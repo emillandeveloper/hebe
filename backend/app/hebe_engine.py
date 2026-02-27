@@ -1,16 +1,13 @@
 import os
 import subprocess
 import time
-import asyncio
 import json
 import uuid
-import sqlite3
 from datetime import datetime
 import tempfile
 import csv
 import re
 
-import websockets
 import pyautogui
 import requests
 import pyaudio
@@ -22,8 +19,21 @@ from TTS.api import TTS
 from faster_whisper import WhisperModel
 import pygetwindow as gw
 from pywinauto.application import Application
-from app.tools.registry import find_app_for_command
 from app.tools.windows_apps import open_app
+
+from app.services.db_sqlite import (
+    init_db,
+    log_chat,
+    seed_default_apps,
+    find_app_for_command as db_find_app_for_command,
+    register_app_usage,
+    add_memory,
+    get_active_memories,
+    save_app_command,
+    update_app_process_name,
+)
+
+from app.services.vts_client import vts_hotkey
 
 
 # =========================
@@ -59,7 +69,7 @@ def submit_text_from_ui(text: str):
 #  CONFIG LLM / MODELO
 # =========================
 
-OLLAMA_MODEL = "hebe-nsfw"  # nombre del modelo en Ollama
+OLLAMA_MODEL = "hebe"  # nombre del modelo en Ollama modelos-> hebe / hebe-nsfw
 
 # =========================
 #  CONFIG AUDIO / STT
@@ -222,473 +232,6 @@ def init_models():
 
         # Nota: XTTS puede tardar bastante si corre en CPU.
         tts = TTS("tts_models/multilingual/multi-dataset/xtts_v2", gpu=use_gpu)
-
-
-# =========================
-#  BASE DE DATOS (SQLite)
-# =========================
-
-DB_PATH = os.path.join(os.getcwd(), "hebe.db")
-
-
-def get_db_connection():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-
-def ensure_column(conn: sqlite3.Connection, table: str, column: str, col_def: str) -> None:
-    """Add a column to a table if it doesn't exist (safe migration)."""
-    try:
-        cur = conn.cursor()
-        cur.execute(f"PRAGMA table_info({table})")
-        rows = cur.fetchall()
-        existing = set()
-        for r in rows:
-            # r can be a tuple (sqlite default) or sqlite3.Row
-            try:
-                existing.add(r[1])
-            except Exception:
-                existing.add(r["name"])
-        if column not in existing:
-            cur.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_def}")
-    except Exception as e:
-        # Don't crash the whole engine on a best-effort migration
-        print(f"⚠️ No se pudo asegurar la columna {table}.{column}: {e}")
-
-def init_db():
-    conn = get_db_connection()
-    cur = conn.cursor()
-
-    # Conversaciones
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS chat_log (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp TEXT NOT NULL,
-            role TEXT NOT NULL,      -- 'user' | 'assistant' | 'system'
-            source TEXT NOT NULL,    -- 'voice' | 'tts' | 'llm' | 'wiki'...
-            text TEXT NOT NULL
-        )
-        """
-    )
-
-    # Apps que Hebe puede abrir
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS app_commands (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL UNIQUE,
-            command TEXT NOT NULL,
-            description TEXT,
-            aliases TEXT,
-            enabled INTEGER NOT NULL DEFAULT 1,
-            usage_count INTEGER NOT NULL DEFAULT 0,
-            last_used_at TEXT,
-            process_name TEXT,
-            window_title TEXT
-        );
-        """
-    )
-
-    # Memorias
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS memories (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            key TEXT,
-            text TEXT NOT NULL,
-            category TEXT,
-            importance INTEGER DEFAULT 1,
-            created_at TEXT NOT NULL,
-            last_used_at TEXT,
-            active INTEGER NOT NULL DEFAULT 1
-        )
-        """
-    )
-
-    # Safe migrations (older DBs might miss columns)
-    ensure_column(conn, 'app_commands', 'process_name', 'TEXT')
-    ensure_column(conn, 'app_commands', 'window_title', 'TEXT')
-
-    conn.commit()
-    conn.close()
-
-
-def log_chat(role: str, text: str, source: str = "voice"):
-    """Guarda una línea de conversación en la BD."""
-    if not text:
-        return
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        INSERT INTO chat_log (timestamp, role, source, text)
-        VALUES (?, ?, ?, ?)
-        """,
-        (datetime.utcnow().isoformat(), role, source, text),
-    )
-    conn.commit()
-    conn.close()
-
-
-def seed_default_apps():
-    """Rellena app_commands con algunas apps por defecto si no existen."""
-    defaults = [
-        ("chrome", "start chrome", "Navegador Chrome", "navegador,google"),
-        ("discord", "start discord", "Discord", "dc"),
-        ("obs", r"C:\Program Files\obs-studio\bin\64bit\obs64.exe", "OBS Studio", ""),
-        ("explorador", "explorer", "Explorador de archivos", "explorer,archivos"),
-        ("notas", "notepad", "Bloc de notas", "bloc,notepad"),
-        ("calculadora", "calc", "Calculadora", "calc,calculadora"),
-        (
-            "final",
-            r"C:\Program Files (x86)\SquareEnix\FINAL FANTASY XIV - A Realm Reborn\boot\ffxivboot.exe",
-            "Final Fantasy XIV",
-            "ff14,ffxiv",
-        ),
-    ]
-
-    conn = get_db_connection()
-    cur = conn.cursor()
-    for name, cmd, desc, aliases in defaults:
-        cur.execute(
-            """
-            INSERT OR IGNORE INTO app_commands (name, command, description, aliases)
-            VALUES (?, ?, ?, ?)
-            """,
-            (name, cmd, desc, aliases),
-        )
-    conn.commit()
-    conn.close()
-
-
-def find_app_for_command(command_text: str):
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM app_commands WHERE enabled = 1")
-    apps = cur.fetchall()
-    conn.close()
-
-    text = (command_text or "").lower()
-    # tokens “limpios”
-    tokens = set(re.findall(r"[a-z0-9]+", text))
-
-    best = None
-    best_score = -1
-
-    for app in apps:
-        names = [app["name"]]
-        if app["aliases"]:
-            names += [a.strip() for a in app["aliases"].split(",") if a.strip()]
-
-        for alias in names:
-            a = (alias or "").strip().lower()
-            if not a:
-                continue
-
-            a_tokens = set(re.findall(r"[a-z0-9]+", a))
-            if not a_tokens:
-                continue
-
-            # score base: cuántos tokens del alias aparecen en el texto
-            hit = len(a_tokens & tokens)
-            if hit == 0:
-                continue
-
-            # bonus: alias completo como palabra/segmento
-            bonus = 0
-            if re.search(rf"\b{re.escape(a)}\b", text):
-                bonus += 3
-
-            # bonus: cuanto más largo el alias, mejor (evita “calc” vs “calculator pro”)
-            bonus += min(len(a), 30) / 10.0
-
-            # bonus: prioriza lo más usado
-            usage = int(app["usage_count"] or 0)
-            bonus += min(usage, 50) / 25.0
-
-            score = hit * 5 + bonus
-
-            if score > best_score:
-                best_score = score
-                best = app
-
-    return best
-
-
-def register_app_usage(app_id: int):
-    """Actualiza estadísticas de uso de una app."""
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        UPDATE app_commands
-        SET usage_count = usage_count + 1,
-            last_used_at = ?
-        WHERE id = ?
-        """,
-        (datetime.utcnow().isoformat(), app_id),
-    )
-    conn.commit()
-    conn.close()
-
-
-# ==== Helpers de MEMORIA y APPS (BD) ====
-
-def add_memory(text: str, key: str | None = None, category: str | None = None, importance: int = 1):
-    """Añade una memoria a la tabla memories."""
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        INSERT INTO memories (key, text, category, importance, created_at)
-        VALUES (?, ?, ?, ?, ?)
-        """,
-        (key, text, category, importance, datetime.utcnow().isoformat()),
-    )
-    conn.commit()
-    conn.close()
-
-
-def get_active_memories(limit: int = 5):
-    """Devuelve las memorias activas más importantes/recientes."""
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT id, key, text, category, importance, created_at, last_used_at
-        FROM memories
-        WHERE active = 1
-        ORDER BY importance DESC, created_at DESC
-        LIMIT ?
-        """,
-        (limit,),
-    )
-    rows = cur.fetchall()
-    conn.close()
-    return rows
-
-
-def save_app_command(name: str, command: str, description: str = "", aliases: str = ""):
-    """Inserta o reutiliza una app en app_commands y devuelve su id."""
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        INSERT OR IGNORE INTO app_commands (name, command, description, aliases)
-        VALUES (?, ?, ?, ?)
-        """,
-        (name, command, description, aliases),
-    )
-    conn.commit()
-    cur.execute("SELECT id FROM app_commands WHERE name = ?", (name,))
-    row = cur.fetchone()
-    conn.close()
-    return row["id"] if row else None
-
-# =========================
-#  VTS (VTube Studio API)
-# =========================
-
-VTS_HOST = "127.0.0.1"
-VTS_PORT = 8001
-
-VTS_PLUGIN_NAME = "HebeAssistant"
-VTS_PLUGIN_AUTHOR = "Leo"
-VTS_PLUGIN_ICON = None
-VTS_TOKEN_FILE = "vts_auth_token.txt"
-
-
-class VTSClient:
-    def __init__(self, host=VTS_HOST, port=VTS_PORT):
-        self.host = host
-        self.port = port
-        self.ws = None
-        self.authenticated = False
-        self.auth_token = None
-
-        if os.path.exists(VTS_TOKEN_FILE):
-            try:
-                with open(VTS_TOKEN_FILE, "r", encoding="utf-8") as f:
-                    self.auth_token = f.read().strip() or None
-            except Exception:
-                self.auth_token = None
-
-    async def connect(self):
-        uri = f"ws://{self.host}:{self.port}"
-        print(f"🔌 Conectando a VTube Studio en {uri}...")
-        self.ws = await websockets.connect(uri)
-        await self.authenticate()
-
-    async def request_auth_token(self):
-        if self.ws is None:
-            raise RuntimeError("WebSocket no inicializado")
-
-        msg = {
-            "apiName": "VTubeStudioPublicAPI",
-            "apiVersion": "1.0",
-            "requestID": "token-1",
-            "messageType": "AuthenticationTokenRequest",
-            "data": {
-                "pluginName": VTS_PLUGIN_NAME,
-                "pluginDeveloper": VTS_PLUGIN_AUTHOR,
-                "pluginIcon": VTS_PLUGIN_ICON,
-            },
-        }
-
-        await self.ws.send(json.dumps(msg))
-        print("📨 Enviado AuthenticationTokenRequest (mira VTS y acepta el plugin)")
-
-        resp_raw = await self.ws.recv()
-        resp = json.loads(resp_raw)
-        print("📥 Respuesta token:", resp.get("messageType"), resp.get("data"))
-
-        if resp.get("messageType") == "AuthenticationTokenResponse":
-            token = resp.get("data", {}).get("authenticationToken")
-            if token:
-                self.auth_token = token
-                with open(VTS_TOKEN_FILE, "w", encoding="utf-8") as f:
-                    f.write(token)
-                print("✅ Token de VTS guardado en", VTS_TOKEN_FILE)
-            else:
-                raise RuntimeError("VTS no devolvió token de autenticación.")
-        else:
-            raise RuntimeError(f"Respuesta inesperada al pedir token: {resp}")
-
-    async def authenticate(self):
-        if self.ws is None:
-            raise RuntimeError("WebSocket no inicializado")
-
-        if self.auth_token is None:
-            await self.request_auth_token()
-
-        msg = {
-            "apiName": "VTubeStudioPublicAPI",
-            "apiVersion": "1.0",
-            "requestID": "auth-1",
-            "messageType": "AuthenticationRequest",
-            "data": {
-                "pluginName": VTS_PLUGIN_NAME,
-                "pluginDeveloper": VTS_PLUGIN_AUTHOR,
-                "pluginIcon": VTS_PLUGIN_ICON,
-                "authenticationToken": self.auth_token,
-            },
-        }
-
-        await self.ws.send(json.dumps(msg))
-        print("📨 Enviado AuthenticationRequest")
-
-        resp_raw = await self.ws.recv()
-        resp = json.loads(resp_raw)
-        print("📥 Respuesta de auth:", resp.get("messageType"), resp.get("data"))
-
-        if resp.get("messageType") == "AuthenticationResponse" and resp.get("data", {}).get("authenticated"):
-            self.authenticated = True
-            print("✅ Autenticado con VTube Studio.")
-        else:
-            print("❌ Fallo autenticando con VTS:", resp)
-            raise RuntimeError("No se pudo autenticar con VTS.")
-
-    async def _send_request(self, message_type: str, data: dict, request_id: str = "req-1"):
-        if self.ws is None:
-            raise RuntimeError("WebSocket no inicializado")
-
-        msg = {
-            "apiName": "VTubeStudioPublicAPI",
-            "apiVersion": "1.0",
-            "requestID": request_id,
-            "messageType": message_type,
-            "data": data,
-        }
-        await self.ws.send(json.dumps(msg))
-        resp_raw = await self.ws.recv()
-        return json.loads(resp_raw)
-
-    async def list_hotkeys(self):
-        resp = await self._send_request(
-            "HotkeysInCurrentModelRequest",
-            {},
-            request_id="hotkeys-current-model-1",
-        )
-
-        print("🔎 Respuesta cruda de HotkeysInCurrentModelRequest:")
-        print(resp)
-
-        data = resp.get("data", {}) or {}
-        hotkeys = data.get("availableHotkeys") or data.get("hotkeys") or []
-
-        if not hotkeys:
-            print("⚠️ No se han recibido hotkeys en la respuesta.")
-        else:
-            print("🔎 Hotkeys disponibles en el modelo actual:")
-            for hk in hotkeys:
-                print(" -", hk)
-
-        return resp
-
-    async def get_hotkey_id_by_name(self, hotkey_name: str) -> str | None:
-        resp = await self._send_request(
-            "HotkeysInCurrentModelRequest",
-            {},
-            request_id="hotkeys-lookup",
-        )
-
-        data = resp.get("data", {}) or {}
-        hotkeys = data.get("availableHotkeys") or data.get("hotkeys") or []
-
-        for hk in hotkeys:
-            if hk.get("name") == hotkey_name:
-                return hk.get("hotkeyID")
-
-        print(f"⚠️ No encontré ningún hotkey con nombre '{hotkey_name}' en la lista.")
-        print("   Nombres encontrados:", [hk.get("name") for hk in hotkeys])
-        return None
-
-    async def trigger_hotkey(self, hotkey_name: str):
-        print(f"🔥 Disparando hotkey '{hotkey_name}'")
-
-        hotkey_id = await self.get_hotkey_id_by_name(hotkey_name)
-        if not hotkey_id:
-            print(f"❌ No se pudo obtener hotkeyID para '{hotkey_name}'.")
-            return
-
-        resp = await self._send_request(
-            "HotkeyTriggerRequest",
-            {
-                "hotkeyID": hotkey_id,
-            },
-            request_id=f"hotkey-{hotkey_name}",
-        )
-
-        if resp.get("messageType") == "APIError":
-            print("⚠️ Error al ejecutar hotkey por ID:", resp)
-        else:
-            print("📥 Respuesta hotkey:", resp)
-
-    async def close(self):
-        if self.ws:
-            await self.ws.close()
-            self.ws = None
-            self.authenticated = False
-            print("🔌 Desconectado de VTS.")
-
-
-async def _vts_hotkey_async(nombre_hotkey: str):
-    client = VTSClient()
-    try:
-        await client.connect()
-        await client.trigger_hotkey(nombre_hotkey)
-    finally:
-        await client.close()
-
-
-def vts_hotkey(nombre_hotkey: str):
-    try:
-        asyncio.run(_vts_hotkey_async(nombre_hotkey))
-    except Exception as e:
-        print(f"❌ Error al disparar hotkey VTS '{nombre_hotkey}': {e}")
-
 
 # =========================
 #  TTS + VTS
@@ -1164,19 +707,6 @@ def try_focus_app_window(app: dict) -> bool:
     except Exception:
         return False
 
-def _update_app_process_name(app_id: int, process_name: str) -> None:
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute(
-            "UPDATE app_commands SET process_name = ? WHERE id = ?",
-            (process_name, app_id),
-        )
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        print(f"⚠️ No se pudo guardar process_name en DB: {e}")
-
 def learn_process_name_after_launch(app: dict, before: set, cmd: str) -> str | None:
     """Best-effort learning of process_name by diffing tasklist before/after launch."""
     if os.name != "nt":
@@ -1210,7 +740,7 @@ def learn_process_name_after_launch(app: dict, before: set, cmd: str) -> str | N
     return sorted(new)[0]
 
 def abrir_aplicacion(command_text: str):
-    app = find_app_for_command(command_text)
+    app = db_find_app_for_command(command_text)
     if not app:
         speak("No conozco esa aplicación todavía.")
         return
