@@ -26,6 +26,7 @@ from app.services.speech_output import speak as _speak
 from app.services.stt_whisper import STTService, STTConfig
 from app.services.win_automation import WinAutomationService
 from app.services.command_router import CommandRouter
+from app.services.tool_system import ToolSystem, ToolContext
 
 # =========================
 #  UI / BACKEND BRIDGE
@@ -88,6 +89,7 @@ def speak(text: str, language: str = "es") -> None:
 
 win = WinAutomationService(emit=emit, speak=speak)
 router = CommandRouter()
+
 router.add(
     "exit",
     r"\bsalir\b",
@@ -113,7 +115,7 @@ router.add(
     "open_app",
     r"\babre\b",
     lambda t: (
-        tool_call(
+        tools.call(
             "open_app",
             {"command": t},
             lambda: abrir_aplicacion(t)
@@ -125,7 +127,7 @@ router.add(
     "close_window",
     r"cierra ventana",
     lambda t: (
-        tool_call(
+        tools.call(
             "close_window",
             {},
             lambda: win.close_active_window()
@@ -137,7 +139,7 @@ router.add(
     "volume_control",
     r"(sube volumen|baja volumen|silenciar)",
     lambda t: (
-        tool_call(
+        tools.call(
             "volume",
             {"command": t},
             lambda: controlar_volumen(t)
@@ -378,7 +380,17 @@ def guardar_memoria_desde_comando(command: str):
         else:
             speak("No he entendido nada, lo dejamos para más tarde.")
 
-
+tools = ToolSystem(
+    ToolContext(
+        emit=emit,
+        speak=speak,
+        win=win,
+        open_app_fn=abrir_aplicacion,
+        volume_fn=controlar_volumen,
+        power_fn=controlar_pc,
+        memory_fn=guardar_memoria_desde_comando,
+    )
+)
 def responder_que_recuerdas():
     """Lee algunas memorias de la BD y las dice en voz alta."""
     mems = get_active_memories(limit=5)
@@ -424,51 +436,6 @@ def aprender_nueva_app():
 # =========================
 #  LOOP DE COMANDOS
 # =========================
-# =========================
-#  TOOL SYSTEM (Paso 1)
-# =========================
-
-def _tool_open_app(app: str):
-    # Reusa la lógica actual (comando de voz) para abrir apps.
-    return abrir_aplicacion(f"abre {app}")
-
-def _tool_type_text(text: str, interval: float = 0.03):
-    pyautogui.write(text, interval=interval)
-    return {"chars": len(text)}
-
-def _tool_press_keys(keys: list[str]):
-    # keys: ["ctrl","l"] o ["CTRL","L"]
-    norm = []
-    for k in keys:
-        kk = str(k).strip().lower()
-        if kk in ("control", "ctl"):
-            kk = "ctrl"
-        if kk == "escape":
-            kk = "esc"
-        norm.append(kk)
-    if not norm:
-        return {"pressed": []}
-    if len(norm) == 1:
-        pyautogui.press(norm[0])
-    else:
-        pyautogui.hotkey(*norm)
-    return {"pressed": norm}
-
-def _tool_open_url(url: str):
-    os.startfile(url)
-    return {"url": url}
-
-TOOLS = {
-    "open_app": _tool_open_app,
-    "type_text": _tool_type_text,
-    "press_keys": _tool_press_keys,
-    "open_url": _tool_open_url,
-}
-
-def exec_tool(name: str, args: dict):
-    if name not in TOOLS:
-        raise ValueError(f"Tool desconocida: {name}")
-    return TOOLS[name](**(args or {}))
 
 def handle_command(command: str, source: str = "voice") -> str:
     text = (command or "").strip()
@@ -600,32 +567,6 @@ class HebeEngine:
 
     def submit_text(self, text: str):
         submit_text_from_ui(text)
-
-
-def tool_call(name: str, args: dict | None, fn):
-    """Ejecuta una acción como 'tool' y emite tool.start/tool.end/tool.error a la UI."""
-    tool_id = str(uuid.uuid4())
-    emit("tool.start", {"id": tool_id, "name": name, "args": args or {}})
-    t0 = time.time()
-    try:
-        result = fn()
-        emit("tool.end", {
-            "id": tool_id,
-            "name": name,
-            "ok": True,
-            "ms": int((time.time() - t0) * 1000),
-            "result": result,
-        })
-        return result
-    except Exception as e:
-        emit("tool.error", {
-            "id": tool_id,
-            "name": name,
-            "ok": False,
-            "ms": int((time.time() - t0) * 1000),
-            "error": str(e),
-        })
-        raise
 
 if __name__ == "__main__":
     # Modo standalone (sin backend): arranca Hebe y mantén vivo el proceso.
