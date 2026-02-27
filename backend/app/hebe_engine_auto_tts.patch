@@ -1,0 +1,207 @@
+--- hebe_engine.py (old)+++ hebe_engine.py (new)@@ -41,6 +41,22 @@ SILENCE_END_SECONDS = 0.8
+ SILENCE_FRAMES_NEEDED = int(SILENCE_END_SECONDS / (CHUNK / RATE))
+ 
++# Frases "fantasma" típicas cuando Whisper alucina con silencio/ruido.
++# Puedes añadir/quitar entradas aquí.
++STT_HALLUCINATION_BLACKLIST = [
++    "subtítulos por la comunidad",
++    "amara.org",
++    "suscribete",
++    "suscríbete",
++    "subscribe",
++    "subscribe to",
++]
++
++def is_stt_hallucination(texto: str) -> bool:
++    t = (texto or "").strip().lower()
++    return any(b in t for b in STT_HALLUCINATION_BLACKLIST)
++
++
+ # Modelo STT (Whisper en CPU)
+ stt_model = WhisperModel(
+     "small",          # puedes probar "tiny" si quieres más velocidad
+@@ -63,10 +79,104 @@ ]
+ 
+ # =========================
+-#  TTS (XTTS)
+-# =========================
+-
+-tts = TTS("tts_models/multilingual/multi-dataset/xtts_v2", gpu=False)
++#  TTS (AUTO: Piper o XTTS)
++# =========================
++
++# Modos:
++#   - auto  : usa XTTS solo si detecta GPU con VRAM suficiente; si no, Piper (rápido)
++#   - piper : siempre Piper
++#   - xtts  : siempre XTTS (calidad, pero lento si va en CPU)
++TTS_MODE = os.getenv("HEBE_TTS_MODE", "auto").lower()  # auto | piper | xtts
++TTS_MIN_VRAM_GB = float(os.getenv("HEBE_TTS_MIN_VRAM_GB", "10"))
++TTS_VOLUME = float(os.getenv("HEBE_TTS_VOLUME", "0.9"))  # 0.0 .. 1.0
++
++# Piper (rápido en CPU). Ajusta rutas con variables de entorno.
++PIPER_EXE = os.getenv("HEBE_PIPER_EXE", "piper")
++PIPER_MODEL_ES = os.getenv("HEBE_PIPER_MODEL_ES", os.path.join(os.getcwd(), "piper_models", "es.onnx"))
++PIPER_MODEL_EN = os.getenv("HEBE_PIPER_MODEL_EN", os.path.join(os.getcwd(), "piper_models", "en.onnx"))
++# length_scale: >1 más lento, <1 más rápido
++PIPER_LENGTH_SCALE = float(os.getenv("HEBE_PIPER_LENGTH_SCALE", "1.0"))
++
++tts = None  # XTTS instance (lazy)
++
++def _xtts_gpu_ok() -> bool:
++    try:
++        import torch
++        if not torch.cuda.is_available():
++            return False
++        props = torch.cuda.get_device_properties(0)
++        vram_gb = props.total_memory / (1024**3)
++        return vram_gb >= TTS_MIN_VRAM_GB
++    except Exception:
++        return False
++
++def should_use_xtts() -> bool:
++    if TTS_MODE == "xtts":
++        return True
++    if TTS_MODE == "piper":
++        return False
++    # auto
++    return _xtts_gpu_ok()
++
++def piper_tts_to_file(text: str, file_path: str, language: str = "es"):
++    model = PIPER_MODEL_ES if (language or "es").lower().startswith("es") else PIPER_MODEL_EN
++    if not os.path.exists(model):
++        raise FileNotFoundError(
++            f"Piper model not found: {model}. "
++            f"Configura HEBE_PIPER_MODEL_ES/HEBE_PIPER_MODEL_EN."
++        )
++
++    # Algunos builds usan flags largos, otros cortos. Probamos ambos.
++    cmd_candidates = [
++        [PIPER_EXE, "--model", model, "--output_file", file_path],
++        [PIPER_EXE, "-m", model, "-f", file_path],
++    ]
++
++    last_err = None
++    for cmd in cmd_candidates:
++        try:
++            cmd2 = cmd[:]
++            if PIPER_LENGTH_SCALE != 1.0:
++                cmd2 += ["--length_scale", str(PIPER_LENGTH_SCALE)]
++            subprocess.run(cmd2, input=text.encode("utf-8"), check=True)
++            return
++        except Exception as e:
++            last_err = e
++
++    raise RuntimeError(f"Piper failed: {last_err}")
++
++def init_xtts():
++    """Carga XTTS solo cuando se necesita (y con parches PyTorch 2.6)."""
++    global tts
++    if tts is not None:
++        return
++
++    try:
++        import torch
++        from TTS.tts.configs.xtts_config import XttsConfig
++
++        # Allowlist PyTorch 2.6 (weights_only)
++        if hasattr(torch, "serialization") and hasattr(torch.serialization, "add_safe_globals"):
++            torch.serialization.add_safe_globals([XttsConfig])
++
++        # Parche compat PyTorch 2.6 + Coqui (evita weights_only=True por defecto)
++        _old_load = torch.load
++        def _load_compat(*args, **kwargs):
++            kwargs.setdefault("weights_only", False)
++            return _old_load(*args, **kwargs)
++        torch.load = _load_compat
++
++        # Carga del modelo
++        use_gpu = bool(torch.cuda.is_available())
++        # Nota: si quieres forzar GPU siempre, pon HEBE_TTS_MODE=xtts
++        from TTS.api import TTS
++        tts = TTS("tts_models/multilingual/multi-dataset/xtts_v2", gpu=use_gpu)
++        print(f"✅ XTTS inicializado (gpu={use_gpu})")
++
++    except Exception as e:
++        print("❌ No se pudo inicializar XTTS:", e)
++        tts = None
++
+ 
+ # =========================
+ #  BASE DE DATOS (SQLite)
+@@ -495,15 +605,51 @@     ) as tmp_file:
+         audio_path = tmp_file.name
+ 
+-    try:
+-        # 1) Generar audio (esto es lo lento)
+-        tts.tts_to_file(
+-            text=text,
+-            file_path=audio_path,
+-            language=language,
+-            speaker="Ana Florence",
+-            split_sentences=True,
+-        )
++    try:        # 1) Generar audio (AUTO: XTTS o Piper) + fallback
++        err = None
++
++        if should_use_xtts():
++            init_xtts()
++
++        if should_use_xtts() and tts is not None:
++            # XTTS (calidad, pero pesado si va en CPU)
++            try:
++                tts.tts_to_file(
++                    text=text,
++                    file_path=audio_path,
++                    language=language,
++                    speaker="Ana Florence",
++                    split_sentences=True,
++                )
++            except Exception as e:
++                err = e
++        else:
++            # Piper (rápido en CPU)
++            try:
++                piper_tts_to_file(text=text, file_path=audio_path, language=language)
++            except Exception as e:
++                err = e
++
++        # Si falló el engine elegido, intenta el otro antes de rendirte
++        if err is not None:
++            try:
++                if should_use_xtts() and tts is not None:
++                    # XTTS falló -> intenta Piper
++                    piper_tts_to_file(text=text, file_path=audio_path, language=language)
++                else:
++                    # Piper falló -> intenta XTTS
++                    init_xtts()
++                    if tts is None:
++                        raise err
++                    tts.tts_to_file(
++                        text=text,
++                        file_path=audio_path,
++                        language=language,
++                        speaker="Ana Florence",
++                        split_sentences=True,
++                    )
++            except Exception:
++                raise err
+ 
+         # 2) Cuando el audio está listo, activamos expresión de hablar
+         vts_hotkey("HebeTalking")
+@@ -513,6 +659,7 @@             pygame.mixer.init()
+ 
+         pygame.mixer.music.load(audio_path)
++        pygame.mixer.music.set_volume(float(TTS_VOLUME))
+         pygame.mixer.music.play()
+ 
+         while pygame.mixer.music.get_busy():
+@@ -644,6 +791,10 @@ 
+     texto = "".join(seg.text for seg in segments).strip().lower()
+     print(f"🗣️ Whisper: {texto}")
++
++    if is_stt_hallucination(texto):
++        print("⚠️ STT descartado (frase fantasma típica).")
++        return ""
+ 
+     # Guardar lo que dijo el usuario
+     log_chat("user", texto, source="voice")

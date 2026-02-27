@@ -1,0 +1,20 @@
+# Python
+backend/.venv/
+__pycache__/
+*.pyc
+
+# Node / Electron / Vite
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+frontend/.vite-temp/
+
+# Local data / secrets
+frontend/.env
+backend/*.db
+backend/hebe.db
+backend/vts_auth_token.txt
+backend/audio_tmp/
+
+# Logs
+*.log
