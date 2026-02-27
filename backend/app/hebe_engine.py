@@ -4,9 +4,7 @@ import time
 import json
 import uuid
 from datetime import datetime
-import tempfile
 import csv
-import re
 
 import pyautogui
 import requests
@@ -28,12 +26,9 @@ from app.services.db_sqlite import (
     save_app_command,
     update_app_process_name,
 )
-
 from app.services.vts_client import vts_hotkey
-
 from app.services.tts_service import speak as tts_speak
 from app.services.stt_whisper import STTService, STTConfig
-
 
 # =========================
 #  UI / BACKEND BRIDGE
@@ -69,7 +64,6 @@ def submit_text_from_ui(text: str):
 # =========================
 
 OLLAMA_MODEL = "hebe"  # nombre del modelo en Ollama modelos-> hebe / hebe-nsfw
-
 
 # =========================
 #  MEMORIA EN RAM
@@ -161,7 +155,6 @@ def speak(text: str, language: str = "es"):
         except OSError as e:
             print(f"⚠️ No se pudo borrar el audio temporal: {e}")
 
-
 # =========================
 #  LÓGICA LLM / WIKIPEDIA
 # =========================
@@ -192,7 +185,6 @@ def buscar_en_wikipedia(consulta):
 
     except Exception as e:
         return f"Error al buscar en Wikipedia: {e}"
-
 
 def obtener_respuesta_gpt(pregunta: str) -> str:
     try:
@@ -230,8 +222,6 @@ def obtener_respuesta_gpt(pregunta: str) -> str:
         print("❌ Error al generar respuesta con Ollama:", e)
         emit("error", {"where": "ollama", "error": str(e)})
         return "Lo siento, no puedo generar una respuesta en este momento."
-
-
 
 def obtener_respuesta(pregunta):
     return obtener_respuesta_gpt(pregunta)
@@ -693,8 +683,6 @@ def exec_tool(name: str, args: dict):
         raise ValueError(f"Tool desconocida: {name}")
     return TOOLS[name](**(args or {}))
 
-
-
 def handle_command(command: str, source: str = "voice") -> str:
     """Ejecuta un comando ya transcrito. Devuelve: 'continue' | 'sleep' | 'stop'."""
     if command == "":
@@ -825,7 +813,6 @@ def handle_command(command: str, source: str = "voice") -> str:
     print(f"Hebe: {respuesta}")
     return "continue"
 
-
 def procesar_comando(stop_event: threading.Event | None = None) -> str:
     """Modo activo: procesa comandos de UI y/o voz. Devuelve 'sleep' o 'stop' cuando toque."""
     while True:
@@ -895,7 +882,6 @@ def activar_hebe(stop_event: threading.Event | None = None, say_hello: bool = Fa
 # =========================
 #  MAIN
 # =========================
-
 class HebeEngine:
     """Motor de Hebe ejecutándose en un hilo, controlable desde el backend/UI."""
     def __init__(self, use_wakeword: bool = True, say_hello: bool = False):
@@ -904,8 +890,6 @@ class HebeEngine:
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._started = False
-
-    
 
     def start(self):
         if self._started:
