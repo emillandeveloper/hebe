@@ -15,7 +15,6 @@ import numpy as np
 import pygame
 import keyboard
 import ollama
-from TTS.api import TTS
 from faster_whisper import WhisperModel
 import pygetwindow as gw
 from pywinauto.application import Application
@@ -34,6 +33,8 @@ from app.services.db_sqlite import (
 )
 
 from app.services.vts_client import vts_hotkey
+
+from app.services.tts_service import speak as tts_speak
 
 
 # =========================
@@ -105,23 +106,12 @@ SEARCH_KEYWORDS = [
 ]
 
 # =========================
-#  TTS (XTTS)
-# =========================
-
-tts = None  # se inicializa en init_models()
-
-# =========================
 #  TTS BACKEND (AUTO / PIPER / XTTS)
 # =========================
+
 HEBE_TTS_MODE = os.getenv("HEBE_TTS_MODE", "auto").lower()  # auto | piper | xtts
 HEBE_TTS_MIN_VRAM_GB = float(os.getenv("HEBE_TTS_MIN_VRAM_GB", "12"))
 HEBE_TTS_VOLUME = float(os.getenv("HEBE_TTS_VOLUME", "0.9"))
-
-# Piper (externo) - si no lo configuras, AUTO caerá a XTTS.
-HEBE_PIPER_EXE = os.getenv("HEBE_PIPER_EXE", "")
-HEBE_PIPER_MODEL_ES = os.getenv("HEBE_PIPER_MODEL_ES", "")
-HEBE_PIPER_MODEL_EN = os.getenv("HEBE_PIPER_MODEL_EN", "")
-HEBE_PIPER_LENGTH_SCALE = float(os.getenv("HEBE_PIPER_LENGTH_SCALE", "1.0"))
 
 # Filtrado básico de "alucinaciones" típicas de Whisper en silencio/ruido
 STT_BLACKLIST = [
@@ -130,76 +120,6 @@ STT_BLACKLIST = [
     "suscríbete",
     "suscribete",
 ]
-
-def _has_cuda_vram(min_gb: float) -> bool:
-    try:
-        import torch
-        if not torch.cuda.is_available():
-            return False
-        props = torch.cuda.get_device_properties(0)
-        vram_gb = props.total_memory / (1024 ** 3)
-        return vram_gb >= float(min_gb)
-    except Exception:
-        return False
-
-def pick_tts_backend() -> str:
-    mode = (HEBE_TTS_MODE or "auto").lower()
-    if mode in ("piper", "xtts"):
-        return mode
-
-    # auto:
-    # - Si la GPU tiene VRAM suficiente → XTTS en GPU
-    # - Si no → Piper si está configurado; si no, XTTS (CPU)
-    if _has_cuda_vram(HEBE_TTS_MIN_VRAM_GB):
-        return "xtts"
-
-    if HEBE_PIPER_EXE and os.path.exists(HEBE_PIPER_EXE) and (
-        (HEBE_PIPER_MODEL_ES and os.path.exists(HEBE_PIPER_MODEL_ES)) or
-        (HEBE_PIPER_MODEL_EN and os.path.exists(HEBE_PIPER_MODEL_EN))
-    ):
-        return "piper"
-
-    return "xtts"
-
-def _apply_torch_xtts_compat():
-    # PyTorch 2.6 cambió el default weights_only=True; XTTS necesita el estado completo.
-    try:
-        import torch
-        _orig_load = torch.load
-
-        def _load_compat(*args, **kwargs):
-            kwargs.setdefault("weights_only", False)
-            return _orig_load(*args, **kwargs)
-
-        torch.load = _load_compat
-
-        # Allowlist para el error "Unsupported global: XttsConfig"
-        try:
-            from torch.serialization import add_safe_globals
-            from TTS.tts.configs.xtts_config import XttsConfig
-            add_safe_globals([XttsConfig])
-        except Exception as e:
-            print(f"WARN: safe_globals not applied: {e}")
-    except Exception as e:
-        print(f"WARN: torch compat not applied: {e}")
-
-def piper_tts_to_wav(text: str, out_wav: str, language: str = "es"):
-    exe = HEBE_PIPER_EXE
-    if not exe or not os.path.exists(exe):
-        raise FileNotFoundError("Piper no está configurado. Define HEBE_PIPER_EXE.")
-
-    lang = (language or "es").lower()
-    model = HEBE_PIPER_MODEL_ES if lang.startswith("es") else HEBE_PIPER_MODEL_EN
-    if not model or not os.path.exists(model):
-        raise FileNotFoundError("Modelo Piper no encontrado. Define HEBE_PIPER_MODEL_ES / HEBE_PIPER_MODEL_EN.")
-
-    # Piper suele leer texto por stdin y generar wav en fichero
-    cmd = [exe, "-m", model, "-f", out_wav]
-    # Opción de velocidad si tu build de piper la soporta
-    if HEBE_PIPER_LENGTH_SCALE and float(HEBE_PIPER_LENGTH_SCALE) != 1.0:
-        cmd += ["--length_scale", str(HEBE_PIPER_LENGTH_SCALE)]
-
-    subprocess.run(cmd, input=text.encode("utf-8"), check=True)
 
 def is_blacklisted_stt(text: str) -> bool:
     t = (text or "").strip().lower()
@@ -213,7 +133,7 @@ def is_blacklisted_stt(text: str) -> bool:
 
 def init_models():
     """Inicializa Whisper/TTS la primera vez (para evitar cargas duplicadas con uvicorn)."""
-    global stt_model, tts
+    global stt_model
     if stt_model is None:
         stt_model = WhisperModel(
             "small",          # puedes probar "tiny" si quieres más velocidad
@@ -221,74 +141,42 @@ def init_models():
             compute_type="int8",
         )
 
-    # TTS: solo inicializamos XTTS si vamos a usarlo (o como fallback)
-    if tts is None and pick_tts_backend() == "xtts":
-        _apply_torch_xtts_compat()
-        try:
-            import torch
-            use_gpu = torch.cuda.is_available()
-        except Exception:
-            use_gpu = False
-
-        # Nota: XTTS puede tardar bastante si corre en CPU.
-        tts = TTS("tts_models/multilingual/multi-dataset/xtts_v2", gpu=use_gpu)
-
 # =========================
 #  TTS + VTS
 # =========================
-
 def speak(text: str, language: str = "es"):
-    init_models()
+    # Mantén init_models() por Whisper si te da tranquilidad (no carga TTS ya)
+    # init_models()
+
     emit("chat.assistant", {"text": text})
-    emit("tts.start", {"text": text, "lang": language})
+    print(f"🗣️ (TTS service) Generando voz: {text}")
 
-    # Guardamos lo que dice Hebe
-    log_chat("assistant", text, source="tts")
-
-    print(f"🗣️ Generando voz: {text}")
-
-    tmp_dir = os.path.join(os.getcwd(), "audio_tmp")
-    os.makedirs(tmp_dir, exist_ok=True)
-
-    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False, dir=tmp_dir) as tmp_file:
-        audio_path = tmp_file.name
-
-    backend = pick_tts_backend()
+    audio_path = ""
+    emit("status", {"tts_debug": "before_tts_speak"})
 
     try:
-        if backend == "piper":
-            # Piper (rápido en CPU)
-            piper_tts_to_wav(text=text, out_wav=audio_path, language=language)
-        else:
-            # XTTS (más natural, más pesado). Si falla, hacemos fallback a Piper si existe.
-            if tts is None:
-                # Por si el modo cambió en caliente
-                _apply_torch_xtts_compat()
-                try:
-                    import torch
-                    use_gpu = torch.cuda.is_available()
-                except Exception:
-                    use_gpu = False
-                # noqa: F811
-                globals()["tts"] = TTS("tts_models/multilingual/multi-dataset/xtts_v2", gpu=use_gpu)
+        try:
+            audio_path = tts_speak(text=text, language=language, emit=emit, log_chat=log_chat)
+            print("✅ tts_speak devolvió:", audio_path)
+        except Exception as e:
+            print("❌ tts_speak CRASHEÓ:", repr(e))
+            emit("status", {"tts_debug": "tts_speak_error", "error": repr(e)})
 
-            try:
-                tts.tts_to_file(
-                    text=text,
-                    file_path=audio_path,
-                    language=language,
-                    speaker="Ana Florence",
-                    split_sentences=True,
-                )
-            except Exception as e:
-                print(f"⚠️ XTTS falló, intento Piper: {e}")
-                # Fallback a Piper si está configurado
-                piper_tts_to_wav(text=text, out_wav=audio_path, language=language)
+            raise
 
-        # Cuando el audio está listo, activamos expresión de hablar
+        emit("status", {"tts_debug": "after_tts_speak", "audio_path": audio_path})
+
+        try:
+            import os
+            size = os.path.getsize(audio_path) if audio_path else -1
+        except Exception as e:
+            size = -2
+
+        emit("status", {"tts_debug": "wav_size", "bytes": size})
+
+        # VTS talking + playback se mantiene aquí (por ahora) para no romper tu flow
         vts_hotkey("HebeTalking")
 
-        # Reproducir
         if not pygame.mixer.get_init():
             pygame.mixer.init()
 
@@ -301,18 +189,19 @@ def speak(text: str, language: str = "es"):
 
     except Exception as e:
         print(f"❌ Error en speak(): {e}")
+
     finally:
-        emit("tts.end", {})
-        # Volver a Idle y limpiar
         vts_hotkey("HebeIdle")
         try:
             pygame.mixer.music.unload()
         except Exception:
             pass
         try:
-            os.remove(audio_path)
+            if audio_path:
+                os.remove(audio_path)
         except OSError as e:
             print(f"⚠️ No se pudo borrar el audio temporal: {e}")
+
 
 # =========================
 #  STT / AUDIO INPUT
