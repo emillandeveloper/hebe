@@ -10,12 +10,9 @@ import re
 
 import pyautogui
 import requests
-import pyaudio
-import numpy as np
 import pygame
 import keyboard
 import ollama
-from faster_whisper import WhisperModel
 import pygetwindow as gw
 from pywinauto.application import Application
 from app.tools.windows_apps import open_app
@@ -35,6 +32,7 @@ from app.services.db_sqlite import (
 from app.services.vts_client import vts_hotkey
 
 from app.services.tts_service import speak as tts_speak
+from app.services.stt_whisper import STTService, STTConfig
 
 
 # =========================
@@ -72,30 +70,19 @@ def submit_text_from_ui(text: str):
 
 OLLAMA_MODEL = "hebe"  # nombre del modelo en Ollama modelos-> hebe / hebe-nsfw
 
-# =========================
-#  CONFIG AUDIO / STT
-# =========================
-
-RATE = 16000
-CHANNELS = 1
-CHUNK = 1024
-INPUT_DEVICE_INDEX = int(os.getenv("HEBE_INPUT_DEVICE_INDEX", "9"))  # índice del micro (ver listar dispositivos)
-
-SILENCE_THRESHOLD = 0.01
-MAX_RECORD_SECONDS = 8.0
-MIN_RECORD_SECONDS = 0.5
-SILENCE_END_SECONDS = 0.8
-SILENCE_FRAMES_NEEDED = int(SILENCE_END_SECONDS / (CHUNK / RATE))
-
-# Modelo STT (Whisper en CPU)
-stt_model = None  # se inicializa en init_models()
-
 
 # =========================
 #  MEMORIA EN RAM
 # =========================
 
 historial = []
+
+stt = STTService(
+    config=STTConfig(),
+    emit=emit,
+    log_chat=log_chat,
+)
+
 
 PALABRAS_CLAVE = ["hebe despierta", "eve despierta", "jebe despierta", "asistente despierta"]
 MODO_ESPERA = ["a dormir", "modo espera", "descansa"]
@@ -112,34 +99,6 @@ SEARCH_KEYWORDS = [
 HEBE_TTS_MODE = os.getenv("HEBE_TTS_MODE", "auto").lower()  # auto | piper | xtts
 HEBE_TTS_MIN_VRAM_GB = float(os.getenv("HEBE_TTS_MIN_VRAM_GB", "12"))
 HEBE_TTS_VOLUME = float(os.getenv("HEBE_TTS_VOLUME", "0.9"))
-
-# Filtrado básico de "alucinaciones" típicas de Whisper en silencio/ruido
-STT_BLACKLIST = [
-    "subtítulos por la comunidad de amara.org",
-    "subtitulos por la comunidad de amara.org",
-    "suscríbete",
-    "suscribete",
-]
-
-def is_blacklisted_stt(text: str) -> bool:
-    t = (text or "").strip().lower()
-    if not t:
-        return True
-    for bad in STT_BLACKLIST:
-        if bad in t:
-            return True
-    return False
-
-
-def init_models():
-    """Inicializa Whisper/TTS la primera vez (para evitar cargas duplicadas con uvicorn)."""
-    global stt_model
-    if stt_model is None:
-        stt_model = WhisperModel(
-            "small",          # puedes probar "tiny" si quieres más velocidad
-            device="cpu",
-            compute_type="int8",
-        )
 
 # =========================
 #  TTS + VTS
@@ -201,144 +160,6 @@ def speak(text: str, language: str = "es"):
                 os.remove(audio_path)
         except OSError as e:
             print(f"⚠️ No se pudo borrar el audio temporal: {e}")
-
-
-# =========================
-#  STT / AUDIO INPUT
-# =========================
-
-def grabar_audio(segundos: float = 4.0) -> np.ndarray:
-    p = pyaudio.PyAudio()
-    stream = p.open(
-        format=pyaudio.paInt16,
-        channels=CHANNELS,
-        rate=RATE,
-        input=True,
-        input_device_index=INPUT_DEVICE_INDEX,
-        frames_per_buffer=CHUNK,
-    )
-
-    frames = []
-    n_chunks = int(RATE / CHUNK * segundos)
-
-    print(f"🎤 Escuchando {segundos:.1f}s...")
-    for _ in range(n_chunks):
-        data = stream.read(CHUNK, exception_on_overflow=False)
-        frames.append(data)
-
-    stream.stop_stream()
-    stream.close()
-    p.terminate()
-
-    audio_bytes = b"".join(frames)
-    audio_np = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32)
-    audio_np /= 32768.0
-
-    max_abs = float(np.max(np.abs(audio_np))) if len(audio_np) > 0 else 0.0
-    print(f"📈 Samples grabados: {len(audio_np)}, nivel máx: {max_abs:.3f}")
-
-    return audio_np
-
-
-def listen() -> str:
-    # NO init_models() aquí. Hazlo una vez al arrancar el motor.
-
-    p = pyaudio.PyAudio()
-    stream = p.open(
-        format=pyaudio.paInt16,
-        channels=CHANNELS,
-        rate=RATE,
-        input=True,
-        input_device_index=INPUT_DEVICE_INDEX,
-        frames_per_buffer=CHUNK,
-    )
-
-    emit("status", {"stt": "listening"})
-    frames = []
-    recording = False
-    silence_frames = 0
-    start_time = time.time()
-    tick = 0
-
-    try:
-        while True:
-            data = stream.read(CHUNK, exception_on_overflow=False)
-            audio_chunk = np.frombuffer(data, dtype=np.int16).astype(np.float32) / 32768.0
-            level = float(np.max(np.abs(audio_chunk))) if len(audio_chunk) > 0 else 0.0
-            tick += 1
-
-            # ✅ cada ~10 frames manda “live” (puede ser el nivel)
-            if tick % 10 == 0:
-                emit("stt.partial", {"text": f"lvl {level:.3f}"})
-
-            if not recording:
-                if level > SILENCE_THRESHOLD:
-                    recording = True
-                    frames.append(data)
-                    start_time = time.time()
-                    silence_frames = 0
-                    emit("status", {"stt": "recording"})
-            else:
-                frames.append(data)
-                # ✅ mientras grabas, sigues en recording
-                # (si quieres, aquí no emitas nada salvo cada X frames)
-
-                if level < SILENCE_THRESHOLD:
-                    silence_frames += 1
-                else:
-                    silence_frames = 0
-
-                elapsed = len(frames) * (CHUNK / RATE)
-
-                if (elapsed >= MIN_RECORD_SECONDS and silence_frames >= SILENCE_FRAMES_NEEDED) or elapsed >= MAX_RECORD_SECONDS:
-                    break
-
-                if time.time() - start_time > MAX_RECORD_SECONDS + 2:
-                    break
-
-    finally:
-        stream.stop_stream()
-        stream.close()
-        p.terminate()
-
-    if not frames:
-        emit("status", {"stt": "listening"})
-        emit("stt.partial", {"text": ""})
-        return ""
-
-    emit("status", {"stt": "transcribing"})
-
-    audio_bytes = b"".join(frames)
-    audio_np = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
-    max_abs = float(np.max(np.abs(audio_np))) if len(audio_np) > 0 else 0.0
-
-    if max_abs < SILENCE_THRESHOLD:
-        emit("status", {"stt": "listening"})
-        emit("stt.partial", {"text": ""})
-        return ""
-
-    segments, info = stt_model.transcribe(
-        audio_np,
-        language=None,
-        beam_size=5,
-        vad_filter=True,
-    )
-
-    texto = "".join(seg.text for seg in segments).strip()
-
-    if is_blacklisted_stt(texto.lower()):
-        emit("status", {"stt": "listening"})
-        emit("stt.partial", {"text": ""})
-        return ""
-
-    if texto:
-        emit("stt.final", {"text": texto})
-        emit("chat.user", {"text": texto})
-        log_chat("user", texto, source="voice")
-
-    emit("status", {"stt": "listening"})
-    emit("stt.partial", {"text": ""})
-    return texto
 
 
 # =========================
@@ -734,7 +555,7 @@ def buscar_y_reproducir_cancion(cancion):
 
 def confirmar_accion(accion):
     speak(f"¿Seguro que quieres {accion}? Di sí o no.")
-    respuesta = listen()
+    respuesta = stt.listen()
     if not respuesta:
         return False
     respuesta = respuesta.strip().lower()
@@ -773,7 +594,7 @@ def guardar_memoria_desde_comando(command: str):
         speak("De acuerdo, lo recordaré.")
     else:
         speak("¿Qué quieres que recuerde exactamente?")
-        resp = listen()
+        resp = stt.listen()
         if resp:
             add_memory(resp, category="usuario", importance=2)
             speak("Lo recordaré.")
@@ -795,21 +616,21 @@ def responder_que_recuerdas():
 def aprender_nueva_app():
     """Diálogo por voz para registrar una nueva aplicación en app_commands."""
     speak("Vale, vamos a aprender una nueva aplicación. ¿Cómo quieres llamarla?")
-    nombre = listen()
+    nombre = stt.listen()
     if not nombre:
         speak("No he entendido el nombre. Lo dejamos para otro momento.")
         return
     nombre = nombre.strip().lower()
 
     speak(f"De acuerdo, la llamaré {nombre}. Ahora dime el comando o la ruta para abrirla.")
-    comando = listen()
+    comando = stt.listen()
     if not comando:
         speak("No he entendido el comando. Cancelamos el registro.")
         return
     comando = comando.strip()
 
     speak("¿Quieres añadir alias para esta aplicación? Por ejemplo, otras formas de llamarla. Si no, di 'no'.")
-    alias_text = listen()
+    alias_text = stt.listen()
     if alias_text:
         alias_text = alias_text.strip().lower()
         if alias_text in ("no", "no gracias", "nah", "nop"):
@@ -1017,7 +838,7 @@ def procesar_comando(stop_event: threading.Event | None = None) -> str:
             from_ui = True
             command = str(command).strip().lower()
         except queue.Empty:
-            command = listen()
+            command = stt.listen()
 
         if command == "":
             continue
@@ -1059,7 +880,7 @@ def activar_hebe(stop_event: threading.Event | None = None, say_hello: bool = Fa
             pass
 
         # 2) Voz: wakeword
-        command = listen()
+        command = stt.listen()
         if not command:
             continue
 
@@ -1071,16 +892,6 @@ def activar_hebe(stop_event: threading.Event | None = None, say_hello: bool = Fa
             if res == "stop":
                 return "stop"
             # si res == "sleep", volvemos a esperar wakeword
-
-def listar_dispositivos_audio():
-    p = pyaudio.PyAudio()
-    print("\n=== Dispositivos de audio detectados ===")
-    for i in range(p.get_device_count()):
-        info = p.get_device_info_by_index(i)
-        print(f"{i}: {info['name']}  | inputs: {info['maxInputChannels']}")
-    p.terminate()
-    print("========================================\n")
-
 # =========================
 #  MAIN
 # =========================
@@ -1110,7 +921,7 @@ class HebeEngine:
                 seed_default_apps()
 
                 emit("status", {"engine": "starting", "stage": "models"})
-                init_models()  # <-- tarda, pero ya NO bloquea el WS
+                stt.init()  # <-- tarda, pero ya NO bloquea el WS
 
                 emit("status", {"engine": "ready", "stage": "ready"})
 
@@ -1161,7 +972,7 @@ def tool_call(name: str, args: dict | None, fn):
 
 if __name__ == "__main__":
     # Modo standalone (sin backend): arranca Hebe y mantén vivo el proceso.
-    listar_dispositivos_audio()
+    stt.list_audio_devices()
     engine = HebeEngine(use_wakeword=True, say_hello=True)
     engine.start()
     while True:
