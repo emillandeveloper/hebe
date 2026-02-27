@@ -1,14 +1,9 @@
 import os
-import subprocess
 import time
-import json
 import uuid
-from datetime import datetime
-import csv
-
 import pyautogui
 import requests
-import pygame
+
 import keyboard
 import ollama
 import pygetwindow as gw
@@ -27,8 +22,10 @@ from app.services.db_sqlite import (
     update_app_process_name,
 )
 from app.services.vts_client import vts_hotkey
-from app.services.tts_service import speak as tts_speak
+from app.services.speech_output import speak as _speak
 from app.services.stt_whisper import STTService, STTConfig
+from app.services.win_automation import WinAutomationService
+from app.services.command_router import CommandRouter
 
 # =========================
 #  UI / BACKEND BRIDGE
@@ -77,7 +74,6 @@ stt = STTService(
     log_chat=log_chat,
 )
 
-
 PALABRAS_CLAVE = ["hebe despierta", "eve despierta", "jebe despierta", "asistente despierta"]
 MODO_ESPERA = ["a dormir", "modo espera", "descansa"]
 SEARCH_KEYWORDS = [
@@ -86,75 +82,85 @@ SEARCH_KEYWORDS = [
     "encuentra información sobre", "dame detalles de", "resumen sobre"
 ]
 
-# =========================
-#  TTS BACKEND (AUTO / PIPER / XTTS)
-# =========================
+def speak(text: str, language: str = "es") -> None:
+    # Always notify UI + persist chat log when Hebe speaks
+    return _speak(text=text, language=language, emit=emit, log_chat=log_chat)
 
-HEBE_TTS_MODE = os.getenv("HEBE_TTS_MODE", "auto").lower()  # auto | piper | xtts
-HEBE_TTS_MIN_VRAM_GB = float(os.getenv("HEBE_TTS_MIN_VRAM_GB", "12"))
-HEBE_TTS_VOLUME = float(os.getenv("HEBE_TTS_VOLUME", "0.9"))
+win = WinAutomationService(emit=emit, speak=speak)
+router = CommandRouter()
+router.add(
+    "exit",
+    r"\bsalir\b",
+    lambda t: (speak("Hasta luego."), "stop")[1]
+)
+router.add(
+    "hello",
+    r"\bhola\b",
+    lambda t: (speak("¡Hola! ¿Cómo puedo ayudarte?"), "continue")[1]
+)
+sleep_regex = r"(modo de espera|entra en modo de espera|descansa|duerme)"
 
-# =========================
-#  TTS + VTS
-# =========================
-def speak(text: str, language: str = "es"):
-    # Mantén init_models() por Whisper si te da tranquilidad (no carga TTS ya)
-    # init_models()
-
-    emit("chat.assistant", {"text": text})
-    print(f"🗣️ (TTS service) Generando voz: {text}")
-
-    audio_path = ""
-    emit("status", {"tts_debug": "before_tts_speak"})
-
-    try:
-        try:
-            audio_path = tts_speak(text=text, language=language, emit=emit, log_chat=log_chat)
-            print("✅ tts_speak devolvió:", audio_path)
-        except Exception as e:
-            print("❌ tts_speak CRASHEÓ:", repr(e))
-            emit("status", {"tts_debug": "tts_speak_error", "error": repr(e)})
-
-            raise
-
-        emit("status", {"tts_debug": "after_tts_speak", "audio_path": audio_path})
-
-        try:
-            import os
-            size = os.path.getsize(audio_path) if audio_path else -1
-        except Exception as e:
-            size = -2
-
-        emit("status", {"tts_debug": "wav_size", "bytes": size})
-
-        # VTS talking + playback se mantiene aquí (por ahora) para no romper tu flow
-        vts_hotkey("HebeTalking")
-
-        if not pygame.mixer.get_init():
-            pygame.mixer.init()
-
-        pygame.mixer.music.set_volume(float(HEBE_TTS_VOLUME))
-        pygame.mixer.music.load(audio_path)
-        pygame.mixer.music.play()
-
-        while pygame.mixer.music.get_busy():
-            time.sleep(0.05)
-
-    except Exception as e:
-        print(f"❌ Error en speak(): {e}")
-
-    finally:
-        vts_hotkey("HebeIdle")
-        try:
-            pygame.mixer.music.unload()
-        except Exception:
-            pass
-        try:
-            if audio_path:
-                os.remove(audio_path)
-        except OSError as e:
-            print(f"⚠️ No se pudo borrar el audio temporal: {e}")
-
+router.add(
+    "sleep_mode",
+    sleep_regex,
+    lambda t: (
+        speak("Entrando en modo de espera..."),
+        vts_hotkey("HebeSleep"),
+        "sleep"
+    )[2]
+)
+router.add(
+    "open_app",
+    r"\babre\b",
+    lambda t: (
+        tool_call(
+            "open_app",
+            {"command": t},
+            lambda: abrir_aplicacion(t)
+        ),
+        "continue"
+    )[1]
+)
+router.add(
+    "close_window",
+    r"cierra ventana",
+    lambda t: (
+        tool_call(
+            "close_window",
+            {},
+            lambda: win.close_active_window()
+        ),
+        "continue"
+    )[1]
+)
+router.add(
+    "volume_control",
+    r"(sube volumen|baja volumen|silenciar)",
+    lambda t: (
+        tool_call(
+            "volume",
+            {"command": t},
+            lambda: controlar_volumen(t)
+        ),
+        "continue"
+    )[1]
+)
+router.add(
+    "power_control",
+    r"(apaga el ordenador|reinicia el ordenador)",
+    lambda t: (
+        controlar_pc(t),
+        "continue"
+    )[1]
+)
+router.add(
+    "memory_store",
+    r"(recuerda que|hebe recuerda que|eve recuerda que)",
+    lambda t: (
+        guardar_memoria_desde_comando(t),
+        "continue"
+    )[1]
+)
 # =========================
 #  LÓGICA LLM / WIKIPEDIA
 # =========================
@@ -232,231 +238,12 @@ def obtener_respuesta(pregunta):
 
 # --- App launching helpers ----------------------------------------------------
 
-_APP_OPEN_DEBOUNCE = {}
-_APP_OPEN_DEBOUNCE_SECONDS = 2.0
-
-def _win_creationflags() -> int:
-    """Creation flags to detach GUI apps from the current console (prevents log spam)."""
-    if os.name != "nt":
-        return 0
-    flags = 0
-    # These constants exist only on Windows
-    flags |= getattr(subprocess, "DETACHED_PROCESS", 0)
-    flags |= getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-    return flags
-
-def _guess_exe_from_command(cmd: str):
-    """Best-effort guess of the process image name (e.g. 'obs64.exe') from a command."""
-    if not cmd:
-        return None
-    c = cmd.strip().strip('"').strip()
-    low = c.lower()
-
-    # 'start chrome' -> 'chrome.exe'
-    if low.startswith("start "):
-        rest = c[6:].strip().strip('"')
-        if not rest:
-            return None
-        token = rest.split()[0].strip('"')
-        if not token:
-            return None
-        if not token.lower().endswith(".exe"):
-            token += ".exe"
-        return token.lower()
-
-    # Absolute exe path
-    if ".exe" in low:
-        # Take last path segment ending with .exe
-        base = os.path.basename(c)
-        if base.lower().endswith(".exe"):
-            return base.lower()
-
-    # Common built-ins
-    token = c.split()[0].strip('"')
-    if not token:
-        return None
-    if not token.lower().endswith(".exe"):
-        token += ".exe"
-    return token.lower()
-
-def is_process_running(process_name: str) -> bool:
-    if not process_name:
-        return False
-    pn = process_name.strip().strip('"')
-    if os.name == "nt":
-        if not pn.lower().endswith(".exe"):
-            pn += ".exe"
-        try:
-            out = subprocess.check_output(
-                ["tasklist", "/FI", f"IMAGENAME eq {pn}", "/FO", "CSV", "/NH"],
-                text=True,
-                encoding="utf-8",
-                errors="ignore",
-            )
-            return pn.lower() in out.lower()
-        except Exception:
-            return False
-
-    # Non-Windows fallback
-    try:
-        out = subprocess.check_output(["ps", "ax"], text=True, errors="ignore")
-        return pn.lower() in out.lower()
-    except Exception:
-        return False
-
-def _list_process_names_win() -> set:
-    """Return a set of running process image names on Windows (lowercase)."""
-    if os.name != "nt":
-        return set()
-    try:
-        out = subprocess.check_output(
-            ["tasklist", "/FO", "CSV", "/NH"],
-            text=True,
-            encoding="utf-8",
-            errors="ignore",
-        )
-        names = set()
-        for row in csv.reader(out.splitlines()):
-            if not row:
-                continue
-            names.add(row[0].strip().strip('"').lower())
-        return names
-    except Exception:
-        return set()
-
-def _spawn_detached(exe_path: str, cwd: str | None = None) -> None:
-    """Launch an executable detached from this console (prevents stdout spam)."""
-    exe = exe_path.strip().strip('"')
-    creationflags = _win_creationflags()
-    subprocess.Popen(
-        [exe],
-        cwd=cwd,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        stdin=subprocess.DEVNULL,
-        creationflags=creationflags,
-        close_fds=True,
-    )
-
-def _run_cmd_windows(cmd: str) -> None:
-    cmd_str = (cmd or "").strip()
-    creationflags = _win_creationflags()
-    if os.name == "nt" and cmd_str.lower().startswith("start "):
-        subprocess.Popen(
-            ["cmd", "/c", cmd_str],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            stdin=subprocess.DEVNULL,
-            creationflags=creationflags,
-            close_fds=True,
-        )
-    else:
-        subprocess.Popen(
-            cmd_str,
-            shell=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            stdin=subprocess.DEVNULL,
-            creationflags=creationflags,
-            close_fds=True,
-        )
-
-def try_focus_app_window(app: dict) -> bool:
-    """Try to bring an app window to front using pygetwindow (best-effort)."""
-    try:
-        candidates = []
-        wt = (app.get("window_title") or "").strip()
-        if wt:
-            candidates.append(wt)
-        nm = (app.get("name") or "").strip()
-        if nm:
-            candidates.append(nm)
-        als = (app.get("aliases") or "").strip()
-        if als:
-            candidates.extend([a.strip() for a in als.split(",") if a.strip()])
-
-        # Fast path: direct title search
-        for cand in candidates:
-            wins = gw.getWindowsWithTitle(cand)
-            if wins:
-                w = wins[0]
-                try:
-                    w.restore()
-                except Exception:
-                    pass
-                w.activate()
-                return True
-
-        # Fallback: scan all titles and match substring
-        titles = [t for t in gw.getAllTitles() if t]
-        for cand in candidates:
-            cl = cand.lower()
-            for t in titles:
-                if cl in t.lower():
-                    wins = gw.getWindowsWithTitle(t)
-                    if wins:
-                        w = wins[0]
-                        try:
-                            w.restore()
-                        except Exception:
-                            pass
-                        w.activate()
-                        return True
-
-        return False
-    except Exception:
-        return False
-
-def learn_process_name_after_launch(app: dict, before: set, cmd: str) -> str | None:
-    """Best-effort learning of process_name by diffing tasklist before/after launch."""
-    if os.name != "nt":
-        return None
-
-    time.sleep(1.2)
-    after = _list_process_names_win()
-    new = {p for p in (after - (before or set())) if p}
-
-    # Filter common helper processes
-    noisy = {"cmd.exe", "conhost.exe", "powershell.exe", "python.exe"}
-    new = {p for p in new if p not in noisy}
-
-    if not new:
-        return None
-
-    guessed = _guess_exe_from_command(cmd) or ""
-    if guessed and guessed in new:
-        return guessed
-
-    if len(new) == 1:
-        return next(iter(new))
-
-    # Try match by app name
-    name = (app.get("name") or "").lower()
-    for p in sorted(new):
-        if name and name in p.lower():
-            return p
-
-    # Fallback: just pick the first (stable sort)
-    return sorted(new)[0]
-
 def abrir_aplicacion(command_text: str):
     app = db_find_app_for_command(command_text)
     if not app:
         speak("No conozco esa aplicación todavía.")
         return
-    open_app(app, speak=speak)
-
-def escribir_texto(command):
-    if "escribe" in command:
-        texto = command.replace("escribe", "").strip()
-        speak(f"Escribiendo: {texto}")
-        pyautogui.write(texto, interval=0.1)
-
-
-def cerrar_ventana():
-    speak("Cerrando la ventana actual.")
-    pyautogui.hotkey("alt", "f4")
-
+    win.open_app(app, speak=speak)
 
 def controlar_volumen(command):
     if "sube volumen" in command:
@@ -684,133 +471,19 @@ def exec_tool(name: str, args: dict):
     return TOOLS[name](**(args or {}))
 
 def handle_command(command: str, source: str = "voice") -> str:
-    """Ejecuta un comando ya transcrito. Devuelve: 'continue' | 'sleep' | 'stop'."""
-    if command == "":
+    text = (command or "").strip()
+    if not text:
         return "continue"
 
-    raw = (command or "").strip()
-    # /tool <name> <json|texto>
-    # Ej: /tool open_url {"url":"https://youtube.com"}
-    if raw.startswith("/tool "):
-        rest = raw[len("/tool "):].strip()
-        name, _, argstr = rest.partition(" ")
-        name = name.strip()
-        args = {}
-        argstr = argstr.strip()
+    decision = router.route(text.lower())
 
-        if argstr:
-            try:
-                args = json.loads(argstr)
-            except Exception:
-                # fallback: argumentos simples (sin JSON)
-                fallback_key = {
-                    "open_app": "app",
-                    "type_text": "text",
-                    "open_url": "url",
-                    "press_keys": "keys",
-                }.get(name)
-                if name == "press_keys":
-                    args = {"keys": [k for k in argstr.replace(" ", "").split("+") if k]}
-                elif fallback_key:
-                    args = {fallback_key: argstr}
+    # Si alguna regla lo manejó:
+    if decision in ("stop", "sleep", "continue"):
+        return decision
 
-        try:
-            tool_call(name, args, lambda: exec_tool(name, args))
-            speak("Hecho.")
-        except Exception as e:
-            speak(f"No pude ejecutar la tool: {e}")
-        return "continue"
-
-    # Normaliza por seguridad (en UI puede venir con mayúsculas)
-    command = command.strip().lower()
-
-    if "salir" in command:
-        speak("Hasta luego.")
-        return "stop"
-
-    if "hola" in command:
-        speak("¡Hola! ¿Cómo puedo ayudarte?")
-        return "continue"
-
-    if any(keyword in command for keyword in MODO_ESPERA):
-        speak("Entrando en modo de espera...")
-        vts_hotkey("HebeSleep")
-        return "sleep"
-
-    if "abre" in command:
-        tool_call("open_app", {"command": command}, lambda: abrir_aplicacion(command))
-        return "continue"
-
-    if "escribe" in command:
-        tool_call("type_text", {"command": command}, lambda: escribir_texto(command))
-        return "continue"
-
-    if "cierra ventana" in command:
-        tool_call("close_window", {}, lambda: cerrar_ventana())
-        return "continue"
-
-    if "sube volumen" in command or "baja volumen" in command or "silenciar" in command:
-        tool_call("volume", {"command": command}, lambda: controlar_volumen(command))
-        return "continue"
-
-    if "apaga el ordenador" in command or "reinicia el ordenador" in command:
-        controlar_pc(command)
-        return "continue"
-
-    if "recuerda que" in command or "hebe recuerda que" in command or "eve recuerda que" in command:
-        guardar_memoria_desde_comando(command)
-        return "continue"
-
-    if "qué recuerdas de mí" in command or "que recuerdas de mi" in command or "qué recuerdas" in command:
-        responder_que_recuerdas()
-        return "continue"
-
-    if "aprende una nueva aplicación" in command or "registra una aplicación" in command or "añade una aplicación" in command:
-        aprender_nueva_app()
-        return "continue"
-
-    if any(keyword in command for keyword in SEARCH_KEYWORDS):
-        tema = (
-            command.replace("busca información sobre", "")
-            .replace("dime sobre", "")
-            .replace("explícame", "")
-            .replace("quiero saber sobre", "")
-            .replace("cuéntame sobre", "")
-            .replace("investiga sobre", "")
-            .replace("consulta sobre", "")
-            .replace("encuentra información sobre", "")
-            .replace("dame detalles de", "")
-            .replace("resumen sobre", "")
-            .strip()
-        )
-        respuesta = buscar_en_wikipedia(tema)
-        log_chat("assistant", respuesta, source="wiki")
-        speak(respuesta)
-        print(f"Hebe: {respuesta}")
-        return "continue"
-
-    if "pon la canción" in command or "quiero escuchar" in command:
-        cancion = (
-            command.replace("pon la canción", "")
-            .replace("quiero escuchar", "")
-            .strip()
-        )
-        buscar_y_reproducir_cancion(cancion)
-        return "continue"
-
-    music_cmd = any(k in command for k in (
-        "pausa", "reproduce", "siguiente", "anterior", "sube el volumen", "baja el volumen"
-    ))
-    if ("música" in command or "canción" in command or "volume" in command) and music_cmd:
-        handled = tool_call("media_control", {"command": command}, lambda: controlar_youtube_music(command))  # <- haz que devuelva True/False
-        if handled:
-            return "continue"
-
-
-    # Default: LLM
-    respuesta = obtener_respuesta(command)
-    speak(respuesta)
-    print(f"Hebe: {respuesta}")
+    # ✅ Fallback: cualquier cosa fuera de comandos => LLM
+    reply = obtener_respuesta_gpt(text)  # o tu ask_llm(...)
+    speak(reply)
     return "continue"
 
 def procesar_comando(stop_event: threading.Event | None = None) -> str:
