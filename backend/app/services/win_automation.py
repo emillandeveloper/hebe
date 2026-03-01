@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import re
+import time
+import os
 from dataclasses import dataclass
 from typing import Callable, Optional
 
@@ -115,6 +117,7 @@ class WinAutomationService:
                 continue
 
         return closed_any
+    
     # ----------------------------
     # Helpers for text commands (optional)
     # ----------------------------
@@ -152,3 +155,171 @@ class WinAutomationService:
             self.close_active_window()
             return True
         return False
+    
+    # ----------------------------
+    # Volume (system)
+    # ----------------------------
+    def handle_volume_command(self, command: str) -> bool:
+        """
+        System volume via media keys (organic, no window focus required).
+        Mirrors controlar_volumen() from engine.
+        """
+        t = (command or "").lower()
+
+        # Use low-level hotkey tool (pyautogui in tools/windows_input)
+        # If you prefer to keep it strictly via tools: create a press_key helper there.
+        import pyautogui
+
+        if "sube volumen" in t:
+            if self.speak:
+                self.speak("Subiendo volumen.", "es")
+            for _ in range(5):
+                pyautogui.press("volumeup")
+            return True
+
+        if "baja volumen" in t:
+            if self.speak:
+                self.speak("Bajando volumen.", "es")
+            for _ in range(5):
+                pyautogui.press("volumedown")
+            return True
+
+        if "silenciar" in t:
+            if self.speak:
+                self.speak("Silenciando.", "es")
+            pyautogui.press("volumemute")
+            return True
+
+        return False
+
+    # ----------------------------
+    # YouTube Music (Opera focus + media keys)
+    # ----------------------------
+    def focus_youtube_music_opera(self) -> bool:
+        """
+        Focus Opera GX window that contains YouTube Music.
+        Mirrors enfocar_opera_youtube() from engine.
+        """
+        try:
+            import pygetwindow as gw
+            from pywinauto.application import Application
+        except Exception as e:
+            self._emit("status", {"win_automation": "focus_youtube_import_error", "error": repr(e)})
+            return False
+
+        ventanas = gw.getAllTitles()
+        for ventana in ventanas:
+            v = ventana or ""
+            if ("YouTube Music" in v) or ("music.youtube.com" in v.lower()) or ("Opera GX" in v):
+                try:
+                    self._emit("status", {"win_automation": "focus_youtube", "title": v})
+                    app = Application().connect(title=v)
+                    app.top_window().set_focus()
+                    return True
+                except Exception as e:
+                    self._emit("status", {"win_automation": "focus_youtube_error", "error": repr(e)})
+                    return False
+
+        self._emit("status", {"win_automation": "focus_youtube_not_found"})
+        return False
+
+    def handle_youtube_music_command(self, command: str) -> bool:
+        """
+        Mirrors controlar_youtube_music() from engine.
+        Uses global media keys, no need to focus Opera for play/pause/next/prev/volume.
+        """
+        t = (command or "").lower()
+        try:
+            import keyboard
+        except Exception as e:
+            self._emit("status", {"win_automation": "keyboard_import_error", "error": repr(e)})
+            return False
+
+        if "pausa música" in t or "reproduce música" in t:
+            keyboard.send("play/pause media")
+            return True
+
+        if "siguiente canción" in t:
+            keyboard.send("next track")
+            return True
+
+        if "canción anterior" in t:
+            keyboard.send("previous track")
+            return True
+
+        if "sube volumen" in t:
+            for _ in range(5):
+                keyboard.send("volume up")
+            return True
+
+        if "baja volumen" in t:
+            for _ in range(5):
+                keyboard.send("volume down")
+            return True
+
+        if "silenciar música" in t:
+            keyboard.send("volume mute")
+            return True
+
+        return False
+
+    def play_song_on_youtube_music(self, song: str) -> bool:
+        """
+        Mirrors buscar_y_reproducir_cancion() from engine.
+        This DOES require focusing Opera with YT Music.
+        """
+        if not song:
+            return False
+
+        if not self.focus_youtube_music_opera():
+            if self.speak:
+                self.speak("No encuentro YouTube Music ahora mismo.", "es")
+            return False
+
+        try:
+            import keyboard
+        except Exception as e:
+            self._emit("status", {"win_automation": "keyboard_import_error", "error": repr(e)})
+            return False
+
+        self._emit("status", {"win_automation": "play_song", "song": song})
+        keyboard.send("/")
+        time.sleep(0.5)
+
+        keyboard.write(song)
+        time.sleep(0.5)
+
+        keyboard.send("enter")
+        time.sleep(2)
+
+        keyboard.send("tab")
+        time.sleep(0.3)
+        keyboard.send("enter")
+        return True
+
+    # ----------------------------
+    # Power commands (with confirm callback)
+    # ----------------------------
+    def handle_power_command(self, command: str, confirm_fn: Callable[[str], bool]) -> bool:
+        """
+        Mirrors controlar_pc() + confirmar_accion() from engine.
+        confirm_fn(action_text)->bool is provided by engine (uses STT).
+        """
+        t = (command or "").lower()
+
+        if "apaga el ordenador" in t:
+            if confirm_fn("apagar el ordenador"):
+                if self.speak:
+                    self.speak("Apagando el ordenador en 5 segundos.", "es")
+                os.system("shutdown /s /t 5")
+            return True
+
+        if "reinicia el ordenador" in t:
+            if confirm_fn("reiniciar el ordenador"):
+                if self.speak:
+                    self.speak("Reiniciando el ordenador en 5 segundos.", "es")
+                os.system("shutdown /r /t 5")
+            return True
+
+        return False
+    

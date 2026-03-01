@@ -1,21 +1,12 @@
-import os
 import time
-import uuid
-import pyautogui
 import requests
-
-import keyboard
 import ollama
-import pygetwindow as gw
-from pywinauto.application import Application
-from app.tools.windows_apps import open_app
 
 from app.services.db_sqlite import (
     init_db,
     log_chat,
     seed_default_apps,
     find_app_for_command as db_find_app_for_command,
-    register_app_usage,
     add_memory,
     get_active_memories,
     save_app_command,
@@ -77,11 +68,6 @@ stt = STTService(
 
 PALABRAS_CLAVE = ["hebe despierta", "eve despierta", "jebe despierta", "asistente despierta"]
 MODO_ESPERA = ["a dormir", "modo espera", "descansa"]
-SEARCH_KEYWORDS = [
-    "busca información sobre", "dime sobre", "explícame", "quiero saber sobre",
-    "cuéntame sobre", "investiga sobre", "consulta sobre",
-    "encuentra información sobre", "dame detalles de", "resumen sobre"
-]
 
 def speak(text: str, language: str = "es") -> None:
     # Always notify UI + persist chat log when Hebe speaks
@@ -90,79 +76,6 @@ def speak(text: str, language: str = "es") -> None:
 win = WinAutomationService(emit=emit, speak=speak)
 router = CommandRouter()
 
-router.add(
-    "exit",
-    r"\bsalir\b",
-    lambda t: (speak("Hasta luego."), "stop")[1]
-)
-router.add(
-    "hello",
-    r"\bhola\b",
-    lambda t: (speak("¡Hola! ¿Cómo puedo ayudarte?"), "continue")[1]
-)
-sleep_regex = r"(modo de espera|entra en modo de espera|descansa|duerme)"
-
-router.add(
-    "sleep_mode",
-    sleep_regex,
-    lambda t: (
-        speak("Entrando en modo de espera..."),
-        vts_hotkey("HebeSleep"),
-        "sleep"
-    )[2]
-)
-router.add(
-    "open_app",
-    r"\babre\b",
-    lambda t: (
-        tools.call(
-            "open_app",
-            {"command": t},
-            lambda: abrir_aplicacion(t)
-        ),
-        "continue"
-    )[1]
-)
-router.add(
-    "close_window",
-    r"cierra ventana",
-    lambda t: (
-        tools.call(
-            "close_window",
-            {},
-            lambda: win.close_active_window()
-        ),
-        "continue"
-    )[1]
-)
-router.add(
-    "volume_control",
-    r"(sube volumen|baja volumen|silenciar)",
-    lambda t: (
-        tools.call(
-            "volume",
-            {"command": t},
-            lambda: controlar_volumen(t)
-        ),
-        "continue"
-    )[1]
-)
-router.add(
-    "power_control",
-    r"(apaga el ordenador|reinicia el ordenador)",
-    lambda t: (
-        controlar_pc(t),
-        "continue"
-    )[1]
-)
-router.add(
-    "memory_store",
-    r"(recuerda que|hebe recuerda que|eve recuerda que)",
-    lambda t: (
-        guardar_memoria_desde_comando(t),
-        "continue"
-    )[1]
-)
 # =========================
 #  LÓGICA LLM / WIKIPEDIA
 # =========================
@@ -245,118 +158,7 @@ def abrir_aplicacion(command_text: str):
     if not app:
         speak("No conozco esa aplicación todavía.")
         return
-    win.open_app(app, speak=speak)
-
-def controlar_volumen(command):
-    if "sube volumen" in command:
-        speak("Subiendo volumen.")
-        for _ in range(5):
-            pyautogui.press("volumeup")
-    elif "baja volumen" in command:
-        speak("Bajando volumen.")
-        for _ in range(5):
-            pyautogui.press("volumedown")
-    elif "silenciar" in command:
-        speak("Silenciando.")
-        pyautogui.press("volumemute")
-
-
-def enfocar_opera_youtube():
-    ventanas = gw.getAllTitles()
-
-    for ventana in ventanas:
-        if "YouTube Music" in ventana or "music.youtube.com" in ventana.lower() or "Opera GX" in ventana:
-            try:
-                print(f"✅ Encontrado: {ventana}")
-                app = Application().connect(title=ventana)
-                app.top_window().set_focus()
-                return True
-            except Exception as e:
-                print(f"❌ No se pudo enfocar YouTube Music en Opera GX: {e}")
-                return False
-
-    print("❌ No se encontró YouTube Music en Opera GX.")
-    return False
-
-
-def controlar_youtube_music(command: str) -> bool:
-    if "pausa música" in command or "reproduce música" in command:
-        keyboard.send("play/pause media")
-        print("🎵 Música pausada o reanudada.")
-        return True
-
-    elif "siguiente canción" in command:
-        keyboard.send("next track")
-        print("⏭️ Siguiente canción.")
-        return True
-
-    elif "canción anterior" in command:
-        keyboard.send("previous track")
-        print("⏮️ Canción anterior.")
-        return True
-
-    elif "sube volumen" in command:
-        for _ in range(5):
-            keyboard.send("volume up")
-        print("🔊 Subiendo volumen.")
-        return True
-
-    elif "baja volumen" in command:
-        for _ in range(5):
-            keyboard.send("volume down")
-        print("🔉 Bajando volumen.")
-        return True
-
-    elif "silenciar música" in command:
-        keyboard.send("volume mute")
-        print("🔇 Música silenciada o activada.")
-        return True
-    return False
-
-def buscar_y_reproducir_cancion(cancion):
-    print(f"🔎 Buscando '{cancion}' en YouTube Music...")
-
-    keyboard.send("/")
-    time.sleep(0.5)
-
-    keyboard.write(cancion)
-    time.sleep(0.5)
-
-    keyboard.send("enter")
-    time.sleep(2)
-
-    keyboard.send("tab")
-    time.sleep(0.3)
-    keyboard.send("enter")
-
-    print("🎵 Reproduciendo la primera canción encontrada.")
-
-
-def confirmar_accion(accion):
-    speak(f"¿Seguro que quieres {accion}? Di sí o no.")
-    respuesta = stt.listen()
-    if not respuesta:
-        return False
-    respuesta = respuesta.strip().lower()
-    return (
-        "sí" in respuesta
-        or respuesta.startswith("si ")
-        or respuesta == "si"
-    )
-
-
-def controlar_pc(command):
-    if "apaga el ordenador" in command:
-        if confirmar_accion("apagar el ordenador"):
-            speak("Apagando el ordenador en 5 segundos.")
-            time.sleep(5)
-            os.system("shutdown /s /t 1")
-    elif "reinicia el ordenador" in command:
-        if confirmar_accion("reiniciar el ordenador"):
-            speak("Reiniciando el ordenador en 5 segundos.")
-            time.sleep(5)
-            os.system("shutdown /r /t 1")
-
+    win.open_app(app)
 # =========================
 #  MEMORIA Y APPS POR VOZ
 # =========================
@@ -380,17 +182,6 @@ def guardar_memoria_desde_comando(command: str):
         else:
             speak("No he entendido nada, lo dejamos para más tarde.")
 
-tools = ToolSystem(
-    ToolContext(
-        emit=emit,
-        speak=speak,
-        win=win,
-        open_app_fn=abrir_aplicacion,
-        volume_fn=controlar_volumen,
-        power_fn=controlar_pc,
-        memory_fn=guardar_memoria_desde_comando,
-    )
-)
 def responder_que_recuerdas():
     """Lee algunas memorias de la BD y las dice en voz alta."""
     mems = get_active_memories(limit=5)
@@ -436,6 +227,88 @@ def aprender_nueva_app():
 # =========================
 #  LOOP DE COMANDOS
 # =========================
+def confirm_action(action: str) -> bool:
+    speak(f"¿Seguro que quieres {action}? Di sí o no.")
+    resp = stt.listen()
+    if not resp:
+        return False
+    r = resp.strip().lower()
+    return ("sí" in r) or r.startswith("si ") or (r == "si")
+
+tools = ToolSystem(
+    ToolContext(
+        emit=emit,
+        speak=speak,
+        win=win,
+        open_app_fn=abrir_aplicacion,
+        volume_fn=win.handle_volume_command,
+        power_fn=None,
+        memory_fn=guardar_memoria_desde_comando,
+    )
+)
+router.add(
+    "exit",
+    r"\bsalir\b",
+    lambda t: (speak("Hasta luego."), "stop")[1]
+)
+router.add(
+    "hello",
+    r"\bhola\b",
+    lambda t: (speak("¡Hola! ¿Cómo puedo ayudarte?"), "continue")[1]
+)
+sleep_regex = r"(modo de espera|entra en modo de espera|descansa|duerme)"
+
+router.add(
+    "sleep_mode",
+    sleep_regex,
+    lambda t: (
+        speak("Entrando en modo de espera..."),
+        vts_hotkey("HebeSleep"),
+        "sleep"
+    )[2]
+)
+router.add(
+    "open_app",
+    r"\babre\b",
+    lambda t: (
+        tools.call("open_app", {"command": t}),
+        "continue"
+    )[1]
+)
+router.add(
+    "close_window",
+    r"cierra ventana",
+    lambda t: (
+        tools.call("close_window", {}),
+        "continue"
+    )[1]
+)
+router.add(
+    "ytmusic_controls",
+    r"(pausa música|reproduce música|siguiente canción|canción anterior|anterior canción|silenciar música)",
+    lambda t: (win.handle_youtube_music_command(t), "continue")[1]
+)
+router.add(
+    "volume_control",
+    r"(sube volumen|baja volumen|\bsilenciar\b)",
+    lambda t: (
+        tools.call("volume", {"command": t}),
+        "continue"
+    )[1]
+)
+router.add(
+    "power_control",
+    r"(apaga el ordenador|reinicia el ordenador)",
+    lambda t: (win.handle_power_command(t, confirm_fn=confirm_action), "continue")[1]
+)
+router.add(
+    "memory_store",
+    r"(recuerda que|hebe recuerda que|eve recuerda que)",
+    lambda t: (
+        guardar_memoria_desde_comando(t),
+        "continue"
+    )[1]
+)
 
 def handle_command(command: str, source: str = "voice") -> str:
     text = (command or "").strip()
