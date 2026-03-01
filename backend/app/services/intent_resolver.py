@@ -1,6 +1,7 @@
 # app/services/intent_resolver.py
 from __future__ import annotations
-
+from pathlib import Path
+import joblib
 from dataclasses import dataclass, field
 from typing import Any, Optional
 import json
@@ -30,13 +31,51 @@ class HybridIntentResolver:
       2) Slot extraction local
       3) Fallback LLM JSON si el gate está inseguro o faltan slots
     """
-    def __init__(self, llm=None, gate_threshold: float = 0.62):
+    def __init__(self, llm=None, gate_threshold: float = 0.62, model_path: str = "models/intent_gate.joblib",):
         self.llm = llm
         self.gate_threshold = gate_threshold
+        self.model_path = model_path
+
+        self._clf = None
+        self._load_model()
+
+    def _normalize(self, s: str) -> str:
+        import re
+        import unicodedata
+
+        s = (s or "").lower().strip()
+        s = unicodedata.normalize("NFD", s)
+        s = "".join(c for c in s if unicodedata.category(c) != "Mn")
+
+        # elimina wakewords y muletillas
+        fillers = ["hebe", "oye", "por favor", "eh", "vale"]
+        for f in fillers:
+            s = s.replace(f, "")
+
+        # solo letras/numeros/espacios
+        s = re.sub(r"[^a-z0-9\s]", " ", s)
+
+        # colapsar espacios
+        s = re.sub(r"\s+", " ", s).strip()
+
+        return s
+    
+    def _resolve_model_path(self) -> Path:
+        backend_root = Path(__file__).resolve().parents[2]
+        return backend_root / self.model_path
+
+    def _load_model(self):
+        p = self._resolve_model_path()
+        if p.exists():
+            self._clf = joblib.load(p)
+            print(f"[NLU] Loaded gate model: {p}")
+        else:
+            self._clf = None
+            print(f"[NLU] Gate model not found: {p}")
 
     def resolve(self, text: str, ctx: NLUContext, source: str = "voice") -> IntentFrame:
         raw = (text or "").strip()
-        t = raw.lower().strip()
+        t = self._normalize(raw)
 
         # 1) Gate local bootstrap: score por matches de keywords
         best_intent, best_score = self._gate(t)
@@ -89,14 +128,27 @@ class HybridIntentResolver:
         return out
 
     def _gate(self, t: str) -> tuple[str | None, float]:
-        # score simple: nº de keywords que aparecen
+        # 1) Si hay modelo sklearn, úsalo
+        if self._clf is not None:
+            try:
+                proba = self._clf.predict_proba([t])[0]
+                classes = self._clf.classes_
+                best_idx = int(proba.argmax())
+                best_intent = str(classes[best_idx])
+                best_score = float(proba[best_idx])
+                if best_intent in INTENTS:
+                    return best_intent, best_score
+            except Exception:
+                # si algo falla, caemos al heurístico
+                pass
+
+        # 2) fallback heurístico (tu implementación actual)
         best_intent = None
         best_score = 0.0
         for intent, kws in INTENT_KEYWORDS.items():
             hits = sum(1 for k in kws if k in t)
             if hits <= 0:
                 continue
-            # score: más hits => más confianza, cap a 0.95
             score = min(0.55 + 0.15 * hits, 0.95)
             if score > best_score:
                 best_score = score
@@ -111,6 +163,37 @@ class HybridIntentResolver:
             return fn(raw) or {}
         except Exception:
             return {}
+        
+    def _normalize_llm_slots(
+        self,
+        intent: str,
+        slots: dict[str, Any],
+        missing: list[str],
+    ) -> tuple[dict[str, Any], list[str]]:
+        """
+        Normaliza nombres de slots que el LLM podría inventar (app_name vs app_raw, etc.)
+        para que encajen con nuestro catálogo y dispatcher.
+        """
+        slots = dict(slots or {})
+        missing = [str(m) for m in (missing or [])]
+
+        # open_app: acepta app_name como alias de app_raw
+        if intent == "open_app":
+            if "app_name" in slots and "app_raw" not in slots:
+                slots["app_raw"] = slots.pop("app_name")
+
+            # También normaliza missing
+            missing = ["app_raw" if m == "app_name" else m for m in missing]
+
+        # memory_store: a veces el LLM usa "content" o "memory"
+        if intent == "memory_store":
+            if "content" in slots and "text" not in slots:
+                slots["text"] = slots.pop("content")
+            if "memory" in slots and "text" not in slots:
+                slots["text"] = slots.pop("memory")
+            missing = ["text" if m in ("content", "memory") else m for m in missing]
+
+        return slots, missing
 
     def _llm_classify(self, raw: str, source: str) -> IntentFrame | None:
         """
@@ -133,12 +216,14 @@ class HybridIntentResolver:
             "Reglas:\n"
             "- Si es conversación, type='chat' e intent='chat'.\n"
             "- Si falta información necesaria para ejecutar, type='clarify' y pon missing.\n"
+            "- Para intent 'open_app' el slot requerido se llama EXACTAMENTE 'app_raw'.\n"
+            "- Para intent 'memory_store' el slot requerido se llama EXACTAMENTE 'text'.\n"
             "- No inventes apps: usa app_raw tal como el usuario la diga.\n\n"
             f"Texto del usuario: {raw}\n"
         )
 
         try:
-            out = self.llm.ask(prompt)
+            out = self.llm.ask_stateless(prompt, temperature=0.0)
         except Exception:
             return None
 
@@ -165,6 +250,14 @@ class HybridIntentResolver:
         missing = data.get("missing") or []
         if not isinstance(missing, list):
             missing = []
+
+        # 🔥 NORMALIZACIÓN defensiva de slots del LLM
+        slots, missing = self._normalize_llm_slots(intent, slots, missing)
+
+        # Si el LLM dice "missing" pero realmente ya está presente, lo limpiamos
+        required = INTENTS[intent].required_slots
+        if required:
+            missing = [k for k in missing if k in required and not slots.get(k)]
 
         return IntentFrame(
             type=frame_type,

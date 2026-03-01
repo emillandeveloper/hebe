@@ -74,3 +74,31 @@ class OllamaLLM:
             if self.emit:
                 self.emit("error", {"where": "ollama", "error": str(e)})
             return "Lo siento, no puedo generar una respuesta en este momento."
+        
+    def ask_stateless(self, user_text: str, temperature: float = 0.0) -> str:
+        """
+        Llamada sin historial. No modifica self.history.
+        Ideal para clasificación NLU.
+        """
+        try:
+            user_text = (user_text or "").strip()
+            if not user_text:
+                return ""
+
+            resp = ollama.chat(
+                model=self.model,
+                messages=[{"role": "user", "content": user_text}],
+                options={
+                    "temperature": temperature,
+                    "repeat_penalty": 1.0,
+                    "top_p": 1.0,
+                    "num_predict": 400,
+                    "num_ctx": self.num_ctx,
+                },
+            )
+
+            text = (resp.get("message", {}) or {}).get("content", "").strip()
+            return text or ""
+
+        except Exception:
+            return ""

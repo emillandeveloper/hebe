@@ -164,7 +164,11 @@ tools = ToolSystem(
 #  NLU (Intent Resolver) + Dispatcher
 # =========================
 nlu_ctx = NLUContext()
-intent_resolver = HybridIntentResolver(llm=llm)
+intent_resolver = HybridIntentResolver(
+    llm=llm,
+    model_path="models/intent_gate.joblib",
+    gate_threshold=0.60,
+)
 
 dispatcher = Dispatcher(
     DispatchContext(

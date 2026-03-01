@@ -1,0 +1,97 @@
+{"text":"abre obs","intent":"open_app"}
+{"text":"abre el obs","intent":"open_app"}
+{"text":"abre la aplicación obs","intent":"open_app"}
+{"text":"quiero abrir obs","intent":"open_app"}
+{"text":"puedes abrir obs","intent":"open_app"}
+{"text":"ábreme obs","intent":"open_app"}
+{"text":"abre discord","intent":"open_app"}
+{"text":"abre chrome","intent":"open_app"}
+{"text":"abre spotify","intent":"open_app"}
+{"text":"abre steam","intent":"open_app"}
+{"text":"abre notepad","intent":"open_app"}
+{"text":"abre la calculadora","intent":"open_app"}
+{"text":"abrir obs","intent":"open_app"}
+{"text":"abrir discord","intent":"open_app"}
+{"text":"abrir chrome","intent":"open_app"}
+{"text":"abre obs por favor","intent":"open_app"}
+{"text":"abre discord ahora","intent":"open_app"}
+
+{"text":"cierra ventana","intent":"close_window"}
+{"text":"cierra la ventana","intent":"close_window"}
+{"text":"ciérrame la ventana","intent":"close_window"}
+{"text":"cierra esta ventana","intent":"close_window"}
+{"text":"cierra la ventan","intent":"close_window"}
+{"text":"cierra ventan","intent":"close_window"}
+{"text":"tierra ventana","intent":"close_window"}
+{"text":"serra ventana","intent":"close_window"}
+{"text":"cierra esa ventana","intent":"close_window"}
+{"text":"cerrar ventana","intent":"close_window"}
+
+{"text":"sube volumen","intent":"volume_control"}
+{"text":"sube el volumen","intent":"volume_control"}
+{"text":"aumenta el volumen","intent":"volume_control"}
+{"text":"pon más volumen","intent":"volume_control"}
+{"text":"más volumen","intent":"volume_control"}
+{"text":"baja volumen","intent":"volume_control"}
+{"text":"baja el volumen","intent":"volume_control"}
+{"text":"reduce volumen","intent":"volume_control"}
+{"text":"pon menos volumen","intent":"volume_control"}
+{"text":"silencia","intent":"volume_control"}
+{"text":"silenciar","intent":"volume_control"}
+{"text":"mute","intent":"volume_control"}
+{"text":"quita el volumen","intent":"volume_control"}
+{"text":"ponlo en silencio","intent":"volume_control"}
+
+{"text":"pausa música","intent":"ytmusic_control"}
+{"text":"pon la música en pausa","intent":"ytmusic_control"}
+{"text":"dale pausa","intent":"ytmusic_control"}
+{"text":"reproduce música","intent":"ytmusic_control"}
+{"text":"pon música","intent":"ytmusic_control"}
+{"text":"dale play a la música","intent":"ytmusic_control"}
+{"text":"siguiente canción","intent":"ytmusic_control"}
+{"text":"pasa a la siguiente","intent":"ytmusic_control"}
+{"text":"canción anterior","intent":"ytmusic_control"}
+{"text":"vuelve a la anterior","intent":"ytmusic_control"}
+{"text":"silenciar música","intent":"ytmusic_control"}
+{"text":"mutea la música","intent":"ytmusic_control"}
+
+{"text":"apaga el ordenador","intent":"power_control"}
+{"text":"apaga el pc","intent":"power_control"}
+{"text":"apaga el ordenador ahora","intent":"power_control"}
+{"text":"reinicia el ordenador","intent":"power_control"}
+{"text":"reinicia el pc","intent":"power_control"}
+{"text":"reinicia el ordenador ahora","intent":"power_control"}
+{"text":"apaga ordenador","intent":"power_control"}
+{"text":"reinicia ordenador","intent":"power_control"}
+
+{"text":"modo de espera","intent":"sleep_mode"}
+{"text":"entra en modo de espera","intent":"sleep_mode"}
+{"text":"descansa","intent":"sleep_mode"}
+{"text":"duerme","intent":"sleep_mode"}
+{"text":"ponte en modo de espera","intent":"sleep_mode"}
+
+{"text":"recuerda que mañana entreno voz","intent":"memory_store"}
+{"text":"hebe recuerda que mañana entreno voz","intent":"memory_store"}
+{"text":"recuerda que tengo reunión el viernes","intent":"memory_store"}
+{"text":"recuerda que comprar agua","intent":"memory_store"}
+{"text":"recuerda que llamar a mamá","intent":"memory_store"}
+{"text":"recuerda que hacer stream a las siete","intent":"memory_store"}
+{"text":"hebe recuerda que comprar pan","intent":"memory_store"}
+{"text":"recuerda que tengo que estudiar","intent":"memory_store"}
+
+{"text":"salir","intent":"exit"}
+{"text":"termina","intent":"exit"}
+{"text":"cierra hebe","intent":"exit"}
+{"text":"para","intent":"exit"}
+{"text":"detente","intent":"exit"}
+
+{"text":"qué tal estás","intent":"chat"}
+{"text":"cuéntame algo","intent":"chat"}
+{"text":"me siento cansado","intent":"chat"}
+{"text":"no sé qué hacer hoy","intent":"chat"}
+{"text":"qué opinas de final fantasy","intent":"chat"}
+{"text":"hoy estoy de bajón","intent":"chat"}
+{"text":"háblame de algo interesante","intent":"chat"}
+{"text":"estoy aburrido","intent":"chat"}
+{"text":"cómo estás","intent":"chat"}
+{"text":"me puedes ayudar","intent":"chat"}
