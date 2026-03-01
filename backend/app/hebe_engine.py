@@ -12,9 +12,10 @@ from app.services.vts_client import vts_hotkey
 from app.services.speech_output import speak as _speak
 from app.services.stt_whisper import STTService, STTConfig
 from app.services.win_automation import WinAutomationService
-from app.services.command_router import CommandRouter
 from app.services.tool_system import ToolSystem, ToolContext
 from app.services.llm_ollama import OllamaLLM
+from app.services.intent_resolver import HybridIntentResolver, NLUContext
+from app.services.dispatcher import Dispatcher, DispatchContext
 # =========================
 #  UI / BACKEND BRIDGE
 # =========================
@@ -50,7 +51,6 @@ stt = STTService(
 )
 
 llm = OllamaLLM(model="hebe", emit=emit, log_chat=log_chat)
-wiki = WikiES(emit=emit)
 
 WAKE_WORDS = ["hebe despierta", "eve despierta", "jebe despierta", "asistente despierta"]
 SLEEP_PHRASES = ["a dormir", "modo espera", "descansa"]
@@ -60,7 +60,6 @@ def speak(text: str, language: str = "es") -> None:
     return _speak(text=text, language=language, emit=emit, log_chat=log_chat)
 
 win = WinAutomationService(emit=emit, speak=speak)
-router = CommandRouter()
 
 # =========================
 #  ACCIONES / COMANDOS DEL PC
@@ -161,68 +160,25 @@ tools = ToolSystem(
         memory_fn=store_memory_from_text,
     )
 )
-router.add(
-    "exit",
-    r"\bsalir\b",
-    lambda t: (speak("Hasta luego."), "stop")[1]
-)
-router.add(
-    "hello",
-    r"\bhola\b",
-    lambda t: (speak("¡Hola! ¿Cómo puedo ayudarte?"), "continue")[1]
-)
-sleep_regex = r"(modo de espera|entra en modo de espera|descansa|duerme)"
+# =========================
+#  NLU (Intent Resolver) + Dispatcher
+# =========================
+nlu_ctx = NLUContext()
+intent_resolver = HybridIntentResolver(llm=llm)
 
-router.add(
-    "sleep_mode",
-    sleep_regex,
-    lambda t: (
-        speak("Entrando en modo de espera..."),
-        vts_hotkey("HebeSleep"),
-        "sleep"
-    )[2]
-)
-router.add(
-    "open_app",
-    r"\babre\b",
-    lambda t: (
-        tools.call("open_app", {"command": t}),
-        "continue"
-    )[1]
-)
-router.add(
-    "close_window",
-    r"cierra ventana",
-    lambda t: (
-        tools.call("close_window", {}),
-        "continue"
-    )[1]
-)
-router.add(
-    "ytmusic_controls",
-    r"(pausa música|reproduce música|siguiente canción|canción anterior|anterior canción|silenciar música)",
-    lambda t: (win.handle_youtube_music_command(t), "continue")[1]
-)
-router.add(
-    "volume_control",
-    r"(sube volumen|baja volumen|\bsilenciar\b)",
-    lambda t: (
-        tools.call("volume", {"command": t}),
-        "continue"
-    )[1]
-)
-router.add(
-    "power_control",
-    r"(apaga el ordenador|reinicia el ordenador)",
-    lambda t: (win.handle_power_command(t, confirm_fn=confirm_action), "continue")[1]
-)
-router.add(
-    "memory_store",
-    r"(recuerda que|hebe recuerda que|eve recuerda que)",
-    lambda t: (
-        store_memory_from_text(t),
-        "continue"
-    )[1]
+dispatcher = Dispatcher(
+    DispatchContext(
+        speak=speak,
+        stt=stt,
+        llm=llm,
+        tools=tools,
+        win=win,
+        vts_hotkey=vts_hotkey,
+        confirm_action=confirm_action,
+        store_memory_from_text=store_memory_from_text,
+    ),
+    intent_resolver=intent_resolver,
+    nlu_ctx=nlu_ctx,
 )
 
 def handle_command(command: str, source: str = "voice") -> str:
@@ -230,16 +186,8 @@ def handle_command(command: str, source: str = "voice") -> str:
     if not text:
         return "continue"
 
-    decision = router.route(text.lower())
-
-    # Si alguna regla lo manejó:
-    if decision in ("stop", "sleep", "continue"):
-        return decision
-
-    # ✅ Fallback: cualquier cosa fuera de comandos => LLM
-    reply = llm.ask(text)
-    speak(reply)
-    return "continue"
+    frame = intent_resolver.resolve(text, ctx=nlu_ctx, source=source)
+    return dispatcher.dispatch(frame, source=source)
 
 def command_loop(stop_event: threading.Event | None = None) -> str:
     """Modo activo: procesa comandos de UI y/o voz. Devuelve 'sleep' o 'stop' cuando toque."""
@@ -271,7 +219,7 @@ t0 = time.time()
 def mark(stage):
     emit("status", {"engine":"starting","stage":stage,"t_ms": int((time.time()-t0)*1000)})
 
-def wakeword_loop(stop_event: threading.Event | None = None, say_hello: bool = False) -> str:
+def wakeword_loop(stop_event: threading.Event | None = None, say_hello: bool = True) -> str:
     """Modo wakeword. En paralelo acepta texto de UI sin necesidad de wakeword."""
     if say_hello:
         speak("¡Hola! ¿Cómo puedo ayudarte?")
@@ -307,13 +255,36 @@ def wakeword_loop(stop_event: threading.Event | None = None, say_hello: bool = F
             if res == "stop":
                 return "stop"
             # si res == "sleep", volvemos a esperar wakeword
+
+def engine_loop(stop_event: threading.Event | None = None, say_hello: bool = True) -> str:
+    """
+    Arranca en modo activo (sin wakeword).
+    Si entra en sleep, entonces sí espera wakeword para volver a activarse.
+    """
+    if say_hello:
+        speak("¡Hola! ¿Cómo puedo ayudarte?")
+
+    # Modo activo por defecto
+    while True:
+        if stop_event and stop_event.is_set():
+            return "stop"
+
+        res = command_loop(stop_event=stop_event)
+        if res == "stop":
+            return "stop"
+        if res == "sleep":
+            # En sleep esperamos wakeword para volver a command_loop
+            # (wakeword_loop ya llama a command_loop cuando detecta wakeword)
+            res2 = wakeword_loop(stop_event=stop_event, say_hello=False)
+            if res2 == "stop":
+                return "stop"
+            # si wakeword_loop no devuelve stop, seguimos el bucle y volvemos a modo activo
 # =========================
 #  MAIN
 # =========================
 class HebeEngine:
     """Motor de Hebe ejecutándose en un hilo, controlable desde el backend/UI."""
     def __init__(self, use_wakeword: bool = True, say_hello: bool = False):
-        self.use_wakeword = use_wakeword
         self.say_hello = say_hello
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
@@ -337,8 +308,8 @@ class HebeEngine:
 
                 emit("status", {"engine": "ready", "stage": "ready"})
 
-                target = wakeword_loop if self.use_wakeword else command_loop
-                kwargs = {"stop_event": self._stop_event}
+                target = engine_loop
+                kwargs = {"stop_event": self._stop_event, "say_hello": self.say_hello}
                 if target is wakeword_loop:
                     kwargs["say_hello"] = self.say_hello
 
