@@ -1,7 +1,4 @@
 import time
-import requests
-import ollama
-
 from app.services.db_sqlite import (
     init_db,
     log_chat,
@@ -10,7 +7,6 @@ from app.services.db_sqlite import (
     add_memory,
     get_active_memories,
     save_app_command,
-    update_app_process_name,
 )
 from app.services.vts_client import vts_hotkey
 from app.services.speech_output import speak as _speak
@@ -18,7 +14,8 @@ from app.services.stt_whisper import STTService, STTConfig
 from app.services.win_automation import WinAutomationService
 from app.services.command_router import CommandRouter
 from app.services.tool_system import ToolSystem, ToolContext
-
+from app.services.llm_ollama import OllamaLLM
+from app.services.wiki_es import WikiES
 # =========================
 #  UI / BACKEND BRIDGE
 # =========================
@@ -47,27 +44,17 @@ def submit_text_from_ui(text: str):
         return
     _UI_INBOX.put(str(text))
 
-# =========================
-# =========================
-#  CONFIG LLM / MODELO
-# =========================
-
-OLLAMA_MODEL = "hebe"  # nombre del modelo en Ollama modelos-> hebe / hebe-nsfw
-
-# =========================
-#  MEMORIA EN RAM
-# =========================
-
-historial = []
-
 stt = STTService(
     config=STTConfig(),
     emit=emit,
     log_chat=log_chat,
 )
 
-PALABRAS_CLAVE = ["hebe despierta", "eve despierta", "jebe despierta", "asistente despierta"]
-MODO_ESPERA = ["a dormir", "modo espera", "descansa"]
+llm = OllamaLLM(model="hebe", emit=emit, log_chat=log_chat)
+wiki = WikiES(emit=emit)
+
+WAKE_WORDS = ["hebe despierta", "eve despierta", "jebe despierta", "asistente despierta"]
+SLEEP_PHRASES = ["a dormir", "modo espera", "descansa"]
 
 def speak(text: str, language: str = "es") -> None:
     # Always notify UI + persist chat log when Hebe speaks
@@ -77,93 +64,21 @@ win = WinAutomationService(emit=emit, speak=speak)
 router = CommandRouter()
 
 # =========================
-#  LÓGICA LLM / WIKIPEDIA
-# =========================
-
-def buscar_en_wikipedia(consulta):
-    try:
-        url = f"https://es.wikipedia.org/api/rest_v1/page/summary/{consulta.replace(' ', '_')}"
-        response = requests.get(url)
-
-        print(f"[DEBUG] URL de Wikipedia: {url}")
-
-        if response.status_code == 200:
-            data = response.json()
-            print(f"[DEBUG] Respuesta de Wikipedia: {data}")
-
-            if "extract" in data:
-                extracto = data["extract"]
-                primer_parrafo = (
-                    extracto.split(". ")[0] + "."
-                    if "." in extracto
-                    else extracto
-                )
-                return primer_parrafo
-
-            return "No encontré información relevante en Wikipedia."
-
-        return f"Error en Wikipedia: Código {response.status_code}"
-
-    except Exception as e:
-        return f"Error al buscar en Wikipedia: {e}"
-
-def obtener_respuesta_gpt(pregunta: str) -> str:
-    try:
-        pregunta = (pregunta or "").strip()
-        if not pregunta:
-            return ""
-
-        # 1) añade user al historial
-        historial.append({"role": "user", "content": pregunta})
-
-        # 2) NO mandes system_prompt: ya está embebido en el modelo "hebe"
-        response = ollama.chat(
-            model=OLLAMA_MODEL,   # "hebe"
-            messages=historial,
-            options={
-                "temperature": 0.7,
-                "repeat_penalty": 1.2,
-                "top_p": 0.9,
-                "num_predict": 1200,   # 5000 es una locura para chat normal
-                "num_ctx": 2048,
-            },
-        )
-
-        texto_generado = (response.get("message", {}) or {}).get("content", "").strip()
-
-        # 3) guarda respuesta
-        if texto_generado:
-            historial.append({"role": "assistant", "content": texto_generado})
-            log_chat("assistant", texto_generado, source="llm")
-            emit("llm.final", {"text": texto_generado})
-
-        return texto_generado or "…"
-
-    except Exception as e:
-        print("❌ Error al generar respuesta con Ollama:", e)
-        emit("error", {"where": "ollama", "error": str(e)})
-        return "Lo siento, no puedo generar una respuesta en este momento."
-
-def obtener_respuesta(pregunta):
-    return obtener_respuesta_gpt(pregunta)
-
-# =========================
 #  ACCIONES / COMANDOS DEL PC
 # =========================
 
-# --- App launching helpers ----------------------------------------------------
-
-def abrir_aplicacion(command_text: str):
+def open_app_from_text(command_text: str):
     app = db_find_app_for_command(command_text)
     if not app:
         speak("No conozco esa aplicación todavía.")
         return
     win.open_app(app)
+
 # =========================
 #  MEMORIA Y APPS POR VOZ
 # =========================
 
-def guardar_memoria_desde_comando(command: str):
+def store_memory_from_text(command: str):
     """Procesa frases como 'recuerda que...' y guarda en memories."""
     texto = command
     for pref in ["hebe recuerda que", "eve recuerda que", "recuerda que"]:
@@ -182,7 +97,7 @@ def guardar_memoria_desde_comando(command: str):
         else:
             speak("No he entendido nada, lo dejamos para más tarde.")
 
-def responder_que_recuerdas():
+def respond_memory_recall():
     """Lee algunas memorias de la BD y las dice en voz alta."""
     mems = get_active_memories(limit=5)
     if not mems:
@@ -193,7 +108,7 @@ def responder_que_recuerdas():
     speak(respuesta)
 
 
-def aprender_nueva_app():
+def learn_new_app():
     """Diálogo por voz para registrar una nueva aplicación en app_commands."""
     speak("Vale, vamos a aprender una nueva aplicación. ¿Cómo quieres llamarla?")
     nombre = stt.listen()
@@ -240,10 +155,10 @@ tools = ToolSystem(
         emit=emit,
         speak=speak,
         win=win,
-        open_app_fn=abrir_aplicacion,
+        open_app_fn=open_app_from_text,
         volume_fn=win.handle_volume_command,
         power_fn=None,
-        memory_fn=guardar_memoria_desde_comando,
+        memory_fn=store_memory_from_text,
     )
 )
 router.add(
@@ -305,7 +220,7 @@ router.add(
     "memory_store",
     r"(recuerda que|hebe recuerda que|eve recuerda que)",
     lambda t: (
-        guardar_memoria_desde_comando(t),
+        store_memory_from_text(t),
         "continue"
     )[1]
 )
@@ -322,11 +237,11 @@ def handle_command(command: str, source: str = "voice") -> str:
         return decision
 
     # ✅ Fallback: cualquier cosa fuera de comandos => LLM
-    reply = obtener_respuesta_gpt(text)  # o tu ask_llm(...)
+    reply = llm.ask(text)
     speak(reply)
     return "continue"
 
-def procesar_comando(stop_event: threading.Event | None = None) -> str:
+def command_loop(stop_event: threading.Event | None = None) -> str:
     """Modo activo: procesa comandos de UI y/o voz. Devuelve 'sleep' o 'stop' cuando toque."""
     while True:
         if stop_event and stop_event.is_set():
@@ -356,7 +271,7 @@ t0 = time.time()
 def mark(stage):
     emit("status", {"engine":"starting","stage":stage,"t_ms": int((time.time()-t0)*1000)})
 
-def activar_hebe(stop_event: threading.Event | None = None, say_hello: bool = False) -> str:
+def wakeword_loop(stop_event: threading.Event | None = None, say_hello: bool = False) -> str:
     """Modo wakeword. En paralelo acepta texto de UI sin necesidad de wakeword."""
     if say_hello:
         speak("¡Hola! ¿Cómo puedo ayudarte?")
@@ -385,10 +300,10 @@ def activar_hebe(stop_event: threading.Event | None = None, say_hello: bool = Fa
             continue
 
         cmd_norm = command.strip().lower()
-        if any(keyword in cmd_norm for keyword in PALABRAS_CLAVE):
+        if any(keyword in cmd_norm for keyword in WAKE_WORDS):
             vts_hotkey("HebeIdle")
             speak("Te escucho.")
-            res = procesar_comando(stop_event=stop_event)
+            res = command_loop(stop_event=stop_event)
             if res == "stop":
                 return "stop"
             # si res == "sleep", volvemos a esperar wakeword
@@ -422,9 +337,9 @@ class HebeEngine:
 
                 emit("status", {"engine": "ready", "stage": "ready"})
 
-                target = activar_hebe if self.use_wakeword else procesar_comando
+                target = wakeword_loop if self.use_wakeword else command_loop
                 kwargs = {"stop_event": self._stop_event}
-                if target is activar_hebe:
+                if target is wakeword_loop:
                     kwargs["say_hello"] = self.say_hello
 
                 self._thread = threading.Thread(target=target, kwargs=kwargs, daemon=True)
