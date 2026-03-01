@@ -15,7 +15,6 @@ from app.services.win_automation import WinAutomationService
 from app.services.command_router import CommandRouter
 from app.services.tool_system import ToolSystem, ToolContext
 from app.services.llm_ollama import OllamaLLM
-from app.services.wiki_es import WikiES
 # =========================
 #  UI / BACKEND BRIDGE
 # =========================
@@ -68,6 +67,7 @@ router = CommandRouter()
 # =========================
 
 def open_app_from_text(command_text: str):
+    command_text = (command_text or "").strip().lower()
     app = db_find_app_for_command(command_text)
     if not app:
         speak("No conozco esa aplicación todavía.")
@@ -148,7 +148,7 @@ def confirm_action(action: str) -> bool:
     if not resp:
         return False
     r = resp.strip().lower()
-    return ("sí" in r) or r.startswith("si ") or (r == "si")
+    return r in ("si", "sí") or r.startswith("si ") or r.startswith("sí ")
 
 tools = ToolSystem(
     ToolContext(
