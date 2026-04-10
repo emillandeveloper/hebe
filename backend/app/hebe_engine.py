@@ -17,7 +17,7 @@ WAKE_WORDS = ["hebe despierta", "eve despierta", "jebe despierta", "asistente de
 t0 = time.time()
 def mark(stage):
     emit("status", {"engine":"starting","stage":stage,"t_ms": int((time.time()-t0)*1000)})
-    
+
 # =========================
 #  MAIN
 # =========================
@@ -56,7 +56,8 @@ class HebeEngine:
 
                 self._thread = threading.Thread(target=target, kwargs=kwargs, daemon=True)
                 self._thread.start()
-
+                self.runtime.state.is_running = True
+                self.runtime.state.mode = "wakeword" if self.use_wakeword else "active"
             except Exception as e:
                 emit("status", {"engine": "error", "stage": "boot", "error": str(e)})
 
@@ -64,6 +65,9 @@ class HebeEngine:
 
     def stop(self):
         self._stop_event.set()
+        self.runtime.state.is_running = False
+        self.runtime.state.is_processing = False
+        self.runtime.state.mode = "stopped"
 
     def submit_text(self, text: str):
         print(f"[HEBE] submit_text: {text!r}", flush=True)
@@ -75,11 +79,19 @@ class HebeEngine:
         if not text:
             return "continue"
 
-        frame = self.runtime.intent_resolver.resolve(text, ctx=self.runtime.nlu_ctx, source=source)
-        print(f"[HEBE] resolved frame={frame!r}", flush=True)
-        result = self.runtime.dispatcher.dispatch(frame, source=source)
-        print(f"[HEBE] dispatch result={result!r}", flush=True)
-        return result
+        self.runtime.state.is_processing = True
+        self.runtime.state.last_input_text = text
+        self.runtime.state.last_input_source = source
+
+        try:
+            frame = self.runtime.intent_resolver.resolve(text, ctx=self.runtime.nlu_ctx, source=source)
+            self.runtime.state.last_intent = frame.intent
+            print(f"[HEBE] resolved frame={frame!r}", flush=True)
+            result = self.runtime.dispatcher.dispatch(frame, source=source)
+            print(f"[HEBE] dispatch result={result!r}", flush=True)
+            return result
+        finally:
+            self.runtime.state.is_processing = False
 
     def command_loop(self) -> str:
         while True:
@@ -122,6 +134,7 @@ class HebeEngine:
                 return res
 
     def wakeword_loop(self, say_hello: bool = True) -> str:
+        self.runtime.state.mode = "sleep"
         if say_hello:
             self.runtime.speak("¡Hola! ¿Cómo puedo ayudarte?")
 
@@ -152,6 +165,7 @@ class HebeEngine:
                 continue
 
             if any(keyword in command for keyword in WAKE_WORDS):
+                self.runtime.state.mode = "active"
                 vts_hotkey("HebeIdle")
                 self.runtime.speak("Te escucho.")
                 res = self.command_loop()
@@ -159,6 +173,7 @@ class HebeEngine:
                     return "stop"
 
     def engine_loop(self, say_hello: bool = True) -> str:
+        self.runtime.state.mode = "active"
         if say_hello:
             self.runtime.speak("¡Hola! ¿Cómo puedo ayudarte?")
 
@@ -170,6 +185,7 @@ class HebeEngine:
             if res == "stop":
                 return "stop"
             if res == "sleep":
+                self.runtime.state.mode = "sleep"
                 res2 = self.wakeword_loop(say_hello=False)
                 if res2 == "stop":
                     return "stop"

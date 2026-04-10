@@ -14,14 +14,13 @@ from app.services.dispatcher import Dispatcher, DispatchContext
 from app.services.vts_client import vts_hotkey
 from app.services.db_sqlite import log_chat
 from app.services.interaction_actions import InteractionActions
-
+from dataclasses import dataclass
+from app.core.state import HebeState
 
 def build_speak():
     def speak(text: str, language: str = "es") -> None:
         return _speak(text=text, language=language, emit=emit, log_chat=log_chat)
     return speak
-
-
 @dataclass
 class HebeRuntime:
     stt: STTService
@@ -33,7 +32,7 @@ class HebeRuntime:
     intent_resolver: HybridIntentResolver
     dispatcher: Dispatcher
     speak: callable
-
+    state: HebeState
 
 def build_runtime() -> HebeRuntime:
     speak = build_speak()
@@ -88,6 +87,8 @@ def build_runtime() -> HebeRuntime:
         intent_resolver=intent_resolver,
         nlu_ctx=nlu_ctx,
     )
+    
+    state = HebeState()
 
     return HebeRuntime(
         stt=stt,
@@ -99,4 +100,5 @@ def build_runtime() -> HebeRuntime:
         intent_resolver=intent_resolver,
         dispatcher=dispatcher,
         speak=speak,
+        state = state,
     )

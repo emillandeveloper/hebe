@@ -1,0 +1,19 @@
+from dataclasses import dataclass, field
+from typing import Optional, Any
+
+
+@dataclass
+class HebeState:
+    mode: str = "active"   # active | sleep | stream | focused
+    is_running: bool = False
+    is_processing: bool = False
+
+    last_input_text: Optional[str] = None
+    last_input_source: Optional[str] = None
+    last_intent: Optional[str] = None
+
+    pending_clarification: Optional[dict] = None
+    pending_confirmation: Optional[dict] = None
+
+    current_task: Optional[str] = None
+    current_context: dict[str, Any] = field(default_factory=dict)
