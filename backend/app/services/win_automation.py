@@ -63,7 +63,7 @@ class WinAutomationService:
         self._emit("status", {"win_automation": "open_app", "app": app.get("name")})
         try:
             from app.tools.windows_apps import open_app as tool_open_app
-            tool_open_app(app, speak=speak or self.speak)
+            tool_open_app(app, speak=None)
             return True
         except Exception as e:
             self._emit("status", {"win_automation": "open_app_error", "error": repr(e)})

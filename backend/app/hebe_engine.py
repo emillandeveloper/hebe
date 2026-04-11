@@ -31,11 +31,8 @@ def mark(stage):
     emit("status", {"engine": "starting", "stage": stage, "t_ms": int((time.time() - t0) * 1000)})
 
 
-# =========================
-#  MAIN
-# =========================
 class HebeEngine:
-    """Motor de Hebe ejecutándose en un hilo, controlable desde el backend/UI."""
+    """Motor principal de Hebe ejecutándose en un hilo."""
 
     def __init__(self, runtime: HebeRuntime, use_wakeword: bool = True, say_hello: bool = False):
         self.runtime = runtime
@@ -46,7 +43,8 @@ class HebeEngine:
         self._started = False
         self.use_wakeword = use_wakeword
 
-        chat_runtime = getattr(self.runtime, "llm", None) or getattr(self.runtime, "chat_runtime", None)
+        chat_runtime = getattr(self.runtime, "llm", None)
+
         dispatcher = OrchestratorDispatcher(
             runtime=self.runtime,
             tools=build_tool_handlers(self.runtime),
@@ -80,7 +78,10 @@ class HebeEngine:
 
                 emit("status", {"engine": "starting", "stage": "models"})
                 self.runtime.stt.init()
-                self._stt_worker = STTWorker(stt=self.runtime.stt, stop_event=self._stop_event)
+                self._stt_worker = STTWorker(
+                    stt=self.runtime.stt,
+                    stop_event=self._stop_event,
+                )
                 self._stt_worker.start()
 
                 emit("status", {"engine": "ready", "stage": "ready"})
@@ -88,7 +89,11 @@ class HebeEngine:
                 target = self.wakeword_loop if self.use_wakeword else self.engine_loop
                 kwargs = {"say_hello": self.say_hello}
 
-                self._thread = threading.Thread(target=target, kwargs=kwargs, daemon=True)
+                self._thread = threading.Thread(
+                    target=target,
+                    kwargs=kwargs,
+                    daemon=True,
+                )
                 self._thread.start()
 
                 self.runtime.state.is_running = True
@@ -133,13 +138,13 @@ class HebeEngine:
 
         spoken_text = (result.output_text or "").strip()
 
+        # No verbalizar señales internas ni respuestas vacías
         if spoken_text and spoken_text.lower() not in {"continue", "stop", "sleep"}:
             try:
                 self.runtime.speak(spoken_text)
             except Exception as e:
                 print(f"[HEBE] speak failed: {e!r}", flush=True)
 
-        # Señales especiales para el loop
         if result.intent == "sleep_mode" and result.success:
             return "sleep"
 
@@ -190,6 +195,7 @@ class HebeEngine:
 
     def wakeword_loop(self, say_hello: bool = True) -> str:
         self.runtime.state.mode = "sleep"
+
         if say_hello:
             self.runtime.speak("¡Hola! ¿Cómo puedo ayudarte?")
 
@@ -229,6 +235,7 @@ class HebeEngine:
 
     def engine_loop(self, say_hello: bool = True) -> str:
         self.runtime.state.mode = "active"
+
         if say_hello:
             self.runtime.speak("¡Hola! ¿Cómo puedo ayudarte?")
 

@@ -2,40 +2,45 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Callable
 
 from app.core.ui_bridge import emit
-from app.services.speech_output import speak as _speak
-from app.services.stt_whisper import STTService, STTConfig
-from app.services.win_automation import WinAutomationService
-from app.services.tool_system import ToolSystem, ToolContext
-from app.services.llm_ollama import OllamaLLM
-from app.services.intent_resolver import HybridIntentResolver, NLUContext
-from app.services.dispatcher import Dispatcher, DispatchContext
-from app.services.vts_client import vts_hotkey
+from app.core.state import HebeState
 from app.services.db_sqlite import log_chat
 from app.services.interaction_actions import InteractionActions
-from dataclasses import dataclass
-from app.core.state import HebeState
+from app.services.llm_ollama import OllamaLLM
+from app.services.speech_output import speak as _speak
+from app.services.stt_whisper import STTConfig, STTService
+from app.services.tool_system import ToolContext, ToolSystem
+from app.services.win_automation import WinAutomationService
 
-def build_speak():
+
+def build_speak() -> Callable[[str, str], None]:
     def speak(text: str, language: str = "es") -> None:
-        return _speak(text=text, language=language, emit=emit, log_chat=log_chat)
+        return _speak(
+            text=text,
+            language=language,
+            emit=emit,
+            log_chat=log_chat,
+        )
     return speak
-@dataclass
+
+
+@dataclass(slots=True)
 class HebeRuntime:
     stt: STTService
     llm: OllamaLLM
     win: WinAutomationService
     actions: InteractionActions
     tools: ToolSystem
-    nlu_ctx: NLUContext
-    intent_resolver: HybridIntentResolver
-    dispatcher: Dispatcher
-    speak: callable
+    speak: Callable[[str, str], None]
     state: HebeState
+
 
 def build_runtime() -> HebeRuntime:
     speak = build_speak()
+
+    state = HebeState()
 
     stt = STTService(
         config=STTConfig(),
@@ -43,9 +48,16 @@ def build_runtime() -> HebeRuntime:
         log_chat=log_chat,
     )
 
-    llm = OllamaLLM(model="hebe", emit=emit, log_chat=log_chat)
+    llm = OllamaLLM(
+        model="hebe",
+        emit=emit,
+        log_chat=log_chat,
+    )
 
-    win = WinAutomationService(emit=emit, speak=speak)
+    win = WinAutomationService(
+        emit=emit,
+        speak=speak,
+    )
 
     actions = InteractionActions(
         speak=speak,
@@ -65,40 +77,12 @@ def build_runtime() -> HebeRuntime:
         )
     )
 
-    nlu_ctx = NLUContext()
-
-    intent_resolver = HybridIntentResolver(
-        llm=llm,
-        model_path="models/intent_gate.joblib",
-        gate_threshold=0.60,
-    )
-
-    dispatcher = Dispatcher(
-        DispatchContext(
-            speak=speak,
-            stt=stt,
-            llm=llm,
-            tools=tools,
-            win=win,
-            vts_hotkey=vts_hotkey,
-            confirm_action=actions.confirm_action,
-            store_memory_from_text=actions.store_memory_from_text,
-        ),
-        intent_resolver=intent_resolver,
-        nlu_ctx=nlu_ctx,
-    )
-    
-    state = HebeState()
-
     return HebeRuntime(
         stt=stt,
         llm=llm,
         win=win,
         actions=actions,
         tools=tools,
-        nlu_ctx=nlu_ctx,
-        intent_resolver=intent_resolver,
-        dispatcher=dispatcher,
         speak=speak,
-        state = state,
+        state=state,
     )

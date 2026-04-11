@@ -4,8 +4,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from app.services.intent_resolver import IntentFrame, HybridIntentResolver, NLUContext
-from app.services.nlu_catalog import INTENTS
+from backend.app.legacy.intent_resolver import IntentFrame, HybridIntentResolver, NLUContext
+from backend.app.legacy.nlu_catalog import INTENTS
 
 @dataclass
 class DispatchContext:

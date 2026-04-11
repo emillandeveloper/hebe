@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 import json
 
-from app.services.nlu_catalog import INTENTS, INTENT_KEYWORDS, SLOT_EXTRACTORS
+from backend.app.legacy.nlu_catalog import INTENTS, INTENT_KEYWORDS, SLOT_EXTRACTORS
 
 @dataclass
 class IntentFrame:

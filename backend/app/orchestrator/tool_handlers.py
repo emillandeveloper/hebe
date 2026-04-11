@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sqlite3
+from pathlib import Path
 from typing import Any
 
 from .models import make_error, make_success
@@ -28,25 +30,28 @@ def handle_open_app(runtime: Any, args: dict[str, Any], source: str = "voice", m
             output_text="No me has dicho qué aplicación abrir.",
         )
 
-    if hasattr(runtime, "win") and hasattr(runtime.win, "open_app"):
-        ok = runtime.win.open_app(app_name)
-        if ok:
-            return make_success(
-                output_text=None,
-                data={"opened_app": app_name},
-            )
+    app_record = _find_app_record(app_name)
+    if app_record is None:
         return make_error(
             error=f"App not found: {app_name}",
             output_text=f"No conozco esa aplicación todavía: {app_name}.",
         )
 
-    if hasattr(runtime, "tools") and hasattr(runtime.tools, "open_app"):
-        result = runtime.tools.open_app(app_name)
-        return _normalize_tool_result(
-            result=result,
-            success_text=None,
-            fail_text=f"No conozco esa aplicación todavía: {app_name}.",
-            data={"opened_app": app_name},
+    if hasattr(runtime, "win") and hasattr(runtime.win, "open_app"):
+        ok = runtime.win.open_app(app_record)
+        if ok:
+            spoken = f"Abriendo {app_record.get('name', app_name)}."
+            return make_success(
+                output_text=spoken,
+                data={
+                    "opened_app": app_record.get("name", app_name),
+                    "app_record": app_record,
+                },
+            )
+
+        return make_error(
+            error=f"Failed opening app: {app_name}",
+            output_text=f"No he podido abrir {app_record.get('name', app_name)}.",
         )
 
     return make_error(
@@ -58,108 +63,112 @@ def handle_open_app(runtime: Any, args: dict[str, Any], source: str = "voice", m
 def handle_close_window(runtime: Any, args: dict[str, Any], source: str = "voice", metadata: dict[str, Any] | None = None):
     target = args.get("target", "active")
 
-    if hasattr(runtime, "win") and hasattr(runtime.win, "close_window"):
-        ok = runtime.win.close_window(target)
-        if ok:
-            return make_success(output_text=None, data={"closed_target": target})
-        return make_error(
-            error=f"Could not close window: {target}",
-            output_text="No he podido cerrar esa ventana.",
-        )
+    if hasattr(runtime, "win"):
+        if target == "active" and hasattr(runtime.win, "close_active_window"):
+            runtime.win.close_active_window()
+            return make_success(output_text="Cerrando la ventana activa.", data={"closed_target": "active"})
+
+        if isinstance(target, str) and hasattr(runtime.win, "close_app_by_process_name"):
+            ok = runtime.win.close_app_by_process_name(target)
+            if ok:
+                return make_success(output_text=f"Cerrando {target}.", data={"closed_target": target})
 
     return make_error(
-        error="No close_window backend available",
-        output_text="No tengo backend para cerrar ventanas.",
+        error=f"Could not close window: {target}",
+        output_text="No he podido cerrar esa ventana.",
     )
 
 
 def handle_set_volume(runtime: Any, args: dict[str, Any], source: str = "voice", metadata: dict[str, Any] | None = None):
-    if "value" not in args:
-        return make_error(
-            error="Missing value",
-            output_text="No me has dicho qué volumen poner.",
-        )
+    if hasattr(runtime, "win"):
+        if "value" in args:
+            value = int(args["value"])
+            # Tu WinAutomationService no tiene set_volume(value), pero sí handle_volume_command(text)
+            # así que lo traducimos a un comando textual provisional.
+            return _set_volume_via_steps(runtime, value)
 
-    value = int(args["value"])
+        if args.get("direction") == "up":
+            ok = runtime.win.handle_volume_command("sube volumen")
+            if ok:
+                return make_success(output_text="Subiendo volumen.", data={"direction": "up"})
 
-    if hasattr(runtime, "win") and hasattr(runtime.win, "set_volume"):
-        ok = runtime.win.set_volume(value)
-        if ok:
-            return make_success(output_text=None, data={"volume": value})
-        return make_error(
-            error=f"Could not set volume: {value}",
-            output_text="No he podido cambiar el volumen.",
-        )
+        if args.get("direction") == "down":
+            ok = runtime.win.handle_volume_command("baja volumen")
+            if ok:
+                return make_success(output_text="Bajando volumen.", data={"direction": "down"})
 
     return make_error(
-        error="No set_volume backend available",
-        output_text="No tengo backend para cambiar el volumen.",
+        error="Could not set volume",
+        output_text="No he podido cambiar el volumen.",
     )
 
 
 def handle_play_music(runtime: Any, args: dict[str, Any], source: str = "voice", metadata: dict[str, Any] | None = None):
     query = str(args.get("query", "")).strip()
 
-    if hasattr(runtime, "win") and hasattr(runtime.win, "play_music"):
-        ok = runtime.win.play_music(query=query)
-        if ok:
-            return make_success(output_text=None, data={"query": query})
+    if not hasattr(runtime, "win"):
         return make_error(
-            error=f"Could not play music: {query}",
-            output_text="No he podido poner esa música.",
+            error="No play_music backend available",
+            output_text="No tengo backend para reproducir música.",
         )
 
+    if query:
+        if hasattr(runtime.win, "play_song_on_youtube_music"):
+            ok = runtime.win.play_song_on_youtube_music(query)
+            if ok:
+                return make_success(output_text=f"Reproduciendo {query}.", data={"query": query})
+
+    if hasattr(runtime.win, "handle_youtube_music_command"):
+        ok = runtime.win.handle_youtube_music_command("reproduce música")
+        if ok:
+            return make_success(output_text="Reproduciendo música.", data={"query": query})
+
     return make_error(
-        error="No play_music backend available",
-        output_text="No tengo backend para reproducir música.",
+        error=f"Could not play music: {query}",
+        output_text="No he podido poner esa música.",
     )
 
 
 def handle_pause_music(runtime: Any, args: dict[str, Any], source: str = "voice", metadata: dict[str, Any] | None = None):
-    if hasattr(runtime, "win") and hasattr(runtime.win, "pause_music"):
-        ok = runtime.win.pause_music()
+    if hasattr(runtime, "win") and hasattr(runtime.win, "handle_youtube_music_command"):
+        ok = runtime.win.handle_youtube_music_command("pausa música")
         if ok:
-            return make_success(output_text=None)
-        return make_error(
-            error="Could not pause music",
-            output_text="No he podido pausar la música.",
-        )
+            return make_success(output_text="Pausando música.")
 
     return make_error(
-        error="No pause_music backend available",
-        output_text="No tengo backend para pausar música.",
+        error="Could not pause music",
+        output_text="No he podido pausar la música.",
     )
 
 
 def handle_shutdown_pc(runtime: Any, args: dict[str, Any], source: str = "voice", metadata: dict[str, Any] | None = None):
-    if hasattr(runtime, "win") and hasattr(runtime.win, "shutdown_pc"):
-        ok = runtime.win.shutdown_pc()
+    if hasattr(runtime, "win") and hasattr(runtime.win, "handle_power_command"):
+        # De momento no llamamos aquí a la confirmación legacy; el orquestador ya confirma antes.
+        ok = runtime.win.handle_power_command(
+            "apaga el ordenador",
+            confirm_fn=lambda _: True,
+        )
         if ok:
             return make_success(output_text="Apagando el ordenador.")
-        return make_error(
-            error="Could not shutdown PC",
-            output_text="No he podido apagar el ordenador.",
-        )
 
     return make_error(
-        error="No shutdown backend available",
-        output_text="No tengo backend para apagar el ordenador.",
+        error="Could not shutdown PC",
+        output_text="No he podido apagar el ordenador.",
     )
 
 
 def handle_restart_pc(runtime: Any, args: dict[str, Any], source: str = "voice", metadata: dict[str, Any] | None = None):
-    if hasattr(runtime, "win") and hasattr(runtime.win, "restart_pc"):
-        ok = runtime.win.restart_pc()
+    if hasattr(runtime, "win") and hasattr(runtime.win, "handle_power_command"):
+        ok = runtime.win.handle_power_command(
+            "reinicia el ordenador",
+            confirm_fn=lambda _: True,
+        )
         if ok:
             return make_success(output_text="Reiniciando el ordenador.")
-        return make_error(
-            error="Could not restart PC",
-            output_text="No he podido reiniciar el ordenador.",
-        )
 
     return make_error(
-        error="No restart backend available",
-        output_text="No tengo backend para reiniciar el ordenador.",
+        error="Could not restart PC",
+        output_text="No he podido reiniciar el ordenador.",
     )
 
 
@@ -170,30 +179,109 @@ def handle_sleep_mode(runtime: Any, args: dict[str, Any], source: str = "voice",
     )
 
 
-def _normalize_tool_result(result: Any, success_text: str | None, fail_text: str, data: dict[str, Any] | None = None):
-    data = data or {}
+# =========================
+# Helpers
+# =========================
 
-    if isinstance(result, bool):
-        if result:
-            return make_success(output_text=success_text, data=data)
-        return make_error(error=fail_text, output_text=fail_text, data=data)
+def _find_app_record(app_name: str) -> dict[str, Any] | None:
+    """
+    Busca una app por nombre o alias en la base SQLite.
+    Adapta el path de la BD a backend/data/hebe.db si existe.
+    """
+    normalized = app_name.strip().lower()
+    if not normalized:
+        return None
 
-    if isinstance(result, str):
-        if result.strip().lower() in {"ok", "success", "done"}:
-            return make_success(output_text=success_text, data=data)
-        return make_success(output_text=result, data=data)
+    db_path = _resolve_db_path()
+    if db_path is None:
+        return _fallback_app_alias(normalized)
 
-    if isinstance(result, dict):
-        success = bool(result.get("success", True))
-        if success:
-            return make_success(
-                output_text=result.get("output_text", success_text),
-                data={**data, **dict(result.get("data", {}))},
-            )
-        return make_error(
-            error=result.get("error", fail_text),
-            output_text=result.get("output_text", fail_text),
-            data={**data, **dict(result.get("data", {}))},
+    try:
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+
+        # Busca primero por name exacto o alias exacto
+        cur.execute(
+            """
+            SELECT *
+            FROM apps
+            WHERE lower(name) = ?
+               OR lower(alias) = ?
+               OR lower(command) LIKE ?
+            LIMIT 1
+            """,
+            (normalized, normalized, f"%{normalized}%"),
         )
+        row = cur.fetchone()
+        conn.close()
 
-    return make_success(output_text=success_text, data=data)
+        if row is not None:
+            return dict(row)
+
+    except Exception:
+        pass
+
+    return _fallback_app_alias(normalized)
+
+
+def _resolve_db_path() -> Path | None:
+    here = Path(__file__).resolve()
+    backend_root = here.parents[2]
+
+    candidates = [
+        backend_root / "data" / "hebe.db",
+        backend_root / "hebe.db",
+    ]
+
+    for path in candidates:
+        if path.exists():
+            return path
+
+    return None
+
+
+def _fallback_app_alias(name: str) -> dict[str, Any] | None:
+    """
+    Fallback mínimo para aliases comunes mientras la BD no resuelva bien.
+    """
+    aliases = {
+        "obs": {
+            "name": "OBS",
+            "alias": "obs",
+            "command": "obs64.exe",
+        },
+        "paint": {
+            "name": "Paint",
+            "alias": "paint",
+            "command": "mspaint.exe",
+        },
+        "chrome": {
+            "name": "Chrome",
+            "alias": "chrome",
+            "command": "chrome.exe",
+        },
+        "discord": {
+            "name": "Discord",
+            "alias": "discord",
+            "command": "discord.exe",
+        },
+        "opera": {
+            "name": "Opera GX",
+            "alias": "opera",
+            "command": "opera.exe",
+        },
+    }
+
+    return aliases.get(name)
+
+
+def _set_volume_via_steps(runtime: Any, value: int):
+    """
+    Tu WinAutomation actual no tiene set_volume(value) directo.
+    Para no romper nada, dejamos una respuesta honesta.
+    """
+    return make_error(
+        error=f"Absolute volume not supported yet: {value}",
+        output_text="Todavía no sé poner un volumen exacto directamente.",
+    )
