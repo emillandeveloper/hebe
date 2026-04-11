@@ -247,26 +247,31 @@ def _fallback_app_alias(name: str) -> dict[str, Any] | None:
     """
     aliases = {
         "obs": {
+            "id": -1,
             "name": "OBS",
             "alias": "obs",
-            "command": "obs64.exe",
+            "command": "C:\\Program Files\\obs-studio\\bin\\64bit\\obs64.exe",
         },
         "paint": {
+            "id": -1,
             "name": "Paint",
             "alias": "paint",
             "command": "mspaint.exe",
         },
         "chrome": {
+            "id": -1,
             "name": "Chrome",
             "alias": "chrome",
             "command": "chrome.exe",
         },
         "discord": {
+            "id": -1,
             "name": "Discord",
             "alias": "discord",
             "command": "discord.exe",
         },
         "opera": {
+            "id": -1,
             "name": "Opera GX",
             "alias": "opera",
             "command": "opera.exe",

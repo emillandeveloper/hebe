@@ -116,44 +116,50 @@ def open_app(app: Dict[str, Any], speak: SpeakFn) -> None:
     """
     Abre una app evitando duplicar instancias si ya está abierta.
     """
-    name = app["name"]
-    cmd = app["command"]
+    name = app.get("name", "aplicación")
+    cmd = app.get("command", "")
+
+    app_id = app.get("id")
 
     process_name = (app.get("process_name") or "").strip()
     if not process_name:
         process_name = guess_exe_from_command(cmd) or ""
 
-    # Ya está abierta -> focus
     if process_name and is_process_running(process_name):
         focused = try_focus_app_window(app)
-        if focused:
-            speak(f"{name} ya estaba abierto. Lo he puesto en primer plano.")
-        else:
-            speak(f"{name} ya está abierto.")
-        try:
-            register_app_usage(app["id"])
-        except Exception:
-            pass
+        if speak:
+            if focused:
+                speak(f"{name} ya estaba abierto. Lo he puesto en primer plano.")
+            else:
+                speak(f"{name} ya está abierto.")
+
+        if app_id:
+            try:
+                register_app_usage(app_id)
+            except Exception:
+                pass
         return
 
-    speak(f"Abriendo {name}.")
+    if speak:
+        speak(f"Abriendo {name}.")
 
     cmd_str = (cmd or "").strip()
 
-    # Ruta directa
     if cmd_str.lower().endswith(".exe") and (":" in cmd_str or cmd_str.startswith("\\\\")):
         exe_path = normalize_exe_path(cmd_str)
         exe_dir = os.path.dirname(exe_path) or None
         spawn_detached(exe_path, cwd=exe_dir)
     else:
-        # start xxx / notepad / explorer etc
         run_cmd_windows(cmd_str)
 
-    register_app_usage(app["id"])
+    if app_id:
+        try:
+            register_app_usage(app_id)
+        except Exception:
+            pass
 
-    # Aprendizaje post-lanzado
-    if not (app.get("process_name") or "").strip():
+    if app_id and not (app.get("process_name") or "").strip():
         expected = guess_exe_from_command(cmd_str)
-        learned = learn_process_name_after_launch(app["id"], expected_exe=expected)
+        learned = learn_process_name_after_launch(app_id, expected_exe=expected)
         if learned:
             print(f"🧠 Aprendido process_name para {name}: {learned}")
