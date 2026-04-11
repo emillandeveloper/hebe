@@ -1,4 +1,7 @@
 import time
+import threading
+from queue import Empty
+
 from app.services.db_sqlite import (
     init_db,
     log_chat,
@@ -9,20 +12,31 @@ from app.core.ui_bridge import emit
 from app.core.input_bus import submit_text_from_ui, get_ui_inbox, get_voice_inbox
 from app.core.stt_worker import STTWorker
 from app.core.runtime import build_runtime, HebeRuntime
-from queue import Empty
-import threading
+
+from app.orchestrator.orchestrator import Orchestrator
+from app.orchestrator.executor import OrchestratorExecutor
+from app.orchestrator.policy import OrchestratorPolicy
+from app.orchestrator.gates import OrchestratorGates
+from app.orchestrator.intents.resolver import IntentResolver
+from app.orchestrator.dispatcher import OrchestratorDispatcher
+from app.orchestrator.tool_handlers import build_tool_handlers
+
 
 WAKE_WORDS = ["hebe despierta", "eve despierta", "jebe despierta", "asistente despierta"]
 
 t0 = time.time()
+
+
 def mark(stage):
-    emit("status", {"engine":"starting","stage":stage,"t_ms": int((time.time()-t0)*1000)})
+    emit("status", {"engine": "starting", "stage": stage, "t_ms": int((time.time() - t0) * 1000)})
+
 
 # =========================
 #  MAIN
 # =========================
 class HebeEngine:
     """Motor de Hebe ejecutándose en un hilo, controlable desde el backend/UI."""
+
     def __init__(self, runtime: HebeRuntime, use_wakeword: bool = True, say_hello: bool = False):
         self.runtime = runtime
         self._stt_worker: STTWorker | None = None
@@ -31,6 +45,25 @@ class HebeEngine:
         self._thread: threading.Thread | None = None
         self._started = False
         self.use_wakeword = use_wakeword
+
+        chat_runtime = getattr(self.runtime, "llm", None) or getattr(self.runtime, "chat_runtime", None)
+        dispatcher = OrchestratorDispatcher(
+            runtime=self.runtime,
+            tools=build_tool_handlers(self.runtime),
+        )
+
+        self.orchestrator = Orchestrator(
+            state=self.runtime.state,
+            intent_resolver=IntentResolver(
+                llm=getattr(self.runtime, "llm", None),
+            ),
+            executor=OrchestratorExecutor(
+                chat_runtime=chat_runtime,
+                dispatcher=dispatcher,
+            ),
+            policy=OrchestratorPolicy(),
+            gates=OrchestratorGates(),
+        )
 
     def start(self):
         if self._started:
@@ -49,6 +82,7 @@ class HebeEngine:
                 self.runtime.stt.init()
                 self._stt_worker = STTWorker(stt=self.runtime.stt, stop_event=self._stop_event)
                 self._stt_worker.start()
+
                 emit("status", {"engine": "ready", "stage": "ready"})
 
                 target = self.wakeword_loop if self.use_wakeword else self.engine_loop
@@ -56,8 +90,10 @@ class HebeEngine:
 
                 self._thread = threading.Thread(target=target, kwargs=kwargs, daemon=True)
                 self._thread.start()
+
                 self.runtime.state.is_running = True
                 self.runtime.state.mode = "wakeword" if self.use_wakeword else "active"
+
             except Exception as e:
                 emit("status", {"engine": "error", "stage": "boot", "error": str(e)})
 
@@ -75,23 +111,42 @@ class HebeEngine:
 
     def handle_command(self, command: str, source: str = "voice") -> str:
         print(f"[HEBE] handle_command source={source} text={command!r}", flush=True)
+
         text = (command or "").strip()
         if not text:
             return "continue"
 
-        self.runtime.state.is_processing = True
-        self.runtime.state.last_input_text = text
-        self.runtime.state.last_input_source = source
+        result = self.orchestrator.handle(
+            text=text,
+            source=source,
+        )
 
-        try:
-            frame = self.runtime.intent_resolver.resolve(text, ctx=self.runtime.nlu_ctx, source=source)
-            self.runtime.state.last_intent = frame.intent
-            print(f"[HEBE] resolved frame={frame!r}", flush=True)
-            result = self.runtime.dispatcher.dispatch(frame, source=source)
-            print(f"[HEBE] dispatch result={result!r}", flush=True)
-            return result
-        finally:
-            self.runtime.state.is_processing = False
+        print(
+            "[HEBE] orchestrator result "
+            f"status={result.status.value!r} "
+            f"success={result.success!r} "
+            f"intent={result.intent!r} "
+            f"text={result.output_text!r} "
+            f"error={result.error!r}",
+            flush=True,
+        )
+
+        spoken_text = (result.output_text or "").strip()
+
+        if spoken_text and spoken_text.lower() not in {"continue", "stop", "sleep"}:
+            try:
+                self.runtime.speak(spoken_text)
+            except Exception as e:
+                print(f"[HEBE] speak failed: {e!r}", flush=True)
+
+        # Señales especiales para el loop
+        if result.intent == "sleep_mode" and result.success:
+            return "sleep"
+
+        if result.intent == "stop_engine" and result.success:
+            return "stop"
+
+        return "continue"
 
     def command_loop(self) -> str:
         while True:
@@ -184,14 +239,18 @@ class HebeEngine:
             res = self.command_loop()
             if res == "stop":
                 return "stop"
+
             if res == "sleep":
                 self.runtime.state.mode = "sleep"
                 res2 = self.wakeword_loop(say_hello=False)
                 if res2 == "stop":
                     return "stop"
+
+
 if __name__ == "__main__":
     runtime = build_runtime()
     engine = HebeEngine(runtime=runtime, use_wakeword=True, say_hello=True)
     engine.start()
+
     while True:
         time.sleep(1)
