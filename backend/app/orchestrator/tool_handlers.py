@@ -83,11 +83,18 @@ def handle_close_window(runtime: Any, args: dict[str, Any], source: str = "voice
         output_text="No he podido cerrar esa ventana.",
     )
 
-def handle_set_volume(runtime, args, **kwargs):
+import re
+
+def handle_set_volume(
+    runtime: Any,
+    args: dict[str, Any],
+    source: str = "voice",
+    metadata: dict[str, Any] | None = None,
+):
     direction = args.get("direction")
     value = args.get("value")
 
-    # 🔥 Si value viene como string largo, extraer número
+    # Si value viene como texto largo, sacar el número
     if isinstance(value, str):
         match = re.search(r"\d+", value)
         if match:
@@ -95,35 +102,57 @@ def handle_set_volume(runtime, args, **kwargs):
         else:
             value = None
 
-    # 🔥 Caso 1: volumen directo
+    # Volumen exacto
     if value is not None:
-        value = max(0, min(100, int(value)))  # clamp 0-100
-        runtime.win.set_volume(value=value)
-        return make_success(
-            output_text=f"Poniendo volumen al {value}%",
-            data={"volume": value},
+        value = max(0, min(100, int(value)))
+
+        if hasattr(runtime, "win") and hasattr(runtime.win, "set_volume"):
+            ok = runtime.win.set_volume(value=value)
+            if ok:
+                return make_success(
+                    output_text=f"Poniendo volumen al {value}%.",
+                    data={"volume": value},
+                )
+
+        return make_error(
+            error=f"Could not set volume to {value}",
+            output_text="No he podido cambiar el volumen.",
         )
 
-    # 🔥 Caso 2: subir
+    # Subir volumen
     if direction == "up":
-        runtime.win.set_volume(direction="up")
-        return make_success(
-            output_text="Subiendo el volumen.",
+        if hasattr(runtime, "win") and hasattr(runtime.win, "handle_volume_command"):
+            ok = runtime.win.handle_volume_command("sube volumen")
+            if ok:
+                return make_success(
+                    output_text="Subiendo el volumen.",
+                    data={"direction": "up"},
+                )
+
+        return make_error(
+            error="Could not increase volume",
+            output_text="No he podido subir el volumen.",
         )
 
-    # 🔥 Caso 3: bajar
+    # Bajar volumen
     if direction == "down":
-        runtime.win.set_volume(direction="down")
-        return make_success(
-            output_text="Bajando el volumen.",
+        if hasattr(runtime, "win") and hasattr(runtime.win, "handle_volume_command"):
+            ok = runtime.win.handle_volume_command("baja volumen")
+            if ok:
+                return make_success(
+                    output_text="Bajando el volumen.",
+                    data={"direction": "down"},
+                )
+
+        return make_error(
+            error="Could not decrease volume",
+            output_text="No he podido bajar el volumen.",
         )
 
-    # 🔥 Caso 4: no tenemos nada claro
     return make_error(
         error="Missing volume info",
         output_text="¿Qué volumen quieres que ponga?",
     )
-
 
 def handle_play_music(runtime: Any, args: dict[str, Any], source: str = "voice", metadata: dict[str, Any] | None = None):
     query = str(args.get("query", "")).strip()
