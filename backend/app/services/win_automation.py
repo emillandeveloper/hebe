@@ -48,7 +48,6 @@ class WinAutomationService:
     # ----------------------------
 
     def open_app(self, app, speak=None, **_ignored) -> bool:
-        # sqlite3.Row -> dict
         if app is None:
             self._emit("status", {"win_automation": "open_app_error", "error": "app is None"})
             return False
@@ -57,18 +56,18 @@ class WinAutomationService:
             try:
                 app = dict(app)
             except Exception:
-                # fallback mínimo: que al menos no pete el log
                 app = {"name": str(app), "command": ""}
 
         self._emit("status", {"win_automation": "open_app", "app": app.get("name")})
+
         try:
             from app.tools.windows_apps import open_app as tool_open_app
-            tool_open_app(app, speak=None)
-            return True
+            ok = tool_open_app(app, speak=None)
+            return bool(ok)
         except Exception as e:
             self._emit("status", {"win_automation": "open_app_error", "error": repr(e)})
             return False
-
+        
     def type_text(self, text: str) -> None:
         """Types text into the currently focused window."""
         self._emit("status", {"win_automation": "type_text"})

@@ -5,9 +5,10 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 from typing import Any
-
 from .models import make_error, make_success
-
+from app.services.app_registry import resolve_candidates, register_app
+from .models import make_error, make_success
+import re
 
 def build_tool_handlers(runtime: Any) -> dict[str, Any]:
     return {
@@ -30,33 +31,37 @@ def handle_open_app(runtime: Any, args: dict[str, Any], source: str = "voice", m
             output_text="No me has dicho qué aplicación abrir.",
         )
 
-    app_record = _find_app_record(app_name)
-    if app_record is None:
+    candidates = resolve_candidates(app_name)
+    if not candidates:
         return make_error(
             error=f"App not found: {app_name}",
             output_text=f"No conozco esa aplicación todavía: {app_name}.",
         )
 
-    if hasattr(runtime, "win") and hasattr(runtime.win, "open_app"):
-        ok = runtime.win.open_app(app_record)
-        if ok:
-            spoken = f"Abriendo {app_record.get('name', app_name)}."
-            return make_success(
-                output_text=spoken,
-                data={
-                    "opened_app": app_record.get("name", app_name),
-                    "app_record": app_record,
-                },
-            )
+    for candidate in candidates:
+        print(f"[HEBE][OPEN_APP] trying candidate={candidate!r}", flush=True)
 
-        return make_error(
-            error=f"Failed opening app: {app_name}",
-            output_text=f"No he podido abrir {app_record.get('name', app_name)}.",
-        )
+        if hasattr(runtime, "win") and hasattr(runtime.win, "open_app"):
+            ok = runtime.win.open_app(candidate)
+            if ok:
+                # si no viene de BD, la registramos automáticamente
+                if candidate.get("source") != "db":
+                    saved = register_app(candidate)
+                    if saved:
+                        candidate = saved
+
+                spoken = f"Abriendo {candidate.get('name', app_name)}."
+                return make_success(
+                    output_text=spoken,
+                    data={
+                        "opened_app": candidate.get("name", app_name),
+                        "app_record": candidate,
+                    },
+                )
 
     return make_error(
-        error="No open_app backend available",
-        output_text="No tengo backend para abrir aplicaciones.",
+        error=f"Failed opening app: {app_name}",
+        output_text=f"No he podido abrir {app_name}.",
     )
 
 
@@ -78,28 +83,45 @@ def handle_close_window(runtime: Any, args: dict[str, Any], source: str = "voice
         output_text="No he podido cerrar esa ventana.",
     )
 
+def handle_set_volume(runtime, args, **kwargs):
+    direction = args.get("direction")
+    value = args.get("value")
 
-def handle_set_volume(runtime: Any, args: dict[str, Any], source: str = "voice", metadata: dict[str, Any] | None = None):
-    if hasattr(runtime, "win"):
-        if "value" in args:
-            value = int(args["value"])
-            # Tu WinAutomationService no tiene set_volume(value), pero sí handle_volume_command(text)
-            # así que lo traducimos a un comando textual provisional.
-            return _set_volume_via_steps(runtime, value)
+    # 🔥 Si value viene como string largo, extraer número
+    if isinstance(value, str):
+        match = re.search(r"\d+", value)
+        if match:
+            value = int(match.group())
+        else:
+            value = None
 
-        if args.get("direction") == "up":
-            ok = runtime.win.handle_volume_command("sube volumen")
-            if ok:
-                return make_success(output_text="Subiendo volumen.", data={"direction": "up"})
+    # 🔥 Caso 1: volumen directo
+    if value is not None:
+        value = max(0, min(100, int(value)))  # clamp 0-100
+        runtime.win.set_volume(value=value)
+        return make_success(
+            output_text=f"Poniendo volumen al {value}%",
+            data={"volume": value},
+        )
 
-        if args.get("direction") == "down":
-            ok = runtime.win.handle_volume_command("baja volumen")
-            if ok:
-                return make_success(output_text="Bajando volumen.", data={"direction": "down"})
+    # 🔥 Caso 2: subir
+    if direction == "up":
+        runtime.win.set_volume(direction="up")
+        return make_success(
+            output_text="Subiendo el volumen.",
+        )
 
+    # 🔥 Caso 3: bajar
+    if direction == "down":
+        runtime.win.set_volume(direction="down")
+        return make_success(
+            output_text="Bajando el volumen.",
+        )
+
+    # 🔥 Caso 4: no tenemos nada claro
     return make_error(
-        error="Could not set volume",
-        output_text="No he podido cambiar el volumen.",
+        error="Missing volume info",
+        output_text="¿Qué volumen quieres que ponga?",
     )
 
 

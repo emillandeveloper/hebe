@@ -45,7 +45,7 @@ DEFAULT_INTENT_POLICY: dict[str, IntentPolicyRule] = {
     ),
     "set_volume": IntentPolicyRule(
         tool_name="set_volume",
-        required_slots=["value"],
+        required_slots=[],  # 🔥 ya no obligamos value
         confirm=False,
         clarify_prompts={
             "value": "¿Qué volumen quieres que ponga?",

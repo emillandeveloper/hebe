@@ -1,0 +1,384 @@
+from __future__ import annotations
+
+import os
+import sqlite3
+from pathlib import Path
+from typing import Any, Dict, Optional
+
+
+def _get_db_path() -> Optional[Path]:
+    here = Path(__file__).resolve()
+    backend_root = here.parents[2]
+
+    candidates = [
+        Path(os.getenv("HEBE_DB_PATH")) if os.getenv("HEBE_DB_PATH") else None,
+        backend_root / "hebe.db",
+        backend_root / "data" / "hebe.db",
+    ]
+
+    for path in candidates:
+        if path and path.exists():
+            return path
+
+    return None
+
+
+def _connect():
+    db_path = _get_db_path()
+    if not db_path:
+        return None
+
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _app_commands_table_exists(conn: sqlite3.Connection) -> bool:
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT name
+            FROM sqlite_master
+            WHERE type='table' AND name='app_commands'
+            LIMIT 1
+            """
+        )
+        return cur.fetchone() is not None
+    except Exception:
+        return False
+
+
+def resolve_app(name: str) -> Optional[Dict[str, Any]]:
+    candidates = resolve_candidates(name)
+    return candidates[0] if candidates else None
+
+
+def resolve_candidates(name: str) -> list[Dict[str, Any]]:
+    normalized = name.strip().lower()
+    if not normalized:
+        return []
+
+    out: list[Dict[str, Any]] = []
+    seen: set[str] = set()
+
+    # 1. BD
+    db_candidates = _resolve_db_candidates(normalized)
+    for candidate in db_candidates:
+        key = _candidate_key(candidate)
+        if key not in seen:
+            out.append(candidate)
+            seen.add(key)
+
+    # 2. Start Menu
+    start_menu_candidates = discover_from_start_menu(normalized)
+    for candidate in start_menu_candidates:
+        key = _candidate_key(candidate)
+        if key not in seen:
+            out.append(candidate)
+            seen.add(key)
+
+    # 3. EXE scan
+    exe_candidates = discover_exe(normalized)
+    for candidate in exe_candidates:
+        key = _candidate_key(candidate)
+        if key not in seen:
+            out.append(candidate)
+            seen.add(key)
+
+    return out
+
+
+def register_app(app: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    conn = _connect()
+    if not conn:
+        return None
+
+    try:
+        if not _app_commands_table_exists(conn):
+            print("[app_registry] register skipped: table 'app_commands' does not exist")
+            return None
+
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT OR IGNORE INTO app_commands
+            (name, command, description, aliases, enabled, process_name, window_title)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                app.get("name"),
+                app.get("command"),
+                app.get("description", ""),
+                app.get("aliases", ""),
+                int(app.get("enabled", 1)),
+                app.get("process_name"),
+                app.get("window_title"),
+            ),
+        )
+        conn.commit()
+
+        cur.execute(
+            """
+            SELECT *
+            FROM app_commands
+            WHERE lower(name) = ?
+            LIMIT 1
+            """,
+            ((app.get("name") or "").strip().lower(),),
+        )
+        row = cur.fetchone()
+        if row:
+            saved = _normalize_app_record(dict(row))
+            print(f"[app_registry] registered {saved.get('name')} (id={saved.get('id')})")
+            return saved
+
+    except Exception as e:
+        print(f"[app_registry] register_app error: {e}")
+
+    finally:
+        conn.close()
+
+    return None
+
+
+def _resolve_db_candidates(normalized: str) -> list[Dict[str, Any]]:
+    conn = _connect()
+    if not conn:
+        return []
+
+    try:
+        if not _app_commands_table_exists(conn):
+            return []
+
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT *
+            FROM app_commands
+            WHERE lower(name) = ?
+               OR lower(command) LIKE ?
+               OR lower(aliases) LIKE ?
+            LIMIT 50
+            """,
+            (normalized, f"%{normalized}%", f"%{normalized}%"),
+        )
+        rows = cur.fetchall()
+
+        exact: list[Dict[str, Any]] = []
+        partial: list[Dict[str, Any]] = []
+
+        for row in rows:
+            row_dict = dict(row)
+            normalized_row = _normalize_app_record(row_dict)
+
+            aliases = (row_dict.get("aliases") or "").strip().lower()
+            alias_list = [a.strip() for a in aliases.split(",") if a.strip()]
+            name = (row_dict.get("name") or "").strip().lower()
+
+            if normalized == name or normalized in alias_list:
+                exact.append(normalized_row)
+            else:
+                partial.append(normalized_row)
+
+        return exact + partial
+
+    except Exception as e:
+        print(f"[app_registry] resolve_app error: {e}")
+        return []
+
+    finally:
+        conn.close()
+
+
+def discover_from_start_menu(name: str) -> list[Dict[str, Any]]:
+    normalized = name.strip().lower()
+    if not normalized:
+        return []
+
+    start_menu_roots = [
+        Path(os.environ.get("PROGRAMDATA", "")) / r"Microsoft\Windows\Start Menu\Programs",
+        Path(os.environ.get("APPDATA", "")) / r"Microsoft\Windows\Start Menu\Programs",
+    ]
+
+    candidates: list[Path] = []
+
+    for root in start_menu_roots:
+        if not root.exists():
+            continue
+
+        try:
+            for path in root.rglob("*.lnk"):
+                stem = path.stem.lower()
+                full = str(path).lower()
+
+                if "uninstall" in stem or "desinstal" in stem:
+                    continue
+
+                if normalized in stem or normalized in full:
+                    candidates.append(path)
+        except Exception:
+            continue
+
+    candidates.sort(key=lambda p: len(p.stem))
+
+    out: list[Dict[str, Any]] = []
+    for selected in candidates[:10]:
+        print(f"[app_registry] discovered from start menu {name} -> {selected}")
+        out.append(
+            {
+                "name": selected.stem,
+                "alias": normalized,
+                "aliases": normalized,
+                "command": str(selected),
+                "process_name": None,
+                "window_title": selected.stem,
+                "enabled": 1,
+                "source": "start_menu",
+            }
+        )
+    return out
+
+
+def discover_exe(name: str) -> list[Dict[str, Any]]:
+    normalized = name.strip().lower()
+    if not normalized:
+        return []
+
+    search_roots = [
+        os.environ.get("PROGRAMFILES"),
+        os.environ.get("PROGRAMFILES(X86)"),
+        os.environ.get("LOCALAPPDATA"),
+    ]
+
+    reject_terms = {
+        "uninstall",
+        "unins",
+        "setup",
+        "updater",
+        "update",
+        "helper",
+        "crash",
+        "report",
+        "test",
+        "tests",
+        "ffmpeg",
+        "browser",
+        "stream-elements",
+        "streamelements",
+        "cef",
+        "service",
+        "renderer",
+        "launcherhelper",
+        "machine-config",
+        "node",
+    }
+
+    candidates: list[str] = []
+
+    for root in search_roots:
+        if not root or not os.path.exists(root):
+            continue
+
+        try:
+            for dirpath, _, filenames in os.walk(root):
+                dir_lower = dirpath.lower()
+
+                # poda básica de rutas claramente malas
+                if any(bad in dir_lower for bad in ["uninstall", "cache", "temp", "logs", "crash"]):
+                    continue
+
+                for file in filenames:
+                    lower = file.lower()
+
+                    if not lower.endswith(".exe"):
+                        continue
+
+                    if normalized not in lower:
+                        continue
+
+                    if any(bad in lower for bad in reject_terms):
+                        continue
+
+                    full_path = os.path.join(dirpath, file)
+                    candidates.append(full_path)
+        except Exception:
+            continue
+
+    def score(path: str) -> tuple[int, int, int]:
+        lower = path.lower()
+        filename = Path(path).name.lower()
+
+        score_value = 0
+
+        # preferir match exacto del exe
+        if filename == f"{normalized}.exe":
+            score_value += 100
+
+        # preferir nombres que empiecen por el nombre buscado
+        if filename.startswith(normalized):
+            score_value += 30
+
+        # penalizar rutas sospechosas
+        suspicious = [
+            "uninstall",
+            "cache",
+            "temp",
+            "logs",
+            "crash",
+            "streamelements",
+            "streamlabs obs\\resources",
+            "node_modules",
+            "plugin",
+            "plugins",
+            "obs-plugins",
+        ]
+        for bad in suspicious:
+            if bad in lower:
+                score_value -= 40
+
+        # preferir rutas más cortas
+        return (-score_value, len(path), len(filename))
+
+    candidates = sorted(set(candidates), key=score)
+
+    out: list[Dict[str, Any]] = []
+    for selected in candidates[:10]:
+        print(f"[app_registry] discovered exe {name} -> {selected}")
+        out.append(
+            {
+                "name": Path(selected).stem,
+                "alias": normalized,
+                "aliases": normalized,
+                "command": selected,
+                "process_name": Path(selected).name,
+                "window_title": Path(selected).stem,
+                "enabled": 1,
+                "source": "exe_scan",
+            }
+        )
+    return out
+
+
+def _normalize_app_record(row: Dict[str, Any]) -> Dict[str, Any]:
+    aliases = row.get("aliases", "")
+
+    primary_alias = ""
+    if isinstance(aliases, str) and aliases.strip():
+        primary_alias = aliases.split(",")[0].strip()
+
+    return {
+        "id": row.get("id"),
+        "name": row.get("name"),
+        "alias": primary_alias,
+        "aliases": aliases,
+        "command": row.get("command"),
+        "process_name": row.get("process_name"),
+        "window_title": row.get("window_title"),
+        "enabled": row.get("enabled", 1),
+        "source": "db",
+    }
+
+
+def _candidate_key(candidate: Dict[str, Any]) -> str:
+    return f"{candidate.get('command','')}|{candidate.get('name','')}"

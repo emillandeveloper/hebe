@@ -112,13 +112,13 @@ def learn_process_name_after_launch(app_id: int, expected_exe: Optional[str], ti
 
     return None
 
-def open_app(app: Dict[str, Any], speak: SpeakFn) -> None:
+def open_app(app: Dict[str, Any], speak: SpeakFn) -> bool:
     """
     Abre una app evitando duplicar instancias si ya está abierta.
+    Devuelve True si parece haberse abierto o enfocado, False si falla.
     """
     name = app.get("name", "aplicación")
     cmd = app.get("command", "")
-
     app_id = app.get("id")
 
     process_name = (app.get("process_name") or "").strip()
@@ -138,19 +138,39 @@ def open_app(app: Dict[str, Any], speak: SpeakFn) -> None:
                 register_app_usage(app_id)
             except Exception:
                 pass
-        return
+        return True
 
     if speak:
         speak(f"Abriendo {name}.")
 
     cmd_str = (cmd or "").strip()
+    if not cmd_str:
+        return False
 
-    if cmd_str.lower().endswith(".exe") and (":" in cmd_str or cmd_str.startswith("\\\\")):
-        exe_path = normalize_exe_path(cmd_str)
-        exe_dir = os.path.dirname(exe_path) or None
-        spawn_detached(exe_path, cwd=exe_dir)
+    try:
+        if (":" in cmd_str or cmd_str.startswith("\\\\")) and (
+            cmd_str.lower().endswith(".exe") or cmd_str.lower().endswith(".lnk")
+        ):
+            exe_path = normalize_exe_path(cmd_str)
+            if not os.path.exists(exe_path):
+                return False
+            exe_dir = os.path.dirname(exe_path) or None
+            spawn_detached(exe_path, cwd=exe_dir)
+        else:
+            run_cmd_windows(cmd_str)
+    except Exception:
+        return False
+
+    # pequeña espera para validar si apareció el proceso
+    time.sleep(1.5)
+
+    if process_name:
+        launched = is_process_running(process_name)
+        if not launched:
+            return False
     else:
-        run_cmd_windows(cmd_str)
+        # si no tenemos process_name, asumimos éxito provisional
+        launched = True
 
     if app_id:
         try:
@@ -163,3 +183,5 @@ def open_app(app: Dict[str, Any], speak: SpeakFn) -> None:
         learned = learn_process_name_after_launch(app_id, expected_exe=expected)
         if learned:
             print(f"🧠 Aprendido process_name para {name}: {learned}")
+
+    return launched
