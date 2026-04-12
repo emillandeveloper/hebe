@@ -19,7 +19,16 @@ from .models import (
     make_ignored,
 )
 from .policy import OrchestratorPolicy
+from app.llm.ollama_intent_client import OllamaIntentClient
+from app.orchestrator.intents.resolver import IntentResolver
 
+intent_llm = OllamaIntentClient(
+    model="hebe-intent",
+    base_url="http://127.0.0.1:11434",
+    timeout=20.0,
+)
+
+intent_resolver = IntentResolver(llm=intent_llm)
 
 class Orchestrator:
     """

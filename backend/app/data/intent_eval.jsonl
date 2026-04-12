@@ -1,0 +1,124 @@
+{"text":"abre obs","intent":"open_app","slots":{"app_name":"obs"}}
+{"text":"abre chrome","intent":"open_app","slots":{"app_name":"chrome"}}
+{"text":"abre discord","intent":"open_app","slots":{"app_name":"discord"}}
+{"text":"abre spotify","intent":"open_app","slots":{"app_name":"spotify"}}
+{"text":"abre steam","intent":"open_app","slots":{"app_name":"steam"}}
+{"text":"abre vscode","intent":"open_app","slots":{"app_name":"vscode"}}
+{"text":"abre visual studio code","intent":"open_app","slots":{"app_name":"visual studio code"}}
+{"text":"abre notepad","intent":"open_app","slots":{"app_name":"notepad"}}
+{"text":"abre bloc de notas","intent":"open_app","slots":{"app_name":"bloc de notas"}}
+{"text":"abre calculadora","intent":"open_app","slots":{"app_name":"calculadora"}}
+{"text":"abre explorer","intent":"open_app","slots":{"app_name":"explorer"}}
+{"text":"abre el explorador de archivos","intent":"open_app","slots":{"app_name":"el explorador de archivos"}}
+{"text":"abre 7th heaven","intent":"open_app","slots":{"app_name":"7th heaven"}}
+{"text":"abre el programa de mods del ff7","intent":"open_app","slots":{"app_name":"el programa de mods del ff7"}}
+{"text":"inicia obs","intent":"open_app","slots":{"app_name":"obs"}}
+{"text":"ejecuta chrome","intent":"open_app","slots":{"app_name":"chrome"}}
+{"text":"lanza discord","intent":"open_app","slots":{"app_name":"discord"}}
+{"text":"open chrome","intent":"open_app","slots":{"app_name":"chrome"}}
+{"text":"start spotify","intent":"open_app","slots":{"app_name":"spotify"}}
+{"text":"run 7th heaven","intent":"open_app","slots":{"app_name":"7th heaven"}}
+{"text":"cierra la ventana","intent":"close_window","slots":{"target":"active"}}
+{"text":"cierra ventana","intent":"close_window","slots":{"target":"active"}}
+{"text":"cierra la ventana activa","intent":"close_window","slots":{"target":"active"}}
+{"text":"close window","intent":"close_window","slots":{"target":"active"}}
+{"text":"cierra chrome","intent":"close_window","slots":{"target":"chrome"}}
+{"text":"cierra obs","intent":"close_window","slots":{"target":"obs"}}
+{"text":"cierra discord","intent":"close_window","slots":{"target":"discord"}}
+{"text":"cerrar spotify","intent":"close_window","slots":{"target":"spotify"}}
+{"text":"close spotify","intent":"close_window","slots":{"target":"spotify"}}
+{"text":"cierra el bloc de notas","intent":"close_window","slots":{"target":"el bloc de notas"}}
+{"text":"pon el volumen al 30","intent":"set_volume","slots":{"value":30}}
+{"text":"pon el volumen al 50","intent":"set_volume","slots":{"value":50}}
+{"text":"volumen 80","intent":"set_volume","slots":{"value":80}}
+{"text":"set volume 25","intent":"set_volume","slots":{"value":25}}
+{"text":"sube el volumen","intent":"set_volume","slots":{"direction":"up"}}
+{"text":"baja el volumen","intent":"set_volume","slots":{"direction":"down"}}
+{"text":"sube volumen","intent":"set_volume","slots":{"direction":"up"}}
+{"text":"baja volumen","intent":"set_volume","slots":{"direction":"down"}}
+{"text":"mute","intent":"set_volume","slots":{"value":0}}
+{"text":"silencia","intent":"set_volume","slots":{"value":0}}
+{"text":"silence","intent":"set_volume","slots":{"value":0}}
+{"text":"pon música","intent":"play_music","slots":{}}
+{"text":"pon musica","intent":"play_music","slots":{}}
+{"text":"play music","intent":"play_music","slots":{}}
+{"text":"reproduce música","intent":"play_music","slots":{}}
+{"text":"pon música de final fantasy","intent":"play_music","slots":{"query":"final fantasy"}}
+{"text":"pon musica de metallica","intent":"play_music","slots":{"query":"metallica"}}
+{"text":"reproduce opening de ff7","intent":"play_music","slots":{"query":"opening de ff7"}}
+{"text":"play music nightwish","intent":"play_music","slots":{"query":"nightwish"}}
+{"text":"pon one winged angel","intent":"play_music","slots":{"query":"one winged angel"}}
+{"text":"pausa la música","intent":"pause_music","slots":{}}
+{"text":"pausa la musica","intent":"pause_music","slots":{}}
+{"text":"pause music","intent":"pause_music","slots":{}}
+{"text":"pausa musica","intent":"pause_music","slots":{}}
+{"text":"apaga el pc","intent":"shutdown_pc","slots":{}}
+{"text":"apaga el ordenador","intent":"shutdown_pc","slots":{}}
+{"text":"apagar el pc","intent":"shutdown_pc","slots":{}}
+{"text":"shutdown","intent":"shutdown_pc","slots":{}}
+{"text":"turn off pc","intent":"shutdown_pc","slots":{}}
+{"text":"reinicia el pc","intent":"restart_pc","slots":{}}
+{"text":"reinicia el ordenador","intent":"restart_pc","slots":{}}
+{"text":"reiniciar el pc","intent":"restart_pc","slots":{}}
+{"text":"restart","intent":"restart_pc","slots":{}}
+{"text":"duerme","intent":"sleep_mode","slots":{}}
+{"text":"vete a dormir","intent":"sleep_mode","slots":{}}
+{"text":"modo reposo","intent":"sleep_mode","slots":{}}
+{"text":"sleep mode","intent":"sleep_mode","slots":{}}
+{"text":"hola","intent":"chat","slots":{}}
+{"text":"buenas","intent":"chat","slots":{}}
+{"text":"hello","intent":"chat","slots":{}}
+{"text":"hi","intent":"chat","slots":{}}
+{"text":"qué tal","intent":"chat","slots":{}}
+{"text":"que tal","intent":"chat","slots":{}}
+{"text":"como estás","intent":"chat","slots":{}}
+{"text":"cómo estás","intent":"chat","slots":{}}
+{"text":"qué haces","intent":"chat","slots":{}}
+{"text":"que haces","intent":"chat","slots":{}}
+{"text":"quién eres","intent":"chat","slots":{}}
+{"text":"quien eres","intent":"chat","slots":{}}
+{"text":"cuéntame algo","intent":"chat","slots":{}}
+{"text":"cuentame algo","intent":"chat","slots":{}}
+{"text":"necesito ayuda","intent":"chat","slots":{}}
+{"text":"hablemos","intent":"chat","slots":{}}
+{"text":"puedes abrir obs","intent":"open_app","slots":{"app_name":"obs"}}
+{"text":"me abres chrome","intent":"open_app","slots":{"app_name":"chrome"}}
+{"text":"abre el discord","intent":"open_app","slots":{"app_name":"discord"}}
+{"text":"quiero abrir spotify","intent":"open_app","slots":{"app_name":"spotify"}}
+{"text":"podrías abrir steam","intent":"open_app","slots":{"app_name":"steam"}}
+{"text":"abre por favor vscode","intent":"open_app","slots":{"app_name":"vscode"}}
+{"text":"abre obs porfa","intent":"open_app","slots":{"app_name":"obs"}}
+{"text":"abre eso","intent":"chat","slots":{}}
+{"text":"ciérralo","intent":"chat","slots":{}}
+{"text":"ciérrame eso","intent":"chat","slots":{}}
+{"text":"ábrelo otra vez","intent":"chat","slots":{}}
+{"text":"cierra lo que esté abierto","intent":"close_window","slots":{"target":"active"}}
+{"text":"sube un poco el volumen","intent":"set_volume","slots":{"direction":"up"}}
+{"text":"baja un poco el volumen","intent":"set_volume","slots":{"direction":"down"}}
+{"text":"bájalo bastante","intent":"set_volume","slots":{"direction":"down"}}
+{"text":"sube el volumen mucho","intent":"set_volume","slots":{"direction":"up"}}
+{"text":"pon el volumen al máximo","intent":"set_volume","slots":{"value":100}}
+{"text":"pon el volumen al minimo","intent":"set_volume","slots":{"value":0}}
+{"text":"pon música de ff7","intent":"play_music","slots":{"query":"ff7"}}
+{"text":"pon algo de metal","intent":"play_music","slots":{"query":"metal"}}
+{"text":"pon música chill","intent":"play_music","slots":{"query":"chill"}}
+{"text":"pon algo para relajarme","intent":"play_music","slots":{"query":"relajante"}}
+{"text":"ponme algo épico","intent":"play_music","slots":{"query":"epic"}}
+{"text":"quita la música","intent":"pause_music","slots":{}}
+{"text":"para la música","intent":"pause_music","slots":{}}
+{"text":"abre obz","intent":"open_app","slots":{"app_name":"obz"}}
+{"text":"abre crom","intent":"open_app","slots":{"app_name":"crom"}}
+{"text":"abre discor","intent":"open_app","slots":{"app_name":"discor"}}
+{"text":"pon el bolumen al 30","intent":"set_volume","slots":{"value":30}}
+{"text":"sube el bolumen","intent":"set_volume","slots":{"direction":"up"}}
+{"text":"abre obs y chrome","intent":"open_app","slots":{"app_name":"obs"}}
+{"text":"abre spotify y pon música","intent":"play_music","slots":{}}
+{"text":"abre discord y luego chrome","intent":"open_app","slots":{"app_name":"discord"}}
+{"text":"abre chrome please","intent":"open_app","slots":{"app_name":"chrome"}}
+{"text":"open obs por favor","intent":"open_app","slots":{"app_name":"obs"}}
+{"text":"close la ventana","intent":"close_window","slots":{"target":"active"}}
+{"text":"play música de ff","intent":"play_music","slots":{"query":"ff"}}
+{"text":"quiero escuchar música","intent":"chat","slots":{}}
+{"text":"me apetece algo de música","intent":"chat","slots":{}}
+{"text":"debería subir el volumen","intent":"chat","slots":{}}
+{"text":"crees que debería cerrar chrome","intent":"chat","slots":{}}
