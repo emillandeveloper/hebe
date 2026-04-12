@@ -93,7 +93,7 @@ def handle_set_volume(
 ):
     direction = args.get("direction")
     value = args.get("value")
-
+    print(f"[HEBE][VOLUME] handle_set_volume args={args!r}", flush=True)
     # Si value viene como texto largo, sacar el número
     if isinstance(value, str):
         match = re.search(r"\d+", value)
@@ -122,6 +122,7 @@ def handle_set_volume(
     # Subir volumen
     if direction == "up":
         if hasattr(runtime, "win") and hasattr(runtime.win, "handle_volume_command"):
+            print("[HEBE][VOLUME] calling handle_volume_command('sube volumen')", flush=True)
             ok = runtime.win.handle_volume_command("sube volumen")
             if ok:
                 return make_success(
@@ -138,6 +139,7 @@ def handle_set_volume(
     if direction == "down":
         if hasattr(runtime, "win") and hasattr(runtime.win, "handle_volume_command"):
             ok = runtime.win.handle_volume_command("baja volumen")
+            print("[HEBE][VOLUME] calling handle_volume_command('baja volumen')", flush=True)
             if ok:
                 return make_success(
                     output_text="Bajando el volumen.",

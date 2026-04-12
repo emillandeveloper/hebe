@@ -170,22 +170,16 @@ class WinAutomationService:
         import pyautogui
 
         if "sube volumen" in t:
-            if self.speak:
-                self.speak("Subiendo volumen.", "es")
-            for _ in range(5):
+            for _ in range(2):
                 pyautogui.press("volumeup")
             return True
 
         if "baja volumen" in t:
-            if self.speak:
-                self.speak("Bajando volumen.", "es")
-            for _ in range(5):
+            for _ in range(2):
                 pyautogui.press("volumedown")
             return True
 
         if "silenciar" in t:
-            if self.speak:
-                self.speak("Silenciando.", "es")
             pyautogui.press("volumemute")
             return True
 
