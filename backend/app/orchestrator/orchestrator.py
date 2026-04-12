@@ -113,7 +113,6 @@ class Orchestrator:
             result = self._execute_decision(decision)
 
             # 5. Update state
-            decision = self.policy.decide(user_input, intent_result, self.state)
             decision = self._attach_runtime_metadata(decision, user_input)
 
             print(
