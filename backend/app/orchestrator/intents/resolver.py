@@ -155,6 +155,22 @@ class IntentResolver:
     # =========================
 
     def _resolve_by_rules(self, *, raw: str, normalized: str) -> IntentResult | None:
+        stream_enable = self._match_stream_enable(raw, normalized)
+        if stream_enable is not None:
+            return stream_enable
+
+        stream_disable = self._match_stream_disable(raw, normalized)
+        if stream_disable is not None:
+            return stream_disable
+
+        stream_shoutout = self._match_stream_shoutout(raw, normalized)
+        if stream_shoutout is not None:
+            return stream_shoutout
+
+        stream_chat = self._match_stream_chat_message(raw, normalized)
+        if stream_chat is not None:
+            return stream_chat
+        
         if normalized in {
             "hola",
             "buenas",
@@ -710,7 +726,10 @@ class IntentResolver:
             "For play_music use slot 'query' only if the user specifies what to play.\n"
             "For close_window use slot 'target' only if the user specifies what to close.\n"
             "Never invent slot values.\n"
-            "Confidence must be a number between 0.0 and 1.0."
+            "For stream_chat_message use slot 'message'.\n"
+            "For stream_shoutout use slot 'target_raw'.\n"
+            "For stream_enable and stream_disable do not use slots.\n"
+            "Confidence must be a number between 0.0 and 1.0." 
         )
 
     def _build_llm_user_prompt(
@@ -728,7 +747,7 @@ Classify the following request and extract slots.
 
 Return JSON with this exact shape:
 {{
-  "intent": "chat|open_app|close_window|set_volume|play_music|pause_music|shutdown_pc|restart_pc|sleep_mode",
+  "intent": "chat|open_app|close_window|set_volume|play_music|pause_music|shutdown_pc|restart_pc|sleep_mode|stream_enable|stream_disable|stream_chat_message|stream_shoutout",
   "confidence": 0.0,
   "slots": {{}}
 }}
@@ -754,6 +773,18 @@ JSON: {{"intent":"chat","confidence":0.90,"slots":{{}}}}
 
 User request: "hola"
 JSON: {{"intent":"chat","confidence":0.95,"slots":{{}}}}
+
+User request: "activa modo stream"
+JSON: {{"intent":"stream_enable","confidence":0.98,"slots":{{}}}}
+
+User request: "desactiva modo stream"
+JSON: {{"intent":"stream_disable","confidence":0.98,"slots":{{}}}}
+
+User request: "escribe en el chat hola gente"
+JSON: {{"intent":"stream_chat_message","confidence":0.97,"slots":{{"message":"hola gente"}}}}
+
+User request: "haz shoutout a tito charly"
+JSON: {{"intent":"stream_shoutout","confidence":0.96,"slots":{{"target_raw":"tito charly"}}}}
 
 State:
 - mode: {state_mode}
@@ -906,4 +937,122 @@ User normalized text:
                 else:
                     normalized.pop("target", None)
 
+        if intent == "stream_chat_message":
+            message = normalized.get("message")
+            if isinstance(message, str):
+                message = message.strip()
+                if message:
+                    normalized["message"] = message
+                else:
+                    normalized.pop("message", None)
+
+        if intent == "stream_shoutout":
+            target_raw = normalized.get("target_raw")
+            if isinstance(target_raw, str):
+                target_raw = target_raw.strip()
+                if target_raw:
+                    normalized["target_raw"] = target_raw
+                else:
+                    normalized.pop("target_raw", None)
+
         return normalized
+    
+    def _match_stream_enable(self, raw: str, normalized: str) -> IntentResult | None:
+        patterns = [
+            r"^(activa|pon|entra en|enable)\s+(el\s+)?modo\s+stream$",
+            r"^(activa|pon|enable)\s+stream$",
+            r"^stream\s+on$",
+        ]
+        for pattern in patterns:
+            if re.match(pattern, normalized, flags=re.IGNORECASE):
+                return IntentResult(
+                    intent="stream_enable",
+                    confidence=0.96,
+                    slots={},
+                    source="rules",
+                    raw={"raw_text": raw, "normalized_text": normalized},
+                )
+        return None
+
+    def _match_stream_disable(self, raw: str, normalized: str) -> IntentResult | None:
+        patterns = [
+            r"^(desactiva|quita|sal del|disable)\s+(el\s+)?modo\s+stream$",
+            r"^(desactiva|quita|disable)\s+stream$",
+            r"^stream\s+off$",
+        ]
+        for pattern in patterns:
+            if re.match(pattern, normalized, flags=re.IGNORECASE):
+                return IntentResult(
+                    intent="stream_disable",
+                    confidence=0.96,
+                    slots={},
+                    source="rules",
+                    raw={"raw_text": raw, "normalized_text": normalized},
+                )
+        return None
+
+    def _match_stream_shoutout(self, raw: str, normalized: str) -> IntentResult | None:
+        patterns = [
+            r"^(haz|dale|manda)?\s*(un\s+)?shoutout\s+a\s+(.+)$",
+            r"^(haz|dale|manda)?\s*(un\s+)?so\s+a\s+(.+)$",
+            r"^shoutout\s+a\s+(.+)$",
+            r"^so\s+a\s+(.+)$",
+        ]
+
+        for pattern in patterns:
+            match = re.match(pattern, normalized, flags=re.IGNORECASE)
+            if not match:
+                continue
+
+            target_raw = match.group(match.lastindex).strip()
+            if not target_raw:
+                return IntentResult(
+                    intent="stream_shoutout",
+                    confidence=0.70,
+                    slots={},
+                    source="rules",
+                    raw={"raw_text": raw, "normalized_text": normalized},
+                )
+
+            return IntentResult(
+                intent="stream_shoutout",
+                confidence=0.95,
+                slots={"target_raw": target_raw},
+                source="rules",
+                raw={"raw_text": raw, "normalized_text": normalized},
+            )
+
+        return None
+
+    def _match_stream_chat_message(self, raw: str, normalized: str) -> IntentResult | None:
+        patterns = [
+            r"^(escribe|di|manda|pon)\s+en\s+el\s+chat\s+(.+)$",
+            r"^(escribe|di|manda|pon)\s+al\s+chat\s+(.+)$",
+            r"^(say)\s+in\s+chat\s+(.+)$",
+            r"^(write)\s+in\s+chat\s+(.+)$",
+        ]
+
+        for pattern in patterns:
+            match = re.match(pattern, normalized, flags=re.IGNORECASE)
+            if not match:
+                continue
+
+            message = match.group(match.lastindex).strip()
+            if not message:
+                return IntentResult(
+                    intent="stream_chat_message",
+                    confidence=0.72,
+                    slots={},
+                    source="rules",
+                    raw={"raw_text": raw, "normalized_text": normalized},
+                )
+
+            return IntentResult(
+                intent="stream_chat_message",
+                confidence=0.95,
+                slots={"message": message},
+                source="rules",
+                raw={"raw_text": raw, "normalized_text": normalized},
+            )
+
+        return None

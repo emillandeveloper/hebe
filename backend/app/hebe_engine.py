@@ -23,6 +23,7 @@ from app.orchestrator.tool_handlers import build_tool_handlers
 
 
 WAKE_WORDS = ["hebe despierta", "eve despierta", "jebe despierta", "asistente despierta"]
+STREAM_WAKE_ALIASES = {"hebe", "ebe", "eve", "heve", "jebe"}
 
 t0 = time.time()
 
@@ -114,6 +115,115 @@ class HebeEngine:
         print(f"[HEBE] submit_text: {text!r}", flush=True)
         submit_text_from_ui(text)
 
+    def _normalize_text(self, text: str) -> str:
+        return " ".join((text or "").strip().lower().split())
+
+    def _get_stream_state(self):
+        return getattr(self.runtime.state, "stream", None)
+
+    def _is_stream_enabled(self) -> bool:
+        stream = self._get_stream_state()
+        return bool(stream and getattr(stream, "enabled", False))
+
+    def _arm_stream(self) -> None:
+        stream = self._get_stream_state()
+        if not stream:
+            return
+        stream.armed = True
+        timeout_sec = float(getattr(stream, "arm_timeout_sec", 8.0) or 8.0)
+        stream.armed_until_ts = time.time() + timeout_sec
+
+    def _disarm_stream(self) -> None:
+        stream = self._get_stream_state()
+        if not stream:
+            return
+        stream.armed = False
+        stream.armed_until_ts = 0.0
+
+    def _stream_is_armed(self) -> bool:
+        stream = self._get_stream_state()
+        if not stream:
+            return False
+
+        armed = bool(getattr(stream, "armed", False))
+        if not armed:
+            return False
+
+        armed_until_ts = float(getattr(stream, "armed_until_ts", 0.0) or 0.0)
+        if time.time() > armed_until_ts:
+            self._disarm_stream()
+            return False
+
+        return True
+
+    def _extract_stream_command(self, text: str) -> tuple[bool, str | None]:
+        """
+        Devuelve:
+          (handled, command_to_execute)
+
+        handled=True y command_to_execute=None:
+          el input ya ha sido consumido por la lógica de stream
+          y no se debe ejecutar nada ahora.
+
+        handled=True y command_to_execute="...":
+          ejecutar ese comando.
+
+        handled=False:
+          no era un caso de stream, continuar con flujo normal.
+        """
+        if not self._is_stream_enabled():
+            return False, None
+
+        normalized = self._normalize_text(text)
+        if not normalized:
+            return True, None
+
+        parts = normalized.split(" ", 1)
+        first_word = parts[0]
+        rest = parts[1].strip() if len(parts) > 1 else ""
+
+        # Caso: "hebe" / "eve" / etc. => armar ventana corta
+        if first_word in STREAM_WAKE_ALIASES:
+            if not rest:
+                self._arm_stream()
+                try:
+                    vts_hotkey("HebeIdle")
+                except Exception as e:
+                    print(f"[HEBE] vts_hotkey failed while arming stream: {e!r}", flush=True)
+                return True, None
+
+            # Caso: "hebe haz shoutout a pepito"
+            self._disarm_stream()
+            return True, rest
+
+        # Caso: ya está armada por haber dicho antes "Hebe"
+        if self._stream_is_armed():
+            self._disarm_stream()
+            return True, normalized
+
+        # Stream activo pero sin wakeword ni ventana armada => ignorar
+        return True, None
+
+    def _should_speak_result(self, result) -> bool:
+        spoken_text = (result.output_text or "").strip()
+        if not spoken_text:
+            return False
+
+        if spoken_text.lower() in {"continue", "stop", "sleep"}:
+            return False
+
+        if self._is_stream_enabled():
+            if result.intent in {
+                "stream_chat_message",
+                "stream_shoutout",
+                "stream_thank_raid",
+            }:
+                stream = self._get_stream_state()
+                policies = getattr(stream, "policies", None) if stream else None
+                return bool(getattr(policies, "allow_tts_replies", False))
+
+        return True
+
     def handle_command(self, command: str, source: str = "voice") -> str:
         print(f"[HEBE] handle_command source={source} text={command!r}", flush=True)
 
@@ -138,8 +248,7 @@ class HebeEngine:
 
         spoken_text = (result.output_text or "").strip()
 
-        # No verbalizar señales internas ni respuestas vacías
-        if spoken_text and spoken_text.lower() not in {"continue", "stop", "sleep"}:
+        if self._should_speak_result(result):
             try:
                 self.runtime.speak(spoken_text)
             except Exception as e:
@@ -166,7 +275,7 @@ class HebeEngine:
                 command = ui_inbox.get_nowait()
                 print(f"[HEBE] UI inbox -> {command!r}", flush=True)
                 source = "ui"
-                command = str(command).strip().lower()
+                command = self._normalize_text(str(command))
             except Empty:
                 pass
 
@@ -176,13 +285,20 @@ class HebeEngine:
                     command = voice_inbox.get_nowait()
                     print(f"[HEBE] VOICE inbox -> {command!r}", flush=True)
                     source = "voice"
-                    command = str(command).strip().lower()
+                    command = self._normalize_text(str(command))
                 except Empty:
                     pass
 
             if not command:
                 time.sleep(0.02)
                 continue
+
+            if source == "voice":
+                handled, stream_command = self._extract_stream_command(command)
+                if handled:
+                    if not stream_command:
+                        continue
+                    command = stream_command
 
             if source == "ui":
                 log_chat("user", command, source="ui")
@@ -206,7 +322,7 @@ class HebeEngine:
             try:
                 ui_inbox = get_ui_inbox()
                 cmd = ui_inbox.get_nowait()
-                cmd = str(cmd).strip().lower()
+                cmd = self._normalize_text(str(cmd))
                 if cmd:
                     log_chat("user", cmd, source="ui")
                     emit("chat.user", {"text": cmd})
@@ -220,9 +336,17 @@ class HebeEngine:
             try:
                 voice_inbox = get_voice_inbox()
                 command = voice_inbox.get_nowait()
-                command = str(command).strip().lower()
+                command = self._normalize_text(str(command))
             except Empty:
                 time.sleep(0.02)
+                continue
+
+            # Si stream mode está activo, dejamos que command_loop gestione
+            # el gate fino con wakeword corto tipo "hebe"/"eve".
+            if self._is_stream_enabled():
+                res = self.command_loop()
+                if res == "stop":
+                    return "stop"
                 continue
 
             if any(keyword in command for keyword in WAKE_WORDS):

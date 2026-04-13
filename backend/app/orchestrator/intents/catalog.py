@@ -53,6 +53,26 @@ INTENTS: dict[str, IntentSpec] = {
         required_slots=[],
         keywords=["duerme", "modo reposo", "sleep mode", "vete a dormir"],
     ),
+    "stream_enable": IntentSpec(
+        name="stream_enable",
+        required_slots=[],
+        keywords=["modo stream", "activa stream", "enable stream"],
+    ),
+    "stream_disable": IntentSpec(
+        name="stream_disable",
+        required_slots=[],
+        keywords=["desactiva stream", "quita stream", "disable stream"],
+    ),
+    "stream_chat_message": IntentSpec(
+        name="stream_chat_message",
+        required_slots=["message"],
+        keywords=["escribe en el chat", "di en el chat", "manda al chat"],
+    ),
+    "stream_shoutout": IntentSpec(
+        name="stream_shoutout",
+        required_slots=["target_raw"],
+        keywords=["shoutout", "so"],
+    ),
     "chat": IntentSpec(
         name="chat",
         required_slots=[],
@@ -70,4 +90,6 @@ TOOL_INTENTS: set[str] = {
     "shutdown_pc",
     "restart_pc",
     "sleep_mode",
+    # Los de stream los meteremos aquí solo si luego el dispatcher
+    # los ejecuta como herramientas/handlers.
 }
