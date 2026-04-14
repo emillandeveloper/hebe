@@ -92,6 +92,18 @@ class Orchestrator:
             gate_decision = self._check_gates(user_input)
             if gate_decision is not None:
                 gate_decision = self._attach_runtime_metadata(gate_decision, user_input)
+
+                print(
+                    f"[HEBE][ORCH] gate_decision "
+                    f"kind={gate_decision.kind.value!r} "
+                    f"intent={gate_decision.intent!r} "
+                    f"tool_name={gate_decision.tool_name!r} "
+                    f"tool_args={gate_decision.tool_args!r} "
+                    f"missing_slots={gate_decision.missing_slots!r} "
+                    f"response={gate_decision.response!r}",
+                    flush=True,
+                )
+
                 result = self._execute_decision(gate_decision)
                 self._after_turn(user_input, gate_decision, result)
                 return result
@@ -106,13 +118,11 @@ class Orchestrator:
                 f"source={intent_result.source!r}",
                 flush=True,
             )
+
             # 3. Policy
             decision = self.policy.decide(user_input, intent_result, self.state)
 
-            # 4. Execute
-            result = self._execute_decision(decision)
-
-            # 5. Update state
+            # 4. Attach metadata BEFORE execute
             decision = self._attach_runtime_metadata(decision, user_input)
 
             print(
@@ -126,9 +136,13 @@ class Orchestrator:
                 flush=True,
             )
 
+            # 5. Execute ONLY ONCE
             result = self._execute_decision(decision)
+
+            # 6. Update state
             self._after_turn(user_input, decision, result)
             return result
+
         except Exception as exc:
             result = make_error(
                 error=str(exc),
@@ -136,7 +150,6 @@ class Orchestrator:
             )
             self._clear_processing_flag()
             return result
-
     # =========================
     # Gates integration
     # =========================

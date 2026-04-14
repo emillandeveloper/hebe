@@ -312,19 +312,25 @@ def handle_twitch_send_message(
             error="Twitch send_message not available",
             output_text="No puedo enviar mensajes al chat todavía.",
         )
-    
-    if getattr(runtime.state, "_twitch_sending", False):
-        return make_success(output_text="")
-
-    runtime.state._twitch_sending = True
 
     try:
         ok = send_fn(message)
-    finally:
-        runtime.state._twitch_sending = False
+    except Exception as exc:
+        return make_error(
+            error=f"Failed sending Twitch message: {exc}",
+            output_text="No he podido escribir en el chat.",
+        )
 
-    return make_success(output_text="", data={"message": message})
+    if not ok:
+        return make_error(
+            error="Failed sending Twitch message",
+            output_text="No he podido escribir en el chat.",
+        )
 
+    return make_success(
+        output_text="",
+        data={"message": message},
+    )
 
 def handle_twitch_shoutout(
     runtime: Any,

@@ -200,15 +200,12 @@ export default function App() {
 
     const ok = clientRef.current?.send({ type: "client.message", data: { text: trimmed } }) ?? false;
     if (!ok) {
-        pushLog({ type: "error", data: { message: "WebSocket no conectado (no pude enviar mensaje)" }, ts: Date.now()/1000 });
-        return;
+      pushLog({ type: "error", data: { message: "WebSocket no conectado (no pude enviar mensaje)" }, ts: Date.now()/1000 });
+      return;
     }
 
-    // ✅ pinta una vez; si luego llega chat.user con lo mismo, se ignora por dedupe
-    pushUser(trimmed, Date.now() / 1000);
     setTimeout(ensureScrollBottom, 0);
   }
-
 
   useEffect(() => {
     const client = new WSClient({
