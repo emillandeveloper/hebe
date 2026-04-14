@@ -16,7 +16,11 @@ class STTConfig:
     rate: int = 16000
     channels: int = 1
     chunk: int = 1024
-    input_device_index: int = int(os.getenv("HEBE_INPUT_DEVICE_INDEX", "9"))
+    input_device_index: Optional[int] = (
+        int(os.getenv("HEBE_INPUT_DEVICE_INDEX"))
+        if os.getenv("HEBE_INPUT_DEVICE_INDEX")
+        else None
+    )
 
     silence_threshold: float = 0.01
     max_record_seconds: float = 8.0
@@ -75,6 +79,36 @@ class STTService:
                 self.emit(event_type, data or {})
             except Exception:
                 pass
+    
+    def _resolve_input_device(self, p: pyaudio.PyAudio) -> int:
+        """
+        Decide qué dispositivo usar:
+        1. Si hay índice en config → usarlo
+        2. Si no → usar el default del sistema
+        """
+
+        if self.cfg.input_device_index is not None:
+            try:
+                info = p.get_device_info_by_index(self.cfg.input_device_index)
+                print(
+                    f"[HEBE][STT] Using configured device index={self.cfg.input_device_index} "
+                    f"name={info.get('name')}",
+                    flush=True,
+                )
+                return self.cfg.input_device_index
+            except Exception:
+                print("[HEBE][STT] Invalid configured device index, falling back to default", flush=True)
+
+        default_info = p.get_default_input_device_info()
+        device_index = int(default_info["index"])
+
+        print(
+            f"[HEBE][STT] Using DEFAULT input device index={device_index} "
+            f"name={default_info.get('name')}",
+            flush=True,
+        )
+
+        return device_index
 
     def listen(self) -> str:
         """
@@ -85,12 +119,14 @@ class STTService:
         assert self._model is not None
 
         p = pyaudio.PyAudio()
+        device_index = self._resolve_input_device(p)
+
         stream = p.open(
             format=pyaudio.paInt16,
             channels=self.cfg.channels,
             rate=self.cfg.rate,
             input=True,
-            input_device_index=self.cfg.input_device_index,
+            input_device_index=device_index,
             frames_per_buffer=self.cfg.chunk,
         )
 

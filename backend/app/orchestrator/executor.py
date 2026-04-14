@@ -185,9 +185,32 @@ class OrchestratorExecutor:
 
         raise RuntimeError("Unsupported chat_runtime interface")
 
+    def _resolve_tool_name(self, decision: Decision) -> str:
+        # Si ya viene explícito desde policy/orchestrator, respetarlo.
+        if decision.tool_name:
+            return decision.tool_name
+
+        intent = str(decision.intent or "").strip()
+
+        stream_tool_map = {
+            "stream_chat_message": "twitch_send_message",
+            "stream_shoutout": "twitch_shoutout",
+            "stream_enable": "stream_enable",
+            "stream_disable": "stream_disable",
+        }
+
+        return stream_tool_map.get(intent, "")
+
     def _call_dispatcher(self, decision: Decision) -> Any:
-        tool_name = decision.tool_name
+        tool_name = self._resolve_tool_name(decision)
         tool_args = dict(decision.tool_args)
+
+        # Si no vienen tool_args pero la policy ha dejado los slots en metadata,
+        # usamos esos slots como fallback.
+        if not tool_args:
+            slots = decision.metadata.get("slots")
+            if isinstance(slots, dict):
+                tool_args = dict(slots)
 
         if not tool_name:
             raise RuntimeError("Decision TOOL without tool_name")

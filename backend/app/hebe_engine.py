@@ -293,7 +293,7 @@ class HebeEngine:
                 time.sleep(0.02)
                 continue
 
-            if source == "voice":
+            if source in {"voice", "ui"}:
                 handled, stream_command = self._extract_stream_command(command)
                 if handled:
                     if not stream_command:
@@ -323,16 +323,25 @@ class HebeEngine:
                 ui_inbox = get_ui_inbox()
                 cmd = ui_inbox.get_nowait()
                 cmd = self._normalize_text(str(cmd))
+
                 if cmd:
+                    handled, stream_command = self._extract_stream_command(cmd)
+                    if handled:
+                        if not stream_command:
+                            continue
+                        cmd = stream_command
+
                     log_chat("user", cmd, source="ui")
                     emit("chat.user", {"text": cmd})
+
                     res = self.handle_command(cmd, source="ui")
                     if res == "stop":
                         return "stop"
+
                 continue
             except Empty:
                 pass
-
+            
             try:
                 voice_inbox = get_voice_inbox()
                 command = voice_inbox.get_nowait()

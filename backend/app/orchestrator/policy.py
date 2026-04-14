@@ -45,7 +45,7 @@ DEFAULT_INTENT_POLICY: dict[str, IntentPolicyRule] = {
     ),
     "set_volume": IntentPolicyRule(
         tool_name="set_volume",
-        required_slots=[],  # 🔥 ya no obligamos value
+        required_slots=[],
         confirm=False,
         clarify_prompts={
             "value": "¿Qué volumen quieres que ponga?",
@@ -59,6 +59,11 @@ DEFAULT_INTENT_POLICY: dict[str, IntentPolicyRule] = {
             "query": "¿Qué quieres que ponga?",
         },
     ),
+    "pause_music": IntentPolicyRule(
+        tool_name="pause_music",
+        required_slots=[],
+        confirm=False,
+    ),
     "shutdown_pc": IntentPolicyRule(
         tool_name="shutdown_pc",
         required_slots=[],
@@ -71,11 +76,40 @@ DEFAULT_INTENT_POLICY: dict[str, IntentPolicyRule] = {
         confirm=True,
         confirm_prompt="¿Seguro que quieres reiniciar el ordenador?",
     ),
-    "sleep_pc": IntentPolicyRule(
-        tool_name="sleep_pc",
+    "sleep_mode": IntentPolicyRule(
+        tool_name="sleep_mode",
         required_slots=[],
-        confirm=True,
-        confirm_prompt="¿Seguro que quieres poner el ordenador en suspensión?",
+        confirm=False,
+    ),
+
+    # =========================
+    # Stream / Twitch
+    # =========================
+    "stream_enable": IntentPolicyRule(
+        tool_name="stream_enable",
+        required_slots=[],
+        confirm=False,
+    ),
+    "stream_disable": IntentPolicyRule(
+        tool_name="stream_disable",
+        required_slots=[],
+        confirm=False,
+    ),
+    "stream_chat_message": IntentPolicyRule(
+        tool_name="twitch_send_message",
+        required_slots=["message"],
+        confirm=False,
+        clarify_prompts={
+            "message": "¿Qué quieres que escriba en el chat?",
+        },
+    ),
+    "stream_shoutout": IntentPolicyRule(
+        tool_name="twitch_shoutout",
+        required_slots=["target_raw"],
+        confirm=False,
+        clarify_prompts={
+            "target_raw": "¿A quién quieres que haga el shoutout?",
+        },
     ),
 }
 
@@ -106,11 +140,20 @@ class OrchestratorPolicy:
     ) -> Decision:
         text = (user_input.text or "").strip()
 
+        common_metadata = {
+            "confidence": intent_result.confidence,
+            "resolver_source": intent_result.source,
+            "source": getattr(user_input, "source", "voice"),
+            "user_text": text,
+            "slots": dict(intent_result.slots or {}),
+        }
+
         # 1. Ignorar input vacío
         if self.ignore_empty_input and not text:
             return Decision(
                 kind=DecisionKind.IGNORE,
                 reason="empty_input",
+                metadata=common_metadata,
             )
 
         # 2. Sin intent claro -> chat
@@ -118,10 +161,7 @@ class OrchestratorPolicy:
             return Decision(
                 kind=DecisionKind.CHAT,
                 reason="no_intent_detected",
-                metadata={
-                    "confidence": intent_result.confidence,
-                    "resolver_source": intent_result.source,
-                },
+                metadata=common_metadata,
             )
 
         # 3. Intent muy débil -> chat
@@ -130,10 +170,7 @@ class OrchestratorPolicy:
                 kind=DecisionKind.CHAT,
                 intent=intent_result.intent,
                 reason="low_confidence_intent",
-                metadata={
-                    "confidence": intent_result.confidence,
-                    "resolver_source": intent_result.source,
-                },
+                metadata=common_metadata,
             )
 
         # 4. Si el intent no está mapeado como tool -> chat
@@ -143,10 +180,7 @@ class OrchestratorPolicy:
                 kind=DecisionKind.CHAT,
                 intent=intent_result.intent,
                 reason="intent_not_mapped_as_tool",
-                metadata={
-                    "confidence": intent_result.confidence,
-                    "resolver_source": intent_result.source,
-                },
+                metadata=common_metadata,
             )
 
         # 5. Si es tool pero la confianza aún no da seguridad -> chat
@@ -155,10 +189,7 @@ class OrchestratorPolicy:
                 kind=DecisionKind.CHAT,
                 intent=intent_result.intent,
                 reason="tool_confidence_too_low",
-                metadata={
-                    "confidence": intent_result.confidence,
-                    "resolver_source": intent_result.source,
-                },
+                metadata=common_metadata,
             )
 
         # 6. Validar slots obligatorios
@@ -179,10 +210,7 @@ class OrchestratorPolicy:
                 tool_args=dict(intent_result.slots),
                 missing_slots=missing_slots,
                 reason="missing_required_slots",
-                metadata={
-                    "confidence": intent_result.confidence,
-                    "resolver_source": intent_result.source,
-                },
+                metadata=common_metadata,
             )
 
         # 7. Confirmación si la acción es sensible
@@ -197,10 +225,7 @@ class OrchestratorPolicy:
                 tool_args=dict(intent_result.slots),
                 requires_confirmation=True,
                 reason="confirmation_required",
-                metadata={
-                    "confidence": intent_result.confidence,
-                    "resolver_source": intent_result.source,
-                },
+                metadata=common_metadata,
             )
 
         # 8. Tool directa
@@ -210,10 +235,7 @@ class OrchestratorPolicy:
             tool_name=rule.tool_name,
             tool_args=dict(intent_result.slots),
             reason="tool_ready",
-            metadata={
-                "confidence": intent_result.confidence,
-                "resolver_source": intent_result.source,
-            },
+            metadata=common_metadata,
         )
 
     # =========================

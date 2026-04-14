@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from pathlib import Path
 from typing import Any
+
 from .models import make_error, make_success
 from app.services.app_registry import resolve_candidates, register_app
-from .models import make_error, make_success
-import re
+
 
 def build_tool_handlers(runtime: Any) -> dict[str, Any]:
     return {
@@ -20,10 +21,21 @@ def build_tool_handlers(runtime: Any) -> dict[str, Any]:
         "shutdown_pc": lambda args, source="voice", metadata=None: handle_shutdown_pc(runtime, args, source, metadata),
         "restart_pc": lambda args, source="voice", metadata=None: handle_restart_pc(runtime, args, source, metadata),
         "sleep_mode": lambda args, source="voice", metadata=None: handle_sleep_mode(runtime, args, source, metadata),
+
+        # Twitch / stream mode
+        "twitch_send_message": lambda args, source="voice", metadata=None: handle_twitch_send_message(runtime, args, source, metadata),
+        "twitch_shoutout": lambda args, source="voice", metadata=None: handle_twitch_shoutout(runtime, args, source, metadata),
+        "stream_enable": lambda args, source="voice", metadata=None: handle_stream_enable(runtime, args, source, metadata),
+        "stream_disable": lambda args, source="voice", metadata=None: handle_stream_disable(runtime, args, source, metadata),
     }
 
 
-def handle_open_app(runtime: Any, args: dict[str, Any], source: str = "voice", metadata: dict[str, Any] | None = None):
+def handle_open_app(
+    runtime: Any,
+    args: dict[str, Any],
+    source: str = "voice",
+    metadata: dict[str, Any] | None = None,
+):
     app_name = str(args.get("app_name", "")).strip()
     if not app_name:
         return make_error(
@@ -44,7 +56,6 @@ def handle_open_app(runtime: Any, args: dict[str, Any], source: str = "voice", m
         if hasattr(runtime, "win") and hasattr(runtime.win, "open_app"):
             ok = runtime.win.open_app(candidate)
             if ok:
-                # si no viene de BD, la registramos automáticamente
                 if candidate.get("source") != "db":
                     saved = register_app(candidate)
                     if saved:
@@ -65,25 +76,35 @@ def handle_open_app(runtime: Any, args: dict[str, Any], source: str = "voice", m
     )
 
 
-def handle_close_window(runtime: Any, args: dict[str, Any], source: str = "voice", metadata: dict[str, Any] | None = None):
+def handle_close_window(
+    runtime: Any,
+    args: dict[str, Any],
+    source: str = "voice",
+    metadata: dict[str, Any] | None = None,
+):
     target = args.get("target", "active")
 
     if hasattr(runtime, "win"):
         if target == "active" and hasattr(runtime.win, "close_active_window"):
             runtime.win.close_active_window()
-            return make_success(output_text="Cerrando la ventana activa.", data={"closed_target": "active"})
+            return make_success(
+                output_text="Cerrando la ventana activa.",
+                data={"closed_target": "active"},
+            )
 
         if isinstance(target, str) and hasattr(runtime.win, "close_app_by_process_name"):
             ok = runtime.win.close_app_by_process_name(target)
             if ok:
-                return make_success(output_text=f"Cerrando {target}.", data={"closed_target": target})
+                return make_success(
+                    output_text=f"Cerrando {target}.",
+                    data={"closed_target": target},
+                )
 
     return make_error(
         error=f"Could not close window: {target}",
         output_text="No he podido cerrar esa ventana.",
     )
 
-import re
 
 def handle_set_volume(
     runtime: Any,
@@ -94,7 +115,7 @@ def handle_set_volume(
     direction = args.get("direction")
     value = args.get("value")
     print(f"[HEBE][VOLUME] handle_set_volume args={args!r}", flush=True)
-    # Si value viene como texto largo, sacar el número
+
     if isinstance(value, str):
         match = re.search(r"\d+", value)
         if match:
@@ -102,7 +123,6 @@ def handle_set_volume(
         else:
             value = None
 
-    # Volumen exacto
     if value is not None:
         value = max(0, min(100, int(value)))
 
@@ -119,7 +139,6 @@ def handle_set_volume(
             output_text="No he podido cambiar el volumen.",
         )
 
-    # Subir volumen
     if direction == "up":
         if hasattr(runtime, "win") and hasattr(runtime.win, "handle_volume_command"):
             print("[HEBE][VOLUME] calling handle_volume_command('sube volumen')", flush=True)
@@ -135,11 +154,10 @@ def handle_set_volume(
             output_text="No he podido subir el volumen.",
         )
 
-    # Bajar volumen
     if direction == "down":
         if hasattr(runtime, "win") and hasattr(runtime.win, "handle_volume_command"):
-            ok = runtime.win.handle_volume_command("baja volumen")
             print("[HEBE][VOLUME] calling handle_volume_command('baja volumen')", flush=True)
+            ok = runtime.win.handle_volume_command("baja volumen")
             if ok:
                 return make_success(
                     output_text="Bajando el volumen.",
@@ -156,7 +174,13 @@ def handle_set_volume(
         output_text="¿Qué volumen quieres que ponga?",
     )
 
-def handle_play_music(runtime: Any, args: dict[str, Any], source: str = "voice", metadata: dict[str, Any] | None = None):
+
+def handle_play_music(
+    runtime: Any,
+    args: dict[str, Any],
+    source: str = "voice",
+    metadata: dict[str, Any] | None = None,
+):
     query = str(args.get("query", "")).strip()
 
     if not hasattr(runtime, "win"):
@@ -169,12 +193,18 @@ def handle_play_music(runtime: Any, args: dict[str, Any], source: str = "voice",
         if hasattr(runtime.win, "play_song_on_youtube_music"):
             ok = runtime.win.play_song_on_youtube_music(query)
             if ok:
-                return make_success(output_text=f"Reproduciendo {query}.", data={"query": query})
+                return make_success(
+                    output_text=f"Reproduciendo {query}.",
+                    data={"query": query},
+                )
 
     if hasattr(runtime.win, "handle_youtube_music_command"):
         ok = runtime.win.handle_youtube_music_command("reproduce música")
         if ok:
-            return make_success(output_text="Reproduciendo música.", data={"query": query})
+            return make_success(
+                output_text="Reproduciendo música.",
+                data={"query": query},
+            )
 
     return make_error(
         error=f"Could not play music: {query}",
@@ -182,7 +212,12 @@ def handle_play_music(runtime: Any, args: dict[str, Any], source: str = "voice",
     )
 
 
-def handle_pause_music(runtime: Any, args: dict[str, Any], source: str = "voice", metadata: dict[str, Any] | None = None):
+def handle_pause_music(
+    runtime: Any,
+    args: dict[str, Any],
+    source: str = "voice",
+    metadata: dict[str, Any] | None = None,
+):
     if hasattr(runtime, "win") and hasattr(runtime.win, "handle_youtube_music_command"):
         ok = runtime.win.handle_youtube_music_command("pausa música")
         if ok:
@@ -194,9 +229,13 @@ def handle_pause_music(runtime: Any, args: dict[str, Any], source: str = "voice"
     )
 
 
-def handle_shutdown_pc(runtime: Any, args: dict[str, Any], source: str = "voice", metadata: dict[str, Any] | None = None):
+def handle_shutdown_pc(
+    runtime: Any,
+    args: dict[str, Any],
+    source: str = "voice",
+    metadata: dict[str, Any] | None = None,
+):
     if hasattr(runtime, "win") and hasattr(runtime.win, "handle_power_command"):
-        # De momento no llamamos aquí a la confirmación legacy; el orquestador ya confirma antes.
         ok = runtime.win.handle_power_command(
             "apaga el ordenador",
             confirm_fn=lambda _: True,
@@ -210,7 +249,12 @@ def handle_shutdown_pc(runtime: Any, args: dict[str, Any], source: str = "voice"
     )
 
 
-def handle_restart_pc(runtime: Any, args: dict[str, Any], source: str = "voice", metadata: dict[str, Any] | None = None):
+def handle_restart_pc(
+    runtime: Any,
+    args: dict[str, Any],
+    source: str = "voice",
+    metadata: dict[str, Any] | None = None,
+):
     if hasattr(runtime, "win") and hasattr(runtime.win, "handle_power_command"):
         ok = runtime.win.handle_power_command(
             "reinicia el ordenador",
@@ -225,10 +269,133 @@ def handle_restart_pc(runtime: Any, args: dict[str, Any], source: str = "voice",
     )
 
 
-def handle_sleep_mode(runtime: Any, args: dict[str, Any], source: str = "voice", metadata: dict[str, Any] | None = None):
+def handle_sleep_mode(
+    runtime: Any,
+    args: dict[str, Any],
+    source: str = "voice",
+    metadata: dict[str, Any] | None = None,
+):
     return make_success(
         output_text="Vale, me quedo en espera.",
         data={"mode": "sleep"},
+    )
+
+
+# =========================
+# Twitch / Stream handlers
+# =========================
+
+def handle_twitch_send_message(
+    runtime: Any,
+    args: dict[str, Any],
+    source: str = "voice",
+    metadata: dict[str, Any] | None = None,
+):
+    message = str(args.get("message", "")).strip()
+
+    if not message:
+        return make_error(
+            error="Missing message",
+            output_text="No me has dicho qué escribir en el chat.",
+        )
+
+    twitch = getattr(runtime, "twitch", None)
+    if twitch is None:
+        return make_error(
+            error="Twitch service not available",
+            output_text="No tengo conexión con Twitch todavía.",
+        )
+
+    send_fn = getattr(twitch, "send_message", None)
+    if not callable(send_fn):
+        return make_error(
+            error="Twitch send_message not available",
+            output_text="No puedo enviar mensajes al chat todavía.",
+        )
+    
+    if getattr(runtime.state, "_twitch_sending", False):
+        return make_success(output_text="")
+
+    runtime.state._twitch_sending = True
+
+    try:
+        ok = send_fn(message)
+    finally:
+        runtime.state._twitch_sending = False
+
+    return make_success(output_text="", data={"message": message})
+
+
+def handle_twitch_shoutout(
+    runtime: Any,
+    args: dict[str, Any],
+    source: str = "voice",
+    metadata: dict[str, Any] | None = None,
+):
+    target_raw = str(args.get("target_raw", "")).strip()
+
+    if not target_raw:
+        return make_error(
+            error="Missing target_raw",
+            output_text="¿A quién quieres hacer el shoutout?",
+        )
+
+    twitch = getattr(runtime, "twitch", None)
+    if twitch is None:
+        return make_error(
+            error="Twitch service not available",
+            output_text="No tengo conexión con Twitch todavía.",
+        )
+
+    resolver = getattr(twitch, "target_resolver", None)
+    if resolver is None:
+        return make_error(
+            error="Target resolver not available",
+            output_text="No puedo resolver a quién te refieres todavía.",
+        )
+
+    resolve_fn = getattr(resolver, "resolve_user", None)
+    if not callable(resolve_fn):
+        return make_error(
+            error="Target resolver missing resolve_user",
+            output_text="No puedo resolver usuarios de Twitch todavía.",
+        )
+
+    try:
+        username = resolve_fn(target_raw)
+    except Exception as exc:
+        return make_error(
+            error=f"Target resolution failed: {exc}",
+            output_text="Ha fallado la resolución del usuario.",
+        )
+
+    if not username:
+        return make_error(
+            error=f"Could not resolve user: {target_raw}",
+            output_text=f"No he encontrado a quién te refieres con '{target_raw}'.",
+        )
+
+    shoutout_fn = getattr(twitch, "shoutout", None)
+    if not callable(shoutout_fn):
+        return make_error(
+            error="Twitch shoutout not available",
+            output_text="No puedo hacer shoutouts todavía.",
+        )
+
+    try:
+        shoutout_fn(username)
+    except Exception as exc:
+        return make_error(
+            error=f"Failed shoutout for user {username}: {exc}",
+            output_text=f"No he podido hacer el shoutout a {username}.",
+        )
+
+    return make_success(
+        output_text="",
+        data={
+            "target_raw": target_raw,
+            "resolved_username": username,
+        },
     )
 
 
@@ -254,7 +421,6 @@ def _find_app_record(app_name: str) -> dict[str, Any] | None:
         conn.row_factory = sqlite3.Row
         cur = conn.cursor()
 
-        # Busca primero por name exacto o alias exacto
         cur.execute(
             """
             SELECT *
@@ -342,4 +508,35 @@ def _set_volume_via_steps(runtime: Any, value: int):
     return make_error(
         error=f"Absolute volume not supported yet: {value}",
         output_text="Todavía no sé poner un volumen exacto directamente.",
+    )
+
+def handle_stream_enable(runtime, args, source="voice", metadata=None):
+    stream = getattr(runtime.state, "stream", None)
+    if not stream:
+        return make_error(
+            error="No stream state",
+            output_text="No tengo sistema de stream disponible.",
+        )
+
+    stream.enabled = True
+
+    return make_success(
+        output_text="Modo stream activado.",
+        data={"stream_enabled": True},
+    )
+
+
+def handle_stream_disable(runtime, args, source="voice", metadata=None):
+    stream = getattr(runtime.state, "stream", None)
+    if not stream:
+        return make_error(
+            error="No stream state",
+            output_text="No tengo sistema de stream disponible.",
+        )
+
+    stream.enabled = False
+
+    return make_success(
+        output_text="Modo stream desactivado.",
+        data={"stream_enabled": False},
     )
