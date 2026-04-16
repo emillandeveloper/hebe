@@ -46,7 +46,7 @@ class TwitchService:
         if not target:
             return False
 
-        return self.send_message(f"/shoutout {target}")
+        return self.send_message(f"!shoutout {target}")
 
     def resolve_user(self, raw_target: str) -> str | None:
         if self.target_resolver is None:

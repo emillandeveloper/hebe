@@ -85,6 +85,13 @@ class HebeEngine:
                 )
                 self._stt_worker.start()
 
+                # Arranque de Twitch EventSub / lectura de chat y eventos
+                if hasattr(self.runtime, "twitch_events") and self.runtime.twitch_events:
+                    try:
+                        self.runtime.twitch_events.start()
+                    except Exception as e:
+                        print(f"[HEBE][TWITCH][EVENTSUB] start failed: {e!r}", flush=True)
+
                 emit("status", {"engine": "ready", "stage": "ready"})
 
                 target = self.wakeword_loop if self.use_wakeword else self.engine_loop
@@ -107,6 +114,13 @@ class HebeEngine:
 
     def stop(self):
         self._stop_event.set()
+
+        if hasattr(self.runtime, "twitch_events") and self.runtime.twitch_events:
+            try:
+                self.runtime.twitch_events.stop()
+            except Exception:
+                pass
+
         self.runtime.state.is_running = False
         self.runtime.state.is_processing = False
         self.runtime.state.mode = "stopped"
@@ -341,7 +355,7 @@ class HebeEngine:
                 continue
             except Empty:
                 pass
-            
+
             try:
                 voice_inbox = get_voice_inbox()
                 command = voice_inbox.get_nowait()

@@ -19,6 +19,7 @@ from app.integrations.twitch.chat_cache import TwitchChatCache
 from app.integrations.twitch.event_memory import TwitchEventMemory
 from app.integrations.twitch.target_resolver import TwitchTargetResolver
 from app.integrations.twitch.service import TwitchService
+from app.integrations.twitch.event_adapter import TwitchEventAdapter
 
 
 def build_speak() -> Callable[[str, str], None]:
@@ -42,6 +43,7 @@ class HebeRuntime:
     speak: Callable[[str, str], None]
     state: HebeState
     twitch: TwitchService
+    twitch_events: TwitchEventAdapter
 
 
 def build_runtime() -> HebeRuntime:
@@ -131,6 +133,15 @@ def build_runtime() -> HebeRuntime:
         bot_username=bot_username,
     )
 
+    twitch_events = TwitchEventAdapter(
+        client_id=client_id,
+        user_oauth_token=oauth_token,
+        broadcaster_user_id=broadcaster_id,
+        bot_user_id=sender_id,
+        twitch_service=twitch,
+        enabled=True,
+    )
+
     return HebeRuntime(
         stt=stt,
         llm=llm,
@@ -140,4 +151,5 @@ def build_runtime() -> HebeRuntime:
         speak=speak,
         state=state,
         twitch=twitch,
+        twitch_events=twitch_events,
     )
