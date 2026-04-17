@@ -1,12 +1,12 @@
 # backend/app/services/db_sqlite.py
 from __future__ import annotations
 
+import json
 import os
 import re
 import sqlite3
-from dataclasses import dataclass
-from datetime import datetime
-from typing import Iterable, Optional, Any
+from datetime import datetime, timezone
+from typing import Optional, Any
 
 
 def _default_db_path() -> str:
@@ -15,6 +15,58 @@ def _default_db_path() -> str:
 
 
 DB_PATH = os.getenv("HEBE_DB_PATH", _default_db_path())
+
+
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def normalize_iso(dt_value: Optional[str]) -> Optional[str]:
+    if not dt_value:
+        return None
+
+    text = dt_value.strip()
+    if not text:
+        return None
+
+    # Soporta "Z"
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+
+    try:
+        dt = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+
+    return dt.astimezone(timezone.utc).isoformat()
+
+
+def dumps_json(value: Optional[dict]) -> Optional[str]:
+    if value is None:
+        return None
+    return json.dumps(value, ensure_ascii=False)
+
+
+def loads_json(value: Optional[str]) -> Optional[dict]:
+    if not value:
+        return None
+    try:
+        return json.loads(value)
+    except Exception:
+        return None
+
+
+def row_to_dict(row: sqlite3.Row | None) -> Optional[dict]:
+    if row is None:
+        return None
+    return {k: row[k] for k in row.keys()}
+
+
+def rows_to_dicts(rows: list[sqlite3.Row]) -> list[dict]:
+    return [row_to_dict(r) for r in rows if r is not None]
 
 
 def get_db_connection() -> sqlite3.Connection:
@@ -32,7 +84,7 @@ def ensure_column(conn: sqlite3.Connection, table: str, column: str, col_def: st
         existing = set()
         for r in rows:
             try:
-                existing.add(r[1])      # tuple
+                existing.add(r[1])       # tuple
             except Exception:
                 existing.add(r["name"])  # Row
         if column not in existing:
@@ -76,7 +128,7 @@ def init_db() -> None:
         """
     )
 
-    # Memorias
+    # Memorias legacy
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS memories (
@@ -90,6 +142,67 @@ def init_db() -> None:
             active INTEGER NOT NULL DEFAULT 1
         )
         """
+    )
+
+    # Memoria estructurada v1
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS memory_facts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            kind TEXT NOT NULL,                -- appointment | preference | person | task | fact
+            subject TEXT,
+            payload_json TEXT,
+            source_text TEXT,
+            confidence REAL NOT NULL DEFAULT 1.0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            last_used_at TEXT,
+            active INTEGER NOT NULL DEFAULT 1
+        )
+        """
+    )
+
+    # Recordatorios / scheduler v1
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS reminders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            kind TEXT NOT NULL DEFAULT 'generic',     -- appointment | task | generic
+            title TEXT NOT NULL,
+            message TEXT,
+            due_at TEXT NOT NULL,
+            timezone TEXT DEFAULT 'UTC',
+            status TEXT NOT NULL DEFAULT 'pending',   -- pending | fired | done | cancelled
+            source_memory_id INTEGER,
+            payload_json TEXT,
+            created_at TEXT NOT NULL,
+            fired_at TEXT,
+            FOREIGN KEY(source_memory_id) REFERENCES memory_facts(id)
+        )
+        """
+    )
+
+    # Log opcional de eventos internos
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS internal_events_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_type TEXT NOT NULL,
+            payload_json TEXT,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+
+    # Índices útiles
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_memory_facts_kind_active ON memory_facts(kind, active)"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_memory_facts_subject ON memory_facts(subject)"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_reminders_status_due_at ON reminders(status, due_at)"
     )
 
     # Safe migrations (older DBs might miss columns)
@@ -111,10 +224,26 @@ def log_chat(role: str, text: str, source: str = "voice") -> None:
         INSERT INTO chat_log (timestamp, role, source, text)
         VALUES (?, ?, ?, ?)
         """,
-        (datetime.utcnow().isoformat(), role, source, text),
+        (utc_now_iso(), role, source, text),
     )
     conn.commit()
     conn.close()
+
+
+def log_internal_event(event_type: str, payload: Optional[dict] = None) -> int:
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO internal_events_log (event_type, payload_json, created_at)
+        VALUES (?, ?, ?)
+        """,
+        (event_type, dumps_json(payload), utc_now_iso()),
+    )
+    event_id = cur.lastrowid
+    conn.commit()
+    conn.close()
+    return event_id
 
 
 def seed_default_apps() -> None:
@@ -206,11 +335,15 @@ def register_app_usage(app_id: int) -> None:
             last_used_at = ?
         WHERE id = ?
         """,
-        (datetime.utcnow().isoformat(), app_id),
+        (utc_now_iso(), app_id),
     )
     conn.commit()
     conn.close()
 
+
+# =========================
+# Legacy memories
+# =========================
 
 def add_memory(
     text: str,
@@ -225,7 +358,7 @@ def add_memory(
         INSERT INTO memories (key, text, category, importance, created_at)
         VALUES (?, ?, ?, ?, ?)
         """,
-        (key, text, category, importance, datetime.utcnow().isoformat()),
+        (key, text, category, importance, utc_now_iso()),
     )
     conn.commit()
     conn.close()
@@ -249,6 +382,303 @@ def get_active_memories(limit: int = 5):
     return rows
 
 
+# =========================
+# Structured memory v1
+# =========================
+
+def insert_memory_fact(
+    kind: str,
+    subject: Optional[str] = None,
+    payload: Optional[dict] = None,
+    source_text: Optional[str] = None,
+    confidence: float = 1.0,
+    active: bool = True,
+) -> int:
+    now = utc_now_iso()
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO memory_facts (
+            kind, subject, payload_json, source_text, confidence,
+            created_at, updated_at, active
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            kind,
+            subject,
+            dumps_json(payload),
+            source_text,
+            float(confidence),
+            now,
+            now,
+            1 if active else 0,
+        ),
+    )
+    memory_id = cur.lastrowid
+    conn.commit()
+    conn.close()
+    return memory_id
+
+
+def get_memory_fact(memory_id: int) -> Optional[dict]:
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT *
+        FROM memory_facts
+        WHERE id = ?
+        """,
+        (memory_id,),
+    )
+    row = cur.fetchone()
+    conn.close()
+
+    data = row_to_dict(row)
+    if data and data.get("payload_json"):
+        data["payload"] = loads_json(data["payload_json"])
+    return data
+
+
+def search_memory_facts(
+    query_text: Optional[str] = None,
+    kind: Optional[str] = None,
+    active_only: bool = True,
+    limit: int = 10,
+) -> list[dict]:
+    conn = get_db_connection()
+    cur = conn.cursor()
+
+    where = []
+    params: list[Any] = []
+
+    if active_only:
+        where.append("active = 1")
+
+    if kind:
+        where.append("kind = ?")
+        params.append(kind)
+
+    if query_text:
+        where.append("(subject LIKE ? OR source_text LIKE ? OR payload_json LIKE ?)")
+        like = f"%{query_text}%"
+        params.extend([like, like, like])
+
+    sql = """
+        SELECT *
+        FROM memory_facts
+    """
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+
+    sql += " ORDER BY updated_at DESC, created_at DESC LIMIT ?"
+    params.append(limit)
+
+    cur.execute(sql, params)
+    rows = cur.fetchall()
+    conn.close()
+
+    items = rows_to_dicts(rows)
+    for item in items:
+        item["payload"] = loads_json(item.get("payload_json"))
+    return items
+
+
+def touch_memory_fact(memory_id: int) -> None:
+    now = utc_now_iso()
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        UPDATE memory_facts
+        SET last_used_at = ?, updated_at = ?
+        WHERE id = ?
+        """,
+        (now, now, memory_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def deactivate_memory_fact(memory_id: int) -> None:
+    now = utc_now_iso()
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        UPDATE memory_facts
+        SET active = 0, updated_at = ?
+        WHERE id = ?
+        """,
+        (now, memory_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+# =========================
+# Reminders v1
+# =========================
+
+def create_reminder(
+    title: str,
+    due_at: str,
+    message: Optional[str] = None,
+    kind: str = "generic",
+    timezone_name: str = "UTC",
+    source_memory_id: Optional[int] = None,
+    payload: Optional[dict] = None,
+) -> int:
+    due_at_norm = normalize_iso(due_at)
+    if not due_at_norm:
+        raise ValueError(f"due_at inválido: {due_at}")
+
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO reminders (
+            kind, title, message, due_at, timezone, status,
+            source_memory_id, payload_json, created_at
+        )
+        VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?)
+        """,
+        (
+            kind,
+            title,
+            message,
+            due_at_norm,
+            timezone_name,
+            source_memory_id,
+            dumps_json(payload),
+            utc_now_iso(),
+        ),
+    )
+    reminder_id = cur.lastrowid
+    conn.commit()
+    conn.close()
+    return reminder_id
+
+
+def get_reminder(reminder_id: int) -> Optional[dict]:
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT *
+        FROM reminders
+        WHERE id = ?
+        """,
+        (reminder_id,),
+    )
+    row = cur.fetchone()
+    conn.close()
+
+    data = row_to_dict(row)
+    if data and data.get("payload_json"):
+        data["payload"] = loads_json(data["payload_json"])
+    return data
+
+
+def list_due_reminders(now_iso: Optional[str] = None, limit: int = 20) -> list[dict]:
+    now_norm = normalize_iso(now_iso) if now_iso else utc_now_iso()
+
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT *
+        FROM reminders
+        WHERE status = 'pending'
+          AND due_at <= ?
+        ORDER BY due_at ASC
+        LIMIT ?
+        """,
+        (now_norm, limit),
+    )
+    rows = cur.fetchall()
+    conn.close()
+
+    items = rows_to_dicts(rows)
+    for item in items:
+        item["payload"] = loads_json(item.get("payload_json"))
+    return items
+
+
+def list_pending_reminders(limit: int = 20) -> list[dict]:
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT *
+        FROM reminders
+        WHERE status = 'pending'
+        ORDER BY due_at ASC
+        LIMIT ?
+        """,
+        (limit,),
+    )
+    rows = cur.fetchall()
+    conn.close()
+
+    items = rows_to_dicts(rows)
+    for item in items:
+        item["payload"] = loads_json(item.get("payload_json"))
+    return items
+
+
+def mark_reminder_fired(reminder_id: int) -> None:
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        UPDATE reminders
+        SET status = 'fired',
+            fired_at = ?
+        WHERE id = ?
+        """,
+        (utc_now_iso(), reminder_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def mark_reminder_done(reminder_id: int) -> None:
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        UPDATE reminders
+        SET status = 'done'
+        WHERE id = ?
+        """,
+        (reminder_id,),
+    )
+    conn.commit()
+    conn.close()
+
+
+def cancel_reminder(reminder_id: int) -> None:
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        UPDATE reminders
+        SET status = 'cancelled'
+        WHERE id = ?
+        """,
+        (reminder_id,),
+    )
+    conn.commit()
+    conn.close()
+
+
+# =========================
+# Apps
+# =========================
+
 def save_app_command(name: str, command: str, description: str = "", aliases: str = ""):
     conn = get_db_connection()
     cur = conn.cursor()
@@ -266,6 +696,7 @@ def save_app_command(name: str, command: str, description: str = "", aliases: st
     conn.close()
 
     return row["id"] if row else None
+
 
 def update_app_process_name(app_id: int, process_name: str) -> None:
     try:

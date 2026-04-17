@@ -21,6 +21,12 @@ from app.orchestrator.intents.resolver import IntentResolver
 from app.orchestrator.dispatcher import OrchestratorDispatcher
 from app.orchestrator.tool_handlers import build_tool_handlers
 
+from app.cognitive import MemoryStore, SchedulerService
+from app.cognitive.context_builder import ContextBuilder
+from app.cognitive.deliberation_service import DeliberationService
+from app.cognitive.plan_executor import PlanExecutor
+from app.cognitive.response_synthesizer import ResponseSynthesizer
+from app.cognitive.action_runtime import ActionRuntime
 
 WAKE_WORDS = ["hebe despierta", "eve despierta", "jebe despierta", "asistente despierta"]
 STREAM_WAKE_ALIASES = {"hebe", "ebe", "eve", "heve", "jebe"}
@@ -63,6 +69,148 @@ class HebeEngine:
             policy=OrchestratorPolicy(),
             gates=OrchestratorGates(),
         )
+        # -------------------------
+        # Cognitive flow (Hebe v1)
+        # -------------------------
+        self.memory_store = MemoryStore()
+        self.scheduler = SchedulerService(self.memory_store)
+        self.context_builder = ContextBuilder(self.memory_store)
+
+        # Modelos:
+        # - intent: ya lo usas en legacy
+        # - deliberation/summary: de momento reutilizo llm hasta separar runtime
+        # - conversation/persona: de momento reutilizo llm hasta separar runtime
+        self.deliberation_service = DeliberationService(
+            intent_model=getattr(self.runtime, "llm", None),
+            reasoning_model=getattr(self.runtime, "llm", None),
+        )
+
+        self.action_runtime = ActionRuntime(self.runtime)
+
+        self.plan_executor = PlanExecutor(
+            memory_store=self.memory_store,
+            action_runtime=self.action_runtime,
+        )
+
+        self.response_synthesizer = ResponseSynthesizer(
+            conversation_model=getattr(self.runtime, "llm", None),
+        )
+
+        # Feature flag inicial
+        self.use_cognitive_flow = True
+        self.scheduler_poll_interval_sec = 1.0
+        self._last_scheduler_poll_ts = 0.0
+
+    def legacy_flow(self, command: str, source: str = "voice") -> str:
+        result = self.orchestrator.handle(
+            text=command,
+            source=source,
+        )
+
+        print(
+            "[HEBE] orchestrator result "
+            f"status={result.status.value!r} "
+            f"success={result.success!r} "
+            f"intent={result.intent!r} "
+            f"text={result.output_text!r} "
+            f"error={result.error!r}",
+            flush=True,
+        )
+
+        spoken_text = (result.output_text or "").strip()
+
+        if self._should_speak_result(result):
+            try:
+                self.runtime.speak(spoken_text)
+            except Exception as e:
+                print(f"[HEBE] speak failed: {e!r}", flush=True)
+
+        if result.intent == "sleep_mode" and result.success:
+            return "sleep"
+
+        if result.intent == "stop_engine" and result.success:
+            return "stop"
+
+        return "continue"    
+    
+    def cognitive_flow(self, command: str, source: str = "voice") -> str:
+        context = self.context_builder.build(
+            state=self.runtime.state,
+            input_text=command,
+            internal_event=None,
+        )
+
+        deliberation = self.deliberation_service.deliberate(context)
+        execution = self.plan_executor.execute(deliberation.plan)
+        reply_text = self.response_synthesizer.synthesize(
+            context=context,
+            deliberation=deliberation,
+            execution=execution,
+        )
+
+        print(
+            "[HEBE][COG] "
+            f"reasoning={deliberation.plan.reasoning!r} "
+            f"steps={[step.type for step in deliberation.plan.steps]!r} "
+            f"reply={reply_text!r}",
+            flush=True,
+        )
+
+        if reply_text:
+            try:
+                self.runtime.speak(reply_text)
+            except Exception as e:
+                print(f"[HEBE][COG] speak failed: {e!r}", flush=True)
+
+        normalized = self._normalize_text(command)
+        if normalized in {"duerme", "modo espera", "modo de espera"}:
+            return "sleep"
+
+        if normalized in {"apaga hebe", "detente", "stop engine"}:
+            return "stop"
+
+        return "continue"
+    
+    def process_internal_event(self, event) -> None:
+        context = self.context_builder.build(
+            state=self.runtime.state,
+            input_text=None,
+            internal_event=event,
+        )
+
+        deliberation = self.deliberation_service.deliberate(context)
+        execution = self.plan_executor.execute(deliberation.plan)
+        reply_text = self.response_synthesizer.synthesize(
+            context=context,
+            deliberation=deliberation,
+            execution=execution,
+        )
+
+        print(
+            "[HEBE][EVENT] "
+            f"type={event.event_type!r} "
+            f"reply={reply_text!r}",
+            flush=True,
+        )
+
+        if reply_text:
+            try:
+                self.runtime.speak(reply_text)
+            except Exception as e:
+                print(f"[HEBE][EVENT] speak failed: {e!r}", flush=True)
+    def poll_internal_events(self) -> None:
+        now = time.time()
+        if now - self._last_scheduler_poll_ts < self.scheduler_poll_interval_sec:
+            return
+
+        self._last_scheduler_poll_ts = now
+
+        try:
+            events = self.scheduler.poll_due_events(limit=10)
+            for event in events:
+                self.process_internal_event(event)
+        except Exception as e:
+            print(f"[HEBE][SCHEDULER] poll failed: {e!r}", flush=True)
 
     def start(self):
         if self._started:
@@ -245,41 +393,14 @@ class HebeEngine:
         if not text:
             return "continue"
 
-        result = self.orchestrator.handle(
-            text=text,
-            source=source,
-        )
-
-        print(
-            "[HEBE] orchestrator result "
-            f"status={result.status.value!r} "
-            f"success={result.success!r} "
-            f"intent={result.intent!r} "
-            f"text={result.output_text!r} "
-            f"error={result.error!r}",
-            flush=True,
-        )
-
-        spoken_text = (result.output_text or "").strip()
-
-        if self._should_speak_result(result):
-            try:
-                self.runtime.speak(spoken_text)
-            except Exception as e:
-                print(f"[HEBE] speak failed: {e!r}", flush=True)
-
-        if result.intent == "sleep_mode" and result.success:
-            return "sleep"
-
-        if result.intent == "stop_engine" and result.success:
-            return "stop"
-
-        return "continue"
+        return self.cognitive_flow(text, source=source)
 
     def command_loop(self) -> str:
         while True:
             if self._stop_event.is_set():
                 return "stop"
+
+            self.poll_internal_events()
 
             command = None
             source = None
@@ -332,7 +453,7 @@ class HebeEngine:
         while True:
             if self._stop_event.is_set():
                 return "stop"
-
+            self.poll_internal_events()
             try:
                 ui_inbox = get_ui_inbox()
                 cmd = ui_inbox.get_nowait()
