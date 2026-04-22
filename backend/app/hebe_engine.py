@@ -148,6 +148,17 @@ class HebeEngine:
             execution=execution,
         )
 
+        reply_step = execution.first_result_of_type("reply")
+        if reply_step:
+            mode = reply_step.data.get("mode")
+
+            if mode == "clarify_appointment_datetime":
+                self.runtime.state.pending_clarification = {
+                    "kind": "appointment_datetime",
+                    "draft": reply_step.data.get("draft", {}),
+                }
+            elif mode == "confirm_appointment":
+                self.runtime.state.pending_clarification = None
         print(
             "[HEBE][COG] "
             f"reasoning={deliberation.plan.reasoning!r} "
@@ -155,7 +166,7 @@ class HebeEngine:
             f"reply={reply_text!r}",
             flush=True,
         )
-
+        
         if reply_text:
             try:
                 self.runtime.speak(reply_text)

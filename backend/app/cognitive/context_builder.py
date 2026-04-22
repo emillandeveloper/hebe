@@ -106,11 +106,12 @@ class ContextBuilder:
         stream = getattr(state, "stream", None)
 
         return {
-            "now_iso": datetime.now().astimezone().isoformat(),
+            "now_iso": __import__("datetime").datetime.now().astimezone().isoformat(),
             "mode": getattr(state, "mode", None),
             "is_processing": getattr(state, "is_processing", None),
             "last_intent": getattr(state, "last_intent", None),
             "current_task": getattr(state, "current_task", None),
+            "pending_clarification": getattr(state, "pending_clarification", None),
             "stream_enabled": getattr(stream, "enabled", False) if stream else False,
             "stream_armed": getattr(stream, "armed", False) if stream else False,
         }

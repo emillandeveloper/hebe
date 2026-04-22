@@ -1,6 +1,7 @@
 # backend/app/core/runtime.py
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import Callable
 
@@ -13,6 +14,8 @@ from app.services.speech_output import speak as _speak
 from app.services.stt_whisper import STTConfig, STTService
 from app.services.tool_system import ToolContext, ToolSystem
 from app.services.win_automation import WinAutomationService
+
+from app.llm.ollama_intent_client import OllamaIntentClient
 
 from app.integrations.twitch.chat_client import TwitchChatClient
 from app.integrations.twitch.chat_cache import TwitchChatCache
@@ -37,6 +40,7 @@ def build_speak() -> Callable[[str, str], None]:
 class HebeRuntime:
     stt: STTService
     llm: OllamaLLM
+    intent_llm: OllamaIntentClient
     win: WinAutomationService
     actions: InteractionActions
     tools: ToolSystem
@@ -57,10 +61,17 @@ def build_runtime() -> HebeRuntime:
         log_chat=log_chat,
     )
 
+    # Modelo conversacional: habla como Hebe
     llm = OllamaLLM(
-        model="hebe",
+        model=os.getenv("HEBE_CHAT_MODEL", "hebe"),
         emit=emit,
         log_chat=log_chat,
+    )
+
+    # Modelo de intent/extracción estructurada: hebe-intent (qwen2.5:3b)
+    intent_llm = OllamaIntentClient(
+        model=os.getenv("HEBE_INTENT_MODEL", "hebe-intent"),
+        base_url=os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434"),
     )
 
     win = WinAutomationService(
@@ -89,21 +100,32 @@ def build_runtime() -> HebeRuntime:
     # =========================
     # Twitch integration
     # =========================
+    # IMPORTANTE: las credenciales se leen de variables de entorno.
+    # NO hardcodear oauth_token ni client_id en el código fuente.
+    # Define en tu .env:
+    #   TWITCH_CHANNEL_NAME=leonifelheim
+    #   TWITCH_BOT_USERNAME=HebeNifelheim
+    #   TWITCH_BROADCASTER_ID=...
+    #   TWITCH_SENDER_ID=...
+    #   TWITCH_CLIENT_ID=...
+    #   TWITCH_OAUTH_TOKEN=...
 
-    channel_name = "leonifelheim"
-    bot_username = "HebeNifelheim"
+    channel_name = os.getenv("TWITCH_CHANNEL_NAME", "")
+    bot_username = os.getenv("TWITCH_BOT_USERNAME", "")
+    broadcaster_id = os.getenv("TWITCH_BROADCASTER_ID", "")
+    sender_id = os.getenv("TWITCH_SENDER_ID", "")
+    client_id = os.getenv("TWITCH_CLIENT_ID", "")
+    oauth_token = os.getenv("TWITCH_OAUTH_TOKEN", "")
 
-    broadcaster_id = "124070929"
-    sender_id = "1480877711"
-    client_id = "gp762nuuoqcoxypju8c569th9wz7q5"
-    oauth_token = "f945r0izxxbt2mrvkoo7zrmpuqv5l3"
+    twitch_enabled = all([channel_name, broadcaster_id, sender_id, client_id, oauth_token])
 
     print("[HEBE][TWITCH] creating client...", flush=True)
-    print("[HEBE][TWITCH] channel_name =", channel_name, flush=True)
-    print("[HEBE][TWITCH] broadcaster_id =", broadcaster_id, flush=True)
-    print("[HEBE][TWITCH] sender_id =", sender_id, flush=True)
+    print("[HEBE][TWITCH] channel_name =", channel_name or "(missing)", flush=True)
+    print("[HEBE][TWITCH] broadcaster_id =", broadcaster_id or "(missing)", flush=True)
+    print("[HEBE][TWITCH] sender_id =", sender_id or "(missing)", flush=True)
     print("[HEBE][TWITCH] client_id loaded =", bool(client_id), flush=True)
     print("[HEBE][TWITCH] oauth_token loaded =", bool(oauth_token), flush=True)
+    print("[HEBE][TWITCH] enabled =", twitch_enabled, flush=True)
 
     chat_cache = TwitchChatCache()
     event_memory = TwitchEventMemory()
@@ -121,7 +143,7 @@ def build_runtime() -> HebeRuntime:
         client_id=client_id,
         oauth_token=oauth_token,
         bot_username=bot_username,
-        enabled=True,
+        enabled=twitch_enabled,
     )
 
     twitch = TwitchService(
@@ -139,12 +161,13 @@ def build_runtime() -> HebeRuntime:
         broadcaster_user_id=broadcaster_id,
         bot_user_id=sender_id,
         twitch_service=twitch,
-        enabled=True,
+        enabled=twitch_enabled,
     )
 
     return HebeRuntime(
         stt=stt,
         llm=llm,
+        intent_llm=intent_llm,
         win=win,
         actions=actions,
         tools=tools,
