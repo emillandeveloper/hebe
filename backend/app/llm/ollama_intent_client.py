@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 import requests
@@ -49,6 +50,8 @@ class OllamaIntentClient:
             "format": schema,
             "options": {
                 "temperature": temperature,
+                "num_predict": 512,
+                "num_ctx": 4096,
             },
         }
 
@@ -87,6 +90,8 @@ class OllamaIntentClient:
             "format": schema,
             "options": {
                 "temperature": temperature,
+                "num_predict": 512,
+                "num_ctx": 4096,
             },
         }
 
@@ -150,16 +155,80 @@ class OllamaIntentClient:
         return content
 
     def _loads_json_object(self, text: str) -> dict[str, Any]:
+        """
+        Parser JSON tolerante:
+        - quita espacios/saltos de línea
+        - intenta parse directo
+        - si falla, busca el primer objeto { ... } dentro del texto
+        - limpia trailing commas típicos de modelos pequeños
+        """
         text = (text or "").strip()
         if not text:
             raise ValueError("Empty Ollama response")
 
+        # 1) Intento directo
         try:
             data = json.loads(text)
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"Invalid JSON from Ollama: {text}") from exc
+            if isinstance(data, dict):
+                return data
+        except json.JSONDecodeError:
+            pass
 
-        if not isinstance(data, dict):
-            raise ValueError("JSON response is not an object")
+        # 2) Extraer el primer bloque { ... } balanceado
+        extracted = self._extract_first_json_object(text)
+        if extracted:
+            try:
+                data = json.loads(extracted)
+                if isinstance(data, dict):
+                    return data
+            except json.JSONDecodeError:
+                # 3) Limpieza de trailing commas
+                cleaned = re.sub(r",(\s*[}\]])", r"\1", extracted)
+                try:
+                    data = json.loads(cleaned)
+                    if isinstance(data, dict):
+                        return data
+                except json.JSONDecodeError:
+                    pass
 
-        return data
+        raise ValueError(f"Invalid JSON from Ollama: {text}")
+
+    def _extract_first_json_object(self, text: str) -> str | None:
+        """
+        Encuentra el primer objeto JSON balanceado dentro del texto.
+        Respeta strings con llaves escapadas.
+        """
+        start = text.find("{")
+        if start == -1:
+            return None
+
+        depth = 0
+        in_string = False
+        escape = False
+
+        for i in range(start, len(text)):
+            ch = text[i]
+
+            if escape:
+                escape = False
+                continue
+
+            if ch == "\\":
+                escape = True
+                continue
+
+            if ch == '"':
+                in_string = not in_string
+                continue
+
+            if in_string:
+                continue
+
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    return text[start : i + 1]
+
+        return None

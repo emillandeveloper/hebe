@@ -81,7 +81,7 @@ class HebeEngine:
         # - deliberation/summary: de momento reutilizo llm hasta separar runtime
         # - conversation/persona: de momento reutilizo llm hasta separar runtime
         self.deliberation_service = DeliberationService(
-            intent_model=getattr(self.runtime, "llm", None),
+            intent_model=getattr(self.runtime, "intent_llm", None),
             reasoning_model=getattr(self.runtime, "llm", None),
         )
 

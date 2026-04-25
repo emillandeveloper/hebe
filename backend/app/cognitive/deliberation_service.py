@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 
 from app.cognitive.context_builder import BuiltContext
 from app.cognitive.models import PlanStep, Plan, DeliberationResult
-from app.cognitive.temporal import TemporalInterpreter
+from app.cognitive.temporal import TemporalFacts, TemporalInterpreter, TemporalSignals
 
 
 class DeliberationService:
@@ -72,7 +72,7 @@ class DeliberationService:
 
     def _plan_appointment(self, context: BuiltContext) -> DeliberationResult:
         now = datetime.now(ZoneInfo("Europe/Madrid"))
-        interp = self.temporal.interpret_appointment(context.input_text or "", now=now)
+        interp = self._interpret_temporal_from_deliberation(context.input_text or "", now)
 
         if interp.status == "resolved":
             return self._build_resolved_plan(
@@ -94,9 +94,15 @@ class DeliberationService:
 
     def _resolve_pending_appointment(self, context: BuiltContext, pending: dict) -> DeliberationResult:
         now = datetime.now(ZoneInfo("Europe/Madrid"))
-        interp = self.temporal.resolve_clarification(
-            reply_text=context.input_text or "",
+        reply_text = context.input_text or ""
+        signals = self.temporal.detect_signals(reply_text, now=now)
+        llm_facts = self.temporal.extract_with_llm(reply_text, now=now)
+        fresh_facts = self._fuse_temporal_results(signals, llm_facts)
+
+        interp = self.temporal.rules.merge_with_draft(
             draft=pending.get("draft", {}),
+            fresh_facts=fresh_facts,
+            reply_text=reply_text,
             now=now,
         )
 
@@ -119,6 +125,30 @@ class DeliberationService:
             draft=pending.get("draft", {}),
             reason=interp.reason or "unresolved",
         )
+
+    def _interpret_temporal_from_deliberation(self, text: str, now: datetime):
+        signals = self.temporal.detect_signals(text, now=now)
+
+        # FastParser solo detecta señales. Aunque no detecte nada, en flujos
+        # de cita el extractor LLM sigue siendo la fuente de hechos temporales.
+        llm_facts = self.temporal.extract_with_llm(text, now=now)
+        facts = self._fuse_temporal_results(signals, llm_facts)
+
+        if facts is None:
+            return self.temporal.empty_interpretation(reason="no_temporal_facts")
+
+        return self.temporal.interpret_facts(facts, now=now)
+
+    def _fuse_temporal_results(
+        self,
+        signals: TemporalSignals,
+        llm_facts: TemporalFacts | None,
+    ) -> TemporalFacts | None:
+        """
+        Deliberation fusiona detección barata y extracción LLM.
+        No interpreta fechas; solo conserva trazas de evidencia.
+        """
+        return self.temporal.fuse_temporal_results(signals, llm_facts)
 
     # =========================
     # Helpers: construcción de planes

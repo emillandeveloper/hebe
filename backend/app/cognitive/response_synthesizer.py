@@ -265,15 +265,16 @@ class ResponseSynthesizer:
 
         system = (
             f"{self._build_system_style_block()}\n"
-            "Situación: el usuario quiere guardar una cita, pero falta información o la fecha es ambigua.\n"
-            "Objetivo: pedir solo la aclaración necesaria de forma natural.\n\n"
+            "Situación: deliberation ya resolvió que hace falta una aclaración temporal.\n"
+            "Objetivo: comunicar esa aclaración necesaria de forma natural.\n\n"
             "Reglas:\n"
             f"- Dato conocido — día: {day}\n"
             f"- Dato conocido — mes: {month}\n"
             f"- Dato conocido — hora: {hour}\n"
             f"- Dato conocido — minuto: {minute}\n"
             f"- Aclaración necesaria: {question}\n"
-            "- Pide solo el dato que falta.\n"
+            "- Usa la aclaración necesaria como fuente de verdad.\n"
+            "- No calcules, corrijas ni reinterpretes fechas.\n"
             "- Si ya conoces el día y la hora, no los vuelvas a pedir.\n"
             "- No inventes fechas ni cambies los datos ya conocidos.\n"
             "- Sé breve y conversacional."
@@ -420,8 +421,7 @@ class ResponseSynthesizer:
 
             dt = datetime.fromisoformat(iso_str)
 
-            # Si el ISO no traía tz, asumimos que venía en Madrid
-            # (es lo que guarda temporal_interpreter originalmente)
+            # Si el ISO no traía tz, asumimos que venía en Madrid.
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=ZoneInfo("Europe/Madrid"))
             else:
