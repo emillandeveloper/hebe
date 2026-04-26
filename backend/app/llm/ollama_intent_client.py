@@ -15,6 +15,7 @@ class OllamaIntentClient:
     - model fijo (ej. "hebe-intent")
     - temperature 0
     - format schema JSON cuando se pide structured output
+    - num_predict alto para evitar truncamientos
     """
 
     def __init__(
@@ -35,9 +36,6 @@ class OllamaIntentClient:
         schema: dict[str, Any],
         temperature: float = 0.0,
     ) -> dict[str, Any]:
-        """
-        Modo simple: un prompt combinado, salida JSON estructurada.
-        """
         payload = {
             "model": self.model,
             "messages": [
@@ -70,10 +68,6 @@ class OllamaIntentClient:
         schema: dict[str, Any],
         temperature: float = 0.0,
     ) -> dict[str, Any]:
-        """
-        Modo recomendado para el IntentResolver:
-        system + user + schema.
-        """
         payload = {
             "model": self.model,
             "messages": [
@@ -107,9 +101,6 @@ class OllamaIntentClient:
         prompt: str,
         temperature: float = 0.0,
     ) -> str:
-        """
-        Fallback no estructurado.
-        """
         payload = {
             "model": self.model,
             "prompt": prompt,
@@ -163,10 +154,11 @@ class OllamaIntentClient:
         - limpia trailing commas típicos de modelos pequeños
         """
         text = (text or "").strip()
+        print(f"[HEBE][INTENT][RAW] len={len(text)} text={text!r}", flush=True)
+
         if not text:
             raise ValueError("Empty Ollama response")
 
-        # 1) Intento directo
         try:
             data = json.loads(text)
             if isinstance(data, dict):
@@ -174,7 +166,6 @@ class OllamaIntentClient:
         except json.JSONDecodeError:
             pass
 
-        # 2) Extraer el primer bloque { ... } balanceado
         extracted = self._extract_first_json_object(text)
         if extracted:
             try:
@@ -182,7 +173,6 @@ class OllamaIntentClient:
                 if isinstance(data, dict):
                     return data
             except json.JSONDecodeError:
-                # 3) Limpieza de trailing commas
                 cleaned = re.sub(r",(\s*[}\]])", r"\1", extracted)
                 try:
                     data = json.loads(cleaned)

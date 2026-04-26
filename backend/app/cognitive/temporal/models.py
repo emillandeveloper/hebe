@@ -5,20 +5,6 @@ from typing import Optional
 
 
 @dataclass(slots=True)
-class TemporalSignals:
-    """
-    Señales baratas detectadas antes de extraer hechos temporales.
-
-    No contienen valores temporales resueltos y no deben usarse como fuente
-    de day/month/hour/minute. Solo ayudan a deliberation a fusionar evidencia.
-    """
-
-    has_temporal_signal: bool = False
-    source: str = "fast_parser"
-    notes: list[str] = field(default_factory=list)
-
-
-@dataclass(slots=True)
 class TemporalFacts:
     """
     Hechos atómicos extraídos del texto del usuario.
@@ -62,7 +48,6 @@ class TemporalFacts:
 class TemporalInterpretation:
     """
     Interpretación final después de pasar los facts por las reglas de negocio.
-
     Esto es lo que consume el deliberation_service para decidir qué plan ejecutar.
     """
 

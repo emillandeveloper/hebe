@@ -42,10 +42,18 @@ class RulesEngine:
         facts: TemporalFacts,
         now: Optional[datetime] = None,
     ) -> TemporalInterpretation:
-        """
-        Aplica reglas sobre los facts extraídos y devuelve una interpretación final.
-        """
         now = now or datetime.now(self.tz)
+
+        # Día fuera de rango señalado por el parser
+        if "invalid_day_value" in (facts.notes or []):
+            return self._invalid(
+                facts.title,
+                None,
+                facts.month,
+                facts.hour,
+                facts.minute,
+                "invalid_day_number",
+            )
 
         # Resolver día/mes/año desde referencias relativas
         resolved_day, resolved_month, resolved_year = self._resolve_reference_fields(facts, now)
@@ -68,7 +76,7 @@ class RulesEngine:
         if resolved_day is None and resolved_month is None:
             return self._handle_time_only(facts, now)
 
-        # Si tenemos mes pero no día → no podemos resolver, falta info
+        # Si tenemos mes pero no día → no podemos resolver
         if resolved_day is None:
             return TemporalInterpretation(
                 status="no_match",
@@ -82,17 +90,14 @@ class RulesEngine:
                 extracted_minute=facts.minute,
             )
 
-        # Si el mes no está pero el día sí → usar mes actual
+        # Mes implícito si no hay
         month_was_explicit = facts.month is not None or resolved_month != now.month
         if resolved_month is None:
             resolved_month = now.month
 
-        # Si el año no está → usar año actual
-        year_was_explicit = facts.year is not None or resolved_year != now.year
         if resolved_year is None:
             resolved_year = now.year
 
-        # Construir candidato
         candidate = self._safe_build(
             resolved_year, resolved_month, resolved_day, facts.hour, facts.minute
         )
@@ -108,7 +113,6 @@ class RulesEngine:
                 reason,
             )
 
-        # ¿Está en futuro?
         if candidate >= now:
             return TemporalInterpretation(
                 status="resolved",
@@ -122,7 +126,6 @@ class RulesEngine:
                 extracted_minute=facts.minute,
             )
 
-        # Está en pasado → preguntar futuro apropiado
         return self._handle_past_date(
             facts, resolved_day, resolved_month, month_was_explicit, now
         )
@@ -138,13 +141,6 @@ class RulesEngine:
         reply_text: str,
         now: Optional[datetime] = None,
     ) -> TemporalInterpretation:
-        """
-        Caso típico: había un draft pendiente con campos parciales, el usuario
-        ha respondido con algo. Hacemos merge y reinterpretamos.
-
-        También maneja confirmaciones afirmativas ("sí") usando el candidate_iso
-        del draft si lo hay.
-        """
         now = now or datetime.now(self.tz)
         raw = (reply_text or "").strip().lower()
 
@@ -189,7 +185,6 @@ class RulesEngine:
         merged_minute = draft_minute
 
         if fresh_facts is not None:
-            # Resolver referencias relativas antes del merge
             fresh_day, fresh_month, fresh_year = self._resolve_reference_fields(fresh_facts, now)
 
             if fresh_day is not None:
@@ -201,7 +196,7 @@ class RulesEngine:
             if fresh_facts.minute is not None:
                 merged_minute = fresh_facts.minute
 
-        # 3) ¿Tenemos ya suficiente para resolver?
+        # 3) Suficiente para resolver
         if merged_day is not None and merged_hour is not None and merged_minute is not None:
             target_month = int(merged_month) if merged_month is not None else now.month
             target_year = now.year
@@ -221,7 +216,6 @@ class RulesEngine:
                 )
 
             if candidate < now:
-                # Resultado en pasado: proponer año siguiente si mes explícito, mes siguiente si no
                 if merged_month is not None:
                     candidate = self._safe_build(
                         target_year + 1, target_month, int(merged_day), int(merged_hour), int(merged_minute)
@@ -254,7 +248,7 @@ class RulesEngine:
                 extracted_minute=int(merged_minute),
             )
 
-        # 4) Sigue faltando info: preguntar específicamente lo que falta
+        # 4) Falta info: preguntar específicamente
         missing = []
         if merged_day is None:
             missing.append("el día")
@@ -284,7 +278,6 @@ class RulesEngine:
         facts: TemporalFacts,
         now: datetime,
     ) -> TemporalInterpretation:
-        """Hay hora pero no día: asumir hoy si es futuro, proponer mañana si pasó."""
         today_candidate = self._safe_build(
             now.year, now.month, now.day, facts.hour, facts.minute
         )
@@ -330,9 +323,7 @@ class RulesEngine:
         month_was_explicit: bool,
         now: datetime,
     ) -> TemporalInterpretation:
-        """La fecha ha quedado en pasado. Proponer futuro apropiado."""
         if month_was_explicit:
-            # Mes explícito en pasado → proponer año siguiente
             next_year_candidate = self._safe_build(
                 now.year + 1, month, day, facts.hour, facts.minute
             )
@@ -353,7 +344,6 @@ class RulesEngine:
                 extracted_minute=facts.minute,
             )
 
-        # Mes implícito (era el mes actual) en pasado → proponer mes siguiente
         next_year, next_month = self._next_month(now.year, now.month)
         next_candidate = self._safe_build(
             next_year, next_month, day, facts.hour, facts.minute
@@ -383,28 +373,19 @@ class RulesEngine:
         facts: TemporalFacts,
         now: datetime,
     ) -> tuple[Optional[int], Optional[int], Optional[int]]:
-        """
-        Convierte referencias relativas (relative_day_offset, weekday) en
-        valores absolutos (day, month, year).
-
-        Prioridad: valores explícitos > referencias relativas.
-        """
         day = facts.day
         month = facts.month
         year = facts.year
 
-        # Si hay offset relativo y no hay día explícito, calcular
         if facts.relative_day_offset is not None and day is None:
             target = now + timedelta(days=facts.relative_day_offset)
             day = target.day
             month = month if month is not None else target.month
             year = year if year is not None else target.year
 
-        # Si hay día de la semana y no hay día explícito, calcular
         if facts.weekday is not None and day is None:
             days_ahead = (facts.weekday - now.weekday()) % 7
             if days_ahead == 0:
-                # Si dice "el jueves" y hoy es jueves, asumir próximo jueves
                 days_ahead = 7
             if facts.weekday_is_next and days_ahead < 7:
                 days_ahead += 7

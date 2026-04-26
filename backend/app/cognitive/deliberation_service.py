@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 
 from app.cognitive.context_builder import BuiltContext
 from app.cognitive.models import PlanStep, Plan, DeliberationResult
-from app.cognitive.temporal import TemporalFacts, TemporalInterpreter, TemporalSignals
+from app.cognitive.temporal import TemporalInterpreter
 
 
 class DeliberationService:
@@ -15,7 +15,7 @@ class DeliberationService:
         """
         intent_model: cliente LLM para extracción estructurada (hebe-intent).
                       Debe exponer chat_structured(system_prompt, user_prompt, schema, temperature).
-        reasoning_model: reservado para el futuro (planificación compleja).
+        reasoning_model: reservado para el futuro.
         """
         self.intent_model = intent_model
         self.reasoning_model = reasoning_model
@@ -72,7 +72,19 @@ class DeliberationService:
 
     def _plan_appointment(self, context: BuiltContext) -> DeliberationResult:
         now = datetime.now(ZoneInfo("Europe/Madrid"))
-        interp = self._interpret_temporal_from_deliberation(context.input_text or "", now)
+        interp = self.temporal.interpret_appointment(context.input_text or "", now=now)
+
+        print(
+            "[HEBE][APPOINTMENT] first interpretation "
+            f"status={interp.status!r} "
+            f"reason={interp.reason!r} "
+            f"day={interp.extracted_day!r} "
+            f"month={interp.extracted_month!r} "
+            f"hour={interp.extracted_hour!r} "
+            f"minute={interp.extracted_minute!r} "
+            f"candidate={interp.candidate_iso!r}",
+            flush=True,
+        )
 
         if interp.status == "resolved":
             return self._build_resolved_plan(
@@ -84,71 +96,81 @@ class DeliberationService:
 
         if interp.status in {"ambiguous_past_date", "invalid"}:
             draft = self._build_draft(interp, context.input_text)
-            question = interp.clarification_question or "¿Qué fecha exacta quieres decir?"
+            question = interp.clarification_question or "Pide al usuario que confirme la fecha exacta."
             return self._build_clarify_plan(question, draft, interp.reason)
 
-        # no_match: guardar campos parciales y preguntar solo lo que falta
         draft = self._build_draft(interp, context.input_text)
-        question = self._build_missing_fields_question(interp)
+        question = interp.clarification_question or self._build_missing_fields_question(interp)
         return self._build_clarify_plan(question, draft, interp.reason or "no_match")
 
     def _resolve_pending_appointment(self, context: BuiltContext, pending: dict) -> DeliberationResult:
         now = datetime.now(ZoneInfo("Europe/Madrid"))
         reply_text = context.input_text or ""
-        signals = self.temporal.detect_signals(reply_text, now=now)
-        llm_facts = self.temporal.extract_with_llm(reply_text, now=now)
-        fresh_facts = self._fuse_temporal_results(signals, llm_facts)
+        pending_draft = pending.get("draft", {})
 
-        interp = self.temporal.rules.merge_with_draft(
-            draft=pending.get("draft", {}),
-            fresh_facts=fresh_facts,
+        print(
+            "[HEBE][PENDING] loaded draft="
+            f"{pending_draft!r} reply_text={reply_text!r}",
+            flush=True,
+        )
+
+        interp = self.temporal.resolve_clarification(
             reply_text=reply_text,
+            draft=pending_draft,
             now=now,
+        )
+
+        print(
+            "[HEBE][PENDING] interp="
+            f"status={interp.status!r} "
+            f"reason={interp.reason!r} "
+            f"day={interp.extracted_day!r} "
+            f"month={interp.extracted_month!r} "
+            f"hour={interp.extracted_hour!r} "
+            f"minute={interp.extracted_minute!r} "
+            f"candidate={interp.candidate_iso!r}",
+            flush=True,
         )
 
         if interp.status == "resolved":
             return self._build_resolved_plan(
                 title=interp.title or "Cita",
                 candidate_iso=interp.candidate_iso,
-                source_text=pending.get("draft", {}).get("source_text"),
+                source_text=pending_draft.get("source_text"),
                 reason=interp.reason,
             )
 
         if interp.status in {"ambiguous_past_date", "invalid"}:
-            draft = self._build_draft(interp, context.input_text)
-            question = interp.clarification_question or "¿Qué fecha exacta quieres decir?"
-            return self._build_clarify_plan(question, draft, interp.reason)
+            draft = self._build_draft(
+                interp,
+                pending_draft.get("source_text"),
+            )
+            question = interp.clarification_question or "Pide al usuario que confirme la fecha exacta."
 
-        # Fallback
+            return self._build_clarify_plan(
+                question=question,
+                draft=draft,
+                reason=interp.reason,
+            )
+
+        if interp.status == "no_match":
+            draft = self._build_draft(
+                interp,
+                pending_draft.get("source_text"),
+            )
+            question = interp.clarification_question or self._build_missing_fields_question(interp)
+
+            return self._build_clarify_plan(
+                question=question,
+                draft=draft,
+                reason=interp.reason or "clarification_incomplete",
+            )
+
         return self._build_clarify_plan(
-            question="No me ha quedado claro. ¿Me dices la fecha completa?",
-            draft=pending.get("draft", {}),
+            question="No se ha podido completar la fecha. Pide al usuario la fecha completa.",
+            draft=pending_draft,
             reason=interp.reason or "unresolved",
         )
-
-    def _interpret_temporal_from_deliberation(self, text: str, now: datetime):
-        signals = self.temporal.detect_signals(text, now=now)
-
-        # FastParser solo detecta señales. Aunque no detecte nada, en flujos
-        # de cita el extractor LLM sigue siendo la fuente de hechos temporales.
-        llm_facts = self.temporal.extract_with_llm(text, now=now)
-        facts = self._fuse_temporal_results(signals, llm_facts)
-
-        if facts is None:
-            return self.temporal.empty_interpretation(reason="no_temporal_facts")
-
-        return self.temporal.interpret_facts(facts, now=now)
-
-    def _fuse_temporal_results(
-        self,
-        signals: TemporalSignals,
-        llm_facts: TemporalFacts | None,
-    ) -> TemporalFacts | None:
-        """
-        Deliberation fusiona detección barata y extracción LLM.
-        No interpreta fechas; solo conserva trazas de evidencia.
-        """
-        return self.temporal.fuse_temporal_results(signals, llm_facts)
 
     # =========================
     # Helpers: construcción de planes
@@ -206,6 +228,14 @@ class DeliberationService:
         draft: dict,
         reason: str | None,
     ) -> DeliberationResult:
+        print(
+            "[HEBE][CLARIFY] building clarify plan "
+            f"reason={reason!r} "
+            f"question={question!r} "
+            f"draft={draft!r}",
+            flush=True,
+        )
+
         return DeliberationResult(
             plan=Plan(
                 steps=[
@@ -236,30 +266,44 @@ class DeliberationService:
 
     def _build_missing_fields_question(self, interp) -> str:
         missing = []
+
         if interp.extracted_day is None:
             missing.append("el día")
+
         if interp.extracted_hour is None:
             missing.append("la hora")
 
         if missing:
-            return "¿Me dices " + " y ".join(missing) + "?"
-        return "No me ha quedado clara la fecha. ¿Me la dices completa?"
+            return "Pide al usuario solo " + " y ".join(missing) + "."
+
+        return "Pide al usuario la fecha completa porque no ha quedado clara."
 
     # =========================
     # Helpers: detección
     # =========================
 
     def _looks_like_appointment(self, text: str) -> bool:
-        keywords = ["psicóloga", "psicologa", "médico", "medico", "dentista", "cita", "hora"]
+        keywords = [
+            "psicóloga",
+            "psicologa",
+            "médico",
+            "medico",
+            "dentista",
+            "cita",
+            "hora",
+        ]
         return any(k in text for k in keywords)
 
     def _extract_open_app_target(self, text: str) -> str | None:
         prefixes = ["abre ", "open "]
+
         for prefix in prefixes:
             if text.startswith(prefix):
                 candidate = text[len(prefix):].strip()
+
                 if candidate:
                     return candidate
+
         return None
 
     def _plan_open_app(self, app_name: str) -> DeliberationResult:

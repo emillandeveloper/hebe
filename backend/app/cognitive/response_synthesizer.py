@@ -14,11 +14,6 @@ class ResponseSynthesizer:
     - resultado de ejecución
 
     en una respuesta natural generada por el modelo conversacional.
-
-    Regla:
-    - evitar hardcodear wording
-    - usar el modelo para formular la respuesta final
-    - mantener solo fallbacks mínimos por robustez
     """
 
     def __init__(self, conversation_model: Any | None = None):
@@ -176,7 +171,6 @@ class ResponseSynthesizer:
 
     # =========================
     # Prompt builders — devuelven (system, user)
-    # FIX BUG 4: separar instrucciones del input del usuario
     # =========================
 
     def _build_system_style_block(self) -> str:
@@ -265,16 +259,15 @@ class ResponseSynthesizer:
 
         system = (
             f"{self._build_system_style_block()}\n"
-            "Situación: deliberation ya resolvió que hace falta una aclaración temporal.\n"
-            "Objetivo: comunicar esa aclaración necesaria de forma natural.\n\n"
+            "Situación: el usuario quiere guardar una cita, pero falta información o la fecha es ambigua.\n"
+            "Objetivo: pedir solo la aclaración necesaria de forma natural.\n\n"
             "Reglas:\n"
             f"- Dato conocido — día: {day}\n"
             f"- Dato conocido — mes: {month}\n"
             f"- Dato conocido — hora: {hour}\n"
             f"- Dato conocido — minuto: {minute}\n"
             f"- Aclaración necesaria: {question}\n"
-            "- Usa la aclaración necesaria como fuente de verdad.\n"
-            "- No calcules, corrijas ni reinterpretes fechas.\n"
+            "- Pide solo el dato que falta.\n"
             "- Si ya conoces el día y la hora, no los vuelvas a pedir.\n"
             "- No inventes fechas ni cambies los datos ya conocidos.\n"
             "- Sé breve y conversacional."
@@ -342,7 +335,7 @@ class ResponseSynthesizer:
         return system, user
 
     # =========================
-    # Model call — FIX BUG 4: usa chat() con system/user separados
+    # Model call con system/user separados
     # =========================
 
     def _call_model(self, system: str, user: str, fallback: str) -> str:
@@ -350,8 +343,6 @@ class ResponseSynthesizer:
             return fallback
 
         try:
-            # Usar chat() con separación system/user para evitar que el modelo
-            # confunda instrucciones con input y repita la frase del usuario
             if hasattr(self.conversation_model, "chat") and callable(self.conversation_model.chat):
                 text = self.conversation_model.chat([
                     {"role": "system", "content": system},
@@ -360,7 +351,6 @@ class ResponseSynthesizer:
                 text = (text or "").strip()
                 return text or fallback
 
-            # Fallback por compatibilidad si solo hay complete()
             if hasattr(self.conversation_model, "complete") and callable(self.conversation_model.complete):
                 combined = f"{system}\n\n{user}"
                 text = self.conversation_model.complete(combined)
@@ -413,15 +403,12 @@ class ResponseSynthesizer:
         if not iso_str:
             return "fecha desconocida"
 
-        # FIX BUG A: parsear ISO con tz y convertir siempre a Europe/Madrid
-        # antes de formatear, por si el storage o el scheduler lo devolvió en UTC.
         try:
             from datetime import datetime
             from zoneinfo import ZoneInfo
 
             dt = datetime.fromisoformat(iso_str)
 
-            # Si el ISO no traía tz, asumimos que venía en Madrid.
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=ZoneInfo("Europe/Madrid"))
             else:
@@ -430,7 +417,6 @@ class ResponseSynthesizer:
             return dt.strftime("%Y-%m-%d a las %H:%M")
 
         except Exception:
-            # Fallback al parsing antiguo si el ISO es raro
             try:
                 date_part = iso_str.split("T")[0]
                 time_part = iso_str.split("T")[1][:5]

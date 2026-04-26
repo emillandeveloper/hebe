@@ -134,10 +134,24 @@ class HebeEngine:
         return "continue"    
     
     def cognitive_flow(self, command: str, source: str = "voice") -> str:
+        print(
+            "[HEBE][COG] incoming "
+            f"source={source!r} "
+            f"command={command!r} "
+            f"current_pending={getattr(self.runtime.state, 'pending_clarification', None)!r}",
+            flush=True,
+        )
+
         context = self.context_builder.build(
             state=self.runtime.state,
             input_text=command,
             internal_event=None,
+        )
+
+        print(
+            "[HEBE][COG] context pending="
+            f"{context.state_snapshot.get('pending_clarification')!r}",
+            flush=True,
         )
 
         deliberation = self.deliberation_service.deliberate(context)
@@ -149,16 +163,37 @@ class HebeEngine:
         )
 
         reply_step = execution.first_result_of_type("reply")
+
         if reply_step:
             mode = reply_step.data.get("mode")
+
+            print(
+                "[HEBE][COG] reply_step "
+                f"mode={mode!r} "
+                f"data={reply_step.data!r}",
+                flush=True,
+            )
 
             if mode == "clarify_appointment_datetime":
                 self.runtime.state.pending_clarification = {
                     "kind": "appointment_datetime",
                     "draft": reply_step.data.get("draft", {}),
                 }
+
+                print(
+                    "[HEBE][STATE] saved pending_clarification="
+                    f"{self.runtime.state.pending_clarification!r}",
+                    flush=True,
+                )
+
             elif mode == "confirm_appointment":
                 self.runtime.state.pending_clarification = None
+
+                print(
+                    "[HEBE][STATE] cleared pending_clarification",
+                    flush=True,
+                )
+
         print(
             "[HEBE][COG] "
             f"reasoning={deliberation.plan.reasoning!r} "
@@ -166,7 +201,7 @@ class HebeEngine:
             f"reply={reply_text!r}",
             flush=True,
         )
-        
+
         if reply_text:
             try:
                 self.runtime.speak(reply_text)
@@ -174,6 +209,7 @@ class HebeEngine:
                 print(f"[HEBE][COG] speak failed: {e!r}", flush=True)
 
         normalized = self._normalize_text(command)
+
         if normalized in {"duerme", "modo espera", "modo de espera"}:
             return "sleep"
 
