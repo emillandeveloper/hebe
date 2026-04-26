@@ -18,8 +18,8 @@ class TwitchChatClient:
         channel_name: str = "leonifelheim",
         broadcaster_id: str = "124070929",
         sender_id: str = "1480877711",
-        client_id: str = "gp762nuuoqcoxypju8c569th9wz7q5",
-        oauth_token: str = "f945r0izxxbt2mrvkoo7zrmpuqv5l3",
+        client_id: str = "",
+        oauth_token: str = "",
         bot_username: str = "HebeNifelheim",
         enabled: bool = True,
         session: Optional[requests.Session] = None,
@@ -146,6 +146,8 @@ class TwitchChatClient:
 
     def _build_headers(self) -> dict[str, str]:
         token = self.oauth_token
+        if token.lower().startswith("oauth:"):
+            token = token.split(":", 1)[1]
         if not token.lower().startswith("bearer "):
             token = f"Bearer {token}"
 

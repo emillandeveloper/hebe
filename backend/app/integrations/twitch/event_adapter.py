@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import threading
 import time
-from typing import Any, Optional
+from typing import Any, Optional, Callable
 
 import requests
 
@@ -28,6 +28,7 @@ class TwitchEventAdapter:
         enabled: bool = True,
         keepalive_timeout_seconds: int = 30,
         session: Optional[requests.Session] = None,
+        push_event_callback: Optional[Callable[[str, dict], None]] = None,
     ) -> None:
         self.client_id = str(client_id or "").strip()
         self.user_oauth_token = str(user_oauth_token or "").strip()
@@ -37,6 +38,7 @@ class TwitchEventAdapter:
         self.enabled = enabled
         self.keepalive_timeout_seconds = int(keepalive_timeout_seconds)
         self._session = session or requests.Session()
+        self.push_event_callback = push_event_callback
 
         self._ws_app = None
         self._thread: Optional[threading.Thread] = None
@@ -264,18 +266,39 @@ class TwitchEventAdapter:
                     display_name=display_name,
                     text=message_text,
                 )
+                # Solo generar evento si no es el bot mismo
+                if username.lower() != self.bot_username.lower() and self.push_event_callback:
+                    self.push_event_callback("twitch_chat_react", {
+                        "display_name": display_name,
+                        "user_login": username,
+                        "message_text": message_text,
+                        "recent_chat": [],  # TODO: implementar contexto reciente
+                    })
             return
 
         if sub_type == "channel.follow":
             username = str(event.get("user_login") or event.get("user_name") or "").strip()
             if username:
                 self.twitch_service.remember_follow(username=username)
+                if self.push_event_callback:
+                    self.push_event_callback("twitch_follow_batch", {
+                        "display_names": [username],
+                        "count": 1,
+                    })
             return
 
         if sub_type == "channel.subscribe":
             username = str(event.get("user_login") or event.get("user_name") or "").strip()
             if username:
                 self.twitch_service.remember_sub(username=username)
+                if self.push_event_callback:
+                    self.push_event_callback("twitch_sub", {
+                        "display_name": username,
+                        "user_login": username,
+                        "cumulative_months": 1,  # TODO: obtener de event si disponible
+                        "is_gift": False,
+                        "is_resub": False,
+                    })
             return
 
         if sub_type == "channel.raid":
@@ -283,6 +306,12 @@ class TwitchEventAdapter:
             viewers = int(event.get("viewers") or 0)
             if username:
                 self.twitch_service.remember_raid(username=username, viewer_count=viewers)
+                if self.push_event_callback:
+                    self.push_event_callback("twitch_raid", {
+                        "display_name": username,
+                        "user_login": username,
+                        "viewer_count": viewers,
+                    })
             return
 
     def _build_headers(self) -> dict[str, str]:

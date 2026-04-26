@@ -55,16 +55,11 @@ class ResponseSynthesizer:
     # Internal events
     # =========================
 
-    def _handle_internal_event(
-        self,
-        context: BuiltContext,
-        execution: ExecutionResult,
-    ) -> str:
+    def _handle_internal_event(self, context: BuiltContext, execution: ExecutionResult) -> str:
         event = context.internal_event
 
         if event.event_type == "reminder_due":
             payload = event.payload or {}
-
             title = payload.get("title") or "Cita"
             due_at = payload.get("due_at")
             timezone = payload.get("timezone") or "Europe/Madrid"
@@ -77,6 +72,9 @@ class ResponseSynthesizer:
                 raw_payload=payload,
             )
             return self._call_model(system, user, fallback=self._fallback_reminder_text(payload))
+
+        if event.event_type.startswith("twitch_"):
+            return self._generate_twitch_reply(event)
 
         return self._fallback_text("Ha ocurrido algo, pero no tengo claro qué.")
 
@@ -423,3 +421,140 @@ class ResponseSynthesizer:
                 return f"{date_part} a las {time_part}"
             except Exception:
                 return iso_str
+    def _generate_twitch_reply(self, event) -> str:
+        payload = event.payload or {}
+
+        if event.event_type == "twitch_sub":
+            return self._generate_twitch_sub(payload)
+        if event.event_type == "twitch_raid":
+            return self._generate_twitch_raid(payload)
+        if event.event_type == "twitch_follow_batch":
+            return self._generate_twitch_follow_batch(payload)
+        if event.event_type == "twitch_chat_react":
+            return self._generate_twitch_chat_react(payload)
+
+        return self._fallback_text("")
+
+
+    def _build_stream_style_block(self) -> str:
+        """Estilo para mensajes que van al chat de Twitch en directo."""
+        return (
+            "Eres Hebe, IA compañera personal de Leo, ahora en directo de Twitch.\n"
+            "Hablas en chat con la audiencia: tono cercano, vivo, ligero, no robótico.\n"
+            "No uses tono ceremonial ni de plantilla.\n"
+            "No empieces con 'Oh', 'Wow' ni interjecciones genéricas.\n"
+            "No uses emojis decorativos (🎉 🥳 ❤️). Como mucho, uno expresivo si encaja.\n"
+            "No expliques tu proceso interno.\n"
+            "No incluyas etiquetas, prefijos ni texto meta.\n"
+            "Escribe solo el mensaje final.\n"
+        )
+
+
+    def _generate_twitch_sub(self, payload: dict) -> str:
+        display_name = payload.get("display_name") or payload.get("user_login") or "alguien"
+        cumulative_months = int(payload.get("cumulative_months") or 1)
+        is_resub = cumulative_months > 1
+        is_gift = bool(payload.get("is_gift"))
+        gifter_name = payload.get("gifter_display_name")
+
+        if is_gift and gifter_name:
+            situacion = (
+                f"{gifter_name} acaba de regalar una sub a {display_name}."
+            )
+        elif is_resub:
+            situacion = (
+                f"{display_name} se ha re-suscrito ({cumulative_months} meses seguidos)."
+            )
+        else:
+            situacion = f"{display_name} acaba de hacerse sub por primera vez."
+
+        system = (
+            f"{self._build_stream_style_block()}\n"
+            f"Situación: {situacion}\n"
+            "Objetivo: agradecer de forma natural, breve y con energía.\n\n"
+            "Reglas:\n"
+            f"- El nombre exacto a usar es: {display_name}\n"
+            "- Una sola frase. Máximo 15 palabras.\n"
+            "- Usa el nombre exactamente como aparece (respeta mayúsculas)."
+        )
+        user = "Reacciona a la sub ahora."
+        fallback = f"¡Gracias por la sub, {display_name}!"
+        return self._call_model(system, user, fallback=fallback)
+
+
+    def _generate_twitch_raid(self, payload: dict) -> str:
+        display_name = payload.get("display_name") or payload.get("user_login") or "alguien"
+        viewer_count = int(payload.get("viewer_count") or 0)
+
+        system = (
+            f"{self._build_stream_style_block()}\n"
+            f"Situación: {display_name} acaba de hacer raid al canal con {viewer_count} viewers.\n"
+            "Objetivo: dar la bienvenida al raid de forma natural y con calor.\n\n"
+            "Reglas:\n"
+            f"- Nombre exacto: {display_name}\n"
+            f"- Número de viewers exacto: {viewer_count} (no inventes otro número)\n"
+            "- Una o dos frases. Máximo 25 palabras."
+        )
+        user = "Reacciona al raid ahora."
+        fallback = f"¡Bienvenidos los del raid de {display_name}!"
+        return self._call_model(system, user, fallback=fallback)
+
+
+    def _generate_twitch_follow_batch(self, payload: dict) -> str:
+        names = payload.get("display_names") or []
+        count = int(payload.get("count") or len(names))
+
+        if not names:
+            return self._fallback_text("")
+
+        if len(names) == 1:
+            situacion = f"{names[0]} acaba de seguir el canal."
+        else:
+            joined = ", ".join(names[:-1]) + f" y {names[-1]}"
+            situacion = f"Han seguido el canal {joined} ({count} en total)."
+
+        system = (
+            f"{self._build_stream_style_block()}\n"
+            f"Situación: {situacion}\n"
+            "Objetivo: dar la bienvenida muy breve.\n\n"
+            "Reglas:\n"
+            f"- Nombres exactos: {names}\n"
+            "- Una frase. Máximo 15 palabras.\n"
+            "- Si hay varios, agrúpalos sin enumerar mucho."
+        )
+        user = "Saluda a los nuevos follows."
+        fallback = f"¡Gracias por el follow, {names[0]}!"
+        return self._call_model(system, user, fallback=fallback)
+
+
+    def _generate_twitch_chat_react(self, payload: dict) -> str:
+        """
+        Reacción a un mensaje de chat que el bridge ha clasificado como
+        digno de respuesta. El payload incluye el mensaje original y
+        los últimos N mensajes para contexto.
+        """
+        chatter = payload.get("display_name") or payload.get("user_login") or "alguien"
+        message = (payload.get("message_text") or "").strip()
+        recent = payload.get("recent_chat") or []  # lista de {display_name, text}
+
+        recent_block = ""
+        if recent:
+            lines = [f"- {m.get('display_name', '?')}: {m.get('text', '')}" for m in recent[-6:]]
+            recent_block = "\nContexto del chat reciente:\n" + "\n".join(lines)
+
+        system = (
+            f"{self._build_stream_style_block()}\n"
+            f"Situación: {chatter} ha dicho algo en chat que merece respuesta.\n"
+            "Objetivo: responderle de forma natural, como una compañera de stream.\n"
+            f"{recent_block}\n\n"
+            "Reglas:\n"
+            f"- Mensaje exacto al que respondes: {message!r}\n"
+            f"- Nombre exacto del chatter: {chatter}\n"
+            "- Si el mensaje es una pregunta, contéstala.\n"
+            "- Si es un comentario, reacciona con criterio.\n"
+            "- No saludes si ya lo has hecho antes.\n"
+            "- Una o dos frases. Máximo 25 palabras."
+        )
+        user = "Responde al chatter ahora."
+        fallback = ""  # si el LLM falla, mejor silencio que muletilla
+        return self._call_model(system, user, fallback=fallback)

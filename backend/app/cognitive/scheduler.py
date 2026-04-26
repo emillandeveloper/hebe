@@ -1,6 +1,7 @@
 # backend/app/cognitive/scheduler.py
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
@@ -33,19 +34,24 @@ class SchedulerService:
 
     def __init__(self, memory_store: MemoryStore):
         self.memory_store = memory_store
+        self._pending: deque[InternalEvent] = deque()
 
+    # Reemplazar poll_due_events por:
     def poll_due_events(self, limit: int = 20) -> list[InternalEvent]:
-        """
-        Busca reminders pendientes ya vencidos, los marca como fired
-        y devuelve eventos internos listos para procesar.
-        """
-        due_reminders = self.memory_store.list_due_reminders(limit=limit)
         events: list[InternalEvent] = []
 
-        for reminder in due_reminders:
-            event = self._fire_reminder(reminder)
-            if event is not None:
-                events.append(event)
+        # 1. Eventos pusheados manualmente (Twitch y otros conectores)
+        while self._pending and len(events) < limit:
+            events.append(self._pending.popleft())
+
+        # 2. Reminders vencidos (lógica existente)
+        remaining = limit - len(events)
+        if remaining > 0:
+            due_reminders = self.memory_store.list_due_reminders(limit=remaining)
+            for reminder in due_reminders:
+                event = self._fire_reminder(reminder)
+                if event is not None:
+                    events.append(event)
 
         return events
 
@@ -110,3 +116,15 @@ class SchedulerService:
     @staticmethod
     def _utc_now_iso() -> str:
         return datetime.now(timezone.utc).isoformat()
+    
+    def push_event(self, event_type: str, payload: Optional[dict] = None) -> InternalEvent:
+        """
+        Encola un evento manual para que poll_due_events lo entregue
+        al orquestador en su siguiente tick.
+
+        Útil para eventos externos (Twitch, futuros conectores) que deben
+        atravesar el mismo pipeline cognitivo que reminder_due.
+        """
+        event = self.build_manual_event(event_type=event_type, payload=payload)
+        self._pending.append(event)
+        return event

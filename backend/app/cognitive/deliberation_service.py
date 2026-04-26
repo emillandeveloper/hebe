@@ -52,7 +52,27 @@ class DeliberationService:
                 )
             )
 
+        # Eventos de stream (Twitch) — modo pasivo: solo reply, sin acciones de PC
+        if event.event_type.startswith("twitch_"):
+            return self._plan_twitch_event(event)
+
         return DeliberationResult(plan=Plan(steps=[]))
+
+    def _plan_twitch_event(self, event) -> DeliberationResult:
+        return DeliberationResult(
+            plan=Plan(
+                steps=[
+                    PlanStep(
+                        type="reply",
+                        data={
+                            "mode": event.event_type,
+                            "payload": event.payload,
+                        },
+                    )
+                ],
+                reasoning=f"Twitch event {event.event_type} -> stream reply",
+            )
+        )
 
     def _handle_user_input(self, context: BuiltContext) -> DeliberationResult:
         text = (context.input_text or "").strip().lower()
@@ -336,5 +356,24 @@ class DeliberationService:
                     )
                 ],
                 reasoning="Fallback chat",
+            )
+        )
+    def _plan_twitch_event(self, event) -> DeliberationResult:
+        """
+        Plan común para eventos de stream en modo pasivo.
+        El synthesizer decide el texto exacto según event_type.
+        """
+        return DeliberationResult(
+            plan=Plan(
+                steps=[
+                    PlanStep(
+                        type="reply",
+                        data={
+                            "mode": event.event_type,
+                            "payload": event.payload,
+                        },
+                    )
+                ],
+                reasoning=f"Stream event: {event.event_type}",
             )
         )

@@ -5,6 +5,9 @@ import os
 from dataclasses import dataclass
 from typing import Callable
 
+from dotenv import load_dotenv
+load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), '..', '..', '.env'))
+
 from app.core.ui_bridge import emit
 from app.core.state import HebeState
 from app.services.db_sqlite import log_chat
@@ -17,6 +20,7 @@ from app.services.win_automation import WinAutomationService
 
 from app.llm.ollama_intent_client import OllamaIntentClient
 
+from app.integrations.twitch.chat_bot import TwitchChatBot
 from app.integrations.twitch.chat_client import TwitchChatClient
 from app.integrations.twitch.chat_cache import TwitchChatCache
 from app.integrations.twitch.event_memory import TwitchEventMemory
@@ -26,13 +30,20 @@ from app.integrations.twitch.event_adapter import TwitchEventAdapter
 
 
 def build_speak() -> Callable[[str, str], None]:
+    tts_enabled = os.getenv("HEBE_TTS_ENABLED", "false").strip().lower() in ("1", "true", "yes", "on")
+
     def speak(text: str, language: str = "es") -> None:
+        if not tts_enabled:
+            print(f"[HEBE][TTS] disabled, dropped speech: {text!r}", flush=True)
+            return
+
         return _speak(
             text=text,
             language=language,
             emit=emit,
             log_chat=log_chat,
         )
+
     return speak
 
 
@@ -48,6 +59,8 @@ class HebeRuntime:
     state: HebeState
     twitch: TwitchService
     twitch_events: TwitchEventAdapter
+    twitch_chat_bot: TwitchChatBot
+    stt_enabled: bool
 
 
 def build_runtime() -> HebeRuntime:
@@ -67,6 +80,8 @@ def build_runtime() -> HebeRuntime:
         emit=emit,
         log_chat=log_chat,
     )
+
+    stt_enabled = os.getenv("HEBE_STT_ENABLED", "false").strip().lower() in ("1", "true", "yes", "on")
 
     # Modelo de intent/extracción estructurada: hebe-intent (qwen2.5:3b)
     intent_llm = OllamaIntentClient(
@@ -164,6 +179,13 @@ def build_runtime() -> HebeRuntime:
         enabled=twitch_enabled,
     )
 
+    twitch_chat_bot = TwitchChatBot(
+        channel_name=channel_name,
+        bot_username=bot_username,
+        oauth_token=oauth_token,
+        enabled=twitch_enabled,
+    )
+
     return HebeRuntime(
         stt=stt,
         llm=llm,
@@ -175,4 +197,6 @@ def build_runtime() -> HebeRuntime:
         state=state,
         twitch=twitch,
         twitch_events=twitch_events,
+        twitch_chat_bot=twitch_chat_bot,
+        stt_enabled=stt_enabled,
     )

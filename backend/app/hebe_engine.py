@@ -76,6 +76,29 @@ class HebeEngine:
         self.scheduler = SchedulerService(self.memory_store)
         self.context_builder = ContextBuilder(self.memory_store)
 
+        # Conectar Twitch events al scheduler
+        if hasattr(self.runtime, 'twitch_events') and self.runtime.twitch_events:
+            self.runtime.twitch_events.push_event_callback = lambda event_type, payload: self.scheduler.push_event(event_type, payload)
+
+        if hasattr(self.runtime, 'twitch_chat_bot') and self.runtime.twitch_chat_bot:
+            def _twitch_chat_callback(username, display_name, text, channel):
+                print(
+                    f"[HEBE][TWITCH][CHATBOT] dispatching event twitch_chat_react user={username!r} channel={channel!r} message={text!r}",
+                    flush=True,
+                )
+                self.scheduler.push_event(
+                    "twitch_chat_react",
+                    {
+                        "display_name": display_name,
+                        "user_login": username,
+                        "message_text": text,
+                        "channel": channel,
+                        "recent_chat": [],
+                    },
+                )
+
+            self.runtime.twitch_chat_bot.message_callback = _twitch_chat_callback
+
         # Modelos:
         # - intent: ya lo usas en legacy
         # - deliberation/summary: de momento reutilizo llm hasta separar runtime
@@ -240,11 +263,15 @@ class HebeEngine:
             flush=True,
         )
 
-        if reply_text:
-            try:
-                self.runtime.speak(reply_text)
-            except Exception as e:
-                print(f"[HEBE][EVENT] speak failed: {e!r}", flush=True)
+        if not reply_text:
+            return
+
+        # Routing del reply según tipo de evento
+        if event.event_type.startswith("twitch_"):
+            self._deliver_twitch_reply(reply_text)
+        else:
+            self._deliver_voice_reply(reply_text)
+
     def poll_internal_events(self) -> None:
         now = time.time()
         if now - self._last_scheduler_poll_ts < self.scheduler_poll_interval_sec:
@@ -273,12 +300,15 @@ class HebeEngine:
                 seed_default_apps()
 
                 emit("status", {"engine": "starting", "stage": "models"})
-                self.runtime.stt.init()
-                self._stt_worker = STTWorker(
-                    stt=self.runtime.stt,
-                    stop_event=self._stop_event,
-                )
-                self._stt_worker.start()
+                if getattr(self.runtime, "stt_enabled", True):
+                    self.runtime.stt.init()
+                    self._stt_worker = STTWorker(
+                        stt=self.runtime.stt,
+                        stop_event=self._stop_event,
+                    )
+                    self._stt_worker.start()
+                else:
+                    print("[HEBE][STT] disabled by HEBE_STT_ENABLED", flush=True)
 
                 # Arranque de Twitch EventSub / lectura de chat y eventos
                 if hasattr(self.runtime, "twitch_events") and self.runtime.twitch_events:
@@ -286,6 +316,12 @@ class HebeEngine:
                         self.runtime.twitch_events.start()
                     except Exception as e:
                         print(f"[HEBE][TWITCH][EVENTSUB] start failed: {e!r}", flush=True)
+
+                if hasattr(self.runtime, "twitch_chat_bot") and self.runtime.twitch_chat_bot:
+                    try:
+                        self.runtime.twitch_chat_bot.start()
+                    except Exception as e:
+                        print(f"[HEBE][TWITCH][CHATBOT] start failed: {e!r}", flush=True)
 
                 emit("status", {"engine": "ready", "stage": "ready"})
 
@@ -313,6 +349,12 @@ class HebeEngine:
         if hasattr(self.runtime, "twitch_events") and self.runtime.twitch_events:
             try:
                 self.runtime.twitch_events.stop()
+            except Exception:
+                pass
+
+        if hasattr(self.runtime, "twitch_chat_bot") and self.runtime.twitch_chat_bot:
+            try:
+                self.runtime.twitch_chat_bot.stop()
             except Exception:
                 pass
 
@@ -432,6 +474,31 @@ class HebeEngine:
                 return bool(getattr(policies, "allow_tts_replies", False))
 
         return True
+    def _deliver_twitch_reply(self, text: str) -> None:
+        """
+        Entrega un reply al chat de Twitch.
+        Si las policies del stream lo permiten, también lo hablamos por TTS.
+        """
+        twitch = getattr(self.runtime, "twitch", None)
+        if twitch is not None and twitch.is_available():
+            try:
+                twitch.send_message(text)
+            except Exception as e:
+                print(f"[HEBE][EVENT][TWITCH] send_message failed: {e!r}", flush=True)
+        else:
+            print("[HEBE][EVENT][TWITCH] service not available, dropping chat reply", flush=True)
+
+        stream = getattr(self.runtime.state, "stream", None)
+        policies = getattr(stream, "policies", None) if stream else None
+        if policies and getattr(policies, "allow_tts_replies", False):
+            self._deliver_voice_reply(text)
+
+
+    def _deliver_voice_reply(self, text: str) -> None:
+        try:
+            self.runtime.speak(text)
+        except Exception as e:
+            print(f"[HEBE][EVENT] speak failed: {e!r}", flush=True)
 
     def handle_command(self, command: str, source: str = "voice") -> str:
         print(f"[HEBE] handle_command source={source} text={command!r}", flush=True)
