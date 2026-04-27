@@ -10,6 +10,9 @@ from .ws import WSManager
 from .events import Event, ClientMsg
 from .hebe_adapter import HebeAdapter
 
+from dotenv import load_dotenv
+load_dotenv()
+
 last_status: dict | None = None
 
 app = FastAPI()

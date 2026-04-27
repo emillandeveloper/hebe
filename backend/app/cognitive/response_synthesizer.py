@@ -4,6 +4,11 @@ from typing import Any
 
 from app.cognitive.context_builder import BuiltContext
 from app.cognitive.models import DeliberationResult, ExecutionResult
+from app.cognitive.persona.hebe_voice import (
+    build_chat_react_examples,
+    build_stream_style_block as build_hebe_stream_style_block,
+)
+from app.cognitive.persona.replay_cleaner import clean_stream_reply
 
 
 class ResponseSynthesizer:
@@ -342,25 +347,34 @@ class ResponseSynthesizer:
 
         try:
             if hasattr(self.conversation_model, "chat") and callable(self.conversation_model.chat):
-                text = self.conversation_model.chat([
-                    {"role": "system", "content": system},
-                    {"role": "user",   "content": user},
-                ])
+                text = self.conversation_model.chat(
+                    [
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": user},
+                    ],
+                    num_predict=120,
+                )
                 text = (text or "").strip()
-                return text or fallback
+                # OllamaLLM.chat devuelve "…" si el modelo no produjo texto.
+                # Lo tratamos como vacío para que el fallback funcione.
+                if text in ("", "…"):
+                    return fallback
+                return text
 
             if hasattr(self.conversation_model, "complete") and callable(self.conversation_model.complete):
                 combined = f"{system}\n\n{user}"
-                text = self.conversation_model.complete(combined)
+                text = self.conversation_model.complete(combined, num_predict=120)
                 text = (text or "").strip()
-                return text or fallback
+                if text in ("", "…"):
+                    return fallback
+                return text
 
             raise AttributeError(
                 f"{type(self.conversation_model).__name__} no expone chat() ni complete()"
             )
 
         except Exception as e:
-            print(f"⚠️ Error en modelo conversacional: {e}")
+            print(f"⚠️ Error en modelo conversacional: {e}", flush=True)
             return fallback
 
     # =========================
@@ -421,6 +435,11 @@ class ResponseSynthesizer:
                 return f"{date_part} a las {time_part}"
             except Exception:
                 return iso_str
+
+    # =========================
+    # Twitch / stream generation
+    # =========================
+
     def _generate_twitch_reply(self, event) -> str:
         payload = event.payload or {}
 
@@ -435,20 +454,8 @@ class ResponseSynthesizer:
 
         return self._fallback_text("")
 
-
     def _build_stream_style_block(self) -> str:
-        """Estilo para mensajes que van al chat de Twitch en directo."""
-        return (
-            "Eres Hebe, IA compañera personal de Leo, ahora en directo de Twitch.\n"
-            "Hablas en chat con la audiencia: tono cercano, vivo, ligero, no robótico.\n"
-            "No uses tono ceremonial ni de plantilla.\n"
-            "No empieces con 'Oh', 'Wow' ni interjecciones genéricas.\n"
-            "No uses emojis decorativos (🎉 🥳 ❤️). Como mucho, uno expresivo si encaja.\n"
-            "No expliques tu proceso interno.\n"
-            "No incluyas etiquetas, prefijos ni texto meta.\n"
-            "Escribe solo el mensaje final.\n"
-        )
-
+        return build_hebe_stream_style_block()
 
     def _generate_twitch_sub(self, payload: dict) -> str:
         display_name = payload.get("display_name") or payload.get("user_login") or "alguien"
@@ -458,47 +465,45 @@ class ResponseSynthesizer:
         gifter_name = payload.get("gifter_display_name")
 
         if is_gift and gifter_name:
-            situacion = (
-                f"{gifter_name} acaba de regalar una sub a {display_name}."
-            )
+            situation = f"{gifter_name} acaba de regalar una sub a {display_name}."
         elif is_resub:
-            situacion = (
-                f"{display_name} se ha re-suscrito ({cumulative_months} meses seguidos)."
-            )
+            situation = f"{display_name} se ha re-suscrito ({cumulative_months} meses seguidos)."
         else:
-            situacion = f"{display_name} acaba de hacerse sub por primera vez."
+            situation = f"{display_name} acaba de hacerse sub por primera vez."
 
         system = (
-            f"{self._build_stream_style_block()}\n"
-            f"Situación: {situacion}\n"
+            f"{self._build_stream_style_block()}\n\n"
+            f"Situación: {situation}\n"
             "Objetivo: agradecer de forma natural, breve y con energía.\n\n"
             "Reglas:\n"
             f"- El nombre exacto a usar es: {display_name}\n"
             "- Una sola frase. Máximo 15 palabras.\n"
-            "- Usa el nombre exactamente como aparece (respeta mayúsculas)."
+            "- Usa el nombre exactamente como aparece, respetando mayúsculas.\n"
+            "- No generes diálogos ni turnos."
         )
-        user = "Reacciona a la sub ahora."
-        fallback = f"¡Gracias por la sub, {display_name}!"
-        return self._call_model(system, user, fallback=fallback)
-
+        user = "Genera SOLO el mensaje final de Hebe para enviar al chat de Twitch."
+        fallback = f"Gracias por la sub, {display_name}."
+        reply = self._call_model(system, user, fallback=fallback)
+        return clean_stream_reply(reply)
 
     def _generate_twitch_raid(self, payload: dict) -> str:
         display_name = payload.get("display_name") or payload.get("user_login") or "alguien"
         viewer_count = int(payload.get("viewer_count") or 0)
 
         system = (
-            f"{self._build_stream_style_block()}\n"
+            f"{self._build_stream_style_block()}\n\n"
             f"Situación: {display_name} acaba de hacer raid al canal con {viewer_count} viewers.\n"
             "Objetivo: dar la bienvenida al raid de forma natural y con calor.\n\n"
             "Reglas:\n"
             f"- Nombre exacto: {display_name}\n"
-            f"- Número de viewers exacto: {viewer_count} (no inventes otro número)\n"
-            "- Una o dos frases. Máximo 25 palabras."
+            f"- Número de viewers exacto: {viewer_count}. No inventes otro número.\n"
+            "- Una o dos frases. Máximo 25 palabras.\n"
+            "- No generes diálogos ni turnos."
         )
-        user = "Reacciona al raid ahora."
-        fallback = f"¡Bienvenidos los del raid de {display_name}!"
-        return self._call_model(system, user, fallback=fallback)
-
+        user = "Genera SOLO el mensaje final de Hebe para enviar al chat de Twitch."
+        fallback = f"Bienvenidos los del raid de {display_name}."
+        reply = self._call_model(system, user, fallback=fallback)
+        return clean_stream_reply(reply)
 
     def _generate_twitch_follow_batch(self, payload: dict) -> str:
         names = payload.get("display_names") or []
@@ -508,53 +513,98 @@ class ResponseSynthesizer:
             return self._fallback_text("")
 
         if len(names) == 1:
-            situacion = f"{names[0]} acaba de seguir el canal."
+            situation = f"{names[0]} acaba de seguir el canal."
         else:
             joined = ", ".join(names[:-1]) + f" y {names[-1]}"
-            situacion = f"Han seguido el canal {joined} ({count} en total)."
+            situation = f"Han seguido el canal {joined} ({count} en total)."
 
         system = (
-            f"{self._build_stream_style_block()}\n"
-            f"Situación: {situacion}\n"
+            f"{self._build_stream_style_block()}\n\n"
+            f"Situación: {situation}\n"
             "Objetivo: dar la bienvenida muy breve.\n\n"
             "Reglas:\n"
             f"- Nombres exactos: {names}\n"
             "- Una frase. Máximo 15 palabras.\n"
-            "- Si hay varios, agrúpalos sin enumerar mucho."
+            "- Si hay varios, agrúpalos sin enumerar mucho.\n"
+            "- No generes diálogos ni turnos."
         )
-        user = "Saluda a los nuevos follows."
-        fallback = f"¡Gracias por el follow, {names[0]}!"
-        return self._call_model(system, user, fallback=fallback)
-
+        user = "Genera SOLO el mensaje final de Hebe para enviar al chat de Twitch."
+        fallback = f"Gracias por el follow, {names[0]}."
+        reply = self._call_model(system, user, fallback=fallback)
+        return clean_stream_reply(reply)
 
     def _generate_twitch_chat_react(self, payload: dict) -> str:
         """
-        Reacción a un mensaje de chat que el bridge ha clasificado como
-        digno de respuesta. El payload incluye el mensaje original y
-        los últimos N mensajes para contexto.
+        Reacción a un mensaje de chat clasificado como digno de respuesta.
+        Usa formato de continuación [chatter]: ... \\n[tú]: para que el modelo
+        complete según los few-shots de hebe_voice.
         """
-        chatter = payload.get("display_name") or payload.get("user_login") or "alguien"
+        user_login = (payload.get("user_login") or "").strip()
+        display_name = payload.get("display_name") or user_login or "alguien"
+        chatter = display_name
         message = (payload.get("message_text") or "").strip()
-        recent = payload.get("recent_chat") or []  # lista de {display_name, text}
+        recent = payload.get("recent_chat") or []
 
+        is_broadcaster = self._is_broadcaster(payload)
+
+        # Bloque de contexto reciente, si lo hay.
         recent_block = ""
         if recent:
-            lines = [f"- {m.get('display_name', '?')}: {m.get('text', '')}" for m in recent[-6:]]
-            recent_block = "\nContexto del chat reciente:\n" + "\n".join(lines)
+            lines = [
+                f"- {m.get('display_name', '?')}: {m.get('text', '')}"
+                for m in recent[-6:]
+            ]
+            recent_block = "\n\nContexto del chat reciente:\n" + "\n".join(lines)
 
-        system = (
-            f"{self._build_stream_style_block()}\n"
-            f"Situación: {chatter} ha dicho algo en chat que merece respuesta.\n"
-            "Objetivo: responderle de forma natural, como una compañera de stream.\n"
-            f"{recent_block}\n\n"
-            "Reglas:\n"
-            f"- Mensaje exacto al que respondes: {message!r}\n"
-            f"- Nombre exacto del chatter: {chatter}\n"
-            "- Si el mensaje es una pregunta, contéstala.\n"
-            "- Si es un comentario, reacciona con criterio.\n"
-            "- No saludes si ya lo has hecho antes.\n"
-            "- Una o dos frases. Máximo 25 palabras."
+        # Aviso sobre quién está hablando, integrado en el system.
+        speaker_block = (
+            "\n\nIMPORTANTE: quien escribe este mensaje ES Leo, tu compañero y broadcaster. "
+            "No lo trates como un viewer cualquiera. Puedes vacilarle con confianza."
+            if is_broadcaster
+            else ""
         )
-        user = "Responde al chatter ahora."
-        fallback = ""  # si el LLM falla, mejor silencio que muletilla
-        return self._call_model(system, user, fallback=fallback)
+
+        # System: identidad + few-shots + contexto.
+        system = (
+            f"{self._build_stream_style_block()}\n\n"
+            f"{build_chat_react_examples()}"
+            f"{speaker_block}"
+            f"{recent_block}"
+        )
+
+        # User: patrón de continuación. El modelo completa después de [tú]:
+        # Esto encaja con los 48 few-shots y reduce drásticamente las
+        # respuestas vacías o con turnos inventados.
+        chatter_tag = (
+            "[chatter Leo]:"
+            if is_broadcaster
+            else "[chatter]:"
+        )
+        user = f"{chatter_tag} {message}\n[tú]:"
+
+        fallback = ""
+        reply = self._call_model(system, user, fallback=fallback)
+
+        return clean_stream_reply(reply, source_message=message)
+
+    def _is_broadcaster(self, payload: dict) -> bool:
+        if bool(payload.get("is_broadcaster")):
+            return True
+
+        candidates = {
+            str(payload.get("user_login") or "").lower().strip(),
+            str(payload.get("display_name") or "").lower().strip(),
+            str(payload.get("chatter_user_login") or "").lower().strip(),
+            str(payload.get("chatter_user_name") or "").lower().strip(),
+        }
+
+        candidates.discard("")
+
+        broadcaster_aliases = {
+            "leonifelheim",
+            "leo_nifelheim",
+            "leo nifelheim",
+            "leo",
+        }
+
+        return bool(candidates & broadcaster_aliases)

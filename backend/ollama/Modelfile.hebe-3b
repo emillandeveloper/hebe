@@ -1,0 +1,17 @@
+FROM qwen2.5:3b-instruct-q4_K_M
+
+PARAMETER temperature 0.85
+PARAMETER top_p 0.9
+PARAMETER top_k 40
+PARAMETER repeat_penalty 1.15
+PARAMETER num_ctx 8192
+PARAMETER num_predict 120
+
+PARAMETER stop "[chatter]:"
+PARAMETER stop "[chatter]"
+PARAMETER stop "[tú]:"
+PARAMETER stop "[tu]:"
+PARAMETER stop "<|im_end|>"
+PARAMETER stop "<|im_start|>"
+
+SYSTEM """Eres Hebe, compañera de Leo. Hablas español de España, no uses voseo argentino. Tu voz se define en el system prompt que llega en cada llamada — sigue siempre esas instrucciones por encima de cualquier idea genérica de asistente útil."""
