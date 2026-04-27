@@ -29,11 +29,13 @@ class TwitchEventAdapter:
         keepalive_timeout_seconds: int = 30,
         session: Optional[requests.Session] = None,
         push_event_callback: Optional[Callable[[str, dict], None]] = None,
+        bot_username: str = "",
     ) -> None:
         self.client_id = str(client_id or "").strip()
         self.user_oauth_token = str(user_oauth_token or "").strip()
         self.broadcaster_user_id = str(broadcaster_user_id or "").strip()
         self.bot_user_id = str(bot_user_id or "").strip()
+        self.bot_username = str(bot_username or "").strip().lower()
         self.twitch_service = twitch_service
         self.enabled = enabled
         self.keepalive_timeout_seconds = int(keepalive_timeout_seconds)
@@ -161,7 +163,9 @@ class TwitchEventAdapter:
         if not self._session_id:
             return
 
-        # Chat messages
+        # Chat messages — los recibimos para alimentar chat_cache (target_resolver),
+        # pero NO disparamos cognitive_flow desde aquí. De eso se encarga TwitchChatBot
+        # vía IRC, que tiene filtro de mention.
         self._create_subscription(
             sub_type="channel.chat.message",
             version="1",
@@ -253,6 +257,9 @@ class TwitchEventAdapter:
         print(f"[HEBE][TWITCH][EVENTSUB] event type={sub_type} event={event}", flush=True)
 
         if sub_type == "channel.chat.message":
+            # Solo alimentamos chat_cache para que target_resolver funcione.
+            # NO disparamos twitch_chat_react desde aquí — lo hace TwitchChatBot
+            # vía IRC con su propio filtro de mention.
             chatter_user_name = str(event.get("chatter_user_name") or "").strip()
             chatter_user_login = str(event.get("chatter_user_login") or "").strip()
             message_text = str((event.get("message") or {}).get("text") or "").strip()
@@ -266,14 +273,6 @@ class TwitchEventAdapter:
                     display_name=display_name,
                     text=message_text,
                 )
-                # Solo generar evento si no es el bot mismo
-                if username.lower() != self.bot_username.lower() and self.push_event_callback:
-                    self.push_event_callback("twitch_chat_react", {
-                        "display_name": display_name,
-                        "user_login": username,
-                        "message_text": message_text,
-                        "recent_chat": [],  # TODO: implementar contexto reciente
-                    })
             return
 
         if sub_type == "channel.follow":

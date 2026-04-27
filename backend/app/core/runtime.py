@@ -170,14 +170,15 @@ def build_runtime() -> HebeRuntime:
         channel_name=channel_name,
         bot_username=bot_username,
     )
-
+    broadcaster_oauth_token = os.getenv("TWITCH_BROADCASTER_OAUTH_TOKEN", oauth_token)
     twitch_events = TwitchEventAdapter(
         client_id=client_id,
-        user_oauth_token=oauth_token,
+        user_oauth_token=broadcaster_oauth_token,
         broadcaster_user_id=broadcaster_id,
         bot_user_id=sender_id,
         twitch_service=twitch,
         enabled=twitch_enabled,
+        bot_username=bot_username,
     )
 
     twitch_chat_bot = TwitchChatBot(
