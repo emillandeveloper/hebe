@@ -1,14 +1,27 @@
 from __future__ import annotations
 
+import random
+import uuid
 from typing import Any
 
 from app.cognitive.context_builder import BuiltContext
 from app.cognitive.models import DeliberationResult, ExecutionResult
+from app.cognitive.persona.chatter_names import normalize_chatter_name
 from app.cognitive.persona.hebe_voice import (
     build_chat_react_examples,
     build_stream_style_block as build_hebe_stream_style_block,
 )
-from app.cognitive.persona.replay_cleaner import clean_stream_reply
+from app.cognitive.persona.reply_cleaner import (
+    clean_stream_reply,
+    detect_helper_pattern,
+)
+from app.cognitive.persona.stream_metrics import StreamReplyStats
+
+
+# Cuántas veces reintentamos la generación si detectamos un patrón helper.
+# 1 retry suele bastar: con seed distinto, qwen 2.5:3b suele recuperarse.
+# Subirlo aumenta latencia por mensaje y puede no aportar nada.
+MAX_HELPER_RETRIES = 1
 
 
 class ResponseSynthesizer:
@@ -23,6 +36,8 @@ class ResponseSynthesizer:
 
     def __init__(self, conversation_model: Any | None = None):
         self.conversation_model = conversation_model
+        # Métricas acumuladas del stream (en memoria, se pierden al reiniciar).
+        self._stream_stats = StreamReplyStats()
 
     # =========================
     # Entry point
@@ -341,18 +356,39 @@ class ResponseSynthesizer:
     # Model call con system/user separados
     # =========================
 
-    def _call_model(self, system: str, user: str, fallback: str) -> str:
+    def _call_model(
+        self,
+        system: str,
+        user: str,
+        fallback: str,
+        *,
+        seed: int | None = None,
+    ) -> str:
+        """
+        Llama al modelo conversacional con system/user separados.
+
+        seed: si se pasa, se incluye en kwargs hacia .chat()/.complete().
+              OllamaLLM debe propagarlo a `options.seed` del payload de
+              Ollama. Si tu wrapper no lo acepta como kwarg, ignora el
+              parámetro silenciosamente (kwargs sueltos se pasan tal cual
+              y Ollama los acepta o los ignora según versión).
+              Útil para retry: cambia la generación entre intentos.
+        """
         if self.conversation_model is None:
             return fallback
 
         try:
+            kwargs: dict[str, Any] = {"num_predict": 120}
+            if seed is not None:
+                kwargs["seed"] = seed
+
             if hasattr(self.conversation_model, "chat") and callable(self.conversation_model.chat):
                 text = self.conversation_model.chat(
                     [
                         {"role": "system", "content": system},
                         {"role": "user", "content": user},
                     ],
-                    num_predict=120,
+                    **kwargs,
                 )
                 text = (text or "").strip()
                 # OllamaLLM.chat devuelve "…" si el modelo no produjo texto.
@@ -363,7 +399,7 @@ class ResponseSynthesizer:
 
             if hasattr(self.conversation_model, "complete") and callable(self.conversation_model.complete):
                 combined = f"{system}\n\n{user}"
-                text = self.conversation_model.complete(combined, num_predict=120)
+                text = self.conversation_model.complete(combined, **kwargs)
                 text = (text or "").strip()
                 if text in ("", "…"):
                     return fallback
@@ -536,16 +572,42 @@ class ResponseSynthesizer:
     def _generate_twitch_chat_react(self, payload: dict) -> str:
         """
         Reacción a un mensaje de chat clasificado como digno de respuesta.
-        Usa formato de continuación [chatter]: ... \\n[tú]: para que el modelo
-        complete según los few-shots de hebe_voice.
+
+        Usa formato de continuación [chatter Nombre]: ... \\n[tú]: para que
+        el modelo complete según los few-shots de hebe_voice.
+
+        Flujo (28/04 — añadido retry + filtro helper):
+          1. Normaliza el display_name del chatter ('nuriiia___' -> 'Nuria').
+          2. Detecta is_broadcaster con la lógica rica habitual.
+          3. Construye el prompt con [chatter Nombre]: msg\\n[tú]:.
+          4. Llama al modelo. Aplica clean_stream_reply al resultado.
+          5. Si el resultado engancha algún patrón helper, retry con seed
+             distinto (hasta MAX_HELPER_RETRIES). Si retry vuelve a fallar,
+             publica la respuesta igualmente — mejor algo imperfecto que
+             silencio en chat.
+          6. Registra métricas en self._stream_stats. Cada 50 mensajes
+             vuelca un STREAM_SUMMARY para datos parciales aunque caiga
+             el backend.
+
+        Logs emitidos (todos con tag [HEBE][REPLY] para grepear):
+          - BEGIN  : entrada del flujo, datos crudos.
+          - RAW    : la respuesta del modelo, cruda y limpiada (por intento).
+          - HELPER_DETECTED   : si engancha un patrón helper.
+          - HELPER_PUBLISHED  : si tras todos los retries seguía enganchando.
+          - END    : resumen del flujo de esta respuesta.
         """
         user_login = (payload.get("user_login") or "").strip()
-        display_name = payload.get("display_name") or user_login or "alguien"
-        chatter = display_name
+        display_name_raw = payload.get("display_name") or user_login or ""
+        chatter_clean = normalize_chatter_name(display_name_raw)
         message = (payload.get("message_text") or "").strip()
         recent = payload.get("recent_chat") or []
 
         is_broadcaster = self._is_broadcaster(payload)
+
+        # trace_id corto para correlacionar todas las líneas de log de
+        # esta generación. Si el caller ya pasa uno (porque viene del
+        # scheduler con un trace de mayor nivel), úsalo.
+        trace_id = payload.get("trace_id") or uuid.uuid4().hex[:8]
 
         # Bloque de contexto reciente, si lo hay.
         recent_block = ""
@@ -573,19 +635,96 @@ class ResponseSynthesizer:
         )
 
         # User: patrón de continuación. El modelo completa después de [tú]:
-        # Esto encaja con los 48 few-shots y reduce drásticamente las
-        # respuestas vacías o con turnos inventados.
+        # Ahora SIEMPRE usamos el nombre limpio del chatter, no [chatter]:
+        # plano. Los few-shots de hebe_voice incluyen ejemplos con
+        # [chatter Nuria]:, [chatter Daniela]:, etc., así que el modelo
+        # aprende a hablarles a ELLOS, no a narrar a Leo en tercera persona.
+        visible_chatter_name = "Leo" if is_broadcaster else (display_name_raw or chatter_clean)
+
         chatter_tag = (
             "[chatter Leo]:"
             if is_broadcaster
-            else "[chatter]:"
+            else f"[chatter {visible_chatter_name}]:"
         )
+
         user = f"{chatter_tag} {message}\n[tú]:"
+        print(
+            f"[HEBE][REPLY][BEGIN] trace={trace_id} "
+            f"chatter_raw={display_name_raw!r} chatter_clean={chatter_clean!r} "
+            f"is_broadcaster={is_broadcaster} msg={message!r}",
+            flush=True,
+        )
 
-        fallback = ""
-        reply = self._call_model(system, user, fallback=fallback)
+        helper_hits: list[str] = []
+        final_reply = ""
+        final_helper: str | None = None
 
-        return clean_stream_reply(reply, source_message=message)
+        for attempt in range(MAX_HELPER_RETRIES + 1):
+            # Seed distinto en cada intento para que el retry no regenere
+            # exactamente lo mismo. Si OllamaLLM no acepta seed como kwarg,
+            # se pasa al options de Ollama y se ignora silenciosamente si
+            # no lo soporta tu versión del wrapper.
+            seed = random.randint(0, 1_000_000)
+            print("[HEBE][REPLY][PROMPT_DEBUG]", system, user, flush=True)
+            raw = self._call_model(system, user, fallback="", seed=seed)
+            cleaned = clean_stream_reply(raw, source_message=message)
+
+            print(
+                f"[HEBE][REPLY][RAW] trace={trace_id} attempt={attempt} "
+                f"seed={seed} raw={raw!r} cleaned={cleaned!r}",
+                flush=True,
+            )
+
+            helper = detect_helper_pattern(cleaned)
+            if helper is None:
+                # Respuesta limpia (o vacía, que también está bien — el
+                # caller publicará "" como silencio).
+                final_reply = cleaned
+                final_helper = None
+                break
+
+            # Engancha un patrón helper.
+            helper_hits.append(helper)
+            print(
+                f"[HEBE][REPLY][HELPER_DETECTED] trace={trace_id} "
+                f"attempt={attempt} pattern={helper} text={cleaned!r}",
+                flush=True,
+            )
+
+            if attempt == MAX_HELPER_RETRIES:
+                # Se acabaron los reintentos. Publicamos lo que hay para
+                # no dejar al chatter sin respuesta. Lo marcamos en el log.
+                final_reply = cleaned
+                final_helper = helper
+                print(
+                    f"[HEBE][REPLY][HELPER_PUBLISHED] trace={trace_id} "
+                    f"patterns={helper_hits} final={final_reply!r}",
+                    flush=True,
+                )
+
+        retried = len(helper_hits) > 0
+        salvaged = retried and final_helper is None
+
+        print(
+            f"[HEBE][REPLY][END] trace={trace_id} helper_hits={helper_hits} "
+            f"retried={retried} salvaged={salvaged} final={final_reply!r}",
+            flush=True,
+        )
+
+        # Registrar en métricas acumuladas del stream.
+        self._stream_stats.record(
+            chatter=chatter_clean,
+            helper_hits=helper_hits,
+            retried=retried,
+            salvaged=salvaged,
+        )
+
+        # Volcar resumen cada 50 mensajes para tener datos parciales aunque
+        # se caiga el backend antes de que termine el stream.
+        if self._stream_stats.total > 0 and self._stream_stats.total % 50 == 0:
+            self._stream_stats.log_summary()
+
+        return final_reply
 
     def _is_broadcaster(self, payload: dict) -> bool:
         if bool(payload.get("is_broadcaster")):

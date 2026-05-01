@@ -19,6 +19,10 @@ class OllamaLLM:
     - `complete()` es la API recomendada para el flujo cognitivo
     - `ask_stateless()` queda útil para NLU / clasificación
     - `ask()` se mantiene temporalmente para compatibilidad con legacy
+
+    CAMBIO 28/04: añadido soporte de `seed` opcional en chat()/complete()
+    para permitir retry con generación distinta tras detectar patrones
+    helper en respuestas de Twitch.
     """
 
     def __init__(
@@ -107,17 +111,26 @@ class OllamaLLM:
         top_p: Optional[float] = None,
         num_predict: Optional[int] = None,
         num_ctx: Optional[int] = None,
+        seed: Optional[int] = None,
     ) -> str:
+        # Construimos options dinámicamente: seed solo se incluye si se ha
+        # pasado explícitamente, para no cambiar el comportamiento de las
+        # llamadas existentes que NO usan seed (que deben seguir teniendo
+        # generación libre y no determinista de Ollama por defecto).
+        options: dict[str, Any] = {
+            "temperature": self.temperature if temperature is None else temperature,
+            "repeat_penalty": self.repeat_penalty if repeat_penalty is None else repeat_penalty,
+            "top_p": self.top_p if top_p is None else top_p,
+            "num_predict": self.num_predict if num_predict is None else num_predict,
+            "num_ctx": self.num_ctx if num_ctx is None else num_ctx,
+        }
+        if seed is not None:
+            options["seed"] = seed
+
         resp = ollama.chat(
             model=self.model,
             messages=messages,
-            options={
-                "temperature": self.temperature if temperature is None else temperature,
-                "repeat_penalty": self.repeat_penalty if repeat_penalty is None else repeat_penalty,
-                "top_p": self.top_p if top_p is None else top_p,
-                "num_predict": self.num_predict if num_predict is None else num_predict,
-                "num_ctx": self.num_ctx if num_ctx is None else num_ctx,
-            },
+            options=options,
         )
 
         return self._extract_text(resp)
@@ -132,10 +145,15 @@ class OllamaLLM:
         *,
         temperature: float = 0.7,
         num_predict: Optional[int] = None,
+        seed: Optional[int] = None,
     ) -> str:
         """
         Inferencia stateless sobre un prompt único.
         Esta es la API recomendada para ResponseSynthesizer.
+
+        seed: si se pasa, se fija el seed de Ollama para que la
+              generación sea reproducible. Úsalo para retry con
+              variación controlada.
         """
         try:
             prompt = (prompt or "").strip()
@@ -146,6 +164,7 @@ class OllamaLLM:
                 [{"role": "user", "content": prompt}],
                 temperature=temperature,
                 num_predict=num_predict,
+                seed=seed,
             )
 
             if text:
@@ -163,11 +182,15 @@ class OllamaLLM:
         *,
         temperature: float = 0.7,
         num_predict: Optional[int] = None,
+        seed: Optional[int] = None,
     ) -> str:
         """
         Chat stateless con mensajes explícitos.
         Útil si más adelante quieres prompts tipo system/user/assistant
         controlados por Hebe, no por el wrapper.
+
+        seed: si se pasa, se fija el seed de Ollama. Útil para retry
+              con variación tras detectar patrones helper.
         """
         try:
             if not messages:
@@ -177,6 +200,7 @@ class OllamaLLM:
                 messages,
                 temperature=temperature,
                 num_predict=num_predict,
+                seed=seed,
             )
 
             if text:

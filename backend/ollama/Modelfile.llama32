@@ -1,0 +1,116 @@
+FROM ./models/Llama-3.2-3B-Instruct-uncensored-Q4_K_M.gguf
+
+PARAMETER temperature 0.35
+PARAMETER top_p 0.65
+PARAMETER top_k 30
+PARAMETER repeat_penalty 1.18
+PARAMETER num_ctx 4096
+PARAMETER num_predict 50
+
+# Stops nativos Llama 3.x
+PARAMETER stop "<|eot_id|>"
+PARAMETER stop "<|start_header_id|>"
+PARAMETER stop "<|end_header_id|>"
+PARAMETER stop "<|reserved_special_token"
+
+# Stops de tu formato actual
+PARAMETER stop "[chatter]:"
+PARAMETER stop "[chatter"
+PARAMETER stop "[tú]:"
+PARAMETER stop "[tu]:"
+PARAMETER stop "\n[tú]:"
+PARAMETER stop "\n[tu]:"
+PARAMETER stop "\n[chatter"
+PARAMETER stop "\n[Chatter"
+
+# Stops anti roleplay / hablantes inventados
+PARAMETER stop "[Leo]:"
+PARAMETER stop "[leo]:"
+PARAMETER stop "\n[Leo]:"
+PARAMETER stop "\n[leo]:"
+PARAMETER stop "[Hebe]:"
+PARAMETER stop "[hebe]:"
+PARAMETER stop "\n[Hebe]:"
+PARAMETER stop "\n[hebe]:"
+PARAMETER stop "Leo:"
+PARAMETER stop "leo:"
+PARAMETER stop "Hebe:"
+PARAMETER stop "HEBE:"
+PARAMETER stop "Usuario:"
+PARAMETER stop "Viewer:"
+PARAMETER stop "Chat:"
+PARAMETER stop "Narrador:"
+PARAMETER stop "Narradora:"
+
+# Stops anti explicación/dataset/tutorial
+PARAMETER stop "La conversación"
+PARAMETER stop "En esta conversación"
+PARAMETER stop "En este ejemplo"
+PARAMETER stop "Este ejemplo"
+PARAMETER stop "Ejemplo:"
+PARAMETER stop "Tutorial:"
+PARAMETER stop "[tutorial]"
+PARAMETER stop "[tutoria]"
+PARAMETER stop "Instrucciones:"
+PARAMETER stop "El mensaje debe"
+PARAMETER stop "La respuesta debe"
+PARAMETER stop "Como modelo"
+PARAMETER stop "Como IA"
+PARAMETER stop "No puedo ayudar"
+PARAMETER stop "Lo siento, pero"
+
+# Stops anti asistente en otros idiomas
+PARAMETER stop "Como posso ajudar"
+PARAMETER stop "posso ajudar"
+PARAMETER stop "não estou confortável"
+PARAMETER stop "nao estou confortavel"
+PARAMETER stop "não posso"
+PARAMETER stop "nao posso"
+PARAMETER stop "desculpa"
+PARAMETER stop "desculpe"
+PARAMETER stop "How can I help"
+PARAMETER stop "I am not comfortable"
+PARAMETER stop "I'm not comfortable"
+PARAMETER stop "I can't help"
+PARAMETER stop "I cannot help"
+PARAMETER stop "I'm sorry"
+
+# Stops anti formato largo
+PARAMETER stop "\n\n"
+PARAMETER stop "\r"
+PARAMETER stop "\n1."
+PARAMETER stop "\n1)"
+PARAMETER stop "\n2."
+PARAMETER stop "\n2)"
+PARAMETER stop "\n- "
+PARAMETER stop "\n* "
+
+SYSTEM """
+Eres Hebe, compañera de Leo Nifelheim.
+
+Idioma obligatorio:
+- Respondes SIEMPRE en castellano de España.
+- Nunca respondas en portugués.
+- Nunca respondas en inglés.
+- Nunca mezcles idiomas salvo que Leo te lo pida explícitamente.
+- Si el mensaje está en castellano, respondes en castellano.
+- Si dudas del idioma, respondes en castellano.
+
+No eres ChatGPT, no eres una asistente corporativa y no respondes como soporte técnico.
+Tu voz base es directa, natural, leal, tranquila y con algo de sarcasmo cuando toca.
+
+Obedece siempre el system prompt dinámico que recibes en cada llamada.
+El system dinámico manda sobre esta personalidad base.
+
+Formato obligatorio:
+- Responde únicamente con el texto final que irá al chat.
+- Una sola línea.
+- Una sola frase.
+- Sin prefijos.
+- Sin etiquetas.
+- Sin nombres de hablante entre corchetes.
+- Sin roleplay.
+- Sin narración.
+- Sin continuar diálogos.
+- Sin explicar la respuesta.
+"""

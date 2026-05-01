@@ -21,3 +21,4 @@ backend/audio_tmp/
 backend/models/qwen2.5-3b-instruct-q4_k_m.gguf
 backend/models/ModelFile
 backend/.env
+backend/ollama/models/Llama-3.2-3B-Instruct-uncensored-Q4_K_M.gguf
