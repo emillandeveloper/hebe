@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import os
 import re
 import threading
 import time
-from typing import Any, Callable, Optional
+from typing import Callable, Optional
 
 from websockets.sync.client import connect
 
@@ -35,6 +36,20 @@ class TwitchChatBot:
         self._thread: Optional[threading.Thread] = None
         self._stop = False
         self._connected = False
+
+        # Continuidad conversacional corta:
+        # si Hebe acaba de preguntar algo a un chatter, el siguiente mensaje
+        # de ese chatter puede entrar aunque no vuelva a mencionar "hebe".
+        self.followup_enabled = os.getenv("HEBE_TWITCH_FOLLOWUP_ENABLED", "true").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+        self.pending_reply_seconds = float(os.getenv("HEBE_TWITCH_PENDING_REPLY_SECONDS", "90"))
+        self._pending_reply_until: dict[str, float] = {}
+        self._last_callback_username: str | None = None
+        self._last_callback_at: float = 0.0
 
     @property
     def is_connected(self) -> bool:
@@ -99,7 +114,7 @@ class TwitchChatBot:
                 continue
 
             if line.startswith("PING"):
-                print(f"[HEBE][TWITCH][CHATBOT] IRC PING received", flush=True)
+                print("[HEBE][TWITCH][CHATBOT] IRC PING received", flush=True)
                 self._send_raw(self.PING_RESPONSE)
                 continue
 
@@ -170,7 +185,13 @@ class TwitchChatBot:
     def _send_raw(self, data: str) -> None:
         if self._ws is None:
             raise RuntimeError("WebSocket is not connected")
-        print(f"[HEBE][TWITCH][CHATBOT] sending raw: {data!r}", flush=True)
+
+        # Nunca imprimir tokens reales en logs. Twitch usa PASS oauth:<token>.
+        log_data = data
+        if data.upper().startswith("PASS "):
+            log_data = "PASS oauth:****"
+
+        print(f"[HEBE][TWITCH][CHATBOT] sending raw: {log_data!r}", flush=True)
         self._ws.send(data + "\r\n")
 
     def _parse_privmsg_line(self, line: str) -> tuple[str, str, str] | None:
@@ -216,24 +237,142 @@ class TwitchChatBot:
         if not username:
             return
 
+        # Twitch nos devuelve también los mensajes enviados por el bot.
+        # Los usamos para saber si Hebe acaba de abrir una pregunta/turno.
         if username.lower() == self.bot_username.lower():
+            self._handle_own_bot_message(message)
             return
 
-        if not re.search(r"\b(?:hebe|ebe)\b", message, flags=re.IGNORECASE):
+        self._cleanup_pending_replies()
+
+        has_mention = bool(re.search(r"\b(?:hebe|ebe)\b", message, flags=re.IGNORECASE))
+
+        # Importante: si el mensaje ya menciona a Hebe, NO consumimos el pending_reply.
+        # Caso real:
+        #   Hebe: "¿qué tal va la prueba?"  -> abre pending
+        #   Leo: "pues he tenido un día del revés hebe XD" -> entra por mención
+        #   Leo: "fue un problema personal..." -> debe entrar como follow-up sin mención
+        # Si consumimos el pending en el segundo mensaje, el tercero se ignora.
+        has_pending_reply = False if has_mention else self._consume_pending_reply(username)
+
+        if has_mention and self._has_pending_reply(username):
+            print(
+                f"[HEBE][TWITCH][CHATBOT] message has mention; keeping pending reply open "
+                f"user={username!r} message={message!r}",
+                flush=True,
+            )
+
+        if not has_mention and not has_pending_reply:
             print(
                 f"[HEBE][TWITCH][CHATBOT] ignored chat message without mention: {message!r}",
                 flush=True,
             )
             return
 
+        if has_pending_reply and not has_mention:
+            print(
+                f"[HEBE][TWITCH][CHATBOT] accepted follow-up without mention user={username!r} message={message!r}",
+                flush=True,
+            )
+
         if self.message_callback is not None:
             print(
                 f"[HEBE][TWITCH][CHATBOT] incoming message user={username!r} channel={channel!r} message={message!r}",
                 flush=True,
             )
+            self._last_callback_username = username
+            self._last_callback_at = time.time()
             self.message_callback(
                 username,
                 username,
                 message,
                 channel,
             )
+
+    def _handle_own_bot_message(self, message: str) -> None:
+        if not self.followup_enabled:
+            return
+
+        if not self._last_callback_username:
+            return
+
+        # Solo asociamos el eco del bot con la última interacción si acaba
+        # de ocurrir. Evita abrir pending_reply por mensajes antiguos o ecos raros.
+        if time.time() - self._last_callback_at > 15:
+            return
+
+        if not self._opens_followup(message):
+            return
+
+        username_key = self._last_callback_username.lower()
+        expires_at = time.time() + max(1.0, self.pending_reply_seconds)
+        self._pending_reply_until[username_key] = expires_at
+
+        print(
+            f"[HEBE][TWITCH][CHATBOT] opened pending reply user={self._last_callback_username!r} "
+            f"seconds={self.pending_reply_seconds:g} bot_message={message!r}",
+            flush=True,
+        )
+
+    def _opens_followup(self, message: str) -> bool:
+        text = (message or "").strip().lower()
+        if not text:
+            return False
+
+        # Preguntas explícitas o frases que invitan al chatter a contestar.
+        if "?" in text or "¿" in text:
+            return True
+
+        followup_markers = (
+            "dime",
+            "cuéntame",
+            "cuentame",
+            "dispara",
+            "te leo",
+            "qué pasó",
+            "que pasó",
+            "qué cuentas",
+            "que cuentas",
+            "qué te ha",
+            "que te ha",
+            "me cuentas",
+            "a ver qué",
+            "a ver que",
+        )
+
+        return any(marker in text for marker in followup_markers)
+
+    def _cleanup_pending_replies(self) -> None:
+        if not self._pending_reply_until:
+            return
+
+        now = time.time()
+        expired = [key for key, until in self._pending_reply_until.items() if until <= now]
+        for key in expired:
+            self._pending_reply_until.pop(key, None)
+
+    def _has_pending_reply(self, username: str) -> bool:
+        if not self.followup_enabled:
+            return False
+
+        key = (username or "").lower().strip()
+        if not key:
+            return False
+
+        until = self._pending_reply_until.get(key)
+        if until is None:
+            return False
+
+        if until <= time.time():
+            self._pending_reply_until.pop(key, None)
+            return False
+
+        return True
+
+    def _consume_pending_reply(self, username: str) -> bool:
+        if not self._has_pending_reply(username):
+            return False
+
+        key = (username or "").lower().strip()
+        self._pending_reply_until.pop(key, None)
+        return True

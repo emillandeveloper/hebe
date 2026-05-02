@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import Callable
+from typing import Any, Callable
 
 from dotenv import load_dotenv
 
@@ -13,7 +13,7 @@ from app.core.ui_bridge import emit
 from app.core.state import HebeState
 from app.services.db_sqlite import log_chat
 from app.services.interaction_actions import InteractionActions
-from app.services.llm_ollama import OllamaLLM
+from app.services.llm_factory import create_conversation_llm
 from app.services.speech_output import speak as _speak
 from app.services.stt_whisper import STTConfig, STTService
 from app.services.tool_system import ToolContext, ToolSystem
@@ -51,7 +51,7 @@ def build_speak() -> Callable[[str, str], None]:
 @dataclass(slots=True)
 class HebeRuntime:
     stt: STTService
-    llm: OllamaLLM
+    llm: Any
     intent_llm: OllamaIntentClient
     win: WinAutomationService
     actions: InteractionActions
@@ -75,9 +75,11 @@ def build_runtime() -> HebeRuntime:
         log_chat=log_chat,
     )
 
-    # Modelo conversacional: habla como Hebe
-    llm = OllamaLLM(
-        model=os.getenv("HEBE_CHAT_MODEL", "hebe"),
+    # Modelo conversacional: habla como Hebe.
+    # Se elige por .env con HEBE_LLM_PROVIDER:
+    #   - local / ollama -> OllamaLLM
+    #   - openai         -> OpenAILLM, con fallback opcional a Ollama
+    llm = create_conversation_llm(
         emit=emit,
         log_chat=log_chat,
     )

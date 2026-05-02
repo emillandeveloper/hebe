@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import random
 import uuid
 from typing import Any
@@ -16,12 +17,14 @@ from app.cognitive.persona.reply_cleaner import (
     detect_helper_pattern,
 )
 from app.cognitive.persona.stream_metrics import StreamReplyStats
+from app.cognitive.persona.stream_dataset_logger import StreamDatasetLogger
+from app.core.ui_bridge import emit
 
 
 # Cuántas veces reintentamos la generación si detectamos un patrón helper.
 # 1 retry suele bastar: con seed distinto, qwen 2.5:3b suele recuperarse.
 # Subirlo aumenta latencia por mensaje y puede no aportar nada.
-MAX_HELPER_RETRIES = 1
+MAX_HELPER_RETRIES = int(os.getenv("HEBE_MAX_HELPER_RETRIES", "1"))
 
 
 class ResponseSynthesizer:
@@ -38,6 +41,7 @@ class ResponseSynthesizer:
         self.conversation_model = conversation_model
         # Métricas acumuladas del stream (en memoria, se pierden al reiniciar).
         self._stream_stats = StreamReplyStats()
+        self._dataset_logger = StreamDatasetLogger()
 
     # =========================
     # Entry point
@@ -378,7 +382,8 @@ class ResponseSynthesizer:
             return fallback
 
         try:
-            kwargs: dict[str, Any] = {"num_predict": 120}
+            num_predict = int(os.getenv("HEBE_REPLY_NUM_PREDICT", "120"))
+            kwargs: dict[str, Any] = {"num_predict": num_predict}
             if seed is not None:
                 kwargs["seed"] = seed
 
@@ -639,15 +644,13 @@ class ResponseSynthesizer:
         # plano. Los few-shots de hebe_voice incluyen ejemplos con
         # [chatter Nuria]:, [chatter Daniela]:, etc., así que el modelo
         # aprende a hablarles a ELLOS, no a narrar a Leo en tercera persona.
-        visible_chatter_name = "Leo" if is_broadcaster else (display_name_raw or chatter_clean)
-
         chatter_tag = (
             "[chatter Leo]:"
             if is_broadcaster
-            else f"[chatter {visible_chatter_name}]:"
+            else f"[chatter {chatter_clean}]:"
         )
-
         user = f"{chatter_tag} {message}\n[tú]:"
+
         print(
             f"[HEBE][REPLY][BEGIN] trace={trace_id} "
             f"chatter_raw={display_name_raw!r} chatter_clean={chatter_clean!r} "
@@ -657,6 +660,7 @@ class ResponseSynthesizer:
 
         helper_hits: list[str] = []
         final_reply = ""
+        final_raw = ""
         final_helper: str | None = None
 
         for attempt in range(MAX_HELPER_RETRIES + 1):
@@ -665,7 +669,8 @@ class ResponseSynthesizer:
             # se pasa al options de Ollama y se ignora silenciosamente si
             # no lo soporta tu versión del wrapper.
             seed = random.randint(0, 1_000_000)
-            print("[HEBE][REPLY][PROMPT_DEBUG]", system, user, flush=True)
+            if os.getenv("HEBE_PROMPT_DEBUG", "false").strip().lower() in ("1", "true", "yes", "on"):
+                print("[HEBE][REPLY][PROMPT_DEBUG]", system, user, flush=True)
             raw = self._call_model(system, user, fallback="", seed=seed)
             cleaned = clean_stream_reply(raw, source_message=message)
 
@@ -680,6 +685,7 @@ class ResponseSynthesizer:
                 # Respuesta limpia (o vacía, que también está bien — el
                 # caller publicará "" como silencio).
                 final_reply = cleaned
+                final_raw = raw
                 final_helper = None
                 break
 
@@ -692,13 +698,19 @@ class ResponseSynthesizer:
             )
 
             if attempt == MAX_HELPER_RETRIES:
-                # Se acabaron los reintentos. Publicamos lo que hay para
-                # no dejar al chatter sin respuesta. Lo marcamos en el log.
-                final_reply = cleaned
+                # Se acabaron los reintentos. No publicamos una fuga helper:
+                # en directo es mejor un fallback seco que mandar al chat
+                # "¿en qué puedo ayudarte?" o un roleplay roto.
+                final_reply = self._fallback_twitch_chat_react(
+                    chatter=chatter_clean,
+                    message=message,
+                    is_broadcaster=is_broadcaster,
+                )
+                final_raw = raw
                 final_helper = helper
                 print(
-                    f"[HEBE][REPLY][HELPER_PUBLISHED] trace={trace_id} "
-                    f"patterns={helper_hits} final={final_reply!r}",
+                    f"[HEBE][REPLY][HELPER_BLOCKED] trace={trace_id} "
+                    f"patterns={helper_hits} fallback={final_reply!r}",
                     flush=True,
                 )
 
@@ -724,7 +736,134 @@ class ResponseSynthesizer:
         if self._stream_stats.total > 0 and self._stream_stats.total % 50 == 0:
             self._stream_stats.log_summary()
 
+        model_meta = self._model_meta()
+
+        self._dataset_logger.log_twitch_chat_react(
+            trace_id=trace_id,
+            payload=payload,
+            chatter_clean=chatter_clean,
+            is_broadcaster=is_broadcaster,
+            raw_response=final_raw,
+            cleaned_response=final_reply,
+            helper_hits=helper_hits,
+            retried=retried,
+            salvaged=salvaged,
+            model_meta=model_meta,
+        )
+
+        # Avisar a la UI de que esta respuesta tiene ejemplo de dataset
+        # para poder mostrar el mensaje original y botones de curación.
+        try:
+            emit(
+                "dataset.example",
+                {
+                    "trace_id": trace_id,
+                    "event_type": "twitch_chat_react",
+                    "user_login": user_login,
+                    "display_name": display_name_raw,
+                    "chatter_clean": chatter_clean,
+                    "is_broadcaster": is_broadcaster,
+                    "message": message,
+                    "response": final_reply,
+                    "model": model_meta,
+                    "curation": {
+                        "status": None,
+                        "approved": None,
+                        "corrected_response": None,
+                        "notes": None,
+                        "tags": [],
+                    },
+                },
+            )
+        except Exception as exc:
+            print(f"[HEBE][DATASET][UI_EVENT_ERROR] {exc!r}", flush=True)
+
         return final_reply
+
+    def _model_meta(self) -> dict[str, Any]:
+        model = self.conversation_model
+        if model is None:
+            return {"provider": "none"}
+
+        # Si usamos FallbackConversationLLM, el objeto externo es el wrapper.
+        # Para dataset nos interesa el provider real que respondió en la última llamada.
+        actual = getattr(model, "last_used", None) or getattr(model, "primary", None) or model
+        class_name = type(actual).__name__
+        provider_attr = getattr(actual, "provider", None)
+        provider = str(provider_attr or "").strip().lower()
+        if not provider:
+            provider = "openai" if class_name.lower().startswith("openai") else "local"
+
+        meta: dict[str, Any] = {
+            "provider": provider,
+            "class": class_name,
+            "name": getattr(actual, "model", None),
+        }
+
+        usage = getattr(actual, "last_usage", None)
+        if isinstance(usage, dict):
+            meta["usage"] = usage
+
+        elapsed_ms = getattr(actual, "last_elapsed_ms", None)
+        if elapsed_ms is not None:
+            meta["elapsed_ms"] = elapsed_ms
+
+        wrapper_name = type(model).__name__
+        if actual is not model:
+            meta["wrapper"] = wrapper_name
+
+        return meta
+
+    def _fallback_twitch_chat_react(
+        self,
+        *,
+        chatter: str,
+        message: str,
+        is_broadcaster: bool,
+    ) -> str:
+        """
+        Fallback determinista para Twitch.
+
+        No intenta ser brillante; intenta no romper personaje ni publicar
+        basura si el modelo devuelve una fuga helper/roleplay.
+        """
+        msg = (message or "").lower().strip()
+        name = "Leo" if is_broadcaster else (chatter or "chat")
+
+        if any(word in msg for word in ("hola", "buenas", "ey", "hey")):
+            return f"hola, {name}. ¿qué cuentas?" if not is_broadcaster else "hola, Leo. te leo."
+
+        if "quien eres" in msg or "quién eres" in msg:
+            return (
+                "soy Hebe, Leo. tu compañera de chat, no una etiqueta rara."
+                if is_broadcaster
+                else f"soy Hebe, {name}. intento poner algo de criterio por aquí."
+            )
+
+        if "mal hebe" in msg or "eso ha salido" in msg or "qué estás diciendo" in msg or "que estas diciendo" in msg:
+            return "sí, esa ha salido torcida. recalibro." if is_broadcaster else f"he derrapado un poco, {name}. recalibro."
+
+        if "relajate" in msg or "relájate" in msg:
+            return "vale, Leo. bajo dos tonos." if is_broadcaster else f"voy bajando el filo, {name}."
+
+        if "vete a la mierda" in msg:
+            return (
+                "vale, Leo. bajo el filo, pero no me entierres todavía."
+                if is_broadcaster
+                else f"con cariño, {name}: primero aprende a saludar."
+            )
+
+        if "personalidad" in msg:
+            return (
+                "la tengo, Leo. solo estoy aprendiendo a no atropellarte con ella."
+                if is_broadcaster
+                else f"personalidad tengo, {name}. paciencia con el despliegue."
+            )
+
+        if is_broadcaster:
+            return "te leo, Leo. sigo calibrando."
+
+        return f"te leo, {name}."
 
     def _is_broadcaster(self, payload: dict) -> bool:
         if bool(payload.get("is_broadcaster")):

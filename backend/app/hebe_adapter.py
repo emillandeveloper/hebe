@@ -5,6 +5,8 @@ from .events import Event
 from .hebe_engine import HebeEngine
 from .core.ui_bridge import set_emitter
 from .core.runtime import build_runtime
+from .cognitive.persona.stream_dataset_logger import StreamDatasetLogger
+
 
 class _AsyncEmitter:
     """Convierte callbacks desde hilos (STT/TTS) en eventos AsyncIO para el WebSocket."""
@@ -27,6 +29,7 @@ class HebeAdapter:
         self._engine: HebeEngine | None = None
         self._emitter: _AsyncEmitter | None = None
         self.running = False
+        self._dataset_logger = StreamDatasetLogger()
 
     async def start(self):
         if self.running:
@@ -60,4 +63,36 @@ class HebeAdapter:
             self._engine.submit_text(text)
 
     async def command(self, name: str, payload: dict):
+        payload = payload or {}
+
+        if name == "dataset_curate":
+            trace_id = str(payload.get("trace_id") or "").strip()
+            status = str(payload.get("status") or "").strip()
+            corrected_response = payload.get("corrected_response")
+            notes = payload.get("notes")
+            tags = payload.get("tags")
+            if not isinstance(tags, list):
+                tags = []
+
+            ok = self._dataset_logger.update_curation(
+                trace_id=trace_id,
+                status=status,
+                corrected_response=corrected_response,
+                notes=notes,
+                tags=[str(t) for t in tags if t],
+            )
+
+            await self.event_q.put(
+                Event(
+                    type="dataset.curation.updated" if ok else "dataset.curation.error",
+                    data={
+                        "trace_id": trace_id,
+                        "status": status,
+                        "ok": ok,
+                    },
+                    ts=time.time(),
+                )
+            )
+            return
+
         await self.event_q.put(Event(type="status", data={"command": name, "payload": payload}, ts=time.time()))
