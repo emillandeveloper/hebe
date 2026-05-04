@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import inspect
 import json
 import os
 from datetime import datetime, timezone
@@ -17,13 +19,23 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return raw.strip().lower() in _TRUE_VALUES
 
 
+def _compute_voice_version() -> str:
+    try:
+        import importlib
+        mod = importlib.import_module("app.cognitive.persona.hebe_voice")
+        src = inspect.getsource(mod)
+        return hashlib.md5(src.encode("utf-8")).hexdigest()[:8]
+    except Exception:
+        return "unknown"
+
+
 class StreamDatasetLogger:
     """
     Logger JSONL para construir dataset de Hebe a partir de actividad real.
 
     Guarda una línea por ejemplo generado. No intenta decidir si el ejemplo es
-    bueno o malo: deja campos de curación (`approved`, `corrected_response`) para
-    que luego puedas revisar/editar sin perder el dato original.
+    bueno o malo: deja campos de curación (`evaluation`) para que luego puedas
+    revisar/editar sin perder el dato original.
 
     Ruta por defecto, relativa al cwd del backend:
       data/dataset/hebe_stream_replies.jsonl
@@ -40,6 +52,7 @@ class StreamDatasetLogger:
         self.max_message_chars = int(os.getenv("HEBE_DATASET_MAX_MESSAGE_CHARS", "500"))
         self.max_response_chars = int(os.getenv("HEBE_DATASET_MAX_RESPONSE_CHARS", "500"))
         self.max_recent_items = int(os.getenv("HEBE_DATASET_MAX_RECENT_ITEMS", "8"))
+        self._voice_version = _compute_voice_version()
 
     def log_twitch_chat_react(
         self,
@@ -54,6 +67,7 @@ class StreamDatasetLogger:
         retried: bool,
         salvaged: bool,
         model_meta: dict[str, Any] | None = None,
+        full_prompt: dict[str, str] | None = None,
     ) -> None:
         if not self.enabled:
             return
@@ -62,24 +76,54 @@ class StreamDatasetLogger:
         display_name = str(payload.get("display_name") or payload.get("user_login") or "")
         user_login = str(payload.get("user_login") or "")
 
+        meta = model_meta or {}
+        usage = meta.get("usage") or {}
+
+        provider = str(meta.get("provider") or "unknown")
+        model_name = str(meta.get("name") or "")
+        input_tokens = int(usage.get("input_tokens", 0) or 0)
+        output_tokens = int(usage.get("output_tokens", 0) or 0)
+        cached_tokens = int(usage.get("cached_tokens", 0) or 0)
+        cost_usd = float(usage.get("cost_usd", 0.0) or 0.0)
+
         row: dict[str, Any] = {
-            "schema_version": 1,
+            "schema_version": 2,
             "timestamp_utc": datetime.now(timezone.utc).isoformat(),
             "source": "twitch",
             "event_type": "twitch_chat_react",
             "trace_id": trace_id,
+            # Chatter
             "user_login": user_login,
             "display_name": display_name,
             "chatter_clean": chatter_clean,
             "is_broadcaster": bool(is_broadcaster),
-            "message": self._clip(message, self.max_message_chars),
-            "response": self._clip(cleaned_response, self.max_response_chars),
-            "raw_response": self._clip(raw_response, self.max_response_chars),
+            # Message & prompt
+            "message_text": self._clip(message, self.max_message_chars),
+            "full_prompt": full_prompt or {},
+            # Outputs
+            "raw_output": self._clip(raw_response, self.max_response_chars),
+            "final_output": self._clip(cleaned_response, self.max_response_chars),
+            # Quality signals
             "helper_hits": helper_hits,
             "retried": bool(retried),
             "salvaged": bool(salvaged),
-            "model": model_meta or {},
+            # Model
+            "provider": provider,
+            "model_name": model_name,
+            # Tokens & cost
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cached_tokens": cached_tokens,
+            "cost_usd": cost_usd,
+            # Voice corpus versioning
+            "voice_version": self._voice_version,
+            # Context
             "recent_chat": self._clean_recent(payload.get("recent_chat") or []),
+            # Full model metadata (for backward compat and debugging)
+            "model": meta,
+            # Evaluation (filled from UI)
+            "evaluation": None,
+            # Curation (legacy, kept for backward compat)
             "curation": {
                 "approved": None,
                 "corrected_response": None,
@@ -89,7 +133,6 @@ class StreamDatasetLogger:
         }
 
         self._append(row)
-
 
     def update_curation(
         self,
@@ -163,6 +206,17 @@ class StreamDatasetLogger:
                             }
                         )
                         row["curation"] = curation
+
+                        # Mirror into evaluation for new schema
+                        row["evaluation"] = {
+                            "status": status,
+                            "approved": curation["approved"],
+                            "corrected_response": curation.get("corrected_response"),
+                            "notes": curation.get("notes"),
+                            "tags": merged_tags,
+                            "updated_at_utc": curation["updated_at_utc"],
+                        }
+
                         updated = True
                         raw_line = json.dumps(row, ensure_ascii=False, separators=(",", ":"))
 
@@ -196,7 +250,15 @@ class StreamDatasetLogger:
             print(f"[HEBE][DATASET][ERROR] could not write dataset row: {exc!r}", flush=True)
             return
 
-        print(f"[HEBE][DATASET] wrote twitch_chat_react path={str(self.path)!r}", flush=True)
+        print(
+            f"[HEBE][DATASET] wrote twitch_chat_react "
+            f"trace={row.get('trace_id')!r} "
+            f"tokens=({row.get('input_tokens')}/{row.get('output_tokens')}) "
+            f"cached={row.get('cached_tokens')} "
+            f"cost_usd={row.get('cost_usd', 0.0):.4f} "
+            f"path={str(self.path)!r}",
+            flush=True,
+        )
 
     def _clean_recent(self, recent: Any) -> list[dict[str, str]]:
         if not isinstance(recent, list):
