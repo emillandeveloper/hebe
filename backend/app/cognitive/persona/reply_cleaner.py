@@ -190,13 +190,19 @@ def clean_stream_reply(
             return ""
 
     # Evitar pseudo-diálogo en una sola línea.
+    # OJO: no cortar vocativos normales como "vale, Leo: ..."
     for marker in INLINE_TURN_MARKERS:
         if marker in cleaned:
-            before = cleaned.split(marker, 1)[0].strip()
-            if before:
-                cleaned = before
-            else:
-                return ""
+            idx = cleaned.find(marker)
+            before = cleaned[:idx].strip()
+
+            # Solo cortamos si el marcador parece realmente otro turno,
+            # no una frase normal con un nombre.
+            if marker.startswith("[") or idx == 0:
+                if before:
+                    cleaned = before
+                else:
+                    return ""
 
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
 

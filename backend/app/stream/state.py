@@ -6,12 +6,11 @@ from typing import Optional
 @dataclass
 class StreamPolicies:
     require_wakeword_for_actions: bool = True
-    allow_tts_replies: bool = False
+    allow_tts_replies: bool = True
     allow_chat_commands: bool = True
     allow_auto_raid_messages: bool = True
     allow_auto_shoutouts: bool = True
     allow_auto_follow_messages: bool = False
-
 
 @dataclass
 class StreamSessionState:
