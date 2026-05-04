@@ -621,35 +621,37 @@ class ResponseSynthesizer:
                 f"- {m.get('display_name', '?')}: {m.get('text', '')}"
                 for m in recent[-6:]
             ]
-            recent_block = "\n\nContexto del chat reciente:\n" + "\n".join(lines)
+            recent_block = "Contexto del chat reciente:\n" + "\n".join(lines)
 
-        # Aviso sobre quién está hablando, integrado en el system.
+        # Aviso sobre quién está hablando. Va al user, no al system,
+        # para no romper el caché del system prompt.
         speaker_block = (
-            "\n\nIMPORTANTE: quien escribe este mensaje ES Leo, tu compañero y broadcaster. "
+            "IMPORTANTE: quien escribe este mensaje ES Leo, tu compañero y broadcaster. "
             "No lo trates como un viewer cualquiera. Puedes vacilarle con confianza."
             if is_broadcaster
             else ""
         )
 
-        # System: identidad + few-shots + contexto.
+        # System: SOLO identidad + few-shots (siempre idéntico → cacheable).
         system = (
             f"{self._build_stream_style_block()}\n\n"
             f"{build_chat_react_examples()}"
-            f"{speaker_block}"
-            f"{recent_block}"
         )
 
-        # User: patrón de continuación. El modelo completa después de [tú]:
-        # Ahora SIEMPRE usamos el nombre limpio del chatter, no [chatter]:
-        # plano. Los few-shots de hebe_voice incluyen ejemplos con
-        # [chatter Nuria]:, [chatter Daniela]:, etc., así que el modelo
-        # aprende a hablarles a ELLOS, no a narrar a Leo en tercera persona.
+        # User: parte variable (contexto + mensaje). El modelo completa
+        # después de [tú]:. Siempre usamos el nombre limpio del chatter.
         chatter_tag = (
             "[chatter Leo]:"
             if is_broadcaster
             else f"[chatter {chatter_clean}]:"
         )
-        user = f"{chatter_tag} {message}\n[tú]:"
+        user_parts: list[str] = []
+        if speaker_block:
+            user_parts.append(speaker_block)
+        if recent_block:
+            user_parts.append(recent_block)
+        user_parts.append(f"{chatter_tag} {message}\n[tú]:")
+        user = "\n\n".join(user_parts)
 
         print(
             f"[HEBE][REPLY][BEGIN] trace={trace_id} "
@@ -749,6 +751,7 @@ class ResponseSynthesizer:
             retried=retried,
             salvaged=salvaged,
             model_meta=model_meta,
+            full_prompt={"system": system, "user": user},
         )
 
         # Avisar a la UI de que esta respuesta tiene ejemplo de dataset

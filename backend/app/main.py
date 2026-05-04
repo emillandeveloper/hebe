@@ -28,6 +28,23 @@ ws_manager = WSManager()
 event_q: asyncio.Queue[Event] = asyncio.Queue()
 hebe = HebeAdapter(event_q)
 
+
+def _get_stream_stats():
+    engine = getattr(hebe, "_engine", None)
+    synth = getattr(engine, "response_synthesizer", None)
+    return getattr(synth, "_stream_stats", None)
+
+
+def _try_dump_stream_summary(reason: str = "") -> None:
+    try:
+        stats = _get_stream_stats()
+        if stats and stats.total > 0:
+            tag = f" reason={reason!r}" if reason else ""
+            print(f"[HEBE][STREAM_SUMMARY]{tag} (triggered by shutdown/disconnect)", flush=True)
+            stats.log_summary()
+    except Exception:
+        pass
+
 async def maybe_await(x):
     # Si HebeAdapter es async -> await
     # Si es sync y devuelve dict/None -> devuelve tal cual
@@ -38,6 +55,30 @@ async def maybe_await(x):
 @app.get("/health")
 def health():
     return {"ok": True, "ts": time.time()}
+
+
+@app.on_event("shutdown")
+async def shutdown():
+    _try_dump_stream_summary("sigterm")
+
+
+@app.get("/debug/stream-summary")
+def debug_stream_summary():
+    """Vuelca y devuelve las métricas acumuladas del stream actual."""
+    stats = _get_stream_stats()
+    if stats is None:
+        return {"ok": False, "reason": "engine not running or no stats"}
+    stats.log_summary()
+    return {
+        "ok": True,
+        "total": stats.total,
+        "retried": stats.retried,
+        "salvaged": stats.salvaged,
+        "published_with_helper": stats.published_with_helper,
+        "patterns": dict(stats.pattern_count.most_common()),
+        "top_chatters": dict(stats.by_chatter.most_common(8)),
+    }
+
 
 @app.on_event("startup")
 async def startup():
@@ -89,7 +130,7 @@ async def ws_endpoint(ws: WebSocket):
 
     except WebSocketDisconnect:
         # normal cuando cierras la ventana o recargas
-        pass
+        _try_dump_stream_summary("ws_disconnect")
     except Exception as e:
         logging.exception("WS error: %s", e)
         try:
