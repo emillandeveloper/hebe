@@ -17,11 +17,18 @@ class FallbackConversationLLM:
 
     Mantiene la interfaz chat()/complete() que espera ResponseSynthesizer.
     Además expone last_used para que el dataset sepa qué provider respondió.
+
+    fallback_on_empty:
+      True  (default) → si el primario devuelve vacío, cae al fallback local.
+      False → si el primario devuelve vacío, devuelve "" sin pasar al local.
+              Útil en producción para evitar que Llama genere respuestas en
+              inglés con personajes inventados cuando OpenAI falla silenciosamente.
     """
 
-    def __init__(self, primary: Any, fallback: Any):
+    def __init__(self, primary: Any, fallback: Any, fallback_on_empty: bool = True):
         self.primary = primary
         self.fallback = fallback
+        self.fallback_on_empty = fallback_on_empty
         self.last_used: Any | None = None
 
     @property
@@ -39,9 +46,12 @@ class FallbackConversationLLM:
     def chat(self, messages: list[dict[str, str]], **kwargs: Any) -> str:
         self.last_used = None
         text = ""
+        fallback_reason: str | None = None
+
         try:
             text = self.primary.chat(messages, **kwargs)
         except Exception as e:
+            fallback_reason = f"exception:{type(e).__name__}"
             print(f"[HEBE][LLM][FALLBACK] primary chat failed: {e}", flush=True)
 
         text = (text or "").strip()
@@ -49,7 +59,22 @@ class FallbackConversationLLM:
             self.last_used = self.primary
             return text
 
-        print("[HEBE][LLM][FALLBACK] using local chat fallback", flush=True)
+        if fallback_reason is None:
+            fallback_reason = "empty_response"
+
+        if fallback_reason == "empty_response" and not self.fallback_on_empty:
+            print(
+                "[HEBE][LLM][FALLBACK] reason=empty_response "
+                "fallback disabled (HEBE_API_FALLBACK_ON_EMPTY=false) → returning ''",
+                flush=True,
+            )
+            self.last_used = self.primary
+            return ""
+
+        print(
+            f"[HEBE][LLM][FALLBACK] reason={fallback_reason} using local chat fallback",
+            flush=True,
+        )
         self.last_used = self.fallback
         try:
             return (self.fallback.chat(messages, **kwargs) or "").strip()
@@ -60,9 +85,12 @@ class FallbackConversationLLM:
     def complete(self, prompt: str, **kwargs: Any) -> str:
         self.last_used = None
         text = ""
+        fallback_reason: str | None = None
+
         try:
             text = self.primary.complete(prompt, **kwargs)
         except Exception as e:
+            fallback_reason = f"exception:{type(e).__name__}"
             print(f"[HEBE][LLM][FALLBACK] primary complete failed: {e}", flush=True)
 
         text = (text or "").strip()
@@ -70,7 +98,22 @@ class FallbackConversationLLM:
             self.last_used = self.primary
             return text
 
-        print("[HEBE][LLM][FALLBACK] using local complete fallback", flush=True)
+        if fallback_reason is None:
+            fallback_reason = "empty_response"
+
+        if fallback_reason == "empty_response" and not self.fallback_on_empty:
+            print(
+                "[HEBE][LLM][FALLBACK] reason=empty_response "
+                "fallback disabled (HEBE_API_FALLBACK_ON_EMPTY=false) → returning ''",
+                flush=True,
+            )
+            self.last_used = self.primary
+            return ""
+
+        print(
+            f"[HEBE][LLM][FALLBACK] reason={fallback_reason} using local complete fallback",
+            flush=True,
+        )
         self.last_used = self.fallback
         try:
             return (self.fallback.complete(prompt, **kwargs) or "").strip()
@@ -102,9 +145,18 @@ def create_conversation_llm(
     Variables relevantes:
       HEBE_LLM_PROVIDER=local | ollama | openai
       HEBE_API_FALLBACK_TO_LOCAL=true | false
+      HEBE_API_FALLBACK_ON_EMPTY=true | false
+        false → si OpenAI devuelve vacío, devuelve '' en vez de caer a local.
+                Recomendado en producción para evitar respuestas en inglés de Llama.
     """
     provider = os.getenv("HEBE_LLM_PROVIDER", "local").strip().lower()
     fallback_to_local = os.getenv("HEBE_API_FALLBACK_TO_LOCAL", "true").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+    fallback_on_empty = os.getenv("HEBE_API_FALLBACK_ON_EMPTY", "true").strip().lower() in (
         "1",
         "true",
         "yes",
@@ -117,7 +169,8 @@ def create_conversation_llm(
 
     if provider == "openai":
         print(
-            f"[HEBE][LLM] provider=openai model={os.getenv('HEBE_OPENAI_MODEL', 'gpt-5-mini')!r}",
+            f"[HEBE][LLM] provider=openai model={os.getenv('HEBE_OPENAI_MODEL', 'gpt-5-mini')!r} "
+            f"fallback_to_local={fallback_to_local} fallback_on_empty={fallback_on_empty}",
             flush=True,
         )
 
@@ -138,6 +191,7 @@ def create_conversation_llm(
             return FallbackConversationLLM(
                 primary=openai_llm,
                 fallback=_build_local_llm(emit=emit, log_chat=log_chat),
+                fallback_on_empty=fallback_on_empty,
             )
 
         return openai_llm

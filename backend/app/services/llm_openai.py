@@ -36,7 +36,10 @@ class OpenAILLM:
 
         self.base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
         self.timeout_seconds = float(os.getenv("HEBE_OPENAI_TIMEOUT_SECONDS", "20"))
-        self.max_output_tokens = int(os.getenv("HEBE_OPENAI_MAX_OUTPUT_TOKENS", "120"))
+        # 400 tokens da margen suficiente para reasoning interno de gpt-5-mini
+        # sin que el output_text quede vacío. Las respuestas reales serán cortas
+        # porque el prompt lo pide; el límite solo actúa como guardia de seguridad.
+        self.max_output_tokens = int(os.getenv("HEBE_OPENAI_MAX_OUTPUT_TOKENS", "400"))
 
         self.temperature = float(os.getenv("HEBE_OPENAI_TEMPERATURE", "0.7"))
         self.send_temperature = os.getenv("HEBE_OPENAI_SEND_TEMPERATURE", "false").strip().lower() in (
@@ -45,6 +48,12 @@ class OpenAILLM:
             "yes",
             "on",
         )
+
+        # reasoning_effort y verbosity: solo se envían en modelos gpt-5*.
+        # Con "minimal" el modelo usa mucho menos presupuesto de reasoning,
+        # dejando más tokens disponibles para el output visible.
+        self.reasoning_effort = os.getenv("HEBE_OPENAI_REASONING_EFFORT", "minimal").strip()
+        self.verbosity = os.getenv("HEBE_OPENAI_VERBOSITY", "low").strip()
 
         self.log_usage = os.getenv("HEBE_OPENAI_LOG_USAGE", "true").strip().lower() in (
             "1",
@@ -232,6 +241,16 @@ class OpenAILLM:
         if seed is not None:
             payload["seed"] = seed
 
+        # reasoning_effort y verbosity son parámetros top-level de Chat Completions
+        # para modelos gpt-5*. "minimal" evita que el reasoning consuma todo el
+        # presupuesto de max_completion_tokens dejando el output_text vacío.
+        model_lower = self.model.lower()
+        is_gpt5 = model_lower.startswith("gpt-5")
+        if is_gpt5 and self.reasoning_effort:
+            payload["reasoning_effort"] = self.reasoning_effort
+        if is_gpt5 and self.verbosity:
+            payload["verbosity"] = self.verbosity
+
         url = f"{self.base_url}/chat/completions"
         body = json.dumps(payload).encode("utf-8")
 
@@ -261,6 +280,20 @@ class OpenAILLM:
 
             elapsed_ms = int((time.time() - started) * 1000)
             self.last_elapsed_ms = elapsed_ms
+
+            if not text:
+                finish_reason = "unknown"
+                try:
+                    finish_reason = data["choices"][0].get("finish_reason", "unknown")
+                except (KeyError, IndexError, TypeError):
+                    pass
+                print(
+                    f"[HEBE][OPENAI][EMPTY_RESPONSE] model={self.model!r} "
+                    f"finish_reason={finish_reason!r} "
+                    f"usage={self.last_usage}",
+                    flush=True,
+                )
+
             print(
                 f"[HEBE][OPENAI] model={self.model!r} elapsed_ms={elapsed_ms} "
                 f"chars={len(text)}",
