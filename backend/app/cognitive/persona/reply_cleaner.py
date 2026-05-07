@@ -1,19 +1,25 @@
 """
-Limpieza de respuestas generadas para el chat de Twitch.
+Limpieza de respuestas generadas por el modelo.
 
-Renombrado desde replay_cleaner.py (typo histórico de la deuda 7.3 del bible).
+Dos funciones públicas según contexto:
+  clean_twitch_reply(text, source_message=None)
+      Para respuestas que van al chat de Twitch.
+      Trunca a 240 chars respetando palabra, protege contra copia literal.
 
-Tres responsabilidades:
-1. clean_stream_reply: limpieza estructural (turnos extra, prefijos,
-   wrappers ridículos, copia literal del input, longitud). Lo que ya hacía.
-2. detect_helper_pattern: detección de "fugas IA" del RLHF de qwen 2.5
-   (¿en qué puedo ayudarte?, lo siento pero no puedo, etc).
-3. STREAM_MAX_CHARS y demás constantes de presentación.
-4. Defensa contra roleplay roto en modelos menos censurados.
+  clean_jarvis_reply(text)
+      Para respuestas que van a JARVIS (UI/voz con Leo).
+      Solo limpia prefijos y normaliza espacio. Sin límite de longitud.
 
-NO conoce el modelo, no conoce el formato del prompt, no llama a Ollama.
-Recibe el texto crudo del modelo y devuelve el texto que va al chat (o ""),
-y por separado expone una API para que el caller decida si hacer retry.
+Ambas comparten _strip_basic() para quitar prefijos de nombre, comillas
+y espacios sobrantes.
+
+detect_helper_pattern(text) → str | None  (intacta, solo para Twitch/retry)
+
+Las defensas contra modelos 3B (TURN_MARKERS, INLINE_TURN_MARKERS,
+BAD_WRAPPER_PATTERNS, split de primera línea) se han eliminado porque
+GPT-5-mini no genera esa basura y estaban mutilando respuestas legítimas.
+Ejemplo real mutilado: "perfecto, Leo. buen trabajo: menos humo, más eficacia."
+→ publicado solo "perfecto, Leo." por el split en "Leo:".
 """
 
 from __future__ import annotations
@@ -23,69 +29,12 @@ from typing import Optional
 
 
 # =============================================================================
-# Limpieza estructural (lo que ya hacía replay_cleaner)
+# Constantes
 # =============================================================================
 
 STREAM_MAX_CHARS = 240
 
-
-# Modelos más libres/roleplay tienden a escupir etiquetas de diálogo:
-# "[leo]:", "[katya]:", "nomad:", etc. Hebe nunca debe publicar eso.
-SPEAKER_PREFIX_RE = re.compile(
-    r"^\s*\[?[A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9_\- ]{1,32}\]?\s*:\s*"
-)
-
-INLINE_SPEAKER_RE = re.compile(
-    r"\s+\[?[A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9_\- ]{1,32}\]?\s*:"
-)
-
-BAD_ROLEPLAY_CLEAN_PATTERNS = [
-    # "soy tu amiga chatter leo" / "chatter Leo" no es voz de Hebe:
-    # es el modelo confundiendo la etiqueta del prompt con una persona.
-    r"\bchatter\s+leo\b",
-
-    # Fuga meta típica cuando el modelo cree que está escribiendo un ejemplo.
-    r"\b(me has hecho la tarea|crear un ejemplo de conversaci[oó]n|di[aá]logo real)\b",
-
-    # Traducciones o aclaraciones entre paréntesis: "maldita sea! (mala suerte)".
-    r"\([a-záéíóúüñ ]{3,40}\)\s*$",
-
-    # Modo coach/terapéutico, impropio de Hebe en Twitch.
-    r"\b(no te preocupes por los problemas|solo respira|piensa en lo que quieres de verdad)\b",
-
-    # Tono irrespetuoso con Leo que ya salió en pruebas.
-    r"\b(c[aá]llate,?\s+chaval|chaval)\b",
-]
-
-
-BAD_WRAPPER_PATTERNS = [
-    r"^aquí (estoy )?respondiendo a\b",
-    r"^estoy respondiendo a\b",
-    r"^respuesta para\b",
-    r"^mensaje para\b",
-    r"^como hebe\b",
-    r"^hebe respondería\b",
-]
-
-
-TURN_MARKERS = [
-    "\n[chatter]:",
-    "\n[chatter]",
-    "\n[tú]:",
-    "\n[tu]:",
-    "\nLeo:",
-    "\nleo:",
-    "\nLeoNifelheim:",
-    "\nleonifelheim:",
-    "\nHebe:",
-    "\nHEBE:",
-    "\nUsuario:",
-    "\nViewer:",
-    "\nChat:",
-]
-
-
-PREFIXES = [
+_PREFIXES = [
     "Hebe:",
     "HEBE:",
     "[tú]:",
@@ -99,127 +48,91 @@ PREFIXES = [
 ]
 
 
-INLINE_TURN_MARKERS = [
-    "[chatter]:",
-    "[tú]:",
-    "[tu]:",
-    "Hebe:",
-    "HEBE:",
-    "Leo:",
-    "LeoNifelheim:",
-    "Usuario:",
-    "Viewer:",
-    "Chat:",
-]
+# =============================================================================
+# Núcleo compartido
+# =============================================================================
 
-
-def _normalize_for_compare(text: str) -> str:
-    text = text.lower().strip()
-    text = re.sub(r"\s+", " ", text)
-    text = text.strip(" \t\n\"'“”")
-    return text
-
-
-def clean_stream_reply(
-    text: str | None,
-    *,
-    source_message: str | None = None,
-) -> str:
+def _strip_basic(text: str) -> str:
     """
-    Limpia respuestas generadas para Twitch.
+    Limpieza mínima compartida por clean_twitch_reply y clean_jarvis_reply.
 
-    Objetivo:
-    - evitar diálogos inventados
-    - quitar prefijos tipo "Hebe:"
-    - cortar turnos extra
-    - descartar basura tipo "estoy respondiendo a..."
-    - evitar copia literal del mensaje del chatter
-    - garantizar una sola línea
+    Hace:
+    - strip + elimina \\r
+    - quita comillas decorativas de inicio/fin
+    - quita prefijos de hablante ("Hebe:", "[tú]:", etc.)
+    - colapsa espacios múltiples a uno
+
+    NO hace:
+    - split por líneas
+    - truncado de longitud
+    - detección de patrones
     """
     if not text:
         return ""
 
     cleaned = str(text).strip().replace("\r", "")
-
     if not cleaned:
         return ""
 
-    cleaned = cleaned.strip(" \t\n\"'“”")
+    cleaned = cleaned.strip(" \t\n\"‘’“”")
 
-    # Si intenta generar otro turno, cortamos antes.
-    for marker in TURN_MARKERS:
-        if marker in cleaned:
-            cleaned = cleaned.split(marker, 1)[0].strip()
-
-    # Nos quedamos con la primera línea útil.
-    lines = [line.strip() for line in cleaned.split("\n") if line.strip()]
-    if not lines:
-        return ""
-
-    cleaned = lines[0].strip()
-
-    # Quitar prefijos repetidos si aparecen.
+    # Quitar prefijos de hablante repetidos (puede haber varios apilados)
     changed = True
     while changed:
         changed = False
-        for prefix in PREFIXES:
+        for prefix in _PREFIXES:
             if cleaned.startswith(prefix):
                 cleaned = cleaned[len(prefix):].strip()
                 changed = True
 
-    cleaned = cleaned.strip(" \t\n\"'“”")
+    cleaned = cleaned.strip(" \t\n\"‘’“”")
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned
 
+
+def _normalize_for_compare(text: str) -> str:
+    text = text.lower().strip()
+    text = re.sub(r"\s+", " ", text)
+    text = text.strip(" \t\n\"‘’“”")
+    return text
+
+
+# =============================================================================
+# API pública
+# =============================================================================
+
+def clean_twitch_reply(
+    text: str | None,
+    *,
+    source_message: str | None = None,
+) -> str:
+    """
+    Limpieza para respuestas que van al chat de Twitch.
+
+    - Aplica _strip_basic (prefijos, comillas, espacios).
+    - Une líneas en un solo espacio (GPT-5-mini puede dar respuesta
+      en varias frases separadas por newline; unirlas es correcto).
+    - Si la respuesta es copia literal del source_message, devuelve "".
+    - Trunca a STREAM_MAX_CHARS=240 respetando palabra completa.
+    """
+    cleaned = _strip_basic(text)
     if not cleaned:
         return ""
 
-    # Si sigue empezando por una etiqueta genérica tipo "[leo]:",
-    # "[katya]:" o "nomad:", es roleplay roto. Mejor silencio que
-    # publicar una línea fuera de personaje.
-    if SPEAKER_PREFIX_RE.match(cleaned):
-        return ""
-
-    # Descartar wrappers horribles del modelo.
-    lowered = cleaned.lower()
-    for pattern in BAD_WRAPPER_PATTERNS:
-        if re.search(pattern, lowered):
-            return ""
-
-    # Descartar fugas de roleplay/meta que no se arreglan limpiando.
-    for pattern in BAD_ROLEPLAY_CLEAN_PATTERNS:
-        if re.search(pattern, lowered):
-            return ""
-
-    # Evitar pseudo-diálogo en una sola línea.
-    # OJO: no cortar vocativos normales como "vale, Leo: ..."
-    for marker in INLINE_TURN_MARKERS:
-        if marker in cleaned:
-            idx = cleaned.find(marker)
-            before = cleaned[:idx].strip()
-
-            # Solo cortamos si el marcador parece realmente otro turno,
-            # no una frase normal con un nombre.
-            if marker.startswith("[") or idx == 0:
-                if before:
-                    cleaned = before
-                else:
-                    return ""
-
+    # Unir líneas → una sola línea para el chat de Twitch
+    lines = [ln.strip() for ln in cleaned.split("\n") if ln.strip()]
+    cleaned = " ".join(lines)
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
 
-    # Cortar si intenta meter otro hablante en mitad de la frase.
-    # Ejemplo: "vale, Leo. [katya]: no..." -> "vale, Leo."
-    match = INLINE_SPEAKER_RE.search(cleaned)
-    if match:
-        cleaned = cleaned[:match.start()].strip()
-
     if not cleaned:
         return ""
 
-    # Si ha copiado literalmente al chatter, mejor silencio.
+    # Anti-copia literal
     if source_message:
         if _normalize_for_compare(cleaned) == _normalize_for_compare(source_message):
             return ""
 
+    # Truncado respetando palabra
     if len(cleaned) > STREAM_MAX_CHARS:
         shortened = cleaned[:STREAM_MAX_CHARS].rsplit(" ", 1)[0].strip()
         cleaned = shortened or cleaned[:STREAM_MAX_CHARS].strip()
@@ -227,8 +140,39 @@ def clean_stream_reply(
     return cleaned
 
 
+def clean_jarvis_reply(text: str | None) -> str:
+    """
+    Limpieza para respuestas que van a JARVIS personal (UI/voz con Leo).
+
+    - Aplica _strip_basic (prefijos, comillas, espacios).
+    - Preserva párrafos/líneas múltiples (Leo puede pedir respuestas largas).
+    - Sin truncado de longitud.
+    - Sin anti-copia (Leo puede repetir lo que él mismo ha dicho).
+    """
+    cleaned = _strip_basic(text)
+    if not cleaned:
+        return ""
+
+    # Preservamos la estructura de líneas, solo normalizamos espacios intralínea
+    lines = cleaned.split("\n")
+    normalized = "\n".join(re.sub(r" +", " ", ln).strip() for ln in lines)
+    normalized = normalized.strip()
+
+    return normalized
+
+
+# DEPRECATED: usar clean_twitch_reply o clean_jarvis_reply según contexto.
+# Mantenida para retrocompatibilidad mientras se actualizan call sites.
+def clean_stream_reply(
+    text: str | None,
+    *,
+    source_message: str | None = None,
+) -> str:
+    return clean_twitch_reply(text, source_message=source_message)
+
+
 # =============================================================================
-# Detección de patrones helper (NUEVO 28/04)
+# Detección de patrones helper
 # =============================================================================
 #
 # Patrones de "fuga IA" verificados como reincidentes en el log del 27/04.
@@ -240,22 +184,13 @@ def clean_stream_reply(
 #   (b) Aparece 3+ veces en logs reales del canal.
 #   (c) No se solapa con uso legítimo de la voz de Hebe en el corpus.
 #
-# Si una respuesta engancha cualquiera de estos patrones, el caller
-# (response_synthesizer) decide qué hacer: típicamente retry con seed
-# distinto, máximo 1 reintento, y publicar igualmente si retry vuelve a
-# fallar. Mejor algo imperfecto que silencio en chat.
-#
-# Esta lista es CERRADA. Si necesitas añadir, primero verifica los tres
-# criterios. Si la lista crece más de 12-15 entradas, es señal de que ya
-# toca pasar al clasificador LLM (pieza 5 del bible) y jubilar este filtro.
+# Esta lista es CERRADA. Si la lista crece más de 12-15 entradas, es señal
+# de que ya toca pasar al clasificador LLM y jubilar este filtro.
 
 _HELPER_PATTERNS: list[tuple[str, "re.Pattern[str]"]] = [
-    # "¿en qué puedo ayudarte/asistirte?" - 9+ apariciones literales en log.
     ("ask_help",
      re.compile(r"\b(en qu[eé]) puedo (ayudarte|asistirte)", re.I)),
 
-    # "hay algo / algún tema [más / específico / en específico / en concreto / ...]"
-    # 12+ apariciones, con muchas variantes de "específico" y "concreto".
     ("anything_else",
      re.compile(
          r"hay (algo|alg[uú]n tema) "
@@ -264,28 +199,21 @@ _HELPER_PATTERNS: list[tuple[str, "re.Pattern[str]"]] = [
          re.I,
      )),
 
-    # "lo siento, pero no puedo / no voy a [replicar/responder/hacer]"
-    # El disclaimer ChatGPT puro. 5+ apariciones ante insultos legítimos.
     ("sorry_cant",
      re.compile(
          r"lo siento[,.]?\s*pero no (puedo|voy a) (replicar|responder|hacer)",
          re.I,
      )),
 
-    # Auto-identificación como IA o asistente.
     ("as_ai",
      re.compile(r"\b(como (una )?ia|soy una asistente|estoy aqu[ií] para)\b", re.I)),
 
-    # "no dudes en [preguntar/compartir/...]"
     ("dont_hesitate",
      re.compile(
          r"no dudes en (preguntar|compartir|consultar|decirme|hac[eé]rmelo)",
          re.I,
      )),
 
-    # "qué interesante" / "qué buena pregunta" / "buena pregunta para [reflexionar/pensar]"
-    # Excluye sarcasmo seco tipo "buena pregunta, idiota": exige "qué" delante
-    # o "para reflexionar/pensar/considerar/debatir" detrás.
     ("interesting_q",
      re.compile(
          r"qu[eé] (interesante|buena pregunta)"
@@ -293,16 +221,12 @@ _HELPER_PATTERNS: list[tuple[str, "re.Pattern[str]"]] = [
          re.I,
      )),
 
-    # "espero que te sirva / haberte ayudado"
     ("hope_helps",
      re.compile(r"espero (que (te (sirva|ayude))|haberte ayudado)", re.I)),
 
-    # "mantengamos / mantén / mantente la calma" - tic de moderación robotizada.
     ("keep_calm",
      re.compile(r"(mantengamos|mant[eé]n|mantente|mantendr[eé]) la calma", re.I)),
 
-    # Modelos menos censurados pueden caer en "roleplay roto":
-    # etiquetas de hablante, otros personajes, o metacomentarios de ejemplo.
     ("speaker_label",
      re.compile(r"^\s*\[[^\]]{1,40}\]\s*:", re.I)),
 

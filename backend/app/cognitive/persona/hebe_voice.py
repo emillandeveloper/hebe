@@ -67,7 +67,13 @@ def build_stream_style_block() -> str:
         "- emojis decorativos, exclamaciones múltiples, 'jajaja'.\n"
         "\n"
         "Formato: UNA línea, sin prefijos de nombre, sin 'Hebe:', sin etiquetas. "
-        "Solo el texto que va al chat. No inventes diálogos ni continúes la conversación."
+        "Solo el texto que va al chat. No inventes diálogos ni continúes la conversación.\n"
+        "\n"
+        "LÍMITE DE LONGITUD CRÍTICO:\n"
+        "Tu respuesta NO debe pasar de 240 caracteres incluyendo espacios. "
+        "Twitch corta los mensajes que pasan de ese tamaño y se ven mal en el chat. "
+        "Si tu respuesta natural sería más larga, recorta hasta lo esencial. "
+        "Una frase corta y certera siempre es mejor que un párrafo."
     )
 
 
