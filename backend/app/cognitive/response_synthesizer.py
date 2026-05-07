@@ -13,7 +13,8 @@ from app.cognitive.persona.hebe_voice import (
     build_stream_style_block as build_hebe_stream_style_block,
 )
 from app.cognitive.persona.reply_cleaner import (
-    clean_stream_reply,
+    clean_jarvis_reply,
+    clean_twitch_reply,
     detect_helper_pattern,
 )
 from app.cognitive.persona.stream_metrics import StreamReplyStats
@@ -95,7 +96,8 @@ class ResponseSynthesizer:
                 timezone=timezone,
                 raw_payload=payload,
             )
-            return self._call_model(system, user, fallback=self._fallback_reminder_text(payload))
+            fallback = self._fallback_reminder_text(payload)
+            return clean_jarvis_reply(self._call_model(system, user, fallback=fallback)) or fallback
 
         if event.event_type.startswith("twitch_"):
             return self._generate_twitch_reply(event)
@@ -134,7 +136,7 @@ class ResponseSynthesizer:
             else f"Vale, te lo guardo: {title}. Te avisaré cuando toque."
         )
 
-        return self._call_model(system, user, fallback=fallback)
+        return clean_jarvis_reply(self._call_model(system, user, fallback=fallback)) or fallback
 
     def _generate_confirm_action(
         self,
@@ -169,7 +171,7 @@ class ResponseSynthesizer:
             action_payload=action_payload,
         )
 
-        return self._call_model(system, user, fallback=fallback)
+        return clean_jarvis_reply(self._call_model(system, user, fallback=fallback)) or fallback
 
     def _generate_clarification_reply(
         self,
@@ -181,7 +183,7 @@ class ResponseSynthesizer:
         )
 
         fallback = reply_data.get("question") or "No me ha quedado clara la fecha."
-        return self._call_model(system, user, fallback=fallback)
+        return clean_jarvis_reply(self._call_model(system, user, fallback=fallback)) or fallback
 
     def _generate_chat_reply(self, context: BuiltContext) -> str:
         """
@@ -229,7 +231,7 @@ class ResponseSynthesizer:
         )
 
         raw = self._call_model(system, user, fallback="")
-        reply = clean_stream_reply(raw, source_message=message)
+        reply = clean_jarvis_reply(raw)
 
         print(
             f"[HEBE][JARVIS][REPLY] raw={raw!r} cleaned={reply!r}",
@@ -549,7 +551,7 @@ class ResponseSynthesizer:
         user = "Genera SOLO el mensaje final de Hebe para enviar al chat de Twitch."
         fallback = f"Gracias por la sub, {display_name}."
         reply = self._call_model(system, user, fallback=fallback)
-        return clean_stream_reply(reply)
+        return clean_twitch_reply(reply)
 
     def _generate_twitch_raid(self, payload: dict) -> str:
         display_name = payload.get("display_name") or payload.get("user_login") or "alguien"
@@ -568,7 +570,7 @@ class ResponseSynthesizer:
         user = "Genera SOLO el mensaje final de Hebe para enviar al chat de Twitch."
         fallback = f"Bienvenidos los del raid de {display_name}."
         reply = self._call_model(system, user, fallback=fallback)
-        return clean_stream_reply(reply)
+        return clean_twitch_reply(reply)
 
     def _generate_twitch_follow_batch(self, payload: dict) -> str:
         names = payload.get("display_names") or []
@@ -596,7 +598,7 @@ class ResponseSynthesizer:
         user = "Genera SOLO el mensaje final de Hebe para enviar al chat de Twitch."
         fallback = f"Gracias por el follow, {names[0]}."
         reply = self._call_model(system, user, fallback=fallback)
-        return clean_stream_reply(reply)
+        return clean_twitch_reply(reply)
 
     def _generate_twitch_chat_react(self, payload: dict) -> str:
         """
@@ -609,7 +611,7 @@ class ResponseSynthesizer:
           1. Normaliza el display_name del chatter ('nuriiia___' -> 'Nuria').
           2. Detecta is_broadcaster con la lógica rica habitual.
           3. Construye el prompt con [chatter Nombre]: msg\\n[tú]:.
-          4. Llama al modelo. Aplica clean_stream_reply al resultado.
+          4. Llama al modelo. Aplica clean_twitch_reply al resultado.
           5. Si el resultado engancha algún patrón helper, retry con seed
              distinto (hasta MAX_HELPER_RETRIES). Si retry vuelve a fallar,
              publica la respuesta igualmente — mejor algo imperfecto que
@@ -698,7 +700,7 @@ class ResponseSynthesizer:
             if os.getenv("HEBE_PROMPT_DEBUG", "false").strip().lower() in ("1", "true", "yes", "on"):
                 print("[HEBE][REPLY][PROMPT_DEBUG]", system, user, flush=True)
             raw = self._call_model(system, user, fallback="", seed=seed)
-            cleaned = clean_stream_reply(raw, source_message=message)
+            cleaned = clean_twitch_reply(raw, source_message=message)
 
             print(
                 f"[HEBE][REPLY][RAW] trace={trace_id} attempt={attempt} "
