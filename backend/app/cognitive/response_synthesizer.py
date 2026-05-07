@@ -184,12 +184,59 @@ class ResponseSynthesizer:
         return self._call_model(system, user, fallback=fallback)
 
     def _generate_chat_reply(self, context: BuiltContext) -> str:
-        system, user = self._build_chat_prompt(context)
-        return self._call_model(
-            system,
-            user,
-            fallback="No estoy segura de qué decirte ahora mismo.",
+        """
+        Respuesta de Hebe en modo JARVIS (conversación directa con Leo desde la UI).
+
+        Usa el MISMO bloque cacheable de voz + few-shots que _generate_twitch_chat_react
+        para que:
+        1. GPT-5-mini reciba los ejemplos de la voz de Hebe → respuestas en su estilo.
+        2. El sistema sea idéntico en ambos contextos → el caché de OpenAI se comparte.
+
+        El user block incluye el aviso de broadcaster + memoria relevante + mensaje de Leo
+        en el mismo formato [chatter Leo]:/[tú]: que los few-shots de hebe_voice.
+        """
+        message = (context.input_text or "").strip()
+
+        # CACHEABLE — idéntico al usado en _generate_twitch_chat_react
+        system = (
+            f"{self._build_stream_style_block()}\n\n"
+            f"{build_chat_react_examples()}"
         )
+
+        # VARIABLE — contexto de esta llamada concreta
+        user_parts: list[str] = [
+            # Siempre es Leo desde la UI
+            "IMPORTANTE: quien escribe este mensaje ES Leo, tu compañero y broadcaster. "
+            "No lo trates como un viewer cualquiera. Puedes vacilarle con confianza.",
+        ]
+
+        # Memoria relevante (va al user para no romper el caché del system)
+        if context.relevant_facts:
+            facts_lines = [
+                f"- {fact.subject}: {fact.payload}"
+                for fact in context.relevant_facts
+            ]
+            user_parts.append("Memoria relevante:\n" + "\n".join(facts_lines))
+
+        # Formato igual que en Twitch para que los few-shots encajen
+        user_parts.append(f"[chatter Leo]: {message}\n[tú]:")
+        user = "\n\n".join(user_parts)
+
+        print(
+            f"[HEBE][JARVIS][CHAT] msg={message!r} "
+            f"facts={len(context.relevant_facts)}",
+            flush=True,
+        )
+
+        raw = self._call_model(system, user, fallback="")
+        reply = clean_stream_reply(raw, source_message=message)
+
+        print(
+            f"[HEBE][JARVIS][REPLY] raw={raw!r} cleaned={reply!r}",
+            flush=True,
+        )
+
+        return reply or "…"
 
     # =========================
     # Prompt builders — devuelven (system, user)
@@ -331,30 +378,7 @@ class ResponseSynthesizer:
 
         return system, user
 
-    def _build_chat_prompt(self, context: BuiltContext) -> tuple[str, str]:
-        system_parts = [
-            self._build_system_style_block(),
-            "Situación: el usuario te ha dicho algo que no requiere una acción específica.",
-            "Objetivo: responder de forma natural, breve y útil.",
-        ]
 
-        if context.relevant_facts:
-            system_parts.append("\nMemoria relevante:")
-            for fact in context.relevant_facts:
-                system_parts.append(f"- {fact.subject}: {fact.payload}")
-
-        system_parts.extend([
-            "\nReglas:",
-            "- Responde con naturalidad.",
-            "- No inventes hechos.",
-            "- No añadas texto meta ni ejemplos.",
-            "- Sé breve.",
-        ])
-
-        system = "\n".join(system_parts)
-        user = context.input_text or ""
-
-        return system, user
 
     # =========================
     # Model call con system/user separados
