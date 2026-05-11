@@ -295,6 +295,14 @@ class HebeEngine:
             try:
                 emit("status", {"engine": "starting", "stage": "db"})
                 init_db()
+                # Tabla memory_chunks vive en su propio módulo para evitar
+                # import circular (memory_store importa db_sqlite). Se inicializa
+                # aquí, justo después de init_db(), en lugar de dentro de init_db().
+                try:
+                    from app.cognitive.memory.memory_store import init_memory_chunks_schema
+                    init_memory_chunks_schema()
+                except Exception as _e:
+                    print(f"[HEBE][MEMORY] init_memory_chunks_schema failed: {_e!r}", flush=True)
 
                 emit("status", {"engine": "starting", "stage": "apps"})
                 seed_default_apps()
