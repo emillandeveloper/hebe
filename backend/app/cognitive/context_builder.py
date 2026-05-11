@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, Any
 
 from app.cognitive.memory_store import MemoryStore, MemoryFact, Reminder
@@ -19,7 +19,7 @@ class BuiltContext:
     input_text: Optional[str]
     internal_event: Optional[InternalEvent]
 
-    # Memoria relevante
+    # Memoria relevante (estructurada, MemoryFact)
     relevant_facts: list[MemoryFact]
     recent_appointments: list[MemoryFact]
 
@@ -28,6 +28,12 @@ class BuiltContext:
 
     # Estado del sistema
     state_snapshot: dict[str, Any]
+
+    # Chunks RAG (texto libre + embeddings). Campo hermano de relevant_facts;
+    # no mezclar — facts son dataclasses estructurados, chunks son dicts con score.
+    # Poblado por _retrieve_memory_for_jarvis (JARVIS) o _retrieve_memory_for_twitch
+    # (Twitch chat react). Vacío en todos los demás eventos.
+    relevant_chunks: list[dict] = field(default_factory=list)
 
 
 class ContextBuilder:
@@ -54,15 +60,28 @@ class ContextBuilder:
     ) -> BuiltContext:
         """
         Construye contexto tanto para:
-        - input del usuario
-        - eventos internos (ej: reminder_due)
+        - input del usuario (JARVIS)
+        - eventos internos (reminder_due, twitch_chat_react, …)
         """
 
         relevant_facts = self._get_relevant_facts(input_text)
         recent_appointments = self.memory_store.get_recent_appointments(limit=3)
         pending_reminders = self.memory_store.list_pending_reminders(limit=5)
-
         state_snapshot = self._build_state_snapshot(state)
+
+        # RAG retrieval — solo donde aporta valor, para no añadir latencia/coste
+        # en eventos donde no se usa (reminders, subs, raids, follows…).
+        relevant_chunks: list[dict] = []
+        if internal_event is None and input_text:
+            # Path JARVIS: búsqueda semántica sobre la query del usuario.
+            relevant_chunks = self._retrieve_memory_for_jarvis(input_text)
+        elif (
+            internal_event is not None
+            and internal_event.event_type == "twitch_chat_react"
+        ):
+            # Path Twitch chat: lookup estructurado del viewer (sin embeddings).
+            user_login = str((internal_event.payload or {}).get("user_login") or "")
+            relevant_chunks = self._retrieve_memory_for_twitch(user_login)
 
         return BuiltContext(
             input_text=input_text,
@@ -71,6 +90,7 @@ class ContextBuilder:
             recent_appointments=recent_appointments,
             pending_reminders=pending_reminders,
             state_snapshot=state_snapshot,
+            relevant_chunks=relevant_chunks,
         )
 
     # =========================
@@ -97,6 +117,90 @@ class ContextBuilder:
         )
 
         return facts
+
+    # =========================
+    # RAG chunk retrieval
+    # =========================
+
+    def _retrieve_memory_for_jarvis(self, user_message: str) -> list[dict]:
+        """
+        Recall semántico + resúmenes recientes de stream para JARVIS.
+
+        Combina:
+        - Búsqueda vectorial top-4 sobre la query del usuario (min_similarity=0.3
+          filtra correlación espuria; un "hola" no trae todos los chunks).
+        - Los 2 stream_summary más recientes (sin filtro semántico, siempre útiles).
+
+        Deduplicamos por id para que un chunk que aparezca en ambas listas
+        no se inyecte dos veces en el prompt.
+
+        Retorna lista vacía en cualquier error (sentence-transformers no instalado,
+        tabla vacía, conexión fallida…). El synthesizer lo trata como ausencia de
+        memoria, no como fallo.
+        """
+        if not user_message:
+            return []
+        try:
+            from app.cognitive.memory.memory_store import search_chunks, get_recent_chunks
+
+            chunks = search_chunks(
+                query=user_message,
+                top_k=4,
+                min_similarity=0.3,
+            )
+            recent_streams = get_recent_chunks(kind="stream_summary", limit=2)
+
+            seen: set[int] = set()
+            combined: list[dict] = []
+            for item in chunks + recent_streams:
+                item_id = item.get("id")
+                if item_id in seen:
+                    continue
+                seen.add(item_id)
+                combined.append(item)
+            return combined
+        except Exception as exc:
+            print(f"[HEBE][MEMORY][JARVIS] retrieval error: {exc!r}", flush=True)
+            return []
+
+    def _retrieve_memory_for_twitch(self, user_login: str) -> list[dict]:
+        """
+        Lookup estructurado del viewer activo. Sin embeddings → coste constante
+        (no añade latencia por embedding en cada mensaje de chat).
+
+        Usa LIKE sobre el campo subject para encontrar viewer_facts del usuario.
+        Devuelve los chunks en el mismo shape que _retrieve_memory_for_jarvis
+        (dict con clave 'text') para que el synthesizer no los distinga.
+        """
+        if not user_login:
+            return []
+        try:
+            from app.services.db_sqlite import search_memory_facts
+
+            rows = search_memory_facts(
+                query_text=user_login,
+                kind="viewer_fact",
+                active_only=True,
+                limit=3,
+            )
+            result: list[dict] = []
+            for r in rows:
+                # source_text es la representación legible; payload como fallback.
+                text = r.get("source_text") or str(r.get("payload") or "")
+                if not text:
+                    continue
+                result.append(
+                    {
+                        "id": r.get("id"),
+                        "text": text,
+                        "kind": "viewer_fact",
+                        "subject": r.get("subject"),
+                    }
+                )
+            return result
+        except Exception as exc:
+            print(f"[HEBE][MEMORY][TWITCH] retrieval error: {exc!r}", flush=True)
+            return []
 
     # =========================
     # State snapshot

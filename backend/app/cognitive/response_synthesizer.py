@@ -100,7 +100,7 @@ class ResponseSynthesizer:
             return clean_jarvis_reply(self._call_model(system, user, fallback=fallback)) or fallback
 
         if event.event_type.startswith("twitch_"):
-            return self._generate_twitch_reply(event)
+            return self._generate_twitch_reply(event, context)
 
         return self._fallback_text("Ha ocurrido algo, pero no tengo claro qué.")
 
@@ -212,13 +212,20 @@ class ResponseSynthesizer:
             "No lo trates como un viewer cualquiera. Puedes vacilarle con confianza.",
         ]
 
-        # Memoria relevante (va al user para no romper el caché del system)
+        # Memoria relevante — facts estructurados + chunks RAG, bajo la misma
+        # cabecera para no confundir al modelo. Va al user para no romper el
+        # caché del system (el system debe ser byte-for-byte idéntico entre llamadas).
+        memory_lines: list[str] = []
         if context.relevant_facts:
-            facts_lines = [
-                f"- {fact.subject}: {fact.payload}"
-                for fact in context.relevant_facts
-            ]
-            user_parts.append("Memoria relevante:\n" + "\n".join(facts_lines))
+            for fact in context.relevant_facts:
+                memory_lines.append(f"- {fact.subject}: {fact.payload}")
+        if context.relevant_chunks:
+            for ch in context.relevant_chunks:
+                text = ch.get("text", "")
+                if text:
+                    memory_lines.append(f"- ({ch.get('kind', 'memory')}) {text}")
+        if memory_lines:
+            user_parts.append("Memoria relevante:\n" + "\n".join(memory_lines))
 
         # Formato igual que en Twitch para que los few-shots encajen
         user_parts.append(f"[chatter Leo]: {message}\n[tú]:")
@@ -226,7 +233,8 @@ class ResponseSynthesizer:
 
         print(
             f"[HEBE][JARVIS][CHAT] msg={message!r} "
-            f"facts={len(context.relevant_facts)}",
+            f"facts={len(context.relevant_facts)} "
+            f"chunks={len(context.relevant_chunks)}",
             flush=True,
         )
 
@@ -507,7 +515,7 @@ class ResponseSynthesizer:
     # Twitch / stream generation
     # =========================
 
-    def _generate_twitch_reply(self, event) -> str:
+    def _generate_twitch_reply(self, event, context: BuiltContext | None = None) -> str:
         payload = event.payload or {}
 
         if event.event_type == "twitch_sub":
@@ -517,7 +525,7 @@ class ResponseSynthesizer:
         if event.event_type == "twitch_follow_batch":
             return self._generate_twitch_follow_batch(payload)
         if event.event_type == "twitch_chat_react":
-            return self._generate_twitch_chat_react(payload)
+            return self._generate_twitch_chat_react(payload, context=context)
 
         return self._fallback_text("")
 
@@ -600,7 +608,7 @@ class ResponseSynthesizer:
         reply = self._call_model(system, user, fallback=fallback)
         return clean_twitch_reply(reply)
 
-    def _generate_twitch_chat_react(self, payload: dict) -> str:
+    def _generate_twitch_chat_react(self, payload: dict, context: BuiltContext | None = None) -> str:
         """
         Reacción a un mensaje de chat clasificado como digno de respuesta.
 
@@ -663,6 +671,19 @@ class ResponseSynthesizer:
             f"{self._build_stream_style_block()}\n\n"
             f"{build_chat_react_examples()}"
         )
+
+        # Si hay viewer_facts para este chatter, añadir perfil compacto al system.
+        # Nota: esto rompe el caché de OpenAI solo cuando existen facts del viewer.
+        # Para la mayoría de viewers (sin facts) el system sigue siendo idéntico.
+        if context is not None and context.relevant_chunks:
+            profile_bits: list[str] = []
+            for ch in context.relevant_chunks:
+                text = ch.get("text", "")
+                if text:
+                    profile_bits.append(text)
+            if profile_bits:
+                profile_line = "; ".join(profile_bits)
+                system = system + f"\n\nSobre este viewer: {profile_line}"
 
         # User: parte variable (contexto + mensaje). El modelo completa
         # después de [tú]:. Siempre usamos el nombre limpio del chatter.

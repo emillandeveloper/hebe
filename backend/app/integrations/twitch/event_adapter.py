@@ -313,6 +313,21 @@ class TwitchEventAdapter:
                     })
             return
 
+        # TODO (Fase 1.5 — memory/stream_end_hook):
+        # Cuando se suscribas a "stream.offline" añadir aquí:
+        #
+        # if sub_type == "stream.offline":
+        #     if self.push_event_callback:
+        #         self.push_event_callback("stream_offline", {})
+        #     return
+        #
+        # Y en hebe_engine.process_internal_event / scheduler, manejar
+        # event_type="stream_offline" para:
+        #   1. Leer los últimos ~50 mensajes de chat_log (source='twitch').
+        #   2. Llamar a GPT-5-mini con un prompt de resumen.
+        #   3. Guardar con add_chunk(text=summary, kind="stream_summary", ...).
+        # Ver: backend/app/cognitive/memory/memory_store.add_chunk
+
     def _build_headers(self) -> dict[str, str]:
         token = self.user_oauth_token
         if not token.lower().startswith("bearer "):
