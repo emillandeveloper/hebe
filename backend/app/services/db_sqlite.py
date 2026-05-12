@@ -213,6 +213,40 @@ def init_db() -> None:
     conn.close()
 
 
+def get_recent_chat_turns(
+    source: str = "ui",
+    limit: int = 10,
+) -> list[dict]:
+    """
+    Devuelve los últimos `limit` turnos de chat_log con source=`source`,
+    ordenados cronológicamente ASCENDENTE (los más antiguos primero), listos
+    para usar como historial conversacional en messages[] de OpenAI.
+
+    Cada turno: {"role": "user"|"assistant", "content": str}
+    """
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT role, text
+        FROM chat_log
+        WHERE source = ?
+          AND role IN ('user', 'assistant')
+        ORDER BY id DESC
+        LIMIT ?
+        """,
+        (source, limit),
+    )
+    rows = cur.fetchall()
+    conn.close()
+    # Reverse: la query saca DESC para limitar a los N más recientes, pero
+    # el resultado va ASC (antiguo → reciente) para usar como historial.
+    return [
+        {"role": r["role"], "content": r["text"]}
+        for r in reversed(rows)
+    ]
+
+
 def log_chat(role: str, text: str, source: str = "voice") -> None:
     """Guarda una línea de conversación en la BD."""
     if not text:
