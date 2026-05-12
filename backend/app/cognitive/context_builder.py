@@ -35,6 +35,11 @@ class BuiltContext:
     # (Twitch chat react). Vacío en todos los demás eventos.
     relevant_chunks: list[dict] = field(default_factory=list)
 
+    # Historial conversacional corto (short-term memory). Solo path JARVIS.
+    # Formato OpenAI: [{"role": "user"|"assistant", "content": str}, ...]
+    # ordenado cronológicamente ASC (antiguo → reciente).
+    conversation_history: list[dict] = field(default_factory=list)
+
 
 class ContextBuilder:
     """
@@ -72,14 +77,18 @@ class ContextBuilder:
         # RAG retrieval — solo donde aporta valor, para no añadir latencia/coste
         # en eventos donde no se usa (reminders, subs, raids, follows…).
         relevant_chunks: list[dict] = []
+        conversation_history: list[dict] = []
         if internal_event is None and input_text:
-            # Path JARVIS: búsqueda semántica sobre la query del usuario.
+            # Path JARVIS: búsqueda semántica + historial conversacional.
             relevant_chunks = self._retrieve_memory_for_jarvis(input_text)
+            from app.services.db_sqlite import get_recent_chat_turns
+            conversation_history = get_recent_chat_turns(source="ui", limit=10)
         elif (
             internal_event is not None
             and internal_event.event_type == "twitch_chat_react"
         ):
             # Path Twitch chat: lookup estructurado del viewer (sin embeddings).
+            # Twitch sigue single-turn por diseño — sin historial conversacional.
             user_login = str((internal_event.payload or {}).get("user_login") or "")
             relevant_chunks = self._retrieve_memory_for_twitch(user_login)
 
@@ -91,6 +100,7 @@ class ContextBuilder:
             pending_reminders=pending_reminders,
             state_snapshot=state_snapshot,
             relevant_chunks=relevant_chunks,
+            conversation_history=conversation_history,
         )
 
     # =========================

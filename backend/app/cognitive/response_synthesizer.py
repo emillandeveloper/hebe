@@ -189,15 +189,15 @@ class ResponseSynthesizer:
         """
         Respuesta de Hebe en modo JARVIS (conversación directa con Leo desde la UI).
 
-        Usa el MISMO bloque cacheable de voz + few-shots que _generate_twitch_chat_react
-        para que:
-        1. GPT-5-mini reciba los ejemplos de la voz de Hebe → respuestas en su estilo.
-        2. El sistema sea idéntico en ambos contextos → el caché de OpenAI se comparte.
+        Usa el MISMO bloque cacheable de voz + few-shots que _generate_twitch_chat_react.
+        Extiende a multi-turn: pasa el historial de chat_log como messages[] a OpenAI.
 
-        El user block incluye el aviso de broadcaster + memoria relevante + mensaje de Leo
-        en el mismo formato [chatter Leo]:/[tú]: que los few-shots de hebe_voice.
+        Estructura del prompt:
+          system  : voz + few-shots (siempre idéntico → cacheable)
+          messages: [turn1_user, turn1_assistant, ..., current_user]
+          current_user: mensaje de Leo PRIMERO, bloque de memoria al FINAL
         """
-        message = (context.input_text or "").strip()
+        msg = (context.input_text or "").strip()
 
         # CACHEABLE — idéntico al usado en _generate_twitch_chat_react
         system = (
@@ -205,40 +205,50 @@ class ResponseSynthesizer:
             f"{build_chat_react_examples()}"
         )
 
-        # VARIABLE — contexto de esta llamada concreta
+        # Construcción del user actual: mensaje PRIMERO, memoria al FINAL.
+        # El mensaje va primero para que el prefijo del último user sea relativamente
+        # estable; la memoria (variable por similitud semántica) va al final.
         user_parts: list[str] = [
-            # Siempre es Leo desde la UI
             "IMPORTANTE: quien escribe este mensaje ES Leo, tu compañero y broadcaster. "
-            "No lo trates como un viewer cualquiera. Puedes vacilarle con confianza.",
+            "No lo trates como un viewer cualquiera. Puedes vacilarle con confianza.\n\n"
+            f"[chatter Leo]: {msg}\n[tú]:"
         ]
 
-        # Memoria relevante — facts estructurados + chunks RAG, bajo la misma
-        # cabecera para no confundir al modelo. Va al user para no romper el
-        # caché del system (el system debe ser byte-for-byte idéntico entre llamadas).
         memory_lines: list[str] = []
         if context.relevant_facts:
             for fact in context.relevant_facts:
-                memory_lines.append(f"- {fact.subject}: {fact.payload}")
+                memory_lines.append(f"- (sobre '{fact.subject}') {fact.payload}")
         if context.relevant_chunks:
             for ch in context.relevant_chunks:
+                subj = ch.get("subject") or "general"
                 text = ch.get("text", "")
                 if text:
-                    memory_lines.append(f"- ({ch.get('kind', 'memory')}) {text}")
+                    memory_lines.append(f"- (sobre '{subj}') {text}")
         if memory_lines:
-            user_parts.append("Memoria relevante:\n" + "\n".join(memory_lines))
+            user_parts.append(
+                "Memoria relevante (cada ítem es sobre una entidad concreta; "
+                "no mezcles información entre ítems distintos):\n"
+                + "\n".join(memory_lines)
+            )
 
-        # Formato igual que en Twitch para que los few-shots encajen
-        user_parts.append(f"[chatter Leo]: {message}\n[tú]:")
-        user = "\n\n".join(user_parts)
+        current_user_content = "\n\n".join(user_parts)
+
+        # Construcción del array messages: historial + turno actual.
+        # Los turnos históricos van limpios (sin bloque de memoria).
+        messages: list[dict] = []
+        for turn in context.conversation_history:
+            messages.append({"role": turn["role"], "content": turn["content"]})
+        messages.append({"role": "user", "content": current_user_content})
 
         print(
-            f"[HEBE][JARVIS][CHAT] msg={message!r} "
+            f"[HEBE][JARVIS][CHAT] msg={msg!r} "
             f"facts={len(context.relevant_facts)} "
-            f"chunks={len(context.relevant_chunks)}",
+            f"chunks={len(context.relevant_chunks)} "
+            f"history={len(context.conversation_history)}",
             flush=True,
         )
 
-        raw = self._call_model(system, user, fallback="")
+        raw = self._call_model(system, messages=messages, fallback="")
         reply = clean_jarvis_reply(raw)
 
         print(
@@ -397,20 +407,20 @@ class ResponseSynthesizer:
     def _call_model(
         self,
         system: str,
-        user: str,
-        fallback: str,
+        user: str | None = None,
+        fallback: str = "",
         *,
+        messages: list[dict] | None = None,
         seed: int | None = None,
     ) -> str:
         """
         Llama al modelo conversacional con system/user separados.
 
-        seed: si se pasa, se incluye en kwargs hacia .chat()/.complete().
-              OllamaLLM debe propagarlo a `options.seed` del payload de
-              Ollama. Si tu wrapper no lo acepta como kwarg, ignora el
-              parámetro silenciosamente (kwargs sueltos se pasan tal cual
-              y Ollama los acepta o los ignora según versión).
-              Útil para retry: cambia la generación entre intentos.
+        Acepta dos modos:
+        - (system, user): single-turn, compatibilidad con todos los generators.
+        - (system, messages=[...]): multi-turn, usado por _generate_chat_reply.
+
+        seed: útil para retry en Twitch — cambia la generación entre intentos.
         """
         if self.conversation_model is None:
             return fallback
@@ -422,13 +432,10 @@ class ResponseSynthesizer:
                 kwargs["seed"] = seed
 
             if hasattr(self.conversation_model, "chat") and callable(self.conversation_model.chat):
-                text = self.conversation_model.chat(
-                    [
-                        {"role": "system", "content": system},
-                        {"role": "user", "content": user},
-                    ],
-                    **kwargs,
-                )
+                if messages is None:
+                    messages = [{"role": "user", "content": user or ""}]
+                full_messages = [{"role": "system", "content": system}] + messages
+                text = self.conversation_model.chat(full_messages, **kwargs)
                 text = (text or "").strip()
                 # OllamaLLM.chat devuelve "…" si el modelo no produjo texto.
                 # Lo tratamos como vacío para que el fallback funcione.
@@ -437,7 +444,13 @@ class ResponseSynthesizer:
                 return text
 
             if hasattr(self.conversation_model, "complete") and callable(self.conversation_model.complete):
-                combined = f"{system}\n\n{user}"
+                if messages is None:
+                    combined = f"{system}\n\n{user or ''}"
+                else:
+                    body = "\n\n".join(
+                        f"{m['role']}: {m['content']}" for m in messages
+                    )
+                    combined = f"{system}\n\n{body}"
                 text = self.conversation_model.complete(combined, **kwargs)
                 text = (text or "").strip()
                 if text in ("", "…"):
