@@ -30,12 +30,11 @@ from app.integrations.twitch.service import TwitchService
 from app.integrations.twitch.event_adapter import TwitchEventAdapter
 
 
-def build_speak() -> Callable[[str, str], None]:
-    tts_enabled = os.getenv("HEBE_TTS_ENABLED", "false").strip().lower() in ("1", "true", "yes", "on")
-
+def build_speak(state: HebeState) -> Callable[[str, str], None]:
     def speak(text: str, language: str = "es") -> None:
-        if not tts_enabled:
-            print(f"[HEBE][TTS] disabled, dropped speech: {text!r}", flush=True)
+        if not getattr(state, "tts_enabled", False):
+            emit("chat.assistant", {"text": text})
+            print("[HEBE][TTS] skipped reason=global_disabled", flush=True)
             return
 
         return _speak(
@@ -65,9 +64,10 @@ class HebeRuntime:
 
 
 def build_runtime() -> HebeRuntime:
-    speak = build_speak()
-
     state = HebeState()
+    state.tts_enabled = os.getenv("HEBE_TTS_ENABLED", "false").strip().lower() in ("1", "true", "yes", "on")
+
+    speak = build_speak(state)
 
     stt = STTService(
         config=STTConfig(),

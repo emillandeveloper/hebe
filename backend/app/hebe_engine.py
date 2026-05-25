@@ -158,7 +158,7 @@ class HebeEngine:
 
         if self._should_speak_result(result):
             try:
-                self.runtime.speak(spoken_text)
+                self._deliver_voice_reply(spoken_text)
             except Exception as e:
                 print(f"[HEBE] speak failed: {e!r}", flush=True)
 
@@ -179,13 +179,11 @@ class HebeEngine:
             flush=True,
         )
 
-        manual = self._handle_stream_manual_command(command)
+        manual = self._handle_tts_manual_command(command)
+        if manual is None:
+            manual = self._handle_stream_manual_command(command)
         if manual is not None:
-            if source == "ui":
-                log_chat("assistant", manual, source="ui")
-                emit("chat.assistant", {"text": manual})
-            else:
-                self._deliver_voice_reply(manual)
+            self._deliver_manual_reply(manual, source=source)
             return "continue"
 
         context = self.context_builder.build(
@@ -265,7 +263,7 @@ class HebeEngine:
         if reply_text:
             try:
                 if source != "ui":
-                    self.runtime.speak(reply_text)
+                    self._deliver_voice_reply(reply_text)
             except Exception as e:
                 print(f"[HEBE][COG] speak failed: {e!r}", flush=True)
 
@@ -669,6 +667,75 @@ class HebeEngine:
 
         return None
 
+    def _handle_tts_manual_command(self, text: str) -> str | None:
+        normalized = self._normalize_text(text)
+        for prefix in ("hebe ", "ebe ", "eve ", "jebe "):
+            if normalized.startswith(prefix):
+                normalized = normalized[len(prefix):].strip()
+
+        global_off = {
+            "desactiva tu voz",
+            "apaga tu voz",
+            "desactiva el tts",
+            "solo texto",
+            "callate la voz",
+            "cállate la voz",
+            "disable your voice",
+            "text only",
+            "disable tts",
+        }
+        if normalized in global_off:
+            self.runtime.state.tts_enabled = False
+            print("[HEBE][TTS] global=false", flush=True)
+            return "Vale, Leo. Me quedo en texto."
+
+        global_on = {
+            "activa tu voz",
+            "vuelve a hablar",
+            "activa el tts",
+            "modo voz",
+            "enable your voice",
+            "enable tts",
+            "voice mode",
+        }
+        if normalized in global_on:
+            self.runtime.state.tts_enabled = True
+            print("[HEBE][TTS] global=true", flush=True)
+            return "Lista, Leo. Vuelvo a hablar."
+
+        stream = self._get_stream_state()
+        policies = getattr(stream, "policies", None) if stream else None
+        if policies is None:
+            return None
+
+        stream_off = {
+            "silencia tu voz en stream",
+            "desactiva tts en stream",
+            "desactiva el tts en stream",
+            "responde solo por chat",
+            "disable stream tts",
+            "text only on stream",
+        }
+        if normalized in stream_off:
+            policies.allow_tts_replies = False
+            print("[HEBE][TTS] stream=false", flush=True)
+            return "Entendido. En stream responderé solo por chat."
+
+        stream_on = {
+            "puedes hablar en stream",
+            "activa tts en stream",
+            "activa el tts en stream",
+            "vuelve a hablar en directo",
+            "enable stream tts",
+            "enable tts on stream",
+        }
+        if normalized in stream_on:
+            policies.allow_tts_replies = True
+            print("[HEBE][TTS] stream=true", flush=True)
+            return "Vale. Si toca, también hablaré en stream."
+
+        return None
+
     def _should_speak_result(self, result) -> bool:
         spoken_text = (result.output_text or "").strip()
         if not spoken_text:
@@ -717,15 +784,34 @@ class HebeEngine:
             print("[HEBE][EVENT][TWITCH] service not available, dropping chat reply", flush=True)
 
         policies = getattr(stream, "policies", None) if stream else None
-        if policies and getattr(policies, "allow_tts_replies", False):
-            self._deliver_voice_reply(text)
+        if not getattr(self.runtime.state, "tts_enabled", False):
+            print("[HEBE][TTS] skipped reason=global_disabled", flush=True)
+            return
+        if not (policies and getattr(policies, "allow_tts_replies", False)):
+            print("[HEBE][TTS] skipped reason=stream_tts_disabled", flush=True)
+            return
+        self._deliver_voice_reply(text)
 
 
     def _deliver_voice_reply(self, text: str) -> None:
+        if not text:
+            return
+        if not getattr(self.runtime.state, "tts_enabled", False):
+            emit("chat.assistant", {"text": text})
+            print("[HEBE][TTS] skipped reason=global_disabled", flush=True)
+            return
         try:
             self.runtime.speak(text)
         except Exception as e:
             print(f"[HEBE][EVENT] speak failed: {e!r}", flush=True)
+
+    def _deliver_manual_reply(self, text: str, *, source: str) -> None:
+        if source == "ui":
+            log_chat("assistant", text, source="ui")
+            emit("chat.assistant", {"text": text})
+            return
+
+        self._deliver_voice_reply(text)
 
     def handle_command(self, command: str, source: str = "voice") -> str:
         print(f"[HEBE] handle_command source={source} text={command!r}", flush=True)
@@ -801,7 +887,7 @@ class HebeEngine:
         self.runtime.state.mode = "sleep"
 
         if say_hello:
-            self.runtime.speak("Ya estoy aquí, Leo.")
+            self._deliver_voice_reply("Ya estoy aquí, Leo.")
 
         while True:
             if self._stop_event.is_set():
@@ -851,7 +937,7 @@ class HebeEngine:
             if any(keyword in command for keyword in WAKE_WORDS):
                 self.runtime.state.mode = "active"
                 vts_hotkey("HebeIdle")
-                self.runtime.speak("Dime, Leo.")
+                self._deliver_voice_reply("Dime, Leo.")
                 res = self.command_loop()
                 if res == "stop":
                     return "stop"
@@ -860,7 +946,7 @@ class HebeEngine:
         self.runtime.state.mode = "active"
 
         if say_hello:
-            self.runtime.speak("Lista, Leo.")
+            self._deliver_voice_reply("Lista, Leo.")
 
         while True:
             if self._stop_event.is_set():
