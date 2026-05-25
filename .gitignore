@@ -23,3 +23,4 @@ backend/models/ModelFile
 backend/.env
 backend/ollama/models/Llama-3.2-3B-Instruct-uncensored-Q4_K_M.gguf
 backend/data/dataset/hebe_stream_replies.jsonl
+.claude/worktrees/wonderful-moser-3c9a97
