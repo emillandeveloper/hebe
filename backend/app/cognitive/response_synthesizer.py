@@ -70,6 +70,9 @@ class ResponseSynthesizer:
             if mode == "confirm_appointment":
                 return self._generate_confirm_appointment(context, execution)
 
+            if mode == "confirm_reminder":
+                return self._generate_confirm_reminder(context, execution, reply_step.data)
+
             if mode == "confirm_action":
                 return self._generate_confirm_action(context, execution)
 
@@ -177,6 +180,32 @@ class ResponseSynthesizer:
         )
 
         return clean_jarvis_reply(self._call_model(system, user, fallback=fallback)) or fallback
+
+    def _generate_confirm_reminder(
+        self,
+        context: BuiltContext,
+        execution: ExecutionResult,
+        reply_data: dict,
+    ) -> str:
+        reminder_result = execution.first_result_of_type("reminder")
+        due_at = reply_data.get("due_at")
+        relative_label = (reply_data.get("relative_label") or "").strip()
+        message = reply_data.get("message") or reply_data.get("title") or "eso"
+        if reminder_result:
+            reminder = reminder_result.data.get("reminder")
+            if reminder is not None:
+                due_at = getattr(reminder, "due_at", due_at)
+                message = getattr(reminder, "message", None) or getattr(reminder, "title", message)
+
+        if relative_label:
+            return f"Vale, Leo. Te aviso en {relative_label}."
+
+        minutes = self._minutes_until(due_at)
+        if minutes is not None and minutes <= 1:
+            return "Vale, Leo. Te aviso en 1 minuto."
+        if minutes is not None:
+            return f"Vale, Leo. Te aviso en {minutes} minutos."
+        return f"Vale, Leo. Te aviso: {message}."
 
     def _generate_clarification_reply(
         self,
@@ -542,6 +571,22 @@ class ResponseSynthesizer:
                 return f"{date_part} a las {time_part}"
             except Exception:
                 return iso_str
+
+    def _minutes_until(self, iso_str: str | None) -> int | None:
+        if not iso_str:
+            return None
+        try:
+            from datetime import datetime
+            from zoneinfo import ZoneInfo
+
+            due = datetime.fromisoformat(str(iso_str))
+            if due.tzinfo is None:
+                due = due.replace(tzinfo=ZoneInfo("Europe/Madrid"))
+            now = datetime.now(ZoneInfo("Europe/Madrid"))
+            seconds = max(0.0, (due.astimezone(ZoneInfo("Europe/Madrid")) - now).total_seconds())
+            return max(1, int(round(seconds / 60.0)))
+        except Exception:
+            return None
 
     # =========================
     # Twitch / stream generation

@@ -46,12 +46,20 @@ class SchedulerService:
 
         # 2. Reminders vencidos (lógica existente)
         remaining = limit - len(events)
+        due_count = 0
         if remaining > 0:
             due_reminders = self.memory_store.list_due_reminders(limit=remaining)
+            due_count = len(due_reminders)
             for reminder in due_reminders:
                 event = self._fire_reminder(reminder)
                 if event is not None:
                     events.append(event)
+
+        try:
+            pending_count = len(self.memory_store.list_pending_reminders(limit=1000))
+        except Exception:
+            pending_count = -1
+        print(f"[HEBE][SCHEDULER] poll pending={pending_count} due={due_count}", flush=True)
 
         return events
 
@@ -62,6 +70,11 @@ class SchedulerService:
         """
         try:
             self.memory_store.mark_reminder_fired(reminder.id)
+            safe_message = str(reminder.message or reminder.title or "").replace('"', '\\"')
+            print(
+                f"[HEBE][REMINDER] fired id={reminder.id} message=\"{safe_message}\"",
+                flush=True,
+            )
 
             payload = {
                 "reminder_id": reminder.id,

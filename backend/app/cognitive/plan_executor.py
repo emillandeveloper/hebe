@@ -168,6 +168,12 @@ class PlanExecutor:
             source_memory_id=source_memory_id,
             payload=data.get("payload"),
         )
+        safe_message = str(reminder.message or reminder.title or "").replace('"', '\\"')
+        print(
+            f"[HEBE][REMINDER] created id={reminder.id} "
+            f"due_at={reminder.due_at} message=\"{safe_message}\"",
+            flush=True,
+        )
 
         return StepExecutionResult(
             step_type="reminder",

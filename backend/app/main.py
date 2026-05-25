@@ -111,8 +111,17 @@ def debug_memory():
         except Exception as exc:
             retrieval["chunks_error"] = repr(exc)
 
+    engine = getattr(hebe, "_engine", None)
+    runtime = getattr(engine, "runtime", None)
+    state = getattr(runtime, "state", None)
+    stream = getattr(state, "stream", None)
+    policies = getattr(stream, "policies", None) if stream is not None else None
+
     return {
         "db_path": db_sqlite.DB_PATH,
+        "tts_enabled": bool(getattr(state, "tts_enabled", False)),
+        "stream_tts_enabled": bool(getattr(policies, "allow_tts_replies", False)),
+        "stt_enabled": bool(getattr(runtime, "stt_enabled", False)),
         "facts_count": db_sqlite.count_memory_facts(active_only=True),
         "chunks_count": count_chunks(active_only=True),
         "last_facts": db_sqlite.get_recent_memory_facts(limit=10, active_only=True),

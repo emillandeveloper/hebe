@@ -1,7 +1,9 @@
 # backend/app/cognitive/deliberation_service.py
 from __future__ import annotations
 
-from datetime import datetime
+import re
+import unicodedata
+from datetime import datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -76,6 +78,16 @@ class DeliberationService:
 
     def _handle_user_input(self, context: BuiltContext) -> DeliberationResult:
         text = (context.input_text or "").strip().lower()
+
+        reminder = self._parse_relative_reminder(context.input_text or "")
+        if reminder is not None:
+            return self._plan_relative_reminder(
+                title=reminder["title"],
+                message=reminder["message"],
+                due_at=reminder["due_at"],
+                relative_label=reminder["relative_label"],
+                source_text=context.input_text,
+            )
 
         pending = context.state_snapshot.get("pending_clarification")
         if pending and pending.get("kind") == "appointment_datetime":
@@ -242,6 +254,50 @@ class DeliberationService:
             )
         )
 
+    def _plan_relative_reminder(
+        self,
+        *,
+        title: str,
+        message: str,
+        due_at: str,
+        relative_label: str,
+        source_text: str | None,
+    ) -> DeliberationResult:
+        return DeliberationResult(
+            plan=Plan(
+                steps=[
+                    PlanStep(
+                        type="reminder",
+                        data={
+                            "title": title,
+                            "due_at": due_at,
+                            "kind": "generic",
+                            "message": message,
+                            "timezone_name": "Europe/Madrid",
+                            "payload": {
+                                "title": title,
+                                "message": message,
+                                "due_at": due_at,
+                                "relative_label": relative_label,
+                                "source_text": source_text,
+                            },
+                        },
+                    ),
+                    PlanStep(
+                        type="reply",
+                        data={
+                            "mode": "confirm_reminder",
+                            "title": title,
+                            "message": message,
+                            "due_at": due_at,
+                            "relative_label": relative_label,
+                        },
+                    ),
+                ],
+                reasoning="Resolved relative reminder deterministically",
+            )
+        )
+
     def _build_clarify_plan(
         self,
         question: str,
@@ -313,6 +369,124 @@ class DeliberationService:
             "hora",
         ]
         return any(k in text for k in keywords)
+
+    def _parse_relative_reminder(self, text: str) -> dict[str, str] | None:
+        raw = (text or "").strip()
+        normalized = self._normalize_text(raw)
+        if not normalized:
+            return None
+
+        match = self._match_relative_reminder(normalized)
+        if match is None:
+            return None
+
+        minutes = match["minutes"]
+        message = self._extract_reminder_message(normalized, raw)
+        if not message:
+            return None
+
+        due = datetime.now(ZoneInfo("Europe/Madrid")) + timedelta(minutes=minutes)
+        return {
+            "title": message,
+            "message": f"Te recuerdo: {message}",
+            "due_at": due.isoformat(),
+            "relative_label": match["relative_label"],
+        }
+
+    def _match_relative_reminder(self, normalized: str) -> dict[str, Any] | None:
+        if not any(marker in normalized for marker in ("recuerdame", "avisame", "recordatorio")):
+            return None
+
+        patterns = [
+            r"\b(?:recuerdame|avisame)\s+en\s+(?P<amount>\d+|un|una|media)\s+(?P<unit>minuto|minutos|hora|horas)\b",
+            r"\bdentro\s+de\s+(?P<amount>\d+|un|una|media)\s+(?P<unit>minuto|minutos|hora|horas)\s+(?:recuerdame|avisame)\b",
+            r"\bponme\s+un\s+recordatorio\s+en\s+(?P<amount>\d+|un|una|media)\s+(?P<unit>minuto|minutos|hora|horas)\b",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, normalized)
+            if not match:
+                continue
+            amount_text = match.group("amount")
+            unit = match.group("unit")
+            minutes = self._relative_minutes(amount_text, unit)
+            if minutes is None:
+                continue
+            return {
+                "minutes": minutes,
+                "relative_label": self._relative_label(amount_text, unit, minutes),
+            }
+        return None
+
+    def _relative_minutes(self, amount_text: str, unit: str) -> int | None:
+        if amount_text == "media":
+            if unit.startswith("hora"):
+                return 30
+            return None
+        if amount_text in {"un", "una"}:
+            amount = 1
+        else:
+            try:
+                amount = int(amount_text)
+            except ValueError:
+                return None
+        if amount <= 0:
+            return None
+        return amount * 60 if unit.startswith("hora") else amount
+
+    def _relative_label(self, amount_text: str, unit: str, minutes: int) -> str:
+        if amount_text == "media" and unit.startswith("hora"):
+            return "media hora"
+        if minutes == 1:
+            return "1 minuto"
+        if minutes < 60:
+            return f"{minutes} minutos"
+        hours = minutes // 60
+        if hours == 1:
+            return "1 hora"
+        return f"{hours} horas"
+
+    def _extract_reminder_message(self, normalized: str, raw: str) -> str:
+        raw_patterns = [
+            r"\b(?:recu[eé]rdame|av[ií]same)\s+en\s+(?:\d+|un|una|media)\s+(?:minuto|minutos|hora|horas)\s+(?:que|de|para)\s+(.+)$",
+            r"\bdentro\s+de\s+(?:\d+|un|una|media)\s+(?:minuto|minutos|hora|horas)\s+(?:recu[eé]rdame|av[ií]same)\s+(?:que|de|para)?\s*(.+)$",
+            r"\bponme\s+un\s+recordatorio\s+en\s+(?:\d+|un|una|media)\s+(?:minuto|minutos|hora|horas)\s+(?:que|de|para)\s+(.+)$",
+        ]
+        for pattern in raw_patterns:
+            match = re.search(pattern, raw, flags=re.IGNORECASE)
+            if match:
+                candidate = match.group(1).strip(" .,:;")
+                if candidate:
+                    return candidate
+
+        normalized_patterns = [
+            r"\b(?:recuerdame|avisame)\s+en\s+(?:\d+|un|una|media)\s+(?:minuto|minutos|hora|horas)\s+(?:que|de|para)\s+(.+)$",
+            r"\bdentro\s+de\s+(?:\d+|un|una|media)\s+(?:minuto|minutos|hora|horas)\s+(?:recuerdame|avisame)\s+(?:que|de|para)?\s*(.+)$",
+            r"\bponme\s+un\s+recordatorio\s+en\s+(?:\d+|un|una|media)\s+(?:minuto|minutos|hora|horas)\s+(?:que|de|para)\s+(.+)$",
+        ]
+        for pattern in normalized_patterns:
+            match = re.search(pattern, normalized)
+            if match:
+                candidate = match.group(1).strip(" .,:;")
+                if candidate:
+                    return candidate
+
+        # Fallback on the original text keeps accents/casing for messages
+        # that used an uncommon but still complete phrasing.
+        text = (raw or "").strip()
+        for marker in (" que ", " para ", " de "):
+            idx = text.lower().rfind(marker)
+            if idx >= 0:
+                return text[idx + len(marker):].strip(" .,:;")
+        return ""
+
+    def _normalize_text(self, text: str) -> str:
+        raw = (text or "").strip().lower()
+        without_accents = "".join(
+            ch for ch in unicodedata.normalize("NFKD", raw)
+            if not unicodedata.combining(ch)
+        )
+        cleaned = re.sub(r"[^a-z0-9ñ\s]", " ", without_accents)
+        return " ".join(cleaned.split())
 
     def _extract_open_app_target(self, text: str) -> str | None:
         prefixes = ["abre ", "open "]

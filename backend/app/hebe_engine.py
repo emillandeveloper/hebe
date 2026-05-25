@@ -450,7 +450,18 @@ class HebeEngine:
                     except Exception as e:
                         print(f"[HEBE][TWITCH][CHATBOT] start failed: {e!r}", flush=True)
 
-                emit("status", {"engine": "ready", "stage": "ready"})
+                stream = getattr(self.runtime.state, "stream", None)
+                policies = getattr(stream, "policies", None) if stream else None
+                emit(
+                    "status",
+                    {
+                        "engine": "ready",
+                        "stage": "ready",
+                        "tts_enabled": bool(getattr(self.runtime.state, "tts_enabled", False)),
+                        "stream_tts_enabled": bool(getattr(policies, "allow_tts_replies", False)),
+                        "stt_enabled": bool(getattr(self.runtime, "stt_enabled", False)),
+                    },
+                )
 
                 target = self.wakeword_loop if self.use_wakeword else self.engine_loop
                 kwargs = {"say_hello": self.say_hello}
@@ -686,7 +697,8 @@ class HebeEngine:
         }
         if normalized in global_off:
             self.runtime.state.tts_enabled = False
-            print("[HEBE][TTS] global=false", flush=True)
+            print("[HEBE][TTS] global enabled=false source=command", flush=True)
+            self._emit_audio_status()
             return "Vale, Leo. Me quedo en texto."
 
         global_on = {
@@ -700,7 +712,8 @@ class HebeEngine:
         }
         if normalized in global_on:
             self.runtime.state.tts_enabled = True
-            print("[HEBE][TTS] global=true", flush=True)
+            print("[HEBE][TTS] global enabled=true source=command", flush=True)
+            self._emit_audio_status()
             return "Lista, Leo. Vuelvo a hablar."
 
         stream = self._get_stream_state()
@@ -718,7 +731,8 @@ class HebeEngine:
         }
         if normalized in stream_off:
             policies.allow_tts_replies = False
-            print("[HEBE][TTS] stream=false", flush=True)
+            print("[HEBE][TTS] stream enabled=false source=command", flush=True)
+            self._emit_audio_status()
             return "Entendido. En stream responderé solo por chat."
 
         stream_on = {
@@ -731,10 +745,26 @@ class HebeEngine:
         }
         if normalized in stream_on:
             policies.allow_tts_replies = True
-            print("[HEBE][TTS] stream=true", flush=True)
+            print("[HEBE][TTS] stream enabled=true source=command", flush=True)
+            self._emit_audio_status()
             return "Vale. Si toca, también hablaré en stream."
 
         return None
+
+    def _emit_audio_status(self) -> None:
+        try:
+            stream = getattr(self.runtime.state, "stream", None)
+            policies = getattr(stream, "policies", None) if stream else None
+            emit(
+                "status",
+                {
+                    "tts_enabled": bool(getattr(self.runtime.state, "tts_enabled", False)),
+                    "stream_tts_enabled": bool(getattr(policies, "allow_tts_replies", False)),
+                    "stt_enabled": bool(getattr(self.runtime, "stt_enabled", False)),
+                },
+            )
+        except Exception:
+            pass
 
     def _should_speak_result(self, result) -> bool:
         spoken_text = (result.output_text or "").strip()
@@ -801,9 +831,12 @@ class HebeEngine:
             print("[HEBE][TTS] skipped reason=global_disabled", flush=True)
             return
         try:
+            safe_text = str(text or "").replace('"', '\\"')
+            print(f"[HEBE][TTS] speaking text=\"{safe_text}\"", flush=True)
             self.runtime.speak(text)
         except Exception as e:
-            print(f"[HEBE][EVENT] speak failed: {e!r}", flush=True)
+            safe_error = str(e).replace('"', '\\"')
+            print(f"[HEBE][TTS] failed error=\"{safe_error}\"", flush=True)
 
     def _deliver_manual_reply(self, text: str, *, source: str) -> None:
         if source == "ui":

@@ -37,12 +37,19 @@ def build_speak(state: HebeState) -> Callable[[str, str], None]:
             print("[HEBE][TTS] skipped reason=global_disabled", flush=True)
             return
 
-        return _speak(
-            text=text,
-            language=language,
-            emit=emit,
-            log_chat=log_chat,
-        )
+        safe_text = str(text or "").replace('"', '\\"')
+        print(f"[HEBE][TTS] speaking text=\"{safe_text}\"", flush=True)
+        try:
+            return _speak(
+                text=text,
+                language=language,
+                emit=emit,
+                log_chat=log_chat,
+            )
+        except Exception as exc:
+            safe_error = str(exc).replace('"', '\\"')
+            print(f"[HEBE][TTS] failed error=\"{safe_error}\"", flush=True)
+            raise
 
     return speak
 
