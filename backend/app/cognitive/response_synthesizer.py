@@ -214,6 +214,14 @@ class ResponseSynthesizer:
         user_parts: list[str] = [
             "Speaker: Leo, your companion and broadcaster. "
             "Do not treat him like a random viewer. You can tease him with trust.\n\n"
+            f"Message type: {getattr(context, 'message_type', 'unknown')}.\n"
+            + (
+                "This is casual small talk. Answer directly in character, maximum two short sentences. "
+                "Do not recap previous conversation and do not mention memory.\n\n"
+                if getattr(context, "message_type", "unknown") == "small_talk"
+                else ""
+            )
+            +
             f"Leo: {msg}"
         ]
 
@@ -227,7 +235,7 @@ class ResponseSynthesizer:
                 text = ch.get("text", "")
                 if text:
                     memory_lines.append(f"- (about '{subj}') {text}")
-        if memory_lines:
+        if memory_lines and getattr(context, "inject_memory", True):
             user_parts.append(
                 "Relevant memory (each item is about a specific entity; "
                 "do not merge details across unrelated items):\n"
