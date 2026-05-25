@@ -3,6 +3,7 @@ import threading
 from queue import Empty
 
 from app.services.db_sqlite import (
+    DB_PATH,
     init_db,
     log_chat,
     seed_default_apps,
@@ -27,8 +28,9 @@ from app.cognitive.deliberation_service import DeliberationService
 from app.cognitive.plan_executor import PlanExecutor
 from app.cognitive.response_synthesizer import ResponseSynthesizer
 from app.cognitive.action_runtime import ActionRuntime
+from app.cognitive.memory.memory_extractor import MemoryExtractor
 
-WAKE_WORDS = ["hebe despierta", "eve despierta", "jebe despierta", "asistente despierta"]
+WAKE_WORDS = ["hebe despierta", "eve despierta", "jebe despierta"]
 STREAM_WAKE_ALIASES = {"hebe", "ebe", "eve", "heve", "jebe"}
 
 t0 = time.time()
@@ -117,6 +119,9 @@ class HebeEngine:
 
         self.response_synthesizer = ResponseSynthesizer(
             conversation_model=getattr(self.runtime, "llm", None),
+        )
+        self.memory_extractor = MemoryExtractor(
+            intent_model=getattr(self.runtime, "intent_llm", None),
         )
 
         # Feature flag inicial
@@ -225,9 +230,24 @@ class HebeEngine:
             flush=True,
         )
 
+        if source == "ui" and reply_text:
+            log_chat("assistant", reply_text, source="ui")
+            emit("chat.assistant", {"text": reply_text})
+
+        if reply_text and self._should_extract_memory(source=source, execution=execution):
+            try:
+                self.memory_extractor.extract_and_store(
+                    user_text=command,
+                    assistant_reply=reply_text,
+                    source=source,
+                )
+            except Exception as exc:
+                print(f"[HEBE][MEMORY_EXTRACT] failed: {exc!r}", flush=True)
+
         if reply_text:
             try:
-                self.runtime.speak(reply_text)
+                if source != "ui":
+                    self.runtime.speak(reply_text)
             except Exception as e:
                 print(f"[HEBE][COG] speak failed: {e!r}", flush=True)
 
@@ -294,6 +314,7 @@ class HebeEngine:
         def boot():
             try:
                 emit("status", {"engine": "starting", "stage": "db"})
+                print(f"[HEBE][DB] startup path={DB_PATH}", flush=True)
                 init_db()
                 # Tabla memory_chunks vive en su propio módulo para evitar
                 # import circular (memory_store importa db_sqlite). Se inicializa
@@ -482,6 +503,17 @@ class HebeEngine:
                 return bool(getattr(policies, "allow_tts_replies", False))
 
         return True
+
+    def _should_extract_memory(self, *, source: str, execution) -> bool:
+        if source not in {"ui", "voice"}:
+            return False
+
+        reply_step = execution.first_result_of_type("reply") if execution else None
+        if not reply_step:
+            return False
+
+        return reply_step.data.get("mode") == "chat"
+
     def _deliver_twitch_reply(self, text: str) -> None:
         """
         Entrega un reply al chat de Twitch.
@@ -570,7 +602,7 @@ class HebeEngine:
         self.runtime.state.mode = "sleep"
 
         if say_hello:
-            self.runtime.speak("¡Hola! ¿Cómo puedo ayudarte?")
+            self.runtime.speak("Ya estoy aquí, Leo.")
 
         while True:
             if self._stop_event.is_set():
@@ -618,7 +650,7 @@ class HebeEngine:
             if any(keyword in command for keyword in WAKE_WORDS):
                 self.runtime.state.mode = "active"
                 vts_hotkey("HebeIdle")
-                self.runtime.speak("Te escucho.")
+                self.runtime.speak("Dime, Leo.")
                 res = self.command_loop()
                 if res == "stop":
                     return "stop"
@@ -627,7 +659,7 @@ class HebeEngine:
         self.runtime.state.mode = "active"
 
         if say_hello:
-            self.runtime.speak("¡Hola! ¿Cómo puedo ayudarte?")
+            self.runtime.speak("Lista, Leo.")
 
         while True:
             if self._stop_event.is_set():

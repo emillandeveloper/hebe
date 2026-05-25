@@ -166,6 +166,15 @@ class OrchestratorExecutor:
         user_text = str(decision.metadata.get("user_text", "")).strip()
 
         if hasattr(self.chat_runtime, "ask_stateless"):
+            # Legacy fallback only. Normal UI/private conversation is routed by
+            # HebeEngine.cognitive_flow through ContextBuilder ->
+            # DeliberationService -> PlanExecutor -> ResponseSynthesizer, so it
+            # receives identity, memory retrieval, and memory extraction.
+            print(
+                "[HEBE][EXECUTOR][LEGACY_CHAT] ask_stateless path used; "
+                "normal chat should use cognitive_flow",
+                flush=True,
+            )
             return self.chat_runtime.ask_stateless(user_text, temperature=0.7)
 
         if hasattr(self.chat_runtime, "generate"):

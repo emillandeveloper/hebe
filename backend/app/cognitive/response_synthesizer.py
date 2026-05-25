@@ -12,6 +12,10 @@ from app.cognitive.persona.hebe_voice import (
     build_chat_react_examples,
     build_stream_style_block as build_hebe_stream_style_block,
 )
+from app.cognitive.persona.hebe_identity import (
+    build_hebe_core_identity,
+    build_private_mode_style,
+)
 from app.cognitive.persona.reply_cleaner import (
     clean_jarvis_reply,
     clean_twitch_reply,
@@ -189,8 +193,8 @@ class ResponseSynthesizer:
         """
         Respuesta de Hebe en modo JARVIS (conversación directa con Leo desde la UI).
 
-        Usa el MISMO bloque cacheable de voz + few-shots que _generate_twitch_chat_react.
-        Extiende a multi-turn: pasa el historial de chat_log como messages[] a OpenAI.
+        Usa la identidad central de Hebe + estilo privado. No reutiliza el
+        bloque Twitch, porque private/JARVIS tiene otro formato y longitud.
 
         Estructura del prompt:
           system  : voz + few-shots (siempre idéntico → cacheable)
@@ -199,35 +203,34 @@ class ResponseSynthesizer:
         """
         msg = (context.input_text or "").strip()
 
-        # CACHEABLE — idéntico al usado en _generate_twitch_chat_react
         system = (
-            f"{self._build_stream_style_block()}\n\n"
-            f"{build_chat_react_examples()}"
+            f"{build_hebe_core_identity()}\n\n"
+            f"{build_private_mode_style()}"
         )
 
         # Construcción del user actual: mensaje PRIMERO, memoria al FINAL.
         # El mensaje va primero para que el prefijo del último user sea relativamente
         # estable; la memoria (variable por similitud semántica) va al final.
         user_parts: list[str] = [
-            "IMPORTANTE: quien escribe este mensaje ES Leo, tu compañero y broadcaster. "
-            "No lo trates como un viewer cualquiera. Puedes vacilarle con confianza.\n\n"
-            f"[chatter Leo]: {msg}\n[tú]:"
+            "Speaker: Leo, your companion and broadcaster. "
+            "Do not treat him like a random viewer. You can tease him with trust.\n\n"
+            f"Leo: {msg}"
         ]
 
         memory_lines: list[str] = []
         if context.relevant_facts:
             for fact in context.relevant_facts:
-                memory_lines.append(f"- (sobre '{fact.subject}') {fact.payload}")
+                memory_lines.append(f"- (about '{fact.subject}') {fact.payload}")
         if context.relevant_chunks:
             for ch in context.relevant_chunks:
                 subj = ch.get("subject") or "general"
                 text = ch.get("text", "")
                 if text:
-                    memory_lines.append(f"- (sobre '{subj}') {text}")
+                    memory_lines.append(f"- (about '{subj}') {text}")
         if memory_lines:
             user_parts.append(
-                "Memoria relevante (cada ítem es sobre una entidad concreta; "
-                "no mezcles información entre ítems distintos):\n"
+                "Relevant memory (each item is about a specific entity; "
+                "do not merge details across unrelated items):\n"
                 + "\n".join(memory_lines)
             )
 
@@ -264,7 +267,7 @@ class ResponseSynthesizer:
 
     def _build_system_style_block(self) -> str:
         return (
-            "Eres Hebe, la compañera IA personal de Leo.\n"
+            f"{build_hebe_core_identity()}\n"
             "Responde en español de forma natural, breve, clara y grounded.\n"
             "No inventes hechos, fechas, horas, nombres, lugares ni acciones.\n"
             "No uses tono robótico.\n"

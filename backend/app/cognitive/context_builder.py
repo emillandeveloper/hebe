@@ -83,6 +83,16 @@ class ContextBuilder:
             relevant_chunks = self._retrieve_memory_for_jarvis(input_text)
             from app.services.db_sqlite import get_recent_chat_turns
             conversation_history = get_recent_chat_turns(source="ui", limit=10)
+            # UI turns are logged before cognitive_flow builds context. Drop the
+            # current user turn if it is already in chat_log, otherwise the model
+            # sees Leo's latest message twice.
+            if conversation_history:
+                last = conversation_history[-1]
+                if (
+                    last.get("role") == "user"
+                    and self._normalize_for_compare(last.get("content")) == self._normalize_for_compare(input_text)
+                ):
+                    conversation_history = conversation_history[:-1]
         elif (
             internal_event is not None
             and internal_event.event_type == "twitch_chat_react"
@@ -126,7 +136,34 @@ class ContextBuilder:
             touch=True,  # importante para ranking futuro
         )
 
-        return facts
+        low = input_text.lower()
+        if any(token in low for token in ("hablar", "idioma", "femenin", "deberias", "deberías", "speak", "language")):
+            facts.extend(
+                self.memory_store.search_facts(
+                    kind="hebe_identity",
+                    active_only=True,
+                    limit=3,
+                    touch=True,
+                )
+            )
+            facts.extend(
+                self.memory_store.search_facts(
+                    kind="preference",
+                    active_only=True,
+                    limit=3,
+                    touch=True,
+                )
+            )
+
+        seen: set[int] = set()
+        deduped: list[MemoryFact] = []
+        for fact in facts:
+            if fact.id in seen:
+                continue
+            seen.add(fact.id)
+            deduped.append(fact)
+
+        return deduped[:limit]
 
     # =========================
     # RAG chunk retrieval
@@ -229,3 +266,6 @@ class ContextBuilder:
             "stream_enabled": getattr(stream, "enabled", False) if stream else False,
             "stream_armed": getattr(stream, "armed", False) if stream else False,
         }
+
+    def _normalize_for_compare(self, text: Optional[str]) -> str:
+        return " ".join((text or "").strip().lower().split())

@@ -80,6 +80,48 @@ def debug_stream_summary():
     }
 
 
+@app.get("/debug/memory")
+def debug_memory():
+    """Inspect persistent memory and last private chat turns."""
+    from app.services import db_sqlite
+    from app.cognitive.memory.memory_store import count_chunks, get_recent_chunks
+
+    last_turns = db_sqlite.get_recent_chat_log(source="ui", limit=10)
+    last_input = ""
+    for turn in last_turns:
+        if turn.get("role") == "user":
+            last_input = str(turn.get("text") or "")
+            break
+
+    retrieval = {"facts": [], "chunks": []}
+    if last_input:
+        retrieval["facts"] = db_sqlite.search_memory_facts(
+            query_text=last_input,
+            active_only=True,
+            limit=5,
+        )
+        try:
+            from app.cognitive.memory.memory_store import search_chunks
+
+            retrieval["chunks"] = search_chunks(
+                query=last_input,
+                top_k=5,
+                min_similarity=0.3,
+            )
+        except Exception as exc:
+            retrieval["chunks_error"] = repr(exc)
+
+    return {
+        "db_path": db_sqlite.DB_PATH,
+        "facts_count": db_sqlite.count_memory_facts(active_only=True),
+        "chunks_count": count_chunks(active_only=True),
+        "last_facts": db_sqlite.get_recent_memory_facts(limit=10, active_only=True),
+        "last_chunks": get_recent_chunks(limit=10, active_only=True),
+        "last_chat_turns": last_turns,
+        "retrieval_for_last_input": retrieval,
+    }
+
+
 @app.on_event("startup")
 async def startup():
     # NO arrancar el motor aquí (XTTS/Whisper pueden tardar bastante)

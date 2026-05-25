@@ -137,6 +137,59 @@ def add_chunk(
     return chunk_id
 
 
+def add_chunk_if_new(
+    text: str,
+    kind: str,
+    *,
+    subject: Optional[str] = None,
+    source_session: Optional[str] = None,
+    importance: float = 0.5,
+    tags: Optional[dict] = None,
+    min_similarity: float = 0.92,
+    embedder: Optional[Embedder] = None,
+) -> tuple[int | None, bool]:
+    """
+    Persist a chunk unless an active near-duplicate already exists.
+
+    Returns (chunk_id, created). If a duplicate is found, chunk_id is the
+    existing row id and created is False.
+    """
+    normalized = " ".join((text or "").strip().lower().split())
+    if not normalized:
+        return None, False
+
+    try:
+        candidates = search_chunks(
+            text,
+            kind=kind,
+            subject=subject,
+            top_k=3,
+            min_similarity=min_similarity,
+            active_only=True,
+            touch=False,
+            embedder=embedder,
+        )
+        for item in candidates:
+            existing_text = " ".join(str(item.get("text") or "").strip().lower().split())
+            if existing_text == normalized or float(item.get("score") or 0.0) >= min_similarity:
+                return int(item["id"]), False
+    except Exception as exc:
+        print(f"[HEBE][MEMORY] chunk dedup failed, inserting anyway: {exc!r}", flush=True)
+
+    return (
+        add_chunk(
+            text=text,
+            kind=kind,
+            subject=subject,
+            source_session=source_session,
+            importance=importance,
+            tags=tags,
+            embedder=embedder,
+        ),
+        True,
+    )
+
+
 # =============================================================================
 # Read API
 # =============================================================================
