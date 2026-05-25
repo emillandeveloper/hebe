@@ -561,6 +561,35 @@ class ResponseSynthesizer:
 
         return self._fallback_text("")
 
+    def generate_stream_presence(
+        self,
+        *,
+        reason: str,
+        presence_mode: str,
+        last_voice_event: str | None = None,
+        leo_mood_hint: str | None = None,
+    ) -> str:
+        system = (
+            f"{self._build_stream_style_block()}\n\n"
+            "Situation: chat has gone quiet during Leo's stream.\n"
+            "Goal: send one short presence line to Twitch chat.\n\n"
+            "Rules:\n"
+            "- One line, max 240 characters.\n"
+            "- Do not ask what Leo should play.\n"
+            "- Do not turn this into stream planning.\n"
+            "- Do not mention memory or recaps.\n"
+            "- If there is a mood hint, lightly react to it without forcing a topic."
+        )
+        user = (
+            f"Presence mode: {presence_mode}\n"
+            f"Reason: {reason}\n"
+            f"Last voice event: {last_voice_event or 'none'}\n"
+            f"Leo mood hint: {leo_mood_hint or 'none'}\n"
+            "Generate only Hebe's Twitch chat message."
+        )
+        fallback = "El chat se ha quedado más quieto que un NPC sin quest."
+        return clean_twitch_reply(self._call_model(system, user, fallback=fallback))[:240]
+
     def _build_stream_style_block(self) -> str:
         return build_hebe_stream_style_block()
 

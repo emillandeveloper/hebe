@@ -1,6 +1,8 @@
 import time
 import threading
 from queue import Empty
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from app.services.db_sqlite import (
     DB_PATH,
@@ -98,6 +100,9 @@ class HebeEngine:
                         "recent_chat": [],
                     },
                 )
+                stream = self._get_stream_state()
+                if stream is not None:
+                    stream.last_chat_activity_ts = time.time()
 
             self.runtime.twitch_chat_bot.message_callback = _twitch_chat_callback
 
@@ -128,6 +133,10 @@ class HebeEngine:
         self.use_cognitive_flow = True
         self.scheduler_poll_interval_sec = 1.0
         self._last_scheduler_poll_ts = 0.0
+        self.presence_poll_interval_sec = 30.0
+        self._last_presence_poll_ts = 0.0
+        self.routine_poll_interval_sec = 30.0
+        self._last_routine_poll_ts = 0.0
 
     def legacy_flow(self, command: str, source: str = "voice") -> str:
         result = self.orchestrator.handle(
@@ -169,6 +178,15 @@ class HebeEngine:
             f"current_pending={getattr(self.runtime.state, 'pending_clarification', None)!r}",
             flush=True,
         )
+
+        manual = self._handle_stream_manual_command(command)
+        if manual is not None:
+            if source == "ui":
+                log_chat("assistant", manual, source="ui")
+                emit("chat.assistant", {"text": manual})
+            else:
+                self._deliver_voice_reply(manual)
+            return "continue"
 
         context = self.context_builder.build(
             state=self.runtime.state,
@@ -306,6 +324,88 @@ class HebeEngine:
         except Exception as e:
             print(f"[HEBE][SCHEDULER] poll failed: {e!r}", flush=True)
 
+    def poll_stream_presence(self) -> None:
+        now = time.time()
+        if now - self._last_presence_poll_ts < self.presence_poll_interval_sec:
+            return
+        self._last_presence_poll_ts = now
+
+        stream = self._get_stream_state()
+        if not stream or not getattr(stream, "enabled", False):
+            return
+
+        mode = getattr(stream, "presence_mode", "reactive") or "reactive"
+        if mode not in {"companion", "show"}:
+            print(f"[HEBE][PRESENCE] skipped reason=mode_{mode}", flush=True)
+            return
+
+        silence_minutes = 4.0 if mode == "companion" else 2.0
+        cooldown_minutes = 12.0 if mode == "companion" else 6.0
+        voice_quiet_sec = 20.0
+
+        last_chat = float(getattr(stream, "last_chat_activity_ts", 0.0) or 0.0)
+        if not last_chat:
+            stream.last_chat_activity_ts = now
+            print("[HEBE][PRESENCE] skipped reason=no_chat_baseline", flush=True)
+            return
+        if last_chat and now - last_chat < silence_minutes * 60:
+            print("[HEBE][PRESENCE] skipped reason=chat_recently_active", flush=True)
+            return
+
+        last_spoken = float(getattr(stream, "last_hebe_stream_speak_ts", 0.0) or 0.0)
+        if last_spoken and now - last_spoken < cooldown_minutes * 60:
+            print("[HEBE][PRESENCE] skipped reason=cooldown", flush=True)
+            return
+
+        last_voice_ts = float(getattr(stream, "last_voice_event_ts", 0.0) or 0.0)
+        if last_voice_ts and now - last_voice_ts < voice_quiet_sec:
+            print("[HEBE][PRESENCE] skipped reason=leo_recently_spoke", flush=True)
+            return
+
+        print(f"[HEBE][PRESENCE] speaking reason=chat_silence mode={mode}", flush=True)
+        reply = self.response_synthesizer.generate_stream_presence(
+            reason="chat_silence",
+            presence_mode=mode,
+            last_voice_event=getattr(stream, "last_voice_event", None),
+            leo_mood_hint=getattr(stream, "leo_mood_hint", None),
+        )
+        if reply:
+            stream.last_hebe_stream_speak_ts = now
+            self._deliver_twitch_reply(reply)
+
+    def poll_stream_routine(self) -> None:
+        now_ts = time.time()
+        if now_ts - self._last_routine_poll_ts < self.routine_poll_interval_sec:
+            return
+        self._last_routine_poll_ts = now_ts
+
+        stream = self._get_stream_state()
+        if not stream:
+            return
+
+        now = datetime.now(ZoneInfo("Europe/Madrid"))
+        today = now.date().isoformat()
+        if getattr(stream, "no_stream_today_date", None) == today:
+            return
+
+        delay = int(getattr(stream, "stream_delay_minutes", 0) or 0)
+        schedule = {
+            "18:30": "Leo, en media hora tocaría preparar stream.",
+            "18:50": "Si hoy hay directo, es buen momento para abrir OBS y el juego.",
+            "19:00": "¿Activo modo stream?",
+        }
+
+        for base_time, message in schedule.items():
+            due = self._today_at(base_time) + timedelta(minutes=delay)
+            key = f"{today}:{base_time}:{delay}"
+            sent = getattr(stream, "routine_sent_keys", set())
+            if key in sent:
+                continue
+            if 0 <= (now - due).total_seconds() < self.routine_poll_interval_sec + 5:
+                sent.add(key)
+                stream.routine_sent_keys = sent
+                self._deliver_voice_reply(message)
+
     def start(self):
         if self._started:
             return
@@ -396,7 +496,13 @@ class HebeEngine:
         submit_text_from_ui(text)
 
     def _normalize_text(self, text: str) -> str:
-        return " ".join((text or "").strip().lower().split())
+        cleaned = "".join(ch if ch.isalnum() or ch.isspace() else " " for ch in (text or "").strip().lower())
+        return " ".join(cleaned.split())
+
+    def _today_at(self, hhmm: str) -> datetime:
+        hour, minute = [int(part) for part in hhmm.split(":", 1)]
+        now = datetime.now(ZoneInfo("Europe/Madrid"))
+        return now.replace(hour=hour, minute=minute, second=0, microsecond=0)
 
     def _get_stream_state(self):
         return getattr(self.runtime.state, "stream", None)
@@ -484,6 +590,85 @@ class HebeEngine:
         # Stream activo pero sin wakeword ni ventana armada => ignorar
         return True, None
 
+    def _classify_voice_event(self, text: str) -> tuple[str, str | None]:
+        normalized = self._normalize_text(text)
+        if not normalized:
+            return "unknown", None
+        if "hebe" in normalized or normalized.startswith(("prepara stream", "activa modo stream", "desactiva modo stream")):
+            return "direct_command_to_hebe", None
+        if any(marker in normalized for marker in ("me han matado", "he muerto", "otra vez", "wipe", "game over")):
+            return "gameplay_failure", "frustrated"
+        if any(marker in normalized for marker in ("jaj", "lol", "me parto")):
+            return "laughter/joke", "playful"
+        if any(marker in normalized for marker in ("joder", "mierda", "que sueño", "qué sueño", "estoy muerto", "cansado")):
+            return "frustration", "tired"
+        if len(normalized.split()) <= 10:
+            return "casual_comment", None
+        return "unknown", None
+
+    def _record_voice_event(self, text: str, event_type: str, mood_hint: str | None) -> None:
+        stream = self._get_stream_state()
+        if not stream:
+            return
+        stream.last_voice_event = event_type
+        stream.last_voice_event_ts = time.time()
+        if mood_hint:
+            stream.leo_mood_hint = mood_hint
+
+    def _handle_stream_manual_command(self, text: str) -> str | None:
+        stream = self._get_stream_state()
+        if not stream:
+            return None
+
+        normalized = self._normalize_text(text)
+        for prefix in ("hebe ", "ebe ", "eve ", "jebe "):
+            if normalized.startswith(prefix):
+                normalized = normalized[len(prefix):].strip()
+
+        presence_modes = {
+            "modo silencioso": ("silent", "Modo silencioso, Leo."),
+            "silent mode": ("silent", "Silent mode, Leo."),
+            "modo reactiva": ("reactive", "Modo reactiva, Leo."),
+            "modo reactivo": ("reactive", "Modo reactiva, Leo."),
+            "reactive mode": ("reactive", "Reactive mode, Leo."),
+            "modo compañera": ("companion", "Modo compañera, Leo."),
+            "modo companera": ("companion", "Modo compañera, Leo."),
+            "companion mode": ("companion", "Companion mode, Leo."),
+            "modo show": ("show", "Modo show, Leo. Con correa, pero show."),
+            "show mode": ("show", "Show mode, Leo."),
+        }
+        if normalized in presence_modes:
+            mode, reply = presence_modes[normalized]
+            stream.presence_mode = mode
+            return reply
+
+        if normalized in {"prepara stream", "prepare stream"}:
+            stream.enabled = True
+            stream.last_chat_activity_ts = time.time()
+            stream.presence_mode = "reactive"
+            stream.no_stream_today_date = None
+            return "Dejo el stream preparado en modo reactiva. OBS y el juego solo si me lo confirmas."
+
+        if normalized in {"activa modo stream", "activa stream", "stream on", "enable stream"}:
+            stream.enabled = True
+            stream.last_chat_activity_ts = time.time()
+            return "Modo stream activado."
+
+        if normalized in {"desactiva modo stream", "desactiva stream", "stream off", "disable stream"}:
+            stream.enabled = False
+            return "Modo stream desactivado."
+
+        if normalized in {"hoy no hay stream", "no hay stream hoy", "today no stream"}:
+            stream.no_stream_today_date = datetime.now(ZoneInfo("Europe/Madrid")).date().isoformat()
+            stream.enabled = False
+            return "Vale, hoy no insisto con el stream."
+
+        if normalized in {"retrasa stream media hora", "retrasa el stream media hora", "delay stream half an hour"}:
+            stream.stream_delay_minutes = int(getattr(stream, "stream_delay_minutes", 0) or 0) + 30
+            return "Retraso el plan de stream media hora."
+
+        return None
+
     def _should_speak_result(self, result) -> bool:
         spoken_text = (result.output_text or "").strip()
         if not spoken_text:
@@ -520,6 +705,9 @@ class HebeEngine:
         Si las policies del stream lo permiten, también lo hablamos por TTS.
         """
         twitch = getattr(self.runtime, "twitch", None)
+        stream = getattr(self.runtime.state, "stream", None)
+        if stream is not None:
+            stream.last_hebe_stream_speak_ts = time.time()
         if twitch is not None and twitch.is_available():
             try:
                 twitch.send_message(text)
@@ -528,7 +716,6 @@ class HebeEngine:
         else:
             print("[HEBE][EVENT][TWITCH] service not available, dropping chat reply", flush=True)
 
-        stream = getattr(self.runtime.state, "stream", None)
         policies = getattr(stream, "policies", None) if stream else None
         if policies and getattr(policies, "allow_tts_replies", False):
             self._deliver_voice_reply(text)
@@ -555,6 +742,8 @@ class HebeEngine:
                 return "stop"
 
             self.poll_internal_events()
+            self.poll_stream_routine()
+            self.poll_stream_presence()
 
             command = None
             source = None
@@ -583,6 +772,16 @@ class HebeEngine:
                 continue
 
             if source in {"voice", "ui"}:
+                if source == "voice" and self._is_stream_enabled():
+                    voice_type, mood_hint = self._classify_voice_event(command)
+                    self._record_voice_event(command, voice_type, mood_hint)
+                    print(
+                        f"[HEBE][VOICE] type={voice_type} mood={mood_hint!r} text={command!r}",
+                        flush=True,
+                    )
+                    if voice_type != "direct_command_to_hebe" and not self._stream_is_armed():
+                        continue
+
                 handled, stream_command = self._extract_stream_command(command)
                 if handled:
                     if not stream_command:
@@ -608,6 +807,8 @@ class HebeEngine:
             if self._stop_event.is_set():
                 return "stop"
             self.poll_internal_events()
+            self.poll_stream_routine()
+            self.poll_stream_presence()
             try:
                 ui_inbox = get_ui_inbox()
                 cmd = ui_inbox.get_nowait()

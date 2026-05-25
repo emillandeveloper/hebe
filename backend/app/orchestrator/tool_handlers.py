@@ -525,6 +525,11 @@ def handle_stream_enable(runtime, args, source="voice", metadata=None):
         )
 
     stream.enabled = True
+    try:
+        import time
+        stream.last_chat_activity_ts = time.time()
+    except Exception:
+        pass
 
     return make_success(
         output_text="Modo stream activado.",
