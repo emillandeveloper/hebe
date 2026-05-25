@@ -53,6 +53,26 @@ class ContextMessageTypeTests(unittest.TestCase):
         self.assertEqual(ctx.relevant_chunks, [])
         self.assertEqual(store.search_calls, [])
 
+    def test_greeting_with_how_are_you_is_small_talk_policy_limited(self):
+        store = DummyMemoryStore()
+        builder = ContextBuilder(store)
+
+        with (
+            patch("app.services.db_sqlite.get_recent_chat_turns", return_value=[]),
+            patch.object(builder, "_retrieve_memory_for_jarvis", return_value=[]),
+        ):
+            ctx = builder.build(
+                state=SimpleNamespace(stream=None),
+                input_text="buenas hebe, como lo llevas?",
+                internal_event=None,
+            )
+
+        self.assertEqual(ctx.message_type, "small_talk")
+        self.assertEqual(ctx.context_policy["memory"], "limited")
+        self.assertFalse(ctx.context_policy["schedule"])
+        self.assertEqual(ctx.context_policy["history_turns"], 2)
+        self.assertFalse(ctx.inject_memory)
+
     def test_memory_query_allows_memory(self):
         store = DummyMemoryStore()
         builder = ContextBuilder(store)
@@ -69,13 +89,58 @@ class ContextMessageTypeTests(unittest.TestCase):
 
         self.assertEqual(ctx.message_type, "memory_query")
         self.assertTrue(ctx.inject_memory)
+
+    def test_banter_policy_does_not_retrieve_schedule_memory(self):
+        store = DummyMemoryStore()
+        builder = ContextBuilder(store)
+
+        with (
+            patch("app.services.db_sqlite.get_recent_chat_turns", return_value=[]),
+            patch.object(builder, "_retrieve_memory_for_jarvis", return_value=[]) as retrieve,
+        ):
+            ctx = builder.build(
+                state=SimpleNamespace(stream=None),
+                input_text="sigo en modo zombie jajaja",
+                internal_event=None,
+            )
+
+        self.assertEqual(ctx.message_type, "banter")
+        self.assertEqual(ctx.context_policy["memory"], "limited")
+        self.assertFalse(ctx.context_policy["schedule"])
+        self.assertEqual(ctx.context_policy["history_turns"], 2)
+        self.assertFalse(ctx.inject_memory)
+        retrieve.assert_not_called()
+
+    def test_planning_request_allows_schedule_memory(self):
+        store = DummyMemoryStore()
+        builder = ContextBuilder(store)
+
+        with (
+            patch("app.services.db_sqlite.get_recent_chat_turns", return_value=[]),
+            patch.object(builder, "_retrieve_memory_for_jarvis", return_value=[]) as retrieve,
+        ):
+            ctx = builder.build(
+                state=SimpleNamespace(stream=None),
+                input_text="que toca hoy en stream?",
+                internal_event=None,
+            )
+
+        self.assertEqual(ctx.message_type, "planning_request")
+        self.assertEqual(ctx.context_policy["memory"], "full")
+        self.assertTrue(ctx.context_policy["schedule"])
+        self.assertEqual(ctx.context_policy["history_turns"], 10)
+        self.assertTrue(ctx.inject_memory)
+        retrieve.assert_called_once()
         self.assertTrue(store.search_calls)
 
     def test_what_do_you_remember_allows_memory(self):
         store = DummyMemoryStore()
         builder = ContextBuilder(store)
 
-        with patch("app.services.db_sqlite.get_recent_chat_turns", return_value=[]):
+        with (
+            patch("app.services.db_sqlite.get_recent_chat_turns", return_value=[]),
+            patch.object(builder, "_retrieve_memory_for_jarvis", return_value=[]),
+        ):
             ctx = builder.build(
                 state=SimpleNamespace(stream=None),
                 input_text="¿qué recuerdas de mí?",
@@ -99,6 +164,12 @@ class ContextMessageTypeTests(unittest.TestCase):
             conversation_history=[],
             message_type="small_talk",
             inject_memory=False,
+            context_policy={
+                "memory": "limited",
+                "schedule": False,
+                "history_turns": 2,
+                "max_sentences": 2,
+            },
         )
         execution = ExecutionResult(
             results=[
@@ -122,6 +193,54 @@ class ContextMessageTypeTests(unittest.TestCase):
         self.assertIn("Do not recap previous conversation", prompt_text)
         self.assertNotIn("We talked about old project context", prompt_text)
         self.assertNotIn("hablamos de", reply.lower())
+
+    def test_banter_prompt_blocks_planning_topic_shift(self):
+        model = CapturingModel(reply="Perfecto, zombi creativo. Sufrimiento premium, pero con estilo.")
+        synthesizer = ResponseSynthesizer(conversation_model=model)
+        context = BuiltContext(
+            input_text="sigo en modo zombie jajaja",
+            internal_event=None,
+            relevant_facts=[],
+            recent_appointments=[],
+            pending_reminders=[],
+            state_snapshot={},
+            relevant_chunks=[
+                {"subject": "stream", "text": "Leo may play FFIX Level 1 or Persona 5 Royal on stream."}
+            ],
+            conversation_history=[],
+            message_type="banter",
+            inject_memory=False,
+            context_policy={
+                "memory": "limited",
+                "schedule": False,
+                "history_turns": 2,
+                "max_sentences": 2,
+            },
+        )
+        execution = ExecutionResult(
+            results=[
+                StepExecutionResult(
+                    step_type="reply",
+                    success=True,
+                    data={"mode": "chat"},
+                )
+            ]
+        )
+
+        reply = synthesizer.synthesize(
+            context=context,
+            deliberation=DeliberationResult(plan=Plan(steps=[])),
+            execution=execution,
+        )
+
+        self.assertLessEqual(len([s for s in reply.split(".") if s.strip()]), 2)
+        prompt_text = "\n".join(m["content"] for m in model.messages)
+        self.assertIn("do not ask planning questions", prompt_text)
+        self.assertNotIn("FFIX", prompt_text)
+        self.assertNotIn("Persona", prompt_text)
+        self.assertNotIn("stream", reply.lower())
+        self.assertNotIn("FFIX", reply)
+        self.assertNotIn("Persona", reply)
 
 
 if __name__ == "__main__":

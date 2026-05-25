@@ -42,9 +42,10 @@ class BuiltContext:
     # ordenado cronológicamente ASC (antiguo → reciente).
     conversation_history: list[dict] = field(default_factory=list)
 
-    # small_talk | direct_question | memory_query | task_request | stream_event | unknown
+    # small_talk | banter | planning_request | memory_query | direct_question | command | stream_event | unknown
     message_type: str = "unknown"
     inject_memory: bool = True
+    context_policy: dict[str, Any] = field(default_factory=dict)
 
 
 class ContextBuilder:
@@ -79,9 +80,14 @@ class ContextBuilder:
             input_text=input_text,
             internal_event=internal_event,
         )
-        inject_memory = self._should_inject_memory(message_type)
+        context_policy = self._build_context_policy(message_type)
+        inject_memory = context_policy["memory"] in {"full", "relevant"}
 
-        relevant_facts = self._get_relevant_facts(input_text) if inject_memory else []
+        relevant_facts = (
+            self._get_relevant_facts(input_text)
+            if context_policy["memory"] in {"full", "relevant"}
+            else []
+        )
         recent_appointments = self.memory_store.get_recent_appointments(limit=3)
         pending_reminders = self.memory_store.list_pending_reminders(limit=5)
         state_snapshot = self._build_state_snapshot(state)
@@ -92,10 +98,16 @@ class ContextBuilder:
         conversation_history: list[dict] = []
         if internal_event is None and input_text:
             # Path JARVIS: búsqueda semántica + historial conversacional.
-            if inject_memory:
-                relevant_chunks = self._retrieve_memory_for_jarvis(input_text)
+            if context_policy["memory"] in {"full", "relevant"}:
+                relevant_chunks = self._retrieve_memory_for_jarvis(
+                    input_text,
+                    include_recent_streams=bool(context_policy["schedule"]),
+                )
             from app.services.db_sqlite import get_recent_chat_turns
-            conversation_history = get_recent_chat_turns(source="ui", limit=10)
+            conversation_history = get_recent_chat_turns(
+                source="ui",
+                limit=int(context_policy["history_turns"]),
+            )
             # UI turns are logged before cognitive_flow builds context. Drop the
             # current user turn if it is already in chat_log, otherwise the model
             # sees Leo's latest message twice.
@@ -106,8 +118,6 @@ class ContextBuilder:
                     and self._normalize_for_compare(last.get("content")) == self._normalize_for_compare(input_text)
                 ):
                     conversation_history = conversation_history[:-1]
-            if message_type == "small_talk":
-                conversation_history = conversation_history[-2:]
         elif (
             internal_event is not None
             and internal_event.event_type == "twitch_chat_react"
@@ -119,6 +129,14 @@ class ContextBuilder:
 
         print(
             f"[HEBE][CONTEXT] message_type={message_type} inject_memory={inject_memory}",
+            flush=True,
+        )
+        print(
+            "[HEBE][CONTEXT_POLICY] "
+            f"type={message_type} "
+            f"memory={context_policy['memory']} "
+            f"schedule={str(context_policy['schedule']).lower()} "
+            f"history_turns={context_policy['history_turns']}",
             flush=True,
         )
 
@@ -133,6 +151,7 @@ class ContextBuilder:
             conversation_history=conversation_history,
             message_type=message_type,
             inject_memory=inject_memory,
+            context_policy=context_policy,
         )
 
     # =========================
@@ -178,6 +197,38 @@ class ContextBuilder:
 
         if normalized.startswith(("recuerdas que", "remember that", "do you remember")):
             return "memory_query"
+
+        planning_markers = (
+            "que toca hoy",
+            "que deberia jugar",
+            "seguimos con",
+            "que tenia planeado",
+            "que hago hoy en directo",
+            "que hago en directo",
+            "plan de stream",
+            "stream plan",
+            "what should i play",
+            "what is planned for stream",
+            "what are we doing on stream",
+        )
+        if any(marker in normalized for marker in planning_markers):
+            return "planning_request"
+
+        command_markers = (
+            "abre ",
+            "open ",
+            "guarda ",
+            "recuerda que",
+            "remember ",
+            "apunta ",
+            "crea ",
+            "pon ",
+            "avisame",
+            "mandame",
+            "envia ",
+        )
+        if normalized.startswith(command_markers):
+            return "command"
 
         task_markers = (
             "abre ",
@@ -244,6 +295,25 @@ class ContextBuilder:
         if len(normalized.split()) <= 7 and any(pattern in normalized for pattern in small_talk_patterns):
             return "small_talk"
 
+        banter_markers = (
+            "jaja",
+            "jajaja",
+            "lol",
+            "modo zombie",
+            "estoy muerto",
+            "estoy muerta",
+            "vaya dia",
+            "menudo dia",
+            "zombie",
+            "reventado",
+            "reventada",
+            "hecho polvo",
+            "hecha polvo",
+            "no puedo con mi alma",
+        )
+        if any(marker in normalized for marker in banter_markers):
+            return "banter"
+
         raw = input_text or ""
         if "?" in raw or normalized.startswith(
             ("que ", "como ", "cuando ", "donde ", "por que ", "why ", "what ", "how ")
@@ -252,8 +322,37 @@ class ContextBuilder:
 
         return "unknown"
 
-    def _should_inject_memory(self, message_type: str) -> bool:
-        return message_type in {"direct_question", "memory_query", "task_request", "unknown"}
+    def _build_context_policy(self, message_type: str) -> dict[str, Any]:
+        if message_type in {"small_talk", "banter"}:
+            return {
+                "memory": "limited",
+                "schedule": False,
+                "history_turns": 2,
+                "max_sentences": 2,
+            }
+
+        if message_type in {"planning_request", "memory_query"}:
+            return {
+                "memory": "full",
+                "schedule": True,
+                "history_turns": 10,
+                "max_sentences": None,
+            }
+
+        if message_type in {"direct_question", "command"}:
+            return {
+                "memory": "relevant",
+                "schedule": False,
+                "history_turns": 6 if message_type == "direct_question" else 4,
+                "max_sentences": None,
+            }
+
+        return {
+            "memory": "relevant",
+            "schedule": False,
+            "history_turns": 4,
+            "max_sentences": None,
+        }
 
     # =========================
     # Memory gathering
@@ -311,7 +410,12 @@ class ContextBuilder:
     # RAG chunk retrieval
     # =========================
 
-    def _retrieve_memory_for_jarvis(self, user_message: str) -> list[dict]:
+    def _retrieve_memory_for_jarvis(
+        self,
+        user_message: str,
+        *,
+        include_recent_streams: bool = True,
+    ) -> list[dict]:
         """
         Recall semántico + resúmenes recientes de stream para JARVIS.
 
@@ -337,7 +441,11 @@ class ContextBuilder:
                 top_k=4,
                 min_similarity=0.3,
             )
-            recent_streams = get_recent_chunks(kind="stream_summary", limit=2)
+            recent_streams = (
+                get_recent_chunks(kind="stream_summary", limit=2)
+                if include_recent_streams
+                else []
+            )
 
             seen: set[int] = set()
             combined: list[dict] = []
