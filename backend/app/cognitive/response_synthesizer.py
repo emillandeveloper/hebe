@@ -6,6 +6,7 @@ import uuid
 from typing import Any
 
 from app.cognitive.context_builder import BuiltContext
+from app.cognitive.entity_resolver import entity_prompt_lines
 from app.cognitive.models import DeliberationResult, ExecutionResult
 from app.cognitive.persona.chatter_names import normalize_chatter_name
 from app.cognitive.persona.hebe_voice import (
@@ -226,6 +227,10 @@ class ResponseSynthesizer:
             +
             f"Leo: {msg}"
         ]
+
+        entity_lines = entity_prompt_lines(getattr(context, "resolved_entities", []) or [])
+        if entity_lines:
+            user_parts.append("Entity resolution:\n" + "\n".join(f"- {line}" for line in entity_lines))
 
         memory_lines: list[str] = []
         if context.relevant_facts:

@@ -7,6 +7,7 @@ from datetime import datetime
 from dataclasses import dataclass, field
 from typing import Optional, Any
 
+from app.cognitive.entity_resolver import EntityResolver
 from app.cognitive.memory_store import MemoryStore, MemoryFact, Reminder
 from app.cognitive.scheduler import InternalEvent
 from app.core.state import HebeState
@@ -46,6 +47,7 @@ class BuiltContext:
     message_type: str = "unknown"
     inject_memory: bool = True
     context_policy: dict[str, Any] = field(default_factory=dict)
+    resolved_entities: list[dict[str, Any]] = field(default_factory=list)
 
 
 class ContextBuilder:
@@ -59,6 +61,7 @@ class ContextBuilder:
 
     def __init__(self, memory_store: MemoryStore):
         self.memory_store = memory_store
+        self.entity_resolver = EntityResolver()
 
     # =========================
     # Entry point
@@ -82,11 +85,27 @@ class ContextBuilder:
         )
         context_policy = self._build_context_policy(message_type)
         inject_memory = context_policy["memory"] in {"full", "relevant"}
+        source_context = (
+            "stream"
+            if internal_event is not None and internal_event.event_type.startswith("twitch_")
+            else "private"
+        )
+        resolved_entities = [
+            resolution.to_dict()
+            for resolution in self.entity_resolver.resolve(
+                input_text,
+                source_context=source_context,
+            )
+        ]
 
         relevant_facts = (
             self._get_relevant_facts(input_text)
             if context_policy["memory"] in {"full", "relevant"}
             else []
+        )
+        relevant_facts = self._filter_facts_by_entity(
+            relevant_facts,
+            resolved_entities=resolved_entities,
         )
         recent_appointments = self.memory_store.get_recent_appointments(limit=3)
         pending_reminders = self.memory_store.list_pending_reminders(limit=5)
@@ -102,6 +121,10 @@ class ContextBuilder:
                 relevant_chunks = self._retrieve_memory_for_jarvis(
                     input_text,
                     include_recent_streams=bool(context_policy["schedule"]),
+                )
+                relevant_chunks = self._filter_chunks_by_entity(
+                    relevant_chunks,
+                    resolved_entities=resolved_entities,
                 )
             from app.services.db_sqlite import get_recent_chat_turns
             conversation_history = get_recent_chat_turns(
@@ -139,6 +162,15 @@ class ContextBuilder:
             f"history_turns={context_policy['history_turns']}",
             flush=True,
         )
+        for entity in resolved_entities:
+            print(
+                "[HEBE][ENTITY] "
+                f"mention={entity.get('mention')!r} "
+                f"candidates={list(entity.get('candidates') or [])!r} "
+                f"selected={entity.get('selected')!r} "
+                f"reason={entity.get('reason')!r}",
+                flush=True,
+            )
 
         return BuiltContext(
             input_text=input_text,
@@ -152,6 +184,7 @@ class ContextBuilder:
             message_type=message_type,
             inject_memory=inject_memory,
             context_policy=context_policy,
+            resolved_entities=resolved_entities,
         )
 
     # =========================
@@ -247,7 +280,7 @@ class ContextBuilder:
             "envía ",
         )
         if normalized.startswith(task_markers):
-            return "task_request"
+            return "command"
 
         small_talk_exact = {
             "hola",
@@ -405,6 +438,124 @@ class ContextBuilder:
             deduped.append(fact)
 
         return deduped[:limit]
+
+    # =========================
+    # Entity-aware filtering
+    # =========================
+
+    def _filter_facts_by_entity(
+        self,
+        facts: list[MemoryFact],
+        *,
+        resolved_entities: list[dict[str, Any]],
+    ) -> list[MemoryFact]:
+        if not facts or not resolved_entities:
+            return facts
+
+        resolution = resolved_entities[0]
+        selected = str(resolution.get("selected") or "")
+        candidates = set(resolution.get("candidates") or [])
+        broad = bool(resolution.get("broad_query"))
+
+        primary: list[MemoryFact] = []
+        secondary: list[MemoryFact] = []
+        unknown: list[MemoryFact] = []
+        for fact in facts:
+            entity_id = self._entity_id_for_fact(fact)
+            if not entity_id:
+                unknown.append(fact)
+            elif entity_id == selected:
+                primary.append(fact)
+            elif broad and entity_id in candidates:
+                secondary.append(fact)
+
+        return primary + secondary + unknown if primary or secondary else unknown
+
+    def _filter_chunks_by_entity(
+        self,
+        chunks: list[dict],
+        *,
+        resolved_entities: list[dict[str, Any]],
+    ) -> list[dict]:
+        if not chunks or not resolved_entities:
+            return chunks
+
+        resolution = resolved_entities[0]
+        selected = str(resolution.get("selected") or "")
+        candidates = set(resolution.get("candidates") or [])
+        broad = bool(resolution.get("broad_query"))
+
+        primary: list[dict] = []
+        secondary: list[dict] = []
+        unknown: list[dict] = []
+        for chunk in chunks:
+            entity_id = self._entity_id_for_chunk(chunk)
+            if not entity_id:
+                unknown.append(chunk)
+            elif entity_id == selected:
+                primary.append(chunk)
+            elif broad and entity_id in candidates:
+                secondary.append(chunk)
+
+        return primary + secondary + unknown if primary or secondary else unknown
+
+    def _entity_id_for_fact(self, fact: MemoryFact) -> str | None:
+        payload = fact.payload or {}
+        entity_id = payload.get("entity_id")
+        if isinstance(entity_id, str) and entity_id.strip():
+            return entity_id.strip()
+        return self._infer_entity_id(
+            " ".join(
+                str(part or "")
+                for part in (
+                    fact.subject,
+                    fact.source_text,
+                    payload.get("text"),
+                    payload.get("subject"),
+                )
+            )
+        )
+
+    def _entity_id_for_chunk(self, chunk: dict) -> str | None:
+        tags = chunk.get("tags") or {}
+        entity_id = None
+        if isinstance(tags, dict):
+            entity_id = tags.get("entity_id")
+        if isinstance(entity_id, str) and entity_id.strip():
+            return entity_id.strip()
+        return self._infer_entity_id(
+            " ".join(
+                str(part or "")
+                for part in (
+                    chunk.get("subject"),
+                    chunk.get("text"),
+                    chunk.get("kind"),
+                )
+            )
+        )
+
+    def _infer_entity_id(self, text: str) -> str | None:
+        normalized = self._normalize_for_compare(text)
+        if not normalized:
+            return None
+
+        if "jotunbot" in normalized or "jotun bot" in normalized:
+            return "jotun_bot"
+        if "jotun" in normalized and any(
+            marker in normalized
+            for marker in ("bot", "comando", "comandos", "follow", "twitch", "chat")
+        ):
+            return "jotun_bot"
+        if "jotun" in normalized and any(
+            marker in normalized
+            for marker in ("perro", "dog", "mascota", "fisico", "físico")
+        ):
+            return "jotun_dog"
+        if "hebe" in normalized:
+            return "hebe_ai"
+        if re.search(r"(^|\s)leo($|\s)", normalized):
+            return "leo"
+        return None
 
     # =========================
     # RAG chunk retrieval

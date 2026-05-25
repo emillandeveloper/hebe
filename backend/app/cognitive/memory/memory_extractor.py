@@ -86,6 +86,10 @@ class MemoryExtractor:
                 "text": text,
                 "tags": item["tags"],
                 "source": source,
+                "entity_id": item.get("entity_id"),
+                "entity_type": item.get("entity_type"),
+                "aliases": item.get("aliases"),
+                "source_context": item.get("source_context") or source,
             }
 
             if store_as in {"fact", "both"}:
@@ -114,7 +118,14 @@ class MemoryExtractor:
                         subject=subject,
                         source_session=source,
                         importance=item["importance"],
-                        tags={"source": source, "tags": item["tags"]},
+                        tags={
+                            "source": source,
+                            "tags": item["tags"],
+                            "entity_id": item.get("entity_id"),
+                            "entity_type": item.get("entity_type"),
+                            "aliases": item.get("aliases"),
+                            "source_context": item.get("source_context") or source,
+                        },
                     )
                     if chunk_id is not None:
                         chunk_ids.append(chunk_id)
@@ -156,6 +167,13 @@ class MemoryExtractor:
                                 "type": "string",
                                 "enum": sorted(ALLOWED_STORE_AS),
                             },
+                            "entity_id": {"type": "string"},
+                            "entity_type": {"type": "string"},
+                            "aliases": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                            },
+                            "source_context": {"type": "string"},
                         },
                         "required": [
                             "kind",
@@ -264,6 +282,15 @@ class MemoryExtractor:
         store_as = str(raw.get("store_as") or "fact").strip()
         if store_as not in ALLOWED_STORE_AS:
             store_as = "fact"
+        entity_id = self._clean_optional_string(raw.get("entity_id")) or self._infer_entity_id(subject, text)
+        entity_type = self._clean_optional_string(raw.get("entity_type"))
+        source_context = self._clean_optional_string(raw.get("source_context"))
+        aliases_raw = raw.get("aliases")
+        aliases = (
+            [str(alias).strip() for alias in aliases_raw if str(alias).strip()]
+            if isinstance(aliases_raw, list)
+            else []
+        )
 
         return {
             "kind": kind,
@@ -273,7 +300,29 @@ class MemoryExtractor:
             "importance": importance,
             "tags": tags[:12],
             "store_as": store_as,
+            "entity_id": entity_id,
+            "entity_type": entity_type,
+            "aliases": aliases[:12],
+            "source_context": source_context,
         }
+
+    def _clean_optional_string(self, value: Any) -> str | None:
+        text = str(value or "").strip()
+        return text or None
+
+    def _infer_entity_id(self, subject: str, text: str) -> str | None:
+        low = f"{subject} {text}".lower()
+        if "jotunbot" in low or "jotun bot" in low:
+            return "jotun_bot"
+        if "jotun" in low and any(word in low for word in ("bot", "comando", "comandos", "twitch", "chat")):
+            return "jotun_bot"
+        if "jotun" in low and any(word in low for word in ("perro", "dog", "mascota")):
+            return "jotun_dog"
+        if "hebe" in low:
+            return "hebe_ai"
+        if "leo" in low:
+            return "leo"
+        return None
 
     def _clamp_float(self, value: Any, low: float, high: float, *, default: float) -> float:
         try:
