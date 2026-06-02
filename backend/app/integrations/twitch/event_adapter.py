@@ -30,6 +30,7 @@ class TwitchEventAdapter:
         session: Optional[requests.Session] = None,
         push_event_callback: Optional[Callable[[str, dict], None]] = None,
         bot_username: str = "",
+        subscribe_chat_messages: bool = False,
     ) -> None:
         self.client_id = str(client_id or "").strip()
         self.user_oauth_token = str(user_oauth_token or "").strip()
@@ -41,6 +42,7 @@ class TwitchEventAdapter:
         self.keepalive_timeout_seconds = int(keepalive_timeout_seconds)
         self._session = session or requests.Session()
         self.push_event_callback = push_event_callback
+        self.subscribe_chat_messages = bool(subscribe_chat_messages)
 
         self._ws_app = None
         self._thread: Optional[threading.Thread] = None
@@ -163,17 +165,20 @@ class TwitchEventAdapter:
         if not self._session_id:
             return
 
-        # Chat messages — los recibimos para alimentar chat_cache (target_resolver),
-        # pero NO disparamos cognitive_flow desde aquí. De eso se encarga TwitchChatBot
-        # vía IRC, que tiene filtro de mention.
-        self._create_subscription(
-            sub_type="channel.chat.message",
-            version="1",
-            condition={
-                "broadcaster_user_id": self.broadcaster_user_id,
-                "user_id": self.bot_user_id,
-            },
-        )
+        if self.subscribe_chat_messages:
+            self._create_subscription(
+                sub_type="channel.chat.message",
+                version="1",
+                condition={
+                    "broadcaster_user_id": self.broadcaster_user_id,
+                    "user_id": self.bot_user_id,
+                },
+            )
+        else:
+            print(
+                "[HEBE][TWITCH][EVENTSUB] channel.chat.message subscription disabled; IRC chat bot handles chat",
+                flush=True,
+            )
 
         # Follow
         self._create_subscription(
@@ -200,6 +205,22 @@ class TwitchEventAdapter:
             version="1",
             condition={
                 "to_broadcaster_user_id": self.broadcaster_user_id,
+            },
+        )
+
+        self._create_subscription(
+            sub_type="stream.online",
+            version="1",
+            condition={
+                "broadcaster_user_id": self.broadcaster_user_id,
+            },
+        )
+
+        self._create_subscription(
+            sub_type="stream.offline",
+            version="1",
+            condition={
+                "broadcaster_user_id": self.broadcaster_user_id,
             },
         )
 
@@ -240,6 +261,13 @@ class TwitchEventAdapter:
             return False
 
         if not response.ok:
+            if sub_type == "channel.chat.message" and response.status_code == 403:
+                print(
+                    "[HEBE][TWITCH][EVENTSUB][WARN] optional channel.chat.message "
+                    "subscription missing proper authorization; continuing because IRC chat bot handles chat",
+                    flush=True,
+                )
+                return False
             print(
                 f"[HEBE][TWITCH][EVENTSUB] create subscription failed "
                 f"type={sub_type} status={response.status_code} body={response.text}",
@@ -311,6 +339,21 @@ class TwitchEventAdapter:
                         "user_login": username,
                         "viewer_count": viewers,
                     })
+            return
+
+        if sub_type == "stream.online":
+            if self.push_event_callback:
+                self.push_event_callback("stream_online", {
+                    "started_at": event.get("started_at"),
+                    "broadcaster_user_id": event.get("broadcaster_user_id") or self.broadcaster_user_id,
+                })
+            return
+
+        if sub_type == "stream.offline":
+            if self.push_event_callback:
+                self.push_event_callback("stream_offline", {
+                    "broadcaster_user_id": event.get("broadcaster_user_id") or self.broadcaster_user_id,
+                })
             return
 
         # TODO (Fase 1.5 — memory/stream_end_hook):

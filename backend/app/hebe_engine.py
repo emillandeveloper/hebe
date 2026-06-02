@@ -1,7 +1,9 @@
+import os
+import re
 import time
 import threading
 from queue import Empty
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from app.services.db_sqlite import (
@@ -25,12 +27,16 @@ from app.orchestrator.dispatcher import OrchestratorDispatcher
 from app.orchestrator.tool_handlers import build_tool_handlers
 
 from app.cognitive import MemoryStore, SchedulerService
+from app.cognitive.scheduler import InternalEvent
 from app.cognitive.context_builder import ContextBuilder
 from app.cognitive.deliberation_service import DeliberationService
 from app.cognitive.plan_executor import PlanExecutor
 from app.cognitive.response_synthesizer import ResponseSynthesizer
 from app.cognitive.action_runtime import ActionRuntime
 from app.cognitive.memory.memory_extractor import MemoryExtractor
+from app.stream.context_sync import StreamContextSyncService
+from app.stream.game_profiles import GameProfileStore
+from app.stream.spontaneity import StreamSpontaneityConfig, StreamSpontaneityService
 
 WAKE_WORDS = ["hebe despierta", "eve despierta", "jebe despierta"]
 STREAM_WAKE_ALIASES = {"hebe", "ebe", "eve", "heve", "jebe"}
@@ -85,7 +91,13 @@ class HebeEngine:
             self.runtime.twitch_events.push_event_callback = lambda event_type, payload: self.scheduler.push_event(event_type, payload)
 
         if hasattr(self.runtime, 'twitch_chat_bot') and self.runtime.twitch_chat_bot:
+            def _twitch_ambient_callback(username, display_name, text, channel):
+                self.observe_twitch_chat_message(username, display_name, text, channel)
+
             def _twitch_chat_callback(username, display_name, text, channel):
+                self.observe_twitch_chat_message(username, display_name, text, channel)
+                stream = self._get_stream_state()
+                recent_chat = list(getattr(stream, "recent_chat_messages", []) or [])[-10:] if stream is not None else []
                 print(
                     f"[HEBE][TWITCH][CHATBOT] dispatching event twitch_chat_react user={username!r} channel={channel!r} message={text!r}",
                     flush=True,
@@ -97,13 +109,13 @@ class HebeEngine:
                         "user_login": username,
                         "message_text": text,
                         "channel": channel,
-                        "recent_chat": [],
+                        "recent_chat": recent_chat,
                     },
                 )
-                stream = self._get_stream_state()
                 if stream is not None:
                     stream.last_chat_activity_ts = time.time()
 
+            self.runtime.twitch_chat_bot.ambient_message_callback = _twitch_ambient_callback
             self.runtime.twitch_chat_bot.message_callback = _twitch_chat_callback
 
         # Modelos:
@@ -125,9 +137,48 @@ class HebeEngine:
         self.response_synthesizer = ResponseSynthesizer(
             conversation_model=getattr(self.runtime, "llm", None),
         )
+        self.game_profiles = GameProfileStore()
+        self.stream_spontaneity = StreamSpontaneityService(
+            game_profiles=self.game_profiles,
+            config=StreamSpontaneityConfig(
+                companion_silence_sec=float(os.getenv("HEBE_COMPANION_IDLE_MIN_MINUTES", "20")) * 60,
+                show_silence_sec=float(os.getenv("HEBE_SHOW_IDLE_MIN_MINUTES", "9")) * 60,
+                companion_max_per_hour=int(os.getenv("HEBE_MAX_IDLE_PROMPTS_PER_HOUR_COMPANION", "2")),
+                show_max_per_hour=int(os.getenv("HEBE_MAX_IDLE_PROMPTS_PER_HOUR_SHOW", "5")),
+                max_per_stream=int(os.getenv("HEBE_MAX_IDLE_PROMPTS_PER_STREAM", "6")),
+                save_equip_topic_cooldown_sec=float(os.getenv("HEBE_SAVE_EQUIP_TOPIC_COOLDOWN_MINUTES", "60")) * 60,
+                chat_activity_window_sec=float(os.getenv("HEBE_CHAT_ACTIVITY_WINDOW_SECONDS", "180")),
+                chat_active_message_threshold=int(os.getenv("HEBE_CHAT_ACTIVE_MESSAGE_THRESHOLD", "3")),
+                chat_active_user_threshold=int(os.getenv("HEBE_CHAT_ACTIVE_USER_THRESHOLD", "1")),
+                suppress_when_chat_active=os.getenv("HEBE_IDLE_SUPPRESS_WHEN_CHAT_ACTIVE", "true").strip().lower() in ("1", "true", "yes", "on"),
+            ),
+        )
+        self.stream_spontaneity.start_grace_period(getattr(self.runtime.state, "stream", None))
+        self.stream_context_sync = StreamContextSyncService(
+            twitch_api=getattr(self.runtime, "twitch", None),
+        )
         self.memory_extractor = MemoryExtractor(
             intent_model=getattr(self.runtime, "intent_llm", None),
         )
+        self.stream_ambient_stt_enabled = os.getenv(
+            "HEBE_STREAM_AMBIENT_STT_ENABLED",
+            "false",
+        ).strip().lower() in ("1", "true", "yes", "on")
+        self.stream_ambient_stt_reply_immediately = os.getenv(
+            "HEBE_STREAM_AMBIENT_STT_REPLY_IMMEDIATELY",
+            "false",
+        ).strip().lower() in ("1", "true", "yes", "on")
+        self.stream_observe_chat = os.getenv(
+            "HEBE_STREAM_OBSERVE_CHAT",
+            "true",
+        ).strip().lower() in ("1", "true", "yes", "on")
+        self.chat_activity_window_sec = float(os.getenv("HEBE_CHAT_ACTIVITY_WINDOW_SECONDS", "180"))
+        self.chat_active_message_threshold = int(os.getenv("HEBE_CHAT_ACTIVE_MESSAGE_THRESHOLD", "3"))
+        self.chat_active_user_threshold = int(os.getenv("HEBE_CHAT_ACTIVE_USER_THRESHOLD", "1"))
+        self.idle_suppress_when_chat_active = os.getenv(
+            "HEBE_IDLE_SUPPRESS_WHEN_CHAT_ACTIVE",
+            "true",
+        ).strip().lower() in ("1", "true", "yes", "on")
 
         # Feature flag inicial
         self.use_cognitive_flow = True
@@ -135,8 +186,123 @@ class HebeEngine:
         self._last_scheduler_poll_ts = 0.0
         self.presence_poll_interval_sec = 30.0
         self._last_presence_poll_ts = 0.0
+        self.stream_context_poll_interval_sec = float(os.getenv("HEBE_STREAM_CONTEXT_SYNC_SEC", "90"))
+        self._last_stream_context_poll_ts = 0.0
         self.routine_poll_interval_sec = 30.0
         self._last_routine_poll_ts = 0.0
+        self._manual_reply_ui_only = False
+        self.auto_enable_stream_when_live = os.getenv(
+            "HEBE_AUTO_ENABLE_STREAM_WHEN_LIVE",
+            "true",
+        ).strip().lower() in ("1", "true", "yes", "on")
+        self.default_live_presence_mode = os.getenv(
+            "HEBE_DEFAULT_LIVE_PRESENCE_MODE",
+            "companion",
+        ).strip().lower() or "companion"
+
+    def observe_twitch_chat_message(self, username: str, display_name: str, text: str, channel: str = "") -> None:
+        if not getattr(self, "stream_observe_chat", True):
+            return
+        stream = self._get_stream_state()
+        if not stream or self._is_chat_bot_user(username):
+            return
+
+        message = str(text or "").strip()
+        if not message:
+            return
+
+        now = time.time()
+        recent_existing = list(getattr(stream, "recent_chat_messages", []) or [])
+        if recent_existing:
+            last = recent_existing[-1]
+            if (
+                str(last.get("username") or "").lower() == str(username or "").lower()
+                and str(last.get("text") or "") == message[:180]
+                and now - float(last.get("ts", 0.0) or 0.0) < 1.0
+            ):
+                return
+        stream.last_chat_activity_ts = now
+        entry = {
+            "username": str(username or "").strip(),
+            "display_name": str(display_name or username or "").strip(),
+            "text": message[:180],
+            "ts": now,
+            "channel": channel,
+            "topic": self._classify_chat_topic(message),
+        }
+        messages = recent_existing
+        messages.append(entry)
+        stream.recent_chat_messages = messages[-50:]
+
+        users = []
+        for item in stream.recent_chat_messages:
+            user = str(item.get("username") or "").strip()
+            if user and user.lower() not in {u.lower() for u in users}:
+                users.append(user)
+        stream.recent_active_users = users[-20:]
+
+        topics = [item.get("topic") for item in stream.recent_chat_messages if item.get("topic")]
+        stream.recent_chat_topics = topics[-12:]
+        if topics:
+            stream.recent_chat_summary = ", ".join(dict.fromkeys(topics[-5:]))
+
+    def _is_chat_bot_user(self, username: str) -> bool:
+        user = (username or "").strip().lower().lstrip("@")
+        if not user:
+            return True
+        stream = self._get_stream_state()
+        bot_names = {
+            "hebenifelheim",
+            "jotunbot",
+            "streamelements",
+            "nightbot",
+            "moobot",
+            "fossabot",
+            "streamlabs",
+            (getattr(stream, "bot_username", "") or "").lower(),
+            (getattr(getattr(self.runtime, "twitch", None), "bot_username", "") or "").lower(),
+            (getattr(getattr(self.runtime, "twitch_chat_bot", None), "bot_username", "") or "").lower(),
+        }
+        configured = os.getenv("HEBE_TWITCH_BOT_USERNAMES", "")
+        bot_names.update(part.strip().lower().lstrip("@") for part in configured.split(",") if part.strip())
+        return user in bot_names
+
+    def _classify_chat_topic(self, text: str) -> str:
+        normalized = self._normalize_text(text)
+        if any(word in normalized for word in ("linux", "ram", "servidor", "server", "pc", "windows", "obs")):
+            return "tech_pc"
+        if any(word in normalized for word in ("ff9", "final fantasy", "level 1", "boss", "jefe", "lindblum", "ramuh")):
+            return "game"
+        if any(word in normalized for word in ("hola", "buenas", "hello")):
+            return "greeting"
+        return "general_chat"
+
+    def _chat_activity_snapshot(self, stream=None, *, now: float | None = None) -> dict:
+        stream = stream or self._get_stream_state()
+        now = time.time() if now is None else float(now)
+        window = float(getattr(self, "chat_activity_window_sec", 180) or 180)
+        messages = [
+            item for item in list(getattr(stream, "recent_chat_messages", []) or [])
+            if now - float(item.get("ts", 0.0) or 0.0) <= window
+        ] if stream else []
+        users = {
+            str(item.get("username") or "").strip().lower()
+            for item in messages
+            if str(item.get("username") or "").strip()
+        }
+        topics = [item.get("topic") for item in messages if item.get("topic")]
+        active = (
+            len(messages) >= int(getattr(self, "chat_active_message_threshold", 3) or 3)
+            and len(users) >= int(getattr(self, "chat_active_user_threshold", 1) or 1)
+        )
+        return {
+            "active": active,
+            "count": len(messages),
+            "users": sorted(users),
+            "topics": topics[-8:],
+            "summary": ", ".join(dict.fromkeys(topics[-5:])) if topics else "sin tema reciente",
+            "window_sec": window,
+        }
 
     def legacy_flow(self, command: str, source: str = "voice") -> str:
         result = self.orchestrator.handle(
@@ -183,7 +349,9 @@ class HebeEngine:
         if manual is None:
             manual = self._handle_stream_manual_command(command)
         if manual is not None:
-            self._deliver_manual_reply(manual, source=source)
+            force_ui = bool(getattr(self, "_manual_reply_ui_only", False))
+            self._manual_reply_ui_only = False
+            self._deliver_manual_reply(manual, source="ui" if force_ui else source)
             return "continue"
 
         context = self.context_builder.build(
@@ -278,6 +446,13 @@ class HebeEngine:
         return "continue"
     
     def process_internal_event(self, event) -> None:
+        if getattr(event, "event_type", None) in {"stream_online", "stream_offline"}:
+            self._handle_stream_lifecycle_event(event)
+            return
+        if getattr(event, "event_type", None) == "twitch_raid":
+            self._handle_twitch_raid_event(event)
+            return
+
         context = self.context_builder.build(
             state=self.runtime.state,
             input_text=None,
@@ -303,10 +478,131 @@ class HebeEngine:
             return
 
         # Routing del reply según tipo de evento
+        if event.event_type == "twitch_idle_prompt":
+            stream = self._get_stream_state()
+            service = getattr(self, "stream_spontaneity", None)
+            if service is not None and service.is_too_similar_to_recent(stream, reply_text):
+                reply_text = self._idle_fallback_for_topic((getattr(event, "payload", {}) or {}).get("idle_topic"))
+
         if event.event_type.startswith("twitch_"):
-            self._deliver_twitch_reply(reply_text)
+            self._deliver_twitch_reply(reply_text, event_type=event.event_type, payload=getattr(event, "payload", {}) or {})
         else:
             self._deliver_voice_reply(reply_text)
+
+    def _handle_stream_lifecycle_event(self, event) -> None:
+        stream = self._get_stream_state()
+        if not stream:
+            return
+        payload = getattr(event, "payload", {}) or {}
+        now = time.time()
+        if event.event_type == "stream_online":
+            stream.is_live = True
+            stream.live_status_known = True
+            stream.last_stream_live_transition = "online"
+            stream.last_stream_live_transition_ts = now
+            stream.stream_started_at = payload.get("started_at") or payload.get("started_at_ts") or stream.stream_started_at
+            stream.idle_prompts_sent_stream = 0
+            stream.recent_idle_messages = []
+            self._auto_enable_stream_if_live(stream, source="stream_online_event")
+            self.poll_stream_context(force=True, require_enabled=False)
+            print("[HEBE][STREAM_CONTEXT] stream_online event handled", flush=True)
+            return
+        if event.event_type == "stream_offline":
+            stream.is_live = False
+            stream.live_status_known = True
+            stream.last_stream_live_transition = "offline"
+            stream.last_stream_live_transition_ts = now
+            stream.stream_started_at = None
+            stream.stream_spontaneity_grace_until_ts = 0.0
+            stream.idle_prompts_sent_stream = 0
+            if isinstance(getattr(stream, "cooldowns", None), dict):
+                stream.cooldowns.pop(getattr(self.stream_spontaneity.config, "cooldown_key", "stream_idle_prompt_next_ts"), None)
+            print("[HEBE][STREAM_CONTEXT] stream_offline event handled", flush=True)
+
+    def _auto_enable_stream_if_live(self, stream, *, source: str) -> bool:
+        if not stream or not getattr(stream, "is_live", False):
+            return False
+        if not bool(getattr(self, "auto_enable_stream_when_live", True)):
+            return False
+
+        changed = False
+        if not getattr(stream, "enabled", False):
+            stream.enabled = True
+            changed = True
+
+        mode = (getattr(stream, "presence_mode", "reactive") or "reactive").strip().lower()
+        explicit = bool(getattr(stream, "presence_mode_explicit", False))
+        default_mode = getattr(self, "default_live_presence_mode", "companion") or "companion"
+        if mode == "reactive" and not explicit:
+            stream.presence_mode = default_mode
+            changed = True
+
+        if changed or source == "stream_online_event":
+            self.stream_spontaneity.start_grace_period(stream)
+        if changed:
+            print("[HEBE][STREAM] auto-enabled stream mode because Twitch is live", flush=True)
+        else:
+            print(f"[HEBE][STREAM] Twitch live confirmed; stream mode already enabled source={source}", flush=True)
+        return changed
+
+    def _handle_twitch_raid_event(self, event) -> None:
+        stream = self._get_stream_state()
+        payload = getattr(event, "payload", {}) or {}
+        username = payload.get("display_name") or payload.get("user_login") or "alguien"
+        viewers = int(payload.get("viewer_count") or 0)
+        print(f"[HEBE][TWITCH][RAID] received from={username} viewers={viewers}", flush=True)
+        if stream is not None:
+            stream.last_raid_event = {
+                "display_name": username,
+                "viewer_count": viewers,
+                "ts": time.time(),
+            }
+
+        if not stream:
+            print("[HEBE][TWITCH][RAID] blocked reason=no_stream_state", flush=True)
+            return
+        if not (getattr(stream, "enabled", False) or getattr(stream, "is_live", False)):
+            print("[HEBE][TWITCH][RAID] blocked reason=stream_not_enabled_and_not_live", flush=True)
+            return
+
+        print("[HEBE][TWITCH][RAID] planned thank-you", flush=True)
+        reply_text = self._synthesize_internal_event_reply(event)
+        if not reply_text:
+            print("[HEBE][TWITCH][RAID] blocked reason=empty_reply", flush=True)
+            return
+        self._deliver_twitch_reply(reply_text, event_type="twitch_raid", payload=payload)
+        print("[HEBE][TWITCH][RAID] sent thank-you", flush=True)
+
+    def _synthesize_internal_event_reply(self, event) -> str:
+        context = self.context_builder.build(
+            state=self.runtime.state,
+            input_text=None,
+            internal_event=event,
+        )
+
+        deliberation = self.deliberation_service.deliberate(context)
+        execution = self.plan_executor.execute(deliberation.plan)
+        return self.response_synthesizer.synthesize(
+            context=context,
+            deliberation=deliberation,
+            execution=execution,
+        )
+
+    def _idle_fallback_for_topic(self, topic: str | None) -> str:
+        fallbacks = {
+            "challenge_comment": "En una run de desafio, la paciencia tambien cuenta como recurso.",
+            "jrpg_trope": "Esto es muy JRPG: una puerta normal puede esconder una decision absurda.",
+            "game_vibe": "La energia aqui pide prudencia elegante y una pizca de caos controlado.",
+            "light_roast": "Leo, esa confianza tuya tiene pinta de necesitar supervision adulta.",
+            "exploration_comment": "Si hay un camino secundario, el cofre imaginario ya esta gritando.",
+            "strategy_without_spoilers": "Mi voto: piensa un turno mas antes de hacer algo heroicamente estupido.",
+            "streamer_reaction_hook": "Esto tiene pinta de momento para mirar dos veces antes de tocar nada.",
+            "hydration_or_break": "Trago de agua, postura decente, y luego ya seguimos tentando al destino.",
+            "save_reminder": "Si puedes guardar, guarda. La epica no paga facturas.",
+            "equipment_check": "Antes de avanzar, una mirada al equipo nunca arruina una leyenda.",
+            "resource_management": "Recursos primero, valentia despues. Ese orden salva runs.",
+        }
+        return fallbacks.get(topic or "", "Esto pide calma, mala idea medida y cero spoilers.")
 
     def poll_internal_events(self) -> None:
         now = time.time()
@@ -322,54 +618,79 @@ class HebeEngine:
         except Exception as e:
             print(f"[HEBE][SCHEDULER] poll failed: {e!r}", flush=True)
 
+    def poll_stream_context(self, *, force: bool = False, require_enabled: bool = True) -> bool:
+        now = time.time()
+        if not force and now - self._last_stream_context_poll_ts < self.stream_context_poll_interval_sec:
+            return False
+        self._last_stream_context_poll_ts = now
+
+        stream = self._get_stream_state()
+        if not stream:
+            print("[HEBE][STREAM_CONTEXT] refresh skipped reason=no_stream_state", flush=True)
+            return False
+        if require_enabled and not getattr(stream, "enabled", False):
+            print("[HEBE][STREAM_CONTEXT] refresh skipped reason=stream_mode_disabled", flush=True)
+            return False
+
+        service = getattr(self, "stream_context_sync", None)
+        print(
+            "[HEBE][STREAM_CONTEXT] poll "
+            f"force={force} require_enabled={require_enabled} "
+            f"service_exists={service is not None}",
+            flush=True,
+        )
+        if service is None:
+            service = StreamContextSyncService(twitch_api=getattr(self.runtime, "twitch", None))
+            self.stream_context_sync = service
+            print("[HEBE][STREAM_CONTEXT] sync service created from runtime.twitch", flush=True)
+
+        print("[HEBE][STREAM_CONTEXT] about to call Helix via context sync", flush=True)
+        was_known = bool(getattr(stream, "live_status_known", False))
+        was_live = bool(getattr(stream, "is_live", False))
+        ok = bool(service.sync(stream))
+        if ok:
+            is_live = bool(getattr(stream, "is_live", False))
+            if is_live and (not was_known or not was_live):
+                stream.last_stream_live_transition = "online"
+                stream.last_stream_live_transition_ts = now
+            elif was_live and not is_live:
+                stream.last_stream_live_transition = "offline"
+                stream.last_stream_live_transition_ts = now
+            if is_live:
+                self._auto_enable_stream_if_live(stream, source="context_sync")
+        print(f"[HEBE][STREAM_CONTEXT] refresh result success={ok}", flush=True)
+        return ok
+
     def poll_stream_presence(self) -> None:
         now = time.time()
         if now - self._last_presence_poll_ts < self.presence_poll_interval_sec:
             return
         self._last_presence_poll_ts = now
 
+        if bool(getattr(self.runtime.state, "is_processing", False)):
+            return
+
         stream = self._get_stream_state()
-        if not stream or not getattr(stream, "enabled", False):
+        if stream is not None:
+            context_updated_ts = float(getattr(stream, "stream_context_updated_ts", 0.0) or 0.0)
+            if not context_updated_ts or now - context_updated_ts > 120:
+                self.poll_stream_context(force=True, require_enabled=False)
+
+        service = getattr(self, "stream_spontaneity", None)
+        if service is None:
+            service = StreamSpontaneityService()
+            self.stream_spontaneity = service
+
+        event = service.build_due_event(stream)
+        if event is None:
             return
 
-        mode = getattr(stream, "presence_mode", "reactive") or "reactive"
-        if mode not in {"companion", "show"}:
-            print(f"[HEBE][PRESENCE] skipped reason=mode_{mode}", flush=True)
-            return
-
-        silence_minutes = 4.0 if mode == "companion" else 2.0
-        cooldown_minutes = 12.0 if mode == "companion" else 6.0
-        voice_quiet_sec = 20.0
-
-        last_chat = float(getattr(stream, "last_chat_activity_ts", 0.0) or 0.0)
-        if not last_chat:
-            stream.last_chat_activity_ts = now
-            print("[HEBE][PRESENCE] skipped reason=no_chat_baseline", flush=True)
-            return
-        if last_chat and now - last_chat < silence_minutes * 60:
-            print("[HEBE][PRESENCE] skipped reason=chat_recently_active", flush=True)
-            return
-
-        last_spoken = float(getattr(stream, "last_hebe_stream_speak_ts", 0.0) or 0.0)
-        if last_spoken and now - last_spoken < cooldown_minutes * 60:
-            print("[HEBE][PRESENCE] skipped reason=cooldown", flush=True)
-            return
-
-        last_voice_ts = float(getattr(stream, "last_voice_event_ts", 0.0) or 0.0)
-        if last_voice_ts and now - last_voice_ts < voice_quiet_sec:
-            print("[HEBE][PRESENCE] skipped reason=leo_recently_spoke", flush=True)
-            return
-
-        print(f"[HEBE][PRESENCE] speaking reason=chat_silence mode={mode}", flush=True)
-        reply = self.response_synthesizer.generate_stream_presence(
-            reason="chat_silence",
-            presence_mode=mode,
-            last_voice_event=getattr(stream, "last_voice_event", None),
-            leo_mood_hint=getattr(stream, "leo_mood_hint", None),
+        print(
+            "[HEBE][PRESENCE] enqueue "
+            f"type={event.event_type!r} mode={event.payload.get('presence_mode')!r}",
+            flush=True,
         )
-        if reply:
-            stream.last_hebe_stream_speak_ts = now
-            self._deliver_twitch_reply(reply)
+        self.process_internal_event(event)
 
     def poll_stream_routine(self) -> None:
         now_ts = time.time()
@@ -605,8 +926,26 @@ class HebeEngine:
             return "unknown", None
         if "hebe" in normalized or normalized.startswith(("prepara stream", "activa modo stream", "desactiva modo stream")):
             return "direct_command_to_hebe", None
+        if normalized.startswith(("ya hemos pasado ", "hemos pasado ")):
+            return "completed_marker", None
+        if any(marker in normalized for marker in ("ahora toca", "toca salir", "objetivo", "vamos a ", "hay que ")):
+            return "objective_update", None
+        if any(marker in normalized for marker in ("estamos en", "estoy en", "hemos llegado a", "salir de")):
+            return "location_update", None
         if any(marker in normalized for marker in ("me han matado", "he muerto", "otra vez", "wipe", "game over")):
             return "gameplay_failure", "frustrated"
+        if any(marker in normalized for marker in ("bien", "toma", "vamos", "victoria", "victory", "por fin", "ha caido")):
+            return "victory", "excited"
+        if any(marker in normalized for marker in ("boss", "jefe", "intento", "try", "pull")):
+            return "boss_attempt", "focused"
+        if any(marker in normalized for marker in ("farm", "farme", "grind", "grinde", "subir nivel", "farmear")):
+            return "grinding", None
+        if any(marker in normalized for marker in ("exploro", "explorar", "por aqui", "por aquí", "mapa", "cofre")):
+            return "exploration", None
+        if any(marker in normalized for marker in ("equipo", "menu", "menú", "inventario", "stats", "guardar")):
+            return "menu/equipment", None
+        if any(marker in normalized for marker in ("donde voy", "dónde voy", "perdido", "no entiendo", "que hago", "qué hago")):
+            return "confusion/lost", "confused"
         if any(marker in normalized for marker in ("jaj", "lol", "me parto")):
             return "laughter/joke", "playful"
         if any(marker in normalized for marker in ("joder", "mierda", "que sueño", "qué sueño", "estoy muerto", "cansado")):
@@ -621,8 +960,46 @@ class HebeEngine:
             return
         stream.last_voice_event = event_type
         stream.last_voice_event_ts = time.time()
+        stream.last_voice_summary = self._summarize_voice_event(text, event_type)
         if mood_hint:
             stream.leo_mood_hint = mood_hint
+        self._apply_ambient_voice_to_run_context(stream, text, event_type)
+
+    def _apply_ambient_voice_to_run_context(self, stream, text: str, event_type: str) -> None:
+        if event_type not in {"completed_marker", "objective_update", "location_update"}:
+            return
+        raw = str(text or "").strip()
+        normalized = self._normalize_text(raw)
+        now = time.time()
+        if event_type == "completed_marker":
+            for prefix in ("ya hemos pasado ", "hemos pasado "):
+                if normalized.startswith(prefix):
+                    marker = raw.split(" ", len(prefix.split()))[-1].strip()
+                    if marker:
+                        self._add_completed_marker(stream, marker)
+                        stream.run_context_updated_ts = now
+                        stream.run_context_source = "ambient_stt"
+                    return
+        if event_type == "objective_update":
+            stream.current_run_objective = raw[:120]
+            stream.run_context_updated_ts = now
+            stream.run_context_source = "ambient_stt"
+            return
+        if event_type == "location_update":
+            match = re.search(r"(?:estamos en|estoy en|hemos llegado a|salir de)\s+(.+)", raw, flags=re.IGNORECASE)
+            if match:
+                stream.current_run_location = match.group(1).strip()[:80]
+            else:
+                stream.current_run_phase = raw[:120]
+            stream.run_context_updated_ts = now
+            stream.run_context_source = "ambient_stt"
+
+    def _summarize_voice_event(self, text: str, event_type: str) -> str | None:
+        if event_type in {"unknown", "direct_command_to_hebe"}:
+            return None
+        normalized = self._normalize_text(text)
+        words = normalized.split()
+        return " ".join(words[:8]) if words else None
 
     def _handle_stream_manual_command(self, text: str) -> str | None:
         stream = self._get_stream_state()
@@ -633,6 +1010,17 @@ class HebeEngine:
         for prefix in ("hebe ", "ebe ", "eve ", "jebe "):
             if normalized.startswith(prefix):
                 normalized = normalized[len(prefix):].strip()
+        raw_command = re.sub(
+            r"^\s*(?:hebe|ebe|eve|jebe)[\s,;:.-]+",
+            "",
+            str(text or "").strip(),
+            flags=re.IGNORECASE,
+        ).strip()
+        raw_lower = raw_command.lower()
+
+        run_reply = self._handle_run_context_command(raw_command, normalized, stream)
+        if run_reply is not None:
+            return run_reply
 
         presence_modes = {
             "modo silencioso": ("silent", "Modo silencioso, Leo."),
@@ -649,6 +1037,7 @@ class HebeEngine:
         if normalized in presence_modes:
             mode, reply = presence_modes[normalized]
             stream.presence_mode = mode
+            stream.presence_mode_explicit = True
             return reply
 
         if normalized in {"prepara stream", "prepare stream"}:
@@ -656,11 +1045,13 @@ class HebeEngine:
             stream.last_chat_activity_ts = time.time()
             stream.presence_mode = "reactive"
             stream.no_stream_today_date = None
+            self.stream_spontaneity.start_grace_period(stream)
             return "Dejo el stream preparado en modo reactiva. OBS y el juego solo si me lo confirmas."
 
         if normalized in {"activa modo stream", "activa stream", "stream on", "enable stream"}:
             stream.enabled = True
             stream.last_chat_activity_ts = time.time()
+            self.stream_spontaneity.start_grace_period(stream)
             return "Modo stream activado."
 
         if normalized in {"desactiva modo stream", "desactiva stream", "stream off", "disable stream"}:
@@ -676,7 +1067,464 @@ class HebeEngine:
             stream.stream_delay_minutes = int(getattr(stream, "stream_delay_minutes", 0) or 0) + 30
             return "Retraso el plan de stream media hora."
 
+        if normalized in {"actualiza contexto de stream", "actualiza contexto stream", "refresh stream context"}:
+            print("[HEBE][STREAM_CONTEXT] manual refresh requested", flush=True)
+            service = getattr(self, "stream_context_sync", None)
+            print(
+                "[HEBE][STREAM_CONTEXT] manual refresh "
+                f"service_exists={service is not None} runtime_twitch_exists={getattr(self.runtime, 'twitch', None) is not None}",
+                flush=True,
+            )
+            ok = self.poll_stream_context(force=True, require_enabled=False)
+            print(f"[HEBE][STREAM_CONTEXT] manual refresh completed success={ok}", flush=True)
+            return "Contexto de stream actualizado." if ok else "No he podido actualizar el contexto de stream ahora."
+
+        if normalized in {"que contexto de stream tienes", "qué contexto de stream tienes", "stream context"}:
+            return self._build_stream_context_reply(stream)
+
+        if normalized in {"prueba espontaneidad", "previsualiza espontaneidad", "genera una espontanea de prueba", "genera una espontánea de prueba"}:
+            self._manual_reply_ui_only = True
+            return self._build_spontaneity_preview_reply(stream)
+
+        if normalized in {"comprueba espontaneidad", "estado de espontaneidad"}:
+            return self._build_spontaneity_readiness_reply(stream)
+
+        if normalized in {"prueba raid"}:
+            self._manual_reply_ui_only = True
+            return self._build_raid_preview_reply("tester", viewer_count=1)
+
+        if normalized.startswith("simula raid de "):
+            target = normalized[len("simula raid de "):].strip()
+            send = False
+            if target.endswith(" y envialo"):
+                send = True
+                target = target[: -len(" y envialo")].strip()
+            if target.endswith(" y envíalo"):
+                send = True
+                target = target[: -len(" y envíalo")].strip()
+            if not target:
+                target = "tester"
+            if send:
+                self._handle_twitch_raid_event(self._build_local_internal_event("twitch_raid", {
+                    "display_name": target,
+                    "user_login": target,
+                    "viewer_count": 1,
+                }))
+                return f"Raid simulado de {target} enviado."
+            self._manual_reply_ui_only = True
+            return self._build_raid_preview_reply(target, viewer_count=1)
+
+        if normalized in {"activa simulacion de directo", "activa simulación de directo"}:
+            stream.live_test_override = True
+            return "Simulacion de directo: activada."
+
+        if normalized in {"desactiva simulacion de directo", "desactiva simulación de directo"}:
+            stream.live_test_override = False
+            return "Simulacion de directo: desactivada."
+
+        if normalized in {"resetea cooldowns de espontaneidad", "resetea cooldown espontaneidad"}:
+            cleared = self.stream_spontaneity.reset_spontaneity_cooldowns(stream)
+            return f"Cooldowns de espontaneidad reseteados: {cleared}."
+
+        if normalized in {"espontaneidad en texto"}:
+            stream.policies.allow_tts_idle_prompts = False
+            return "Espontaneidad en texto. Si comento por mi cuenta, no lo leo en voz."
+
+        if normalized in {"espontaneidad con voz"}:
+            stream.policies.allow_tts_idle_prompts = True
+            return "Espontaneidad con voz activada. Con moderacion."
+
+        if normalized in {"pausa espontaneidad"}:
+            stream.idle_spontaneity_enabled = False
+            return "Pauso la espontaneidad idle. Raids, subs, follows y menciones siguen funcionando."
+
+        if normalized in {"activa espontaneidad"}:
+            stream.idle_spontaneity_enabled = True
+            self.stream_spontaneity.start_grace_period(stream)
+            return "Espontaneidad idle activada, con periodo de gracia."
+
+        if normalized in {"habla menos"}:
+            stream.presence_mode = "companion"
+            stream.presence_mode_explicit = True
+            stream.cooldowns["companion_idle_silence_sec"] = max(
+                float(stream.cooldowns.get("companion_idle_silence_sec", 20 * 60) or 20 * 60),
+                25 * 60,
+            )
+            return "Bajo intensidad. Menos comentarios, mas aire."
+
+        if normalized in {"habla mas", "habla más"}:
+            stream.presence_mode = "show"
+            stream.presence_mode_explicit = True
+            stream.cooldowns["show_idle_silence_sec"] = min(
+                float(stream.cooldowns.get("show_idle_silence_sec", 9 * 60) or 9 * 60),
+                8 * 60,
+            )
+            return "Subo a modo show, pero sin ponerme pesada."
+
+        if normalized in {"que sabes de este juego", "qué sabes de este juego", "que perfil de juego estas usando", "qué perfil de juego estás usando"}:
+            return self._build_game_profile_reply(stream)
+
+        if normalized in {"recarga perfiles de juegos", "recarga perfiles de juego"}:
+            count = self.game_profiles.reload()
+            return f"Perfiles de juegos recargados: {count}."
+
+        if normalized in {"diagnostica twitch", "diagnostico twitch", "twitch diagnostic"}:
+            return self._build_twitch_diagnostic_reply()
+
         return None
+
+    def _handle_run_context_command(self, raw_command: str, normalized: str, stream) -> str | None:
+        now = time.time()
+
+        def set_updated(source: str) -> None:
+            stream.run_context_updated_ts = now
+            stream.run_context_source = source
+
+        lower = raw_command.lower()
+        objective_prefixes = ("objetivo actual:", "objetivo actual ")
+        for prefix in objective_prefixes:
+            if lower.startswith(prefix):
+                value = raw_command[len(prefix):].strip()
+                if value:
+                    stream.current_run_objective = value
+                    set_updated("manual")
+                    return f"Objetivo actual guardado: {value}."
+
+        progress_prefixes = ("progreso actual:", "progreso actual ")
+        for prefix in progress_prefixes:
+            if lower.startswith(prefix):
+                value = raw_command[len(prefix):].strip()
+                if value:
+                    stream.current_run_phase = value
+                    set_updated("manual")
+                    return f"Progreso actual guardado: {value}."
+
+        location_prefixes = ("estamos en ",)
+        for prefix in location_prefixes:
+            if lower.startswith(prefix):
+                value = raw_command[len(prefix):].strip()
+                if value:
+                    stream.current_run_location = value
+                    set_updated("manual")
+                    return f"Ubicacion actual guardada: {value}."
+
+        passed_prefixes = ("ya hemos pasado ", "hemos pasado ")
+        for prefix in passed_prefixes:
+            if lower.startswith(prefix):
+                marker = raw_command[len(prefix):].strip()
+                if marker:
+                    self._add_completed_marker(stream, marker)
+                    set_updated("manual")
+                    return f"Marcador completado guardado: {marker}."
+
+        forget_prefixes = ("olvida ",)
+        if lower.startswith("olvida ") and lower.endswith(" como objetivo actual"):
+            marker = raw_command[len("olvida "): -len(" como objetivo actual")].strip()
+            if marker:
+                self._add_completed_marker(stream, marker)
+                if self._same_marker(getattr(stream, "current_run_objective", ""), marker):
+                    stream.current_run_objective = None
+                set_updated("manual")
+                return f"Dejo de tratar {marker} como objetivo actual."
+
+        if normalized in {"limpia contexto de partida"}:
+            stream.current_run_objective = None
+            stream.current_run_location = None
+            stream.current_run_phase = None
+            stream.completed_run_markers = []
+            stream.run_context_updated_ts = now
+            stream.run_context_source = "manual"
+            return "Contexto de partida limpiado."
+
+        if normalized in {"que contexto de partida tienes", "qué contexto de partida tienes"}:
+            return self._build_run_context_reply(stream)
+
+        if normalized in {"que ha oido del stream", "qué ha oido del stream", "qué ha oído del stream"}:
+            return self._build_stream_heard_reply(stream)
+
+        if normalized in {"que esta pasando en chat", "qué está pasando en chat", "que está pasando en chat"}:
+            return self._build_chat_context_reply(stream)
+
+        return None
+
+    def _build_raid_preview_reply(self, username: str, *, viewer_count: int = 1) -> str:
+        event = self._build_local_internal_event("twitch_raid", {
+            "display_name": username,
+            "user_login": username,
+            "viewer_count": viewer_count,
+        })
+        message = self._synthesize_internal_event_reply(event)
+        return f"Prueba de raid: '{message}'"
+
+    def _build_local_internal_event(self, event_type: str, payload: dict) -> InternalEvent:
+        return InternalEvent(
+            event_type=event_type,
+            payload=payload,
+            created_at=datetime.now(timezone.utc).isoformat(),
+        )
+
+    def _lookup_current_game_profile(self, stream):
+        store = getattr(self, "game_profiles", None)
+        if store is None:
+            store = GameProfileStore()
+            self.game_profiles = store
+        return store.lookup(
+            current_category=getattr(stream, "current_category", None),
+            current_game=getattr(stream, "current_game", None),
+            current_title=getattr(stream, "current_stream_title", None),
+        )
+
+    def _build_game_profile_reply(self, stream) -> str:
+        profile = self._lookup_current_game_profile(stream)
+
+        def joined(items, fallback="ninguno") -> str:
+            return ", ".join(items) if items else fallback
+
+        return (
+            "Perfil de juego en uso:\n\n"
+            f"* Juego: {profile.canonical_title}\n"
+            f"* Slug: {profile.game_slug}\n"
+            f"* Generos: {joined(profile.genres)}\n"
+            f"* Contexto del canal: {profile.channel_context or 'no detectado'}\n"
+            f"* Relacion con Leo: {profile.leo_relationship or 'no detectado'}\n"
+            f"* Spoilers: {profile.spoiler_policy}\n"
+            f"* Temas seguros: {joined(profile.safe_comment_topics)}\n"
+            f"* Temas prohibidos: {joined(profile.unsafe_comment_topics)}\n"
+            f"* Hooks de stream: {joined(profile.stream_hooks)}"
+        )
+
+    def _add_completed_marker(self, stream, marker: str) -> None:
+        value = str(marker or "").strip()
+        if not value:
+            return
+        existing = list(getattr(stream, "completed_run_markers", []) or [])
+        if not any(self._same_marker(item, value) for item in existing):
+            existing.append(value)
+        stream.completed_run_markers = existing[-30:]
+
+    def _same_marker(self, left: str, right: str) -> bool:
+        return self._normalize_text(left) == self._normalize_text(right)
+
+    def _build_run_context_reply(self, stream) -> str:
+        now = time.time()
+        title_updated = float(getattr(stream, "title_context_updated_ts", 0.0) or 0.0)
+        title_age = now - title_updated if title_updated else 999999
+        title_ttl = getattr(getattr(self, "stream_spontaneity", None), "config", None)
+        ttl = float(getattr(title_ttl, "title_marker_ttl_sec", 55 * 60) or 55 * 60)
+        title_status = "fresco" if title_updated and title_age <= ttl else "stale"
+        run_updated = float(getattr(stream, "run_context_updated_ts", 0.0) or 0.0)
+        run_status = self._format_stream_context_age(run_updated) if run_updated else "nunca"
+
+        def joined(items, fallback="ninguno") -> str:
+            return ", ".join(items) if items else fallback
+
+        return (
+            "Contexto de partida:\n\n"
+            f"* Juego/categoria: {getattr(stream, 'current_category', None) or getattr(stream, 'current_game', None) or 'sin categoria'}\n"
+            f"* Tipo de run: {getattr(stream, 'current_playthrough_type', None) or 'no detectado'}\n"
+            f"* Challenge: {getattr(stream, 'current_challenge', None) or 'ninguno'}\n"
+            f"* Objetivo actual: {getattr(stream, 'current_run_objective', None) or 'no detectado'}\n"
+            f"* Ubicacion actual: {getattr(stream, 'current_run_location', None) or 'no detectada'}\n"
+            f"* Progreso/fase: {getattr(stream, 'current_run_phase', None) or 'no detectado'}\n"
+            f"* Marcadores del titulo: {joined(getattr(stream, 'title_context_markers', []) or [])} ({title_status})\n"
+            f"* Marcadores completados: {joined(getattr(stream, 'completed_run_markers', []) or [])}\n"
+            f"* Contexto de partida actualizado: {run_status}\n"
+            f"* Fuente: {getattr(stream, 'run_context_source', None) or 'unknown'}\n"
+            f"* Spoilers: {getattr(stream, 'spoiler_policy', None) or 'no_spoilers'}"
+        )
+
+    def _build_stream_heard_reply(self, stream) -> str:
+        updated = self._format_stream_context_age(getattr(stream, "last_voice_event_ts", 0.0) or 0.0)
+        return (
+            "Esto he oido del stream:\n\n"
+            f"* Ultimo evento de voz: {getattr(stream, 'last_voice_event', None) or 'ninguno'}\n"
+            f"* Mood: {getattr(stream, 'leo_mood_hint', None) or 'no detectado'}\n"
+            f"* Resumen: {getattr(stream, 'last_voice_summary', None) or 'ninguno'}\n"
+            f"* Actualizado: {updated}"
+        )
+
+    def _build_chat_context_reply(self, stream) -> str:
+        snapshot = self._chat_activity_snapshot(stream)
+        return (
+            "Contexto de chat:\n\n"
+            f"* Chat activo: {'yes' if snapshot['active'] else 'no'}\n"
+            f"* Mensajes recientes: {snapshot['count']} en {int(snapshot['window_sec'])}s\n"
+            f"* Usuarios recientes: {', '.join(snapshot['users']) if snapshot['users'] else 'ninguno'}\n"
+            f"* Temas recientes: {snapshot['summary']}"
+        )
+
+    def _build_spontaneity_preview_reply(self, stream) -> str:
+        event = self.stream_spontaneity.build_preview_event(stream)
+        if event is None:
+            return "Prueba de espontaneidad: no tengo suficiente contexto para generar una prueba."
+        message = self.response_synthesizer.generate_twitch_idle_prompt_preview(event.payload)
+        stream.last_stream_spontaneity_preview_ts = time.time()
+        return f"Prueba de espontaneidad: '{message}'"
+
+    def _build_spontaneity_readiness_reply(self, stream) -> str:
+        live_override = bool(getattr(stream, "live_test_override", False))
+        readiness = self.stream_spontaneity.evaluate(stream, live_override=live_override)
+
+        def yes_no(value) -> str:
+            return "yes" if bool(value) else "no"
+
+        twitch_live = readiness.get("twitch_live")
+        if twitch_live == "unknown":
+            live_label = "unknown"
+        else:
+            live_label = yes_no(twitch_live)
+
+        category = getattr(stream, "current_category", None) or getattr(stream, "current_game", None) or "sin categoria"
+        playthrough = getattr(stream, "current_playthrough_type", None) or "no detectado"
+        challenge = getattr(stream, "current_challenge", None) or "ninguno"
+        spoilers = getattr(stream, "spoiler_policy", None) or "no detectado"
+        reason = readiness.get("blocked_reason") or "unknown"
+        updated = self._format_stream_context_age(getattr(stream, "stream_context_updated_ts", 0.0) or 0.0)
+        transition = getattr(stream, "last_stream_live_transition", None) or "ninguna"
+        transition_ts = getattr(stream, "last_stream_live_transition_ts", 0.0) or 0.0
+        transition_age = self._format_stream_context_age(transition_ts) if transition_ts else "nunca"
+        raid = getattr(stream, "last_raid_event", None) or {}
+        if raid:
+            raid_label = f"{raid.get('display_name')} ({raid.get('viewer_count', 0)})"
+        else:
+            raid_label = "ninguno"
+        is_processing = bool(getattr(self.runtime.state, "is_processing", False))
+        if is_processing:
+            reason = "command currently processing"
+        chat_snapshot = self._chat_activity_snapshot(stream)
+        recent_idle = list(getattr(stream, "recent_idle_messages", []) or [])
+        next_ts = readiness.get("next_possible_idle_prompt_ts") or (getattr(stream, "cooldowns", {}) or {}).get(
+            getattr(self.stream_spontaneity.config, "cooldown_key", "stream_idle_prompt_next_ts"),
+            0.0,
+        )
+        next_label = self._format_stream_context_age(float(next_ts)) if next_ts and float(next_ts) <= time.time() else (
+            datetime.fromtimestamp(float(next_ts), ZoneInfo("Europe/Madrid")).strftime("%H:%M:%S") if next_ts else "cuando se cumplan las condiciones"
+        )
+
+        return (
+            "Estado de espontaneidad:\n\n"
+            f"* Stream mode enabled: {yes_no(readiness.get('stream_enabled'))}\n"
+            f"* Twitch live: {live_label}\n"
+            f"* Auto-enable when live: {yes_no(getattr(self, 'auto_enable_stream_when_live', True))}\n"
+            f"* Default live presence mode: {getattr(self, 'default_live_presence_mode', 'companion')}\n"
+            f"* Simulacion de directo: {'activada' if live_override else 'desactivada'}\n"
+            f"* Presence mode: {readiness.get('presence_mode')}\n"
+            f"* Idle enabled/paused: {'enabled' if getattr(stream, 'idle_spontaneity_enabled', True) else 'paused'}\n"
+            f"* Idle TTS enabled: {yes_no(getattr(stream.policies, 'allow_tts_idle_prompts', False))}\n"
+            f"* Chat active: {yes_no(chat_snapshot['active'])}\n"
+            f"* Recent chat messages/window: {chat_snapshot['count']} / {int(chat_snapshot['window_sec'])}s\n"
+            f"* Context fresh: {yes_no(readiness.get('context_fresh'))}\n"
+            f"* Command currently processing: {yes_no(is_processing)}\n"
+            f"* Last stream context update: {updated}\n"
+            f"* Last live transition: {transition} ({transition_age})\n"
+            f"* Last raid event: {raid_label}\n"
+            f"* Game/category: {category}\n"
+            f"* Current run objective: {getattr(stream, 'current_run_objective', None) or 'no detectado'}\n"
+            f"* Current run location: {getattr(stream, 'current_run_location', None) or 'no detectada'}\n"
+            f"* Title markers: {', '.join(getattr(stream, 'title_context_markers', []) or []) or 'ninguno'}\n"
+            f"* Stale title markers: {', '.join(readiness.get('title_markers_stale') or []) or 'ninguno'}\n"
+            f"* Completed markers: {', '.join(getattr(stream, 'completed_run_markers', []) or []) or 'ninguno'}\n"
+            f"* Playthrough: {playthrough}\n"
+            f"* Challenge: {challenge}\n"
+            f"* Spoilers: {spoilers}\n"
+            f"* Last idle topic: {(recent_idle[-1].get('topic') if recent_idle else None) or 'ninguno'}\n"
+            f"* Recent idle topics: {', '.join([item.get('topic') for item in recent_idle[-6:] if item.get('topic')]) or 'ninguno'}\n"
+            f"* Prompts sent this hour: {readiness.get('prompts_sent_hour', 0)}\n"
+            f"* Prompts sent this stream: {getattr(stream, 'idle_prompts_sent_stream', 0)}\n"
+            f"* Recent chat block: {yes_no(readiness.get('recent_chat_block'))}\n"
+            f"* Recent Hebe message block: {yes_no(readiness.get('recent_hebe_block'))}\n"
+            f"* Cooldown ready: {yes_no(readiness.get('cooldown_ready'))}\n"
+            f"* Would send now: {yes_no(readiness.get('would_send'))}\n"
+            f"* Last spontaneous blocked reason: {getattr(stream, 'last_stream_spontaneity_blocked_reason', None) or 'ninguno'}\n"
+            f"* Reason if blocked: {reason}\n"
+            f"* Next possible idle prompt time: {next_label}"
+        )
+
+    def _build_stream_context_reply(self, stream) -> str:
+        if getattr(stream, "live_status_known", False):
+            if getattr(stream, "is_live", False):
+                status = "online, comprobado con Twitch."
+            else:
+                status = "offline, comprobado con Twitch."
+        else:
+            status = "desconocido. No he podido confirmar si el stream esta online."
+
+        title = getattr(stream, "current_stream_title", None) or "sin titulo"
+        category = getattr(stream, "current_category", None) or getattr(stream, "current_game", None) or "sin categoria"
+        playthrough = getattr(stream, "current_playthrough_type", None) or "no detectado"
+        slot = getattr(stream, "current_stream_slot", None) or "no detectado"
+        challenge = getattr(stream, "current_challenge", None) or "ninguno"
+        language = getattr(stream, "language_mode", None)
+        if not language:
+            language = "ENG/ESP" if getattr(stream, "bilingual_mode", False) else "no detectado"
+        spoiler_policy = getattr(stream, "spoiler_policy", None) or "no detectado"
+        updated = self._format_stream_context_age(getattr(stream, "stream_context_updated_ts", 0.0) or 0.0)
+        error = getattr(stream, "last_stream_context_error", None) or "ninguno"
+
+        return (
+            "Esto tengo ahora mismo:\n\n"
+            f"* Estado: {status}\n"
+            f"* Juego/categoria: {category}.\n"
+            f"* Titulo: {title}\n"
+            f"* Tipo de directo detectado: {playthrough}.\n"
+            f"* Slot/tema detectado: {slot}.\n"
+            f"* Challenge detectado: {challenge}.\n"
+            f"* Idioma/modo: {language}.\n"
+            f"* Spoilers: {spoiler_policy}.\n"
+            f"* Contexto actualizado: {updated}.\n"
+            f"* Ultimo error: {error}."
+        )
+
+    def _format_stream_context_age(self, updated_ts: float) -> str:
+        if not updated_ts:
+            return "nunca"
+        elapsed = max(0, int(time.time() - float(updated_ts)))
+        if elapsed < 60:
+            return f"hace {elapsed} segundos"
+        minutes = elapsed // 60
+        if minutes < 60:
+            return f"hace {minutes} minutos"
+        hours = minutes // 60
+        return f"hace {hours} horas"
+
+    def _build_twitch_diagnostic_reply(self) -> str:
+        stream = self._get_stream_state()
+        twitch = getattr(self.runtime, "twitch", None)
+        helix = getattr(twitch, "helix_client", None) if twitch is not None else None
+        chat_bot = getattr(self.runtime, "twitch_chat_bot", None)
+        eventsub = getattr(self.runtime, "twitch_events", None)
+
+        channel_name = getattr(twitch, "channel_name", "") or getattr(helix, "channel_name", "")
+        broadcaster_id = getattr(helix, "broadcaster_id", "")
+        client_id = getattr(helix, "client_id", "")
+        sender_id = getattr(getattr(twitch, "chat_client", None), "sender_id", "")
+        oauth_token = os.getenv("TWITCH_OAUTH_TOKEN", "")
+        broadcaster_token = os.getenv("TWITCH_BROADCASTER_OAUTH_TOKEN", "")
+
+        def yes_no(value) -> str:
+            return "yes" if bool(value) else "no"
+
+        chat_connected = getattr(chat_bot, "is_connected", None)
+        if chat_connected is None:
+            chat_connected = bool(twitch and twitch.is_available())
+        eventsub_connected = getattr(eventsub, "is_connected", None)
+
+        updated = getattr(stream, "stream_context_updated_ts", 0.0) if stream else 0.0
+        error = getattr(stream, "last_stream_context_error", None) if stream else None
+
+        return (
+            "Twitch diag: "
+            f"channel_name loaded: {yes_no(channel_name)}; "
+            f"broadcaster_id loaded: {yes_no(broadcaster_id)}; "
+            f"sender_id loaded: {yes_no(sender_id)}; "
+            f"client_id loaded: {yes_no(client_id)}; "
+            f"TWITCH_OAUTH_TOKEN loaded: {yes_no(oauth_token)}; "
+            f"TWITCH_BROADCASTER_OAUTH_TOKEN loaded: {yes_no(broadcaster_token)}; "
+            f"IRC chat bot connected/available: {yes_no(chat_connected)}; "
+            f"EventSub connected: {yes_no(eventsub_connected)}; "
+            f"last stream context update timestamp: {updated or 'never'}; "
+            f"last stream context error: {error or 'none'}."
+        )
 
     def _handle_tts_manual_command(self, text: str) -> str | None:
         normalized = self._normalize_text(text)
@@ -796,7 +1644,7 @@ class HebeEngine:
 
         return reply_step.data.get("mode") == "chat"
 
-    def _deliver_twitch_reply(self, text: str) -> None:
+    def _deliver_twitch_reply(self, text: str, *, event_type: str | None = None, payload: dict | None = None) -> None:
         """
         Entrega un reply al chat de Twitch.
         Si las policies del stream lo permiten, también lo hablamos por TTS.
@@ -805,6 +1653,11 @@ class HebeEngine:
         stream = getattr(self.runtime.state, "stream", None)
         if stream is not None:
             stream.last_hebe_stream_speak_ts = time.time()
+            if event_type == "twitch_idle_prompt":
+                topic = (payload or {}).get("idle_topic")
+                service = getattr(self, "stream_spontaneity", None)
+                if service is not None:
+                    service.record_idle_message(stream, text, topic=topic)
         if twitch is not None and twitch.is_available():
             try:
                 twitch.send_message(text)
@@ -817,7 +1670,14 @@ class HebeEngine:
         if not getattr(self.runtime.state, "tts_enabled", False):
             print("[HEBE][TTS] skipped reason=global_disabled", flush=True)
             return
-        if not (policies and getattr(policies, "allow_tts_replies", False)):
+        allow_tts = bool(policies and getattr(policies, "allow_tts_replies", False))
+        if event_type == "twitch_idle_prompt":
+            allow_tts = bool(policies and getattr(policies, "allow_tts_idle_prompts", False))
+        elif event_type == "twitch_raid":
+            allow_tts = bool(policies and getattr(policies, "allow_tts_raid_thanks", True))
+        elif event_type and event_type.startswith("twitch_") and event_type != "twitch_chat_react":
+            allow_tts = bool(policies and getattr(policies, "allow_tts_event_replies", True))
+        if not allow_tts:
             print("[HEBE][TTS] skipped reason=stream_tts_disabled", flush=True)
             return
         self._deliver_voice_reply(text)
@@ -862,6 +1722,7 @@ class HebeEngine:
 
             self.poll_internal_events()
             self.poll_stream_routine()
+            self.poll_stream_context(require_enabled=False)
             self.poll_stream_presence()
 
             command = None
@@ -893,9 +1754,12 @@ class HebeEngine:
             if source in {"voice", "ui"}:
                 if source == "voice" and self._is_stream_enabled():
                     voice_type, mood_hint = self._classify_voice_event(command)
-                    self._record_voice_event(command, voice_type, mood_hint)
+                    ambient_enabled = bool(getattr(self, "stream_ambient_stt_enabled", False))
+                    if voice_type == "direct_command_to_hebe" or ambient_enabled:
+                        self._record_voice_event(command, voice_type, mood_hint)
+                    logged_text = command if voice_type == "direct_command_to_hebe" else "(ambient)"
                     print(
-                        f"[HEBE][VOICE] type={voice_type} mood={mood_hint!r} text={command!r}",
+                        f"[HEBE][VOICE] type={voice_type} mood={mood_hint!r} text={logged_text!r}",
                         flush=True,
                     )
                     if voice_type != "direct_command_to_hebe" and not self._stream_is_armed():
@@ -927,6 +1791,7 @@ class HebeEngine:
                 return "stop"
             self.poll_internal_events()
             self.poll_stream_routine()
+            self.poll_stream_context(require_enabled=False)
             self.poll_stream_presence()
             try:
                 ui_inbox = get_ui_inbox()

@@ -603,8 +603,167 @@ class ResponseSynthesizer:
             return self._generate_twitch_follow_batch(payload)
         if event.event_type == "twitch_chat_react":
             return self._generate_twitch_chat_react(payload, context=context)
+        if event.event_type == "twitch_idle_prompt":
+            return self._generate_twitch_idle_prompt(payload)
 
         return self._fallback_text("")
+
+    def _generate_twitch_idle_prompt(self, payload: dict) -> str:
+        presence_mode = payload.get("presence_mode") or "companion"
+        title = payload.get("title") or "unknown"
+        category = payload.get("current_category") or payload.get("current_game") or "unknown"
+        playthrough_type = payload.get("playthrough_type") or "unknown"
+        challenge = payload.get("challenge") or "none"
+        stream_slot = payload.get("stream_slot") or "unknown"
+        language_mode = payload.get("language_mode") or "unknown"
+        spoiler_policy = payload.get("spoiler_policy") or "no_spoilers"
+        last_voice_event = payload.get("last_voice_event") or "none"
+        last_voice_summary = payload.get("last_voice_summary") or "none"
+        leo_mood_hint = payload.get("leo_mood_hint") or "none"
+        game_profile = payload.get("game_profile") or {}
+        run_context = payload.get("run_context") or {}
+        chat_context = payload.get("chat_context") or {}
+        idle_topic = payload.get("idle_topic") or "game_vibe"
+        recent_idle_topics = payload.get("recent_idle_topics") or []
+        recent_idle_messages = payload.get("recent_idle_messages") or []
+
+        system = (
+            f"{self._build_stream_style_block()}\n\n"
+            "Situation: Leo is live and Hebe may send one proactive game companion line.\n"
+            "Goal: make a useful or funny gameplay comment Leo can react to verbally.\n\n"
+            "Rules:\n"
+            "- One line, max 220 characters.\n"
+            "- No markdown.\n"
+            "- Spanish by default.\n"
+            "- Prioritize current category/game, then stream title, then playthrough/challenge, then ambient STT.\n"
+            "- Use the local game_profile when present, but only claim facts listed there or in stream_context.\n"
+            "- Do not mention silence, quiet chat, inactivity, viewers, viewer count, lurkers, or lack of chat.\n"
+            "- Do not sound like ChatGPT, a moderator bot, or a motivational poster.\n"
+            "- No spoilers. Do not invent specific mechanics, story facts, characters, bosses, locations, or guide claims.\n"
+            "- Do not give walkthrough instructions unless Leo explicitly asked.\n"
+            "- If the game/category is unknown, use generic RPG/JRPG/gameplay commentary.\n"
+            "- Do not mention policies, cooldowns, prompts, or internal state.\n"
+            "- Use the requested idle_topic. Do not repeat recent idle topics or phrases.\n"
+            "- Do not treat stale title markers as current objectives.\n"
+            "- Never mention completed markers as upcoming/current.\n"
+            "- If chat_context is active or about non-game topics, do not answer chat; keep the line broadly game-safe.\n"
+        )
+        user = (
+            "stream_context:\n"
+            f"- is_live: true\n"
+            f"- title: {title}\n"
+            f"- category/game: {category}\n"
+            f"- playthrough_type: {playthrough_type}\n"
+            f"- challenge: {challenge}\n"
+            f"- stream_slot: {stream_slot}\n"
+            f"- language_mode: {language_mode}\n"
+            f"- spoiler_policy: {spoiler_policy}\n"
+            f"- last_voice_event: {last_voice_event}\n"
+            f"- last_voice_summary: {last_voice_summary}\n"
+            f"- leo_mood_hint: {leo_mood_hint}\n"
+            f"- presence_mode: {presence_mode}\n"
+            f"- idle_topic: {idle_topic}\n\n"
+            "run_context:\n"
+            f"- objective: {run_context.get('objective') or 'unknown'}\n"
+            f"- location: {run_context.get('location') or 'unknown'}\n"
+            f"- phase: {run_context.get('phase') or 'unknown'}\n"
+            f"- source: {run_context.get('source') or 'unknown'}\n"
+            f"- completed_markers: {', '.join(run_context.get('completed_markers') or []) or 'none'}\n"
+            f"- title_markers_fresh: {', '.join(run_context.get('title_markers_fresh') or []) or 'none'}\n"
+            f"- title_markers_stale: {', '.join(run_context.get('title_markers_stale') or []) or 'none'}\n\n"
+            "chat_context:\n"
+            f"- active: {bool(chat_context.get('active'))}\n"
+            f"- recent_count: {chat_context.get('recent_count') or 0}\n"
+            f"- recent_topics: {', '.join(chat_context.get('recent_topics') or []) or 'none'}\n"
+            f"- summary: {chat_context.get('summary') or 'none'}\n\n"
+            "recent_idle:\n"
+            f"- topics: {', '.join(recent_idle_topics) or 'none'}\n"
+            f"- messages: {' | '.join(str(item) for item in recent_idle_messages) or 'none'}\n\n"
+            "game_profile:\n"
+            f"- title: {game_profile.get('title') or 'unknown'}\n"
+            f"- genres: {', '.join(game_profile.get('genres') or []) or 'unknown'}\n"
+            f"- channel_context: {game_profile.get('channel_context') or 'unknown'}\n"
+            f"- leo_relationship: {game_profile.get('leo_relationship') or 'unknown'}\n"
+            f"- safe_comment_topics: {', '.join(game_profile.get('safe_comment_topics') or []) or 'none'}\n"
+            f"- spoiler_policy: {game_profile.get('spoiler_policy') or 'no_spoilers'}\n"
+            f"- unsafe_comment_topics: {', '.join(game_profile.get('unsafe_comment_topics') or []) or 'none'}\n"
+            f"- stream_hooks: {', '.join(game_profile.get('stream_hooks') or []) or 'none'}\n"
+            f"- challenge_notes: {', '.join(game_profile.get('challenge_notes') or []) or 'none'}\n\n"
+            "Generate only Hebe's Twitch chat message."
+        )
+        fallback = random.choice(
+            [
+                "Mi senor, antes de lanzarte al caos, revisa vida, recursos y si puedes guardar.",
+                "Esto huele a zona donde el juego espera que vayas confiado. Sospechoso.",
+                "En una run de desafio, cada menu cuenta. El verdadero boss es la preparacion.",
+                "Esto es muy JRPG: abres una puerta y acabas resolviendo un problema geopolitico.",
+                "Mi voto divino: guardar partida antes de hacer cualquier cosa remotamente estupida.",
+            ]
+        )
+        reply = clean_twitch_reply(self._call_model(system, user, fallback=fallback))[:220]
+        return self._safe_spontaneous_stream_reply(reply, fallback, payload=payload)
+
+    def generate_twitch_idle_prompt_preview(self, payload: dict) -> str:
+        return self._generate_twitch_idle_prompt(payload)
+
+    def _safe_spontaneous_stream_reply(self, reply: str, fallback: str, payload: dict | None = None) -> str:
+        text = (reply or "").strip()
+        lowered = text.lower()
+        payload = payload or {}
+        forbidden = (
+            "silencio",
+            "silencio en la sala",
+            "quieto",
+            "tranquilo",
+            "está esto tranquilo",
+            "esta esto tranquilo",
+            "nadie",
+            "sin chat",
+            "chat esta",
+            "chat está",
+            "chat está muerto",
+            "chat esta muerto",
+            "no habla",
+            "nadie habla",
+            "nadie está hablando",
+            "nadie esta hablando",
+            "inactivo",
+            "muerto",
+            "no viewers",
+            "viewer",
+            "viewers",
+            "espectador",
+            "espectadores",
+            "lurking",
+            "lurker",
+            "lurkers",
+            "si alguien está",
+            "si alguien esta",
+            "aunque no haya",
+            "aunque no haya nadie",
+        )
+        game_profile = payload.get("game_profile") or {}
+        game_title = " ".join(
+            str(value or "").lower()
+            for value in (
+                payload.get("current_game"),
+                payload.get("current_category"),
+                game_profile.get("title"),
+            )
+        )
+        if "final fantasy ix" in game_title or "ffix" in game_title or "ff9" in game_title:
+            if "esfera" in lowered or "esferas" in lowered:
+                return fallback
+
+        run_context = payload.get("run_context") or {}
+        completed = [str(item).lower() for item in run_context.get("completed_markers") or []]
+        stale = [str(item).lower() for item in run_context.get("title_markers_stale") or []]
+        if any(marker and marker in lowered for marker in completed + stale):
+            return fallback
+
+        if not text or any(marker in lowered for marker in forbidden):
+            return fallback
+        return text
 
     def generate_stream_presence(
         self,
@@ -614,26 +773,14 @@ class ResponseSynthesizer:
         last_voice_event: str | None = None,
         leo_mood_hint: str | None = None,
     ) -> str:
-        system = (
-            f"{self._build_stream_style_block()}\n\n"
-            "Situation: chat has gone quiet during Leo's stream.\n"
-            "Goal: send one short presence line to Twitch chat.\n\n"
-            "Rules:\n"
-            "- One line, max 240 characters.\n"
-            "- Do not ask what Leo should play.\n"
-            "- Do not turn this into stream planning.\n"
-            "- Do not mention memory or recaps.\n"
-            "- If there is a mood hint, lightly react to it without forcing a topic."
+        return self._generate_twitch_idle_prompt(
+            {
+                "reason": reason,
+                "presence_mode": presence_mode,
+                "last_voice_event": last_voice_event,
+                "leo_mood_hint": leo_mood_hint,
+            }
         )
-        user = (
-            f"Presence mode: {presence_mode}\n"
-            f"Reason: {reason}\n"
-            f"Last voice event: {last_voice_event or 'none'}\n"
-            f"Leo mood hint: {leo_mood_hint or 'none'}\n"
-            "Generate only Hebe's Twitch chat message."
-        )
-        fallback = "El chat se ha quedado más quieto que un NPC sin quest."
-        return clean_twitch_reply(self._call_model(system, user, fallback=fallback))[:240]
 
     def _build_stream_style_block(self) -> str:
         return build_hebe_stream_style_block()

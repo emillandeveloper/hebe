@@ -28,6 +28,7 @@ from app.integrations.twitch.event_memory import TwitchEventMemory
 from app.integrations.twitch.target_resolver import TwitchTargetResolver
 from app.integrations.twitch.service import TwitchService
 from app.integrations.twitch.event_adapter import TwitchEventAdapter
+from app.integrations.twitch.helix_client import TwitchHelixClient
 
 
 def build_speak(state: HebeState) -> Callable[[str, str], None]:
@@ -170,16 +171,23 @@ def build_runtime() -> HebeRuntime:
         bot_username=bot_username,
         enabled=twitch_enabled,
     )
+    broadcaster_oauth_token = os.getenv("TWITCH_BROADCASTER_OAUTH_TOKEN", oauth_token)
+    helix_client = TwitchHelixClient(
+        client_id=client_id,
+        oauth_token=broadcaster_oauth_token,
+        broadcaster_id=broadcaster_id,
+        channel_name=channel_name,
+    )
 
     twitch = TwitchService(
         chat_client=chat_client,
         target_resolver=target_resolver,
         chat_cache=chat_cache,
         event_memory=event_memory,
+        helix_client=helix_client,
         channel_name=channel_name,
         bot_username=bot_username,
     )
-    broadcaster_oauth_token = os.getenv("TWITCH_BROADCASTER_OAUTH_TOKEN", oauth_token)
     twitch_events = TwitchEventAdapter(
         client_id=client_id,
         user_oauth_token=broadcaster_oauth_token,
@@ -188,6 +196,7 @@ def build_runtime() -> HebeRuntime:
         twitch_service=twitch,
         enabled=twitch_enabled,
         bot_username=bot_username,
+        subscribe_chat_messages=os.getenv("HEBE_TWITCH_EVENTSUB_CHAT_MESSAGES", "false").strip().lower() in ("1", "true", "yes", "on"),
     )
 
     twitch_chat_bot = TwitchChatBot(

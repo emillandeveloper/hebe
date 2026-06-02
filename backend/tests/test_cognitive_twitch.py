@@ -2,6 +2,7 @@ import unittest
 from types import SimpleNamespace
 
 from app.cognitive.deliberation_service import DeliberationService
+from app.cognitive.response_synthesizer import ResponseSynthesizer
 from app.cognitive.scheduler import SchedulerService, InternalEvent
 from app.integrations.twitch.chat_bot import TwitchChatBot
 
@@ -22,6 +23,16 @@ class DummyMemoryStore:
 
 class DummyModel:
     pass
+
+
+class CapturingModel:
+    def __init__(self, reply):
+        self.reply = reply
+        self.messages = None
+
+    def chat(self, messages, **kwargs):
+        self.messages = messages
+        return self.reply
 
 
 class CognitiveTwitchTests(unittest.TestCase):
@@ -72,6 +83,51 @@ class CognitiveTwitchTests(unittest.TestCase):
         self.assertEqual(received[0]["text"], "Hola Hebe")
         self.assertEqual(received[0]["channel"], "#testchannel")
 
+    def test_twitch_chat_bot_detects_at_bot_mentions(self):
+        received = []
+        bot = TwitchChatBot(
+            channel_name="testchannel",
+            bot_username="HebeNifelheim",
+            oauth_token="oauth:dummy",
+            enabled=True,
+            message_callback=lambda *args: received.append(args),
+        )
+
+        bot._handle_privmsg(":viewer!viewer@viewer.tmi.twitch.tv PRIVMSG #testchannel :@HebeNifelheim que opinas?")
+        bot._handle_privmsg(":viewer!viewer@viewer.tmi.twitch.tv PRIVMSG #testchannel :@hebenifelheim despierta")
+        bot._handle_privmsg(":viewer!viewer@viewer.tmi.twitch.tv PRIVMSG #testchannel :HebeNifelheim mira esto")
+
+        self.assertEqual(len(received), 3)
+
+    def test_twitch_chat_bot_uses_configured_bot_username_for_mentions(self):
+        received = []
+        bot = TwitchChatBot(
+            channel_name="testchannel",
+            bot_username="OtherHebe",
+            oauth_token="oauth:dummy",
+            enabled=True,
+            message_callback=lambda *args: received.append(args),
+        )
+
+        bot._handle_privmsg(":viewer!viewer@viewer.tmi.twitch.tv PRIVMSG #testchannel :@otherhebe hola")
+
+        self.assertEqual(len(received), 1)
+
+    def test_twitch_chat_bot_ignores_own_bot_messages_and_unrelated_words(self):
+        received = []
+        bot = TwitchChatBot(
+            channel_name="testchannel",
+            bot_username="HebeNifelheim",
+            oauth_token="oauth:dummy",
+            enabled=True,
+            message_callback=lambda *args: received.append(args),
+        )
+
+        bot._handle_privmsg(":HebeNifelheim!bot@bot.tmi.twitch.tv PRIVMSG #testchannel :@HebeNifelheim hola")
+        bot._handle_privmsg(":viewer!viewer@viewer.tmi.twitch.tv PRIVMSG #testchannel :alhebedo no cuenta")
+
+        self.assertEqual(received, [])
+
     def test_deliberation_service_plans_twitch_event_as_reply(self):
         deliberation_service = DeliberationService(
             intent_model=DummyModel(),
@@ -92,6 +148,117 @@ class CognitiveTwitchTests(unittest.TestCase):
         self.assertEqual(step.type, "reply")
         self.assertEqual(step.data["mode"], "twitch_raid")
         self.assertEqual(step.data["payload"], {"display_name": "Broadcaster"})
+
+    def test_response_synthesizer_handles_twitch_idle_prompt(self):
+        event = InternalEvent(
+            event_type="twitch_idle_prompt",
+            payload={
+                "reason": "stream_companion_prompt",
+                "presence_mode": "show",
+                "silence_seconds": 360,
+            },
+            created_at="2026-05-31T12:00:00Z",
+        )
+        context = SimpleNamespace(internal_event=event, input_text=None)
+
+        reply = ResponseSynthesizer(conversation_model=None)._handle_internal_event(
+            context,
+            execution=SimpleNamespace(),
+        )
+
+        self.assertTrue(reply)
+        self.assertLessEqual(len(reply), 220)
+
+    def test_spontaneous_prompt_includes_stream_context(self):
+        model = CapturingModel("Mi senor, revisa recursos antes de avanzar.")
+        event = InternalEvent(
+            event_type="twitch_idle_prompt",
+            payload={
+                "title": "Challenge Playthrough Level 1",
+                "current_category": "Final Fantasy X",
+                "playthrough_type": "challenge",
+                "challenge": "level_1",
+                "spoiler_policy": "no_spoilers",
+                "last_voice_event": "menu/equipment",
+                "leo_mood_hint": "focused",
+                "presence_mode": "show",
+                "game_profile": {
+                    "title": "Final Fantasy X",
+                    "genres": ["JRPG", "turn-based"],
+                    "channel_context": "Final Fantasy stream with strong no-spoiler needs.",
+                    "safe_comment_topics": ["resource checks", "save spheres"],
+                    "spoiler_policy": "no_spoilers",
+                    "unsafe_comment_topics": ["story twists", "boss names"],
+                },
+            },
+            created_at="2026-05-31T12:00:00Z",
+        )
+        context = SimpleNamespace(internal_event=event, input_text=None)
+
+        reply = ResponseSynthesizer(conversation_model=model)._handle_internal_event(
+            context,
+            execution=SimpleNamespace(),
+        )
+
+        prompt_text = "\n".join(message["content"] for message in model.messages)
+        self.assertEqual(reply, "Mi senor, revisa recursos antes de avanzar.")
+        self.assertIn("Challenge Playthrough Level 1", prompt_text)
+        self.assertIn("Final Fantasy X", prompt_text)
+        self.assertIn("challenge", prompt_text)
+        self.assertIn("level_1", prompt_text)
+        self.assertIn("game_profile:", prompt_text)
+        self.assertIn("save spheres", prompt_text)
+        self.assertIn("story twists", prompt_text)
+
+    def test_spontaneous_reply_filters_forbidden_silence_viewer_phrases(self):
+        forbidden_replies = [
+            "Silencio en la sala, no hay viewers.",
+            "Si alguien esta lurking, que vote.",
+            "Aunque no haya nadie, seguimos.",
+            "Chat esta muerto hoy.",
+            "Esta esto tranquilo.",
+        ]
+        for raw_reply in forbidden_replies:
+            with self.subTest(raw_reply=raw_reply):
+                model = CapturingModel(raw_reply)
+                event = InternalEvent(
+                    event_type="twitch_idle_prompt",
+                    payload={"current_category": "JRPG", "presence_mode": "companion"},
+                    created_at="2026-05-31T12:00:00Z",
+                )
+                context = SimpleNamespace(internal_event=event, input_text=None)
+
+                reply = ResponseSynthesizer(conversation_model=model)._handle_internal_event(
+                    context,
+                    execution=SimpleNamespace(),
+                )
+
+                self.assertNotEqual(reply, raw_reply)
+                lowered = reply.lower()
+                self.assertNotIn("silencio", lowered)
+                self.assertNotIn("viewer", lowered)
+                self.assertNotIn("lurking", lowered)
+                self.assertNotIn("aunque no haya nadie", lowered)
+
+    def test_ff9_idle_prompt_rejects_spheres(self):
+        model = CapturingModel("Revisa las esferas antes de avanzar.")
+        event = InternalEvent(
+            event_type="twitch_idle_prompt",
+            payload={
+                "current_category": "Final Fantasy IX",
+                "presence_mode": "companion",
+                "game_profile": {"title": "Final Fantasy IX"},
+            },
+            created_at="2026-06-01T12:00:00Z",
+        )
+        context = SimpleNamespace(internal_event=event, input_text=None)
+
+        reply = ResponseSynthesizer(conversation_model=model)._handle_internal_event(
+            context,
+            execution=SimpleNamespace(),
+        )
+
+        self.assertNotIn("esfera", reply.lower())
 
 
 if __name__ == "__main__":

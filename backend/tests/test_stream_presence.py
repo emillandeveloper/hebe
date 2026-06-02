@@ -1,15 +1,26 @@
+import os
 import time
 import unittest
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from app.hebe_engine import HebeEngine
+from app.stream.context_sync import StreamContextSyncService
+from app.stream.game_profiles import GameProfileStore
 from app.stream.state import StreamSessionState
+from app.stream.spontaneity import StreamSpontaneityConfig, StreamSpontaneityService
 
 
 class FakeTwitch:
     def __init__(self):
         self.sent = []
+        self.channel_name = "leonifelheim"
+        self.helix_client = SimpleNamespace(
+            broadcaster_id="124070929",
+            client_id="client",
+            channel_name="leonifelheim",
+        )
+        self.chat_client = SimpleNamespace(sender_id="1480877711")
 
     def is_available(self):
         return True
@@ -20,7 +31,10 @@ class FakeTwitch:
 
 class FakeSynth:
     def generate_stream_presence(self, **kwargs):
-        return "El chat se ha quedado más quieto que un NPC sin quest."
+        return "Antes de avanzar, mira equipo. La epica tambien paga facturas."
+
+    def generate_twitch_idle_prompt_preview(self, payload):
+        return "First playthrough significa sospechar de todo NPC amable. Es ley."
 
 
 def make_engine(stream=None):
@@ -29,14 +43,50 @@ def make_engine(stream=None):
     engine.runtime = SimpleNamespace(
         state=SimpleNamespace(stream=stream),
         twitch=FakeTwitch(),
+        twitch_chat_bot=SimpleNamespace(is_connected=True),
+        twitch_events=SimpleNamespace(is_connected=False),
         speak=Mock(),
     )
+    engine.game_profiles = GameProfileStore()
     engine.response_synthesizer = FakeSynth()
+    engine.stream_spontaneity = StreamSpontaneityService(
+        config=StreamSpontaneityConfig(companion_jitter_sec=0, show_jitter_sec=0),
+        game_profiles=engine.game_profiles,
+    )
     engine._last_presence_poll_ts = 0.0
     engine.presence_poll_interval_sec = 0.0
+    engine._last_stream_context_poll_ts = 0.0
+    engine.stream_context_poll_interval_sec = 90.0
+    engine.stream_context_sync = None
+    engine.stream_ambient_stt_enabled = True
+    engine.stream_observe_chat = True
+    engine.chat_activity_window_sec = 180
+    engine.chat_active_message_threshold = 3
+    engine.chat_active_user_threshold = 1
+    engine.idle_suppress_when_chat_active = True
+    engine._manual_reply_ui_only = False
     engine._last_routine_poll_ts = 0.0
     engine.routine_poll_interval_sec = 30.0
+    engine.auto_enable_stream_when_live = True
+    engine.default_live_presence_mode = "companion"
     return engine
+
+
+class FakeContextSync:
+    def __init__(self, ok=True, live=None):
+        self.ok = ok
+        self.live = live
+        self.calls = []
+
+    def sync(self, stream):
+        self.calls.append(stream)
+        if not self.ok:
+            stream.last_stream_context_error = "Helix get_streams failed: 401 Unauthorized."
+        if self.live is not None:
+            stream.is_live = bool(self.live)
+            stream.live_status_known = True
+            stream.stream_context_updated_ts = time.time()
+        return self.ok
 
 
 class StreamPresenceTests(unittest.TestCase):
@@ -81,28 +131,433 @@ class StreamPresenceTests(unittest.TestCase):
         self.assertEqual(event_type, "direct_command_to_hebe")
         self.assertIsNone(mood)
 
-    def test_presence_speaks_when_chat_is_silent_and_mode_companion(self):
+    def test_ambient_voice_without_wakeword_does_not_become_command(self):
+        engine = make_engine(StreamSessionState(enabled=True))
+
+        handled, command = engine._extract_stream_command("me han matado otra vez")
+
+        self.assertTrue(handled)
+        self.assertIsNone(command)
+
+    def test_ambient_voice_updates_lightweight_context_only(self):
+        engine = make_engine(StreamSessionState(enabled=True))
+        event_type, mood = engine._classify_voice_event("no entiendo donde voy ahora")
+
+        engine._record_voice_event("no entiendo donde voy ahora", event_type, mood)
+
+        stream = engine.runtime.state.stream
+        self.assertEqual(stream.last_voice_event, "confusion/lost")
+        self.assertEqual(stream.leo_mood_hint, "confused")
+        self.assertEqual(stream.last_voice_summary, "no entiendo donde voy ahora")
+
+    def test_chat_message_without_mention_updates_activity_without_reply(self):
+        engine = make_engine(StreamSessionState(enabled=True))
+
+        engine.observe_twitch_chat_message("viewer", "Viewer", "linux y ram hoy", "#chan")
+
+        stream = engine.runtime.state.stream
+        self.assertGreater(stream.last_chat_activity_ts, 0)
+        self.assertEqual(len(stream.recent_chat_messages), 1)
+        self.assertEqual(engine.runtime.twitch.sent, [])
+
+    def test_bot_messages_do_not_count_as_chat_activity(self):
+        engine = make_engine(StreamSessionState(enabled=True))
+
+        engine.observe_twitch_chat_message("Nightbot", "Nightbot", "mensaje automatico", "#chan")
+
+        self.assertEqual(engine.runtime.state.stream.last_chat_activity_ts, 0.0)
+        self.assertEqual(engine.runtime.state.stream.recent_chat_messages, [])
+
+    def test_manual_completed_marker_updates_run_context(self):
+        engine = make_engine(StreamSessionState(enabled=True))
+
+        reply = engine._handle_stream_manual_command("Hebe, ya hemos pasado Ramuh")
+
+        self.assertIn("Ramuh", engine.runtime.state.stream.completed_run_markers)
+        self.assertIn("Marcador completado", reply)
+
+    def test_manual_objective_updates_run_context(self):
+        engine = make_engine(StreamSessionState(enabled=True))
+
+        reply = engine._handle_stream_manual_command("Hebe, objetivo actual: avanzar hasta Burmecia")
+
+        self.assertEqual(engine.runtime.state.stream.current_run_objective, "avanzar hasta Burmecia")
+        self.assertIn("Objetivo actual", reply)
+
+    def test_ambient_stt_completed_marker_does_not_reply(self):
+        engine = make_engine(StreamSessionState(enabled=True))
+        event_type, mood = engine._classify_voice_event("Ya hemos pasado Ramuh")
+
+        engine._record_voice_event("Ya hemos pasado Ramuh", event_type, mood)
+
+        self.assertEqual(event_type, "completed_marker")
+        self.assertIn("Ramuh", engine.runtime.state.stream.completed_run_markers)
+        self.assertEqual(engine.runtime.twitch.sent, [])
+
+    def test_ambient_stt_failure_updates_mood_only(self):
+        engine = make_engine(StreamSessionState(enabled=True))
+        event_type, mood = engine._classify_voice_event("Joder, me han matado otra vez")
+
+        engine._record_voice_event("Joder, me han matado otra vez", event_type, mood)
+
+        stream = engine.runtime.state.stream
+        self.assertEqual(stream.last_voice_event, "gameplay_failure")
+        self.assertEqual(stream.leo_mood_hint, "frustrated")
+        self.assertIsNone(stream.current_run_objective)
+
+    def test_pausing_idle_spontaneity_does_not_block_raid_thanks(self):
+        stream = StreamSessionState(enabled=True, presence_mode="reactive")
+        stream.idle_spontaneity_enabled = False
+        stream.is_live = True
+        engine = make_engine(stream)
+        engine._synthesize_internal_event_reply = Mock(return_value="Gracias por la raid.")
+
+        engine._handle_twitch_raid_event(engine._build_local_internal_event("twitch_raid", {
+            "display_name": "Raider",
+            "viewer_count": 3,
+        }))
+
+        self.assertEqual(engine.runtime.twitch.sent, ["Gracias por la raid."])
+
+    def test_readiness_reports_chat_active_blocked_reason(self):
+        now = time.time()
+        stream = StreamSessionState(enabled=True, presence_mode="show")
+        stream.is_live = True
+        stream.live_status_known = True
+        stream.stream_context_updated_ts = now
+        stream.last_chat_activity_ts = now - 60 * 60
+        stream.recent_chat_messages = [
+            {"username": "viewer", "text": "linux", "ts": now - 20, "topic": "tech_pc"},
+            {"username": "viewer", "text": "ram", "ts": now - 10, "topic": "tech_pc"},
+            {"username": "viewer", "text": "server", "ts": now - 5, "topic": "tech_pc"},
+        ]
+        engine = make_engine(stream)
+
+        reply = engine._build_spontaneity_readiness_reply(stream)
+
+        self.assertIn("Chat active: yes", reply)
+        self.assertIn("Reason if blocked: chat_active", reply)
+
+    def test_presence_speaks_when_context_allows_companion(self):
         stream = StreamSessionState(enabled=True, presence_mode="companion")
-        stream.last_chat_activity_ts = time.time() - 10 * 60
+        stream.last_chat_activity_ts = time.time() - 25 * 60
         stream.last_hebe_stream_speak_ts = time.time() - 20 * 60
         stream.last_voice_event_ts = time.time() - 60
+        stream.is_live = True
+        stream.live_status_known = True
+        stream.stream_context_updated_ts = time.time()
         engine = make_engine(stream)
+        engine.process_internal_event = Mock(
+            side_effect=lambda event: engine._deliver_twitch_reply("Antes de avanzar, mira equipo.")
+        )
 
         engine.poll_stream_presence()
 
         self.assertEqual(
             engine.runtime.twitch.sent,
-            ["El chat se ha quedado más quieto que un NPC sin quest."],
+            ["Antes de avanzar, mira equipo."],
         )
 
     def test_presence_skips_reactive_mode(self):
         stream = StreamSessionState(enabled=True, presence_mode="reactive")
         stream.last_chat_activity_ts = time.time() - 10 * 60
+        stream.is_live = True
+        stream.live_status_known = True
+        stream.stream_context_updated_ts = time.time()
         engine = make_engine(stream)
+        engine.process_internal_event = Mock()
 
         engine.poll_stream_presence()
 
         self.assertEqual(engine.runtime.twitch.sent, [])
+        engine.process_internal_event.assert_not_called()
+
+    def test_manual_refresh_command_calls_context_sync(self):
+        stream = StreamSessionState(enabled=False)
+        engine = make_engine(stream)
+        sync = FakeContextSync(ok=True)
+        engine.stream_context_sync = sync
+
+        reply = engine._handle_stream_manual_command("Hebe, actualiza contexto de stream")
+
+        self.assertEqual(reply, "Contexto de stream actualizado.")
+        self.assertEqual(sync.calls, [stream])
+
+    def test_context_query_includes_last_stream_context_error(self):
+        stream = StreamSessionState()
+        stream.last_stream_context_error = "Helix get_streams failed: 401 Unauthorized."
+        engine = make_engine(stream)
+
+        reply = engine._handle_stream_manual_command("Hebe, que contexto de stream tienes")
+
+        self.assertIn("Esto tengo ahora mismo:", reply)
+        self.assertIn("Ultimo error: Helix get_streams failed: 401 Unauthorized.", reply)
+
+    def test_context_query_includes_parsed_stream_fields(self):
+        stream = StreamSessionState()
+        stream.live_status_known = True
+        stream.is_live = False
+        stream.current_category = "Zwei!!: The Arges Adventure"
+        stream.current_stream_title = "[ENG/ESP] Retro Weekend: Food for Leveling! That's Zwei | First Playthrough"
+        stream.current_playthrough_type = "first_playthrough"
+        stream.current_stream_slot = "retro_weekend"
+        stream.current_challenge = None
+        stream.bilingual_mode = True
+        stream.language_mode = "ENG/ESP"
+        stream.spoiler_policy = "no_spoilers"
+        stream.stream_context_updated_ts = time.time() - 12
+        engine = make_engine(stream)
+
+        reply = engine._handle_stream_manual_command("Hebe, que contexto de stream tienes")
+
+        self.assertIn("Estado: offline, comprobado con Twitch.", reply)
+        self.assertIn("Juego/categoria: Zwei!!: The Arges Adventure.", reply)
+        self.assertIn("Tipo de directo detectado: first_playthrough.", reply)
+        self.assertIn("Slot/tema detectado: retro_weekend.", reply)
+        self.assertIn("Challenge detectado: ninguno.", reply)
+        self.assertIn("Idioma/modo: ENG/ESP.", reply)
+        self.assertIn("Spoilers: no_spoilers.", reply)
+        self.assertIn("Contexto actualizado: hace", reply)
+        self.assertIn("Ultimo error: ninguno.", reply)
+
+    def test_context_query_unknown_fields_are_friendly(self):
+        stream = StreamSessionState()
+        stream.live_status_known = False
+        engine = make_engine(stream)
+
+        reply = engine._handle_stream_manual_command("Hebe, que contexto de stream tienes")
+
+        self.assertIn("Estado: desconocido. No he podido confirmar si el stream esta online.", reply)
+        self.assertIn("Tipo de directo detectado: no detectado.", reply)
+        self.assertIn("Slot/tema detectado: no detectado.", reply)
+        self.assertIn("Challenge detectado: ninguno.", reply)
+        self.assertIn("Idioma/modo: no detectado.", reply)
+        self.assertIn("Contexto actualizado: nunca.", reply)
+        self.assertNotIn("None", reply)
+        self.assertNotIn("null", reply)
+
+    def test_context_sync_missing_service_records_error_when_no_runtime_twitch(self):
+        stream = StreamSessionState(enabled=True)
+        engine = make_engine(stream)
+        engine.runtime.twitch = None
+        engine.stream_context_sync = StreamContextSyncService(twitch_api=None)
+
+        ok = engine.poll_stream_context(force=True, require_enabled=False)
+
+        self.assertFalse(ok)
+        self.assertEqual(stream.last_stream_context_error, "Context sync service not initialized")
+
+    def test_diagnostica_twitch_does_not_expose_tokens(self):
+        stream = StreamSessionState()
+        engine = make_engine(stream)
+
+        with patch.dict(os.environ, {"TWITCH_OAUTH_TOKEN": "secret-token", "TWITCH_BROADCASTER_OAUTH_TOKEN": "secret-broadcaster"}):
+            reply = engine._handle_stream_manual_command("Hebe, diagnostica twitch")
+
+        self.assertIn("TWITCH_OAUTH_TOKEN loaded: yes", reply)
+        self.assertIn("TWITCH_BROADCASTER_OAUTH_TOKEN loaded: yes", reply)
+        self.assertNotIn("secret-token", reply)
+        self.assertNotIn("secret-broadcaster", reply)
+
+    def test_preview_spontaneous_message_works_offline_without_twitch_or_tts(self):
+        stream = StreamSessionState(enabled=True, presence_mode="companion")
+        stream.is_live = False
+        stream.live_status_known = True
+        stream.current_stream_title = "First Playthrough"
+        stream.current_category = "JRPG"
+        engine = make_engine(stream)
+
+        reply = engine._handle_stream_manual_command("Hebe, prueba espontaneidad")
+
+        self.assertIn("Prueba de espontaneidad:", reply)
+        self.assertIn("First playthrough", reply)
+        self.assertEqual(engine.runtime.twitch.sent, [])
+        engine.runtime.speak.assert_not_called()
+        self.assertEqual(stream.last_hebe_stream_speak_ts, 0.0)
+
+    def test_readiness_checklist_explains_offline_block(self):
+        stream = StreamSessionState(enabled=True, presence_mode="companion")
+        stream.is_live = False
+        stream.live_status_known = True
+        stream.stream_context_updated_ts = time.time()
+        engine = make_engine(stream)
+
+        reply = engine._handle_stream_manual_command("Hebe, comprueba espontaneidad")
+
+        self.assertIn("Estado de espontaneidad:", reply)
+        self.assertIn("* Twitch live: no", reply)
+        self.assertIn("Reason if blocked: stream is offline", reply)
+
+    def test_readiness_checklist_explains_reactive_block(self):
+        stream = StreamSessionState(enabled=True, presence_mode="reactive")
+        stream.is_live = True
+        stream.live_status_known = True
+        stream.stream_context_updated_ts = time.time()
+        stream.last_chat_activity_ts = time.time() - 60 * 60
+        engine = make_engine(stream)
+
+        reply = engine._handle_stream_manual_command("Hebe, estado de espontaneidad")
+
+        self.assertIn("* Presence mode: reactive", reply)
+        self.assertIn("Reason if blocked: presence mode is reactive", reply)
+
+    def test_live_test_override_appears_in_readiness_output(self):
+        stream = StreamSessionState(enabled=True, presence_mode="companion")
+        stream.is_live = False
+        stream.live_status_known = True
+        stream.live_test_override = True
+        stream.stream_context_updated_ts = time.time()
+        engine = make_engine(stream)
+
+        reply = engine._handle_stream_manual_command("Hebe, estado de espontaneidad")
+
+        self.assertIn("Simulacion de directo: activada", reply)
+
+    def test_reset_spontaneity_cooldowns_clears_only_spontaneity_keys(self):
+        stream = StreamSessionState()
+        stream.cooldowns = {
+            "stream_idle_prompt_next_ts": 123.0,
+            "companion_idle_silence_sec": 1.0,
+            "unrelated": 999.0,
+        }
+        engine = make_engine(stream)
+
+        reply = engine._handle_stream_manual_command("Hebe, resetea cooldowns de espontaneidad")
+
+        self.assertIn("2", reply)
+        self.assertEqual(stream.cooldowns, {"unrelated": 999.0})
+
+    def test_stream_online_event_sets_live_and_refreshes_context(self):
+        stream = StreamSessionState(enabled=True)
+        engine = make_engine(stream)
+        engine.poll_stream_context = Mock(return_value=True)
+
+        engine._handle_stream_lifecycle_event(SimpleNamespace(event_type="stream_online", payload={"started_at": "2026-05-31T18:00:00Z"}))
+
+        self.assertTrue(stream.is_live)
+        self.assertTrue(stream.live_status_known)
+        self.assertEqual(stream.stream_started_at, "2026-05-31T18:00:00Z")
+        self.assertGreater(stream.stream_spontaneity_grace_until_ts, time.time())
+        engine.poll_stream_context.assert_called_once_with(force=True, require_enabled=False)
+
+    def test_stream_offline_event_sets_offline_and_blocks_spontaneity(self):
+        stream = StreamSessionState(enabled=True, presence_mode="companion")
+        stream.is_live = True
+        stream.live_status_known = True
+        stream.stream_context_updated_ts = time.time()
+        stream.last_chat_activity_ts = time.time() - 60 * 60
+        engine = make_engine(stream)
+
+        engine._handle_stream_lifecycle_event(SimpleNamespace(event_type="stream_offline", payload={}))
+
+        self.assertFalse(stream.is_live)
+        event = engine.stream_spontaneity.build_due_event(stream)
+        self.assertIsNone(event)
+
+    def test_grace_period_blocks_immediate_spontaneous_message(self):
+        stream = StreamSessionState(enabled=True, presence_mode="companion")
+        stream.is_live = True
+        stream.live_status_known = True
+        stream.stream_context_updated_ts = time.time()
+        stream.last_chat_activity_ts = time.time() - 60 * 60
+        stream.stream_spontaneity_grace_until_ts = time.time() + 60
+        engine = make_engine(stream)
+
+        event = engine.stream_spontaneity.build_due_event(stream)
+
+        self.assertIsNone(event)
+
+    def test_context_sync_live_auto_enables_stream_mode(self):
+        stream = StreamSessionState(enabled=False, presence_mode="reactive")
+        engine = make_engine(stream)
+        engine.stream_context_sync = FakeContextSync(ok=True, live=True)
+
+        ok = engine.poll_stream_context(force=True, require_enabled=False)
+
+        self.assertTrue(ok)
+        self.assertTrue(stream.enabled)
+        self.assertEqual(stream.presence_mode, "companion")
+        self.assertGreater(stream.stream_spontaneity_grace_until_ts, time.time())
+
+    def test_live_auto_enable_does_not_override_explicit_silent(self):
+        stream = StreamSessionState(enabled=False, presence_mode="silent")
+        stream.presence_mode_explicit = True
+        engine = make_engine(stream)
+        engine.stream_context_sync = FakeContextSync(ok=True, live=True)
+
+        engine.poll_stream_context(force=True, require_enabled=False)
+
+        self.assertTrue(stream.enabled)
+        self.assertEqual(stream.presence_mode, "silent")
+
+    def test_ignored_stream_prompt_does_not_prevent_live_auto_enable(self):
+        stream = StreamSessionState(enabled=False, presence_mode="reactive")
+        engine = make_engine(stream)
+        engine.stream_context_sync = FakeContextSync(ok=True, live=True)
+
+        ok = engine.poll_stream_context(force=True, require_enabled=False)
+
+        self.assertTrue(ok)
+        self.assertTrue(stream.enabled)
+
+    def test_raid_event_sends_thank_you_in_reactive_mode(self):
+        stream = StreamSessionState(enabled=True, presence_mode="reactive")
+        engine = make_engine(stream)
+        engine._synthesize_internal_event_reply = Mock(return_value="Gracias por la raid, Raider.")
+
+        engine._handle_twitch_raid_event(SimpleNamespace(
+            event_type="twitch_raid",
+            payload={"display_name": "Raider", "viewer_count": 5},
+        ))
+
+        self.assertEqual(engine.runtime.twitch.sent, ["Gracias por la raid, Raider."])
+        self.assertEqual(stream.last_raid_event["display_name"], "Raider")
+
+    def test_raid_thank_you_not_blocked_by_idle_cooldown(self):
+        stream = StreamSessionState(enabled=True, presence_mode="reactive")
+        stream.cooldowns["stream_idle_prompt_next_ts"] = time.time() + 9999
+        engine = make_engine(stream)
+        engine._synthesize_internal_event_reply = Mock(return_value="Gracias por la raid, Raider.")
+
+        engine._handle_twitch_raid_event(SimpleNamespace(
+            event_type="twitch_raid",
+            payload={"display_name": "Raider", "viewer_count": 5},
+        ))
+
+        self.assertEqual(engine.runtime.twitch.sent, ["Gracias por la raid, Raider."])
+
+    def test_raid_text_sends_when_global_tts_off(self):
+        stream = StreamSessionState(enabled=True, presence_mode="reactive")
+        engine = make_engine(stream)
+        engine.runtime.state.tts_enabled = False
+        engine._synthesize_internal_event_reply = Mock(return_value="Gracias por la raid, Raider.")
+
+        engine._handle_twitch_raid_event(SimpleNamespace(
+            event_type="twitch_raid",
+            payload={"display_name": "Raider", "viewer_count": 5},
+        ))
+
+        self.assertEqual(engine.runtime.twitch.sent, ["Gracias por la raid, Raider."])
+        engine.runtime.speak.assert_not_called()
+
+    def test_game_profile_command_returns_readable_info(self):
+        stream = StreamSessionState()
+        stream.current_category = "Zwei!!: The Arges Adventure"
+        engine = make_engine(stream)
+
+        reply = engine._handle_stream_manual_command("Hebe, que perfil de juego estas usando")
+
+        self.assertIn("Perfil de juego en uso:", reply)
+        self.assertIn("Zwei!!: The Arges Adventure", reply)
+        self.assertIn("no_spoilers", reply)
+        self.assertIn("food leveling", reply)
+
+    def test_reload_game_profiles_command(self):
+        engine = make_engine(StreamSessionState())
+
+        reply = engine._handle_stream_manual_command("Hebe, recarga perfiles de juegos")
+
+        self.assertIn("Perfiles de juegos recargados:", reply)
 
 
 if __name__ == "__main__":

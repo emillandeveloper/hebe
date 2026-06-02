@@ -13,6 +13,7 @@ class TwitchService:
         target_resolver: Any | None = None,
         chat_cache: Any | None = None,
         event_memory: Any | None = None,
+        helix_client: Any | None = None,
         channel_name: str = "",
         bot_username: str = "JotunBot",
     ) -> None:
@@ -20,6 +21,7 @@ class TwitchService:
         self.target_resolver = target_resolver
         self.chat_cache = chat_cache
         self.event_memory = event_memory
+        self.helix_client = helix_client
         self.channel_name = channel_name
         self.bot_username = bot_username
 
@@ -40,6 +42,16 @@ class TwitchService:
 
         send_fn(message)
         return True
+
+    def get_current_stream(self) -> dict | None:
+        if self.helix_client is None:
+            raise RuntimeError("Twitch Helix client is not configured")
+        return self.helix_client.get_stream()
+
+    def get_channel_info(self) -> dict | None:
+        if self.helix_client is None:
+            raise RuntimeError("Twitch Helix client is not configured")
+        return self.helix_client.get_channel_info()
 
     def shoutout(self, username: str) -> bool:
         target = str(username or "").strip()

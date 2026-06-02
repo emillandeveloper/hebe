@@ -21,6 +21,7 @@ class TwitchChatBot:
         oauth_token: str,
         enabled: bool = True,
         message_callback: Optional[Callable[[str, str, str, str], None]] = None,
+        ambient_message_callback: Optional[Callable[[str, str, str, str], None]] = None,
         reconnect_delay: float = 5.0,
     ) -> None:
         self.channel_name = str(channel_name or "").strip().lower()
@@ -30,6 +31,7 @@ class TwitchChatBot:
             self.oauth_token = self.oauth_token.split(":", 1)[1]
         self.enabled = enabled
         self.message_callback = message_callback
+        self.ambient_message_callback = ambient_message_callback
         self.reconnect_delay = reconnect_delay
 
         self._ws = None
@@ -50,6 +52,21 @@ class TwitchChatBot:
         self._pending_reply_until: dict[str, float] = {}
         self._last_callback_username: str | None = None
         self._last_callback_at: float = 0.0
+        configured_bots = os.getenv("HEBE_TWITCH_BOT_USERNAMES", "")
+        self.ignored_usernames = {
+            "hebenifelheim",
+            "jotunbot",
+            "streamelements",
+            "nightbot",
+            "moobot",
+            "fossabot",
+            "streamlabs",
+        }
+        self.ignored_usernames.update(
+            part.strip().lower().lstrip("@")
+            for part in configured_bots.split(",")
+            if part.strip()
+        )
 
     @property
     def is_connected(self) -> bool:
@@ -243,9 +260,12 @@ class TwitchChatBot:
             self._handle_own_bot_message(message)
             return
 
+        if self.ambient_message_callback is not None and not self._is_ignored_user(username):
+            self.ambient_message_callback(username, username, message, channel)
+
         self._cleanup_pending_replies()
 
-        has_mention = bool(re.search(r"\b(?:hebe|ebe)\b", message, flags=re.IGNORECASE))
+        has_mention = self._has_hebe_mention(message)
 
         # Importante: si el mensaje ya menciona a Hebe, NO consumimos el pending_reply.
         # Caso real:
@@ -288,6 +308,25 @@ class TwitchChatBot:
                 message,
                 channel,
             )
+
+    def _is_ignored_user(self, username: str) -> bool:
+        normalized = (username or "").strip().lower().lstrip("@")
+        return (
+            not normalized
+            or normalized == self.bot_username.lower()
+            or normalized in self.ignored_usernames
+        )
+
+    def _has_hebe_mention(self, message: str) -> bool:
+        text = str(message or "")
+        names = {"hebe", "ebe"}
+        bot_name = (self.bot_username or "").strip().lower().lstrip("@")
+        if bot_name:
+            names.add(bot_name)
+        for name in names:
+            if re.search(rf"(?<![\w])@?{re.escape(name)}(?![\w])", text, flags=re.IGNORECASE):
+                return True
+        return False
 
     def _handle_own_bot_message(self, message: str) -> None:
         if not self.followup_enabled:
