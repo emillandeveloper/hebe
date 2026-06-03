@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from .ws import WSManager
 from .events import Event, ClientMsg
 from .hebe_adapter import HebeAdapter
+from .api.debug import router as debug_router
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -23,10 +24,12 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.include_router(debug_router)
 
 ws_manager = WSManager()
 event_q: asyncio.Queue[Event] = asyncio.Queue()
 hebe = HebeAdapter(event_q)
+app.state.adapter = hebe
 
 
 def _get_stream_stats():

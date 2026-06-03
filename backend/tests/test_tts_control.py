@@ -21,7 +21,13 @@ def make_engine(*, tts_enabled=True):
     engine = HebeEngine.__new__(HebeEngine)
     stream = StreamSessionState()
     engine.runtime = SimpleNamespace(
-        state=SimpleNamespace(tts_enabled=tts_enabled, stream=stream),
+        state=SimpleNamespace(
+            tts_enabled=tts_enabled,
+            stream=stream,
+            pending_tts_scope=None,
+            pending_clarification=None,
+            pending_reminder=None,
+        ),
         speak=Mock(),
         twitch=FakeTwitch(),
     )
@@ -43,7 +49,39 @@ class TTSControlTests(unittest.TestCase):
         reply = engine._handle_tts_manual_command("Hebe, activa tu voz")
 
         self.assertTrue(engine.runtime.state.tts_enabled)
-        self.assertEqual(reply, "Lista, Leo. Vuelvo a hablar.")
+        self.assertIsNotNone(engine.runtime.state.pending_tts_scope)
+        self.assertIn("solo", reply.lower())
+
+    def test_global_tts_on_command_with_suffix_hebe_enables_voice(self):
+        engine = make_engine(tts_enabled=False)
+
+        reply = engine._handle_tts_manual_command("activa la voz hebe")
+
+        self.assertTrue(engine.runtime.state.tts_enabled)
+        self.assertIsNotNone(engine.runtime.state.pending_tts_scope)
+        self.assertIn("stream", reply.lower())
+
+    def test_tts_scope_followup_local_does_not_trigger_reminder(self):
+        engine = make_engine(tts_enabled=False)
+        engine._handle_tts_manual_command("activa la voz hebe")
+
+        reply = engine._handle_pending_manual_intent("solo por ahora para poder escucharte")
+
+        self.assertTrue(engine.runtime.state.tts_enabled)
+        self.assertIsNone(engine.runtime.state.pending_tts_scope)
+        self.assertFalse(engine.runtime.state.stream.policies.allow_tts_idle_prompts)
+        self.assertIn("solo", reply.lower())
+
+    def test_cancel_pending_reminder_clears_state(self):
+        engine = make_engine(tts_enabled=False)
+        engine.runtime.state.pending_clarification = {"kind": "appointment_datetime"}
+        engine.runtime.state.pending_reminder = {"kind": "appointment_datetime"}
+
+        reply = engine._handle_pending_manual_intent("no quiero que guardes nada")
+
+        self.assertIsNone(engine.runtime.state.pending_clarification)
+        self.assertIsNone(engine.runtime.state.pending_reminder)
+        self.assertEqual(reply, "Vale, no guardo nada.")
 
     def test_global_tts_disabled_skips_runtime_speak_and_emits_text(self):
         engine = make_engine(tts_enabled=False)

@@ -72,7 +72,12 @@ class StreamSessionState:
     recent_idle_messages: list[dict] = field(default_factory=list)
     idle_prompts_sent_stream: int = 0
     last_raid_event: Optional[dict] = None
+    last_shoutout_target: Optional[str] = None
+    last_shoutout_ts: float = 0.0
+    last_shoutout_error: Optional[str] = None
+    shoutout_cooldowns: dict[str, float] = field(default_factory=dict)
     last_stream_context_error: Optional[str] = None
+    active_stream_session_id: Optional[int] = None
 
     normal_start_time: str = "19:00"
     pre_stream_reminder_1: str = "18:30"

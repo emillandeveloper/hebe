@@ -5,6 +5,7 @@ from app.cognitive.deliberation_service import DeliberationService
 from app.cognitive.response_synthesizer import ResponseSynthesizer
 from app.cognitive.scheduler import SchedulerService, InternalEvent
 from app.integrations.twitch.chat_bot import TwitchChatBot
+from app.integrations.twitch.service import TwitchService
 
 
 class DummyMemoryStore:
@@ -33,6 +34,14 @@ class CapturingModel:
     def chat(self, messages, **kwargs):
         self.messages = messages
         return self.reply
+
+
+class CapturingChatClient:
+    def __init__(self):
+        self.sent = []
+
+    def send_message(self, text):
+        self.sent.append(text)
 
 
 class CognitiveTwitchTests(unittest.TestCase):
@@ -113,6 +122,15 @@ class CognitiveTwitchTests(unittest.TestCase):
 
         self.assertEqual(len(received), 1)
 
+    def test_twitch_service_shoutout_uses_configurable_template(self):
+        chat = CapturingChatClient()
+        twitch = TwitchService(chat_client=chat, shoutout_command_template="!promo {username}")
+
+        ok = twitch.shoutout("@Totodile")
+
+        self.assertTrue(ok)
+        self.assertEqual(chat.sent, ["!promo Totodile"])
+
     def test_twitch_chat_bot_ignores_own_bot_messages_and_unrelated_words(self):
         received = []
         bot = TwitchChatBot(
@@ -185,10 +203,13 @@ class CognitiveTwitchTests(unittest.TestCase):
                 "game_profile": {
                     "title": "Final Fantasy X",
                     "genres": ["JRPG", "turn-based"],
+                    "tone_vibe": "pilgrimage fantasy",
+                    "gameplay_systems_non_spoiler": ["turn-based combat", "resource management"],
                     "channel_context": "Final Fantasy stream with strong no-spoiler needs.",
                     "safe_comment_topics": ["resource checks", "save spheres"],
                     "spoiler_policy": "no_spoilers",
                     "unsafe_comment_topics": ["story twists", "boss names"],
+                    "challenge_hooks": ["No Sphere Grid is about patience, not route advice"],
                 },
             },
             created_at="2026-05-31T12:00:00Z",
@@ -207,8 +228,12 @@ class CognitiveTwitchTests(unittest.TestCase):
         self.assertIn("challenge", prompt_text)
         self.assertIn("level_1", prompt_text)
         self.assertIn("game_profile:", prompt_text)
+        self.assertIn("tone_vibe: pilgrimage fantasy", prompt_text)
+        self.assertIn("turn-based combat", prompt_text)
         self.assertIn("save spheres", prompt_text)
         self.assertIn("story twists", prompt_text)
+        self.assertIn("No Sphere Grid is about patience", prompt_text)
+        self.assertIn("No spoilers", prompt_text)
 
     def test_spontaneous_reply_filters_forbidden_silence_viewer_phrases(self):
         forbidden_replies = [

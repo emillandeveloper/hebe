@@ -36,6 +36,8 @@ from app.cognitive.action_runtime import ActionRuntime
 from app.cognitive.memory.memory_extractor import MemoryExtractor
 from app.stream.context_sync import StreamContextSyncService
 from app.stream.game_profiles import GameProfileStore
+from app.stream.game_research import GameKnowledgeResearchConfig, GameKnowledgeResearchService
+from app.stream import memory as stream_memory
 from app.stream.spontaneity import StreamSpontaneityConfig, StreamSpontaneityService
 
 WAKE_WORDS = ["hebe despierta", "eve despierta", "jebe despierta"]
@@ -138,6 +140,11 @@ class HebeEngine:
             conversation_model=getattr(self.runtime, "llm", None),
         )
         self.game_profiles = GameProfileStore()
+        self.game_research = GameKnowledgeResearchService(
+            store=self.game_profiles,
+            config=GameKnowledgeResearchConfig.from_env(),
+        )
+        self._last_game_research_category = None
         self.stream_spontaneity = StreamSpontaneityService(
             game_profiles=self.game_profiles,
             config=StreamSpontaneityConfig(
@@ -199,6 +206,16 @@ class HebeEngine:
             "HEBE_DEFAULT_LIVE_PRESENCE_MODE",
             "companion",
         ).strip().lower() or "companion"
+        self.auto_shoutout_raiders = os.getenv(
+            "HEBE_AUTO_SHOUTOUT_RAIDERS",
+            "true",
+        ).strip().lower() in ("1", "true", "yes", "on")
+        self.shoutout_cooldown_seconds = float(os.getenv("HEBE_SHOUTOUT_COOLDOWN_SECONDS", "120") or 120)
+        self.shoutout_allow_bots = os.getenv(
+            "HEBE_SHOUTOUT_ALLOW_BOTS",
+            "false",
+        ).strip().lower() in ("1", "true", "yes", "on")
+        self.shoutout_blocked_users = self._load_shoutout_blocked_users()
 
     def observe_twitch_chat_message(self, username: str, display_name: str, text: str, channel: str = "") -> None:
         if not getattr(self, "stream_observe_chat", True):
@@ -222,6 +239,18 @@ class HebeEngine:
             ):
                 return
         stream.last_chat_activity_ts = now
+        session_id = self._ensure_stream_memory_session_if_live(stream)
+        stream_memory.record_chat_message(
+            username=username,
+            display_name=display_name,
+            message_text=message,
+            stream_session_id=session_id,
+            is_mention_to_hebe=self._message_mentions_hebe(message),
+            is_direct_reply_to_hebe=False,
+            is_bot=False,
+            source="twitch_irc",
+            topic_hint=self._classify_chat_topic(message),
+        )
         entry = {
             "username": str(username or "").strip(),
             "display_name": str(display_name or username or "").strip(),
@@ -267,6 +296,164 @@ class HebeEngine:
         bot_names.update(part.strip().lower().lstrip("@") for part in configured.split(",") if part.strip())
         return user in bot_names
 
+    def _load_shoutout_blocked_users(self) -> set[str]:
+        configured = os.getenv(
+            "HEBE_SHOUTOUT_BLOCKED_USERS",
+            "hebenifelheim,jotunbot,streamelements,nightbot",
+        )
+        blocked = {
+            "hebenifelheim",
+            "jotunbot",
+            "streamelements",
+            "nightbot",
+            "moobot",
+            "fossabot",
+            "streamlabs",
+        }
+        blocked.update(part.strip().lower().lstrip("@") for part in configured.split(",") if part.strip())
+        stream = self._get_stream_state()
+        twitch = getattr(self.runtime, "twitch", None)
+        for value in (
+            getattr(stream, "bot_username", "") if stream else "",
+            getattr(twitch, "bot_username", "") if twitch else "",
+            getattr(getattr(self.runtime, "twitch_chat_bot", None), "bot_username", ""),
+        ):
+            if value:
+                blocked.add(str(value).strip().lower().lstrip("@"))
+        return blocked
+
+    def _normalize_shoutout_target(self, target: str) -> str:
+        twitch = getattr(self.runtime, "twitch", None)
+        normalize = getattr(twitch, "normalize_twitch_username", None)
+        if callable(normalize):
+            return normalize(target)
+        value = re.sub(r"\s+", "", str(target or "").strip().lstrip("@"))
+        return value if re.fullmatch(r"[A-Za-z0-9_]{3,25}", value) else ""
+
+    def _resolve_shoutout_target(self, raw_target: str | None, *, allow_last_raider: bool = True) -> tuple[str | None, str | None]:
+        raw = str(raw_target or "").strip()
+        normalized_raw = self._normalize_text(raw)
+        stream = self._get_stream_state()
+
+        last_raider_markers = {
+            "",
+            "al ultimo raider",
+            "al ultimo raider",
+            "ultimo raider",
+            "último raider",
+            "a quien nos ha raideado",
+            "quien nos ha raideado",
+            "al que nos ha raideado",
+            "last raider",
+            "the last raider",
+        }
+        if allow_last_raider and normalized_raw in last_raider_markers:
+            raid = getattr(stream, "last_raid_event", None) if stream else None
+            target = (raid or {}).get("user_login") or (raid or {}).get("display_name")
+            if target:
+                return self._normalize_shoutout_target(target), None
+            return None, "missing_target"
+
+        target = raw.strip().lstrip("@").strip()
+        twitch = getattr(self.runtime, "twitch", None)
+        resolve_user = getattr(twitch, "resolve_user", None)
+        if callable(resolve_user) and target:
+            try:
+                resolved = resolve_user(target)
+                if resolved:
+                    target = resolved
+            except Exception as exc:
+                print(f"[HEBE][TWITCH][SO] target resolver failed target={target!r} error={exc!r}", flush=True)
+
+        if stream is not None and target:
+            target_norm = self._normalize_text(target)
+            for item in reversed(list(getattr(stream, "recent_chat_messages", []) or [])):
+                for key in ("display_name", "username"):
+                    candidate = str(item.get(key) or "").strip()
+                    if candidate and self._normalize_text(candidate) == target_norm:
+                        target = candidate
+                        break
+
+        normalized = self._normalize_shoutout_target(target)
+        if not normalized:
+            return None, "invalid_target"
+        return normalized, None
+
+    def _shoutout_block_reason(self, target: str, *, explicit_self: bool = False) -> str | None:
+        normalized = self._normalize_shoutout_target(target)
+        if not normalized:
+            return "invalid_target"
+        lowered = normalized.lower()
+        blocked = set(getattr(self, "shoutout_blocked_users", set()) or set()) | self._load_shoutout_blocked_users()
+        if not getattr(self, "shoutout_allow_bots", False) and lowered in blocked:
+            return "blocked_bot_user"
+        twitch = getattr(self.runtime, "twitch", None)
+        channel = str(getattr(twitch, "channel_name", "") or "").strip().lower()
+        if channel and lowered == channel and not explicit_self:
+            return "own_channel"
+        return None
+
+    def _send_shoutout(self, target: str, *, source: str, force: bool = False, explicit_self: bool = False) -> tuple[bool, str, str]:
+        stream = self._get_stream_state()
+        normalized = self._normalize_shoutout_target(target)
+        reason = self._shoutout_block_reason(normalized, explicit_self=explicit_self)
+        if reason:
+            if stream is not None:
+                stream.last_shoutout_error = reason
+            print(f"[HEBE][TWITCH][SO] blocked reason={reason} target={target}", flush=True)
+            return False, normalized, reason
+
+        now = time.time()
+        cooldowns = getattr(stream, "shoutout_cooldowns", {}) if stream else {}
+        last_ts = float((cooldowns or {}).get(normalized.lower(), 0.0) or 0.0)
+        if not force and last_ts and now - last_ts < float(getattr(self, "shoutout_cooldown_seconds", 120) or 120):
+            reason = "cooldown_active"
+            if stream is not None:
+                stream.last_shoutout_error = reason
+            print(f"[HEBE][TWITCH][SO] blocked reason={reason} target={normalized}", flush=True)
+            return False, normalized, reason
+
+        twitch = getattr(self.runtime, "twitch", None)
+        shoutout = getattr(twitch, "shoutout", None)
+        try:
+            if callable(shoutout):
+                ok = bool(shoutout(normalized))
+                command = getattr(twitch, "build_shoutout_command", lambda user: f"!so {user}")(normalized)
+            else:
+                template = os.getenv("HEBE_SHOUTOUT_COMMAND_TEMPLATE", "!so {username}") or "!so {username}"
+                command = template.format(username=normalized)
+                ok = bool(twitch and twitch.send_message(command))
+            if not ok:
+                raise RuntimeError("Twitch shoutout command returned false")
+            if stream is not None:
+                stream.last_shoutout_target = normalized
+                stream.last_shoutout_ts = now
+                stream.last_shoutout_error = None
+                if not isinstance(getattr(stream, "shoutout_cooldowns", None), dict):
+                    stream.shoutout_cooldowns = {}
+                stream.shoutout_cooldowns[normalized.lower()] = now
+            print(f"[HEBE][TWITCH][SO] sent command={command!r}", flush=True)
+            return True, normalized, "sent"
+        except Exception as exc:
+            reason = f"send_failed: {type(exc).__name__}: {exc}"
+            if stream is not None:
+                stream.last_shoutout_error = reason
+            print(f"[HEBE][TWITCH][SO] blocked reason={reason} target={normalized}", flush=True)
+            return False, normalized, reason
+
+    def _maybe_auto_shoutout_raider(self, target: str, *, force: bool = False) -> None:
+        stream = self._get_stream_state()
+        if not bool(getattr(self, "auto_shoutout_raiders", True)) and not force:
+            print(f"[HEBE][TWITCH][SO] blocked reason=auto_disabled target={target}", flush=True)
+            return
+        if not force and not (stream and getattr(stream, "is_live", False)):
+            print(f"[HEBE][TWITCH][SO] blocked reason=stream_offline target={target}", flush=True)
+            return
+        print(f"[HEBE][TWITCH][SO] auto shoutout planned target={target}", flush=True)
+        ok, normalized, reason = self._send_shoutout(target, source="raid", force=force)
+        if not ok:
+            print(f"[HEBE][TWITCH][SO] auto shoutout failed reason={reason} target={normalized or target}", flush=True)
+
     def _classify_chat_topic(self, text: str) -> str:
         normalized = self._normalize_text(text)
         if any(word in normalized for word in ("linux", "ram", "servidor", "server", "pc", "windows", "obs")):
@@ -276,6 +463,28 @@ class HebeEngine:
         if any(word in normalized for word in ("hola", "buenas", "hello")):
             return "greeting"
         return "general_chat"
+
+    def _message_mentions_hebe(self, text: str) -> bool:
+        normalized = self._normalize_text(text)
+        if re.search(r"\b(?:hebe|ebe|eve|heve|jebe)\b", normalized):
+            return True
+        stream = self._get_stream_state()
+        candidates = [
+            getattr(stream, "bot_username", "") if stream else "",
+            getattr(getattr(self.runtime, "twitch", None), "bot_username", ""),
+            getattr(getattr(self.runtime, "twitch_chat_bot", None), "bot_username", ""),
+        ]
+        return any(candidate and re.search(rf"(?<![a-z0-9_])@?{re.escape(candidate.lower().lstrip('@'))}(?![a-z0-9_])", normalized) for candidate in candidates)
+
+    def _ensure_stream_memory_session_if_live(self, stream=None) -> int | None:
+        stream = stream or self._get_stream_state()
+        if not stream or not (getattr(stream, "is_live", False) or getattr(stream, "enabled", False)):
+            return getattr(stream, "active_stream_session_id", None) if stream else None
+        try:
+            return stream_memory.ensure_active_stream_session(stream, source="engine")
+        except Exception as exc:
+            print(f"[HEBE][STREAM_MEMORY] ensure session failed: {exc!r}", flush=True)
+            return None
 
     def _chat_activity_snapshot(self, stream=None, *, now: float | None = None) -> dict:
         stream = stream or self._get_stream_state()
@@ -345,7 +554,9 @@ class HebeEngine:
             flush=True,
         )
 
-        manual = self._handle_tts_manual_command(command)
+        manual = self._handle_pending_manual_intent(command)
+        if manual is None:
+            manual = self._handle_tts_manual_command(command)
         if manual is None:
             manual = self._handle_stream_manual_command(command)
         if manual is not None:
@@ -391,6 +602,7 @@ class HebeEngine:
                     "kind": "appointment_datetime",
                     "draft": reply_step.data.get("draft", {}),
                 }
+                self.runtime.state.pending_reminder = self.runtime.state.pending_clarification
 
                 print(
                     "[HEBE][STATE] saved pending_clarification="
@@ -400,6 +612,7 @@ class HebeEngine:
 
             elif mode == "confirm_appointment":
                 self.runtime.state.pending_clarification = None
+                self.runtime.state.pending_reminder = None
 
                 print(
                     "[HEBE][STATE] cleared pending_clarification",
@@ -504,6 +717,8 @@ class HebeEngine:
             stream.idle_prompts_sent_stream = 0
             stream.recent_idle_messages = []
             self._auto_enable_stream_if_live(stream, source="stream_online_event")
+            self._ensure_stream_memory_session_if_live(stream)
+            stream_memory.record_stream_event("stream_online", payload, stream=stream)
             self.poll_stream_context(force=True, require_enabled=False)
             print("[HEBE][STREAM_CONTEXT] stream_online event handled", flush=True)
             return
@@ -517,6 +732,8 @@ class HebeEngine:
             stream.idle_prompts_sent_stream = 0
             if isinstance(getattr(stream, "cooldowns", None), dict):
                 stream.cooldowns.pop(getattr(self.stream_spontaneity.config, "cooldown_key", "stream_idle_prompt_next_ts"), None)
+            stream_memory.record_stream_event("stream_offline", payload, stream=stream)
+            stream_memory.close_active_stream_session(stream, reason="stream_offline_event")
             print("[HEBE][STREAM_CONTEXT] stream_offline event handled", flush=True)
 
     def _auto_enable_stream_if_live(self, stream, *, source: str) -> bool:
@@ -552,11 +769,20 @@ class HebeEngine:
         viewers = int(payload.get("viewer_count") or 0)
         print(f"[HEBE][TWITCH][RAID] received from={username} viewers={viewers}", flush=True)
         if stream is not None:
+            self._ensure_stream_memory_session_if_live(stream)
             stream.last_raid_event = {
                 "display_name": username,
+                "user_login": payload.get("user_login") or username,
                 "viewer_count": viewers,
                 "ts": time.time(),
             }
+            stream_memory.record_stream_event("twitch_raid", payload, stream=stream)
+            stream_memory.observe_presence(
+                payload.get("user_login") or username,
+                username,
+                stream_session_id=getattr(stream, "active_stream_session_id", None),
+                source="raid",
+            )
 
         if not stream:
             print("[HEBE][TWITCH][RAID] blocked reason=no_stream_state", flush=True)
@@ -572,6 +798,7 @@ class HebeEngine:
             return
         self._deliver_twitch_reply(reply_text, event_type="twitch_raid", payload=payload)
         print("[HEBE][TWITCH][RAID] sent thank-you", flush=True)
+        self._maybe_auto_shoutout_raider(payload.get("user_login") or username, force=bool(payload.get("_force_shoutout")))
 
     def _synthesize_internal_event_reply(self, event) -> str:
         context = self.context_builder.build(
@@ -658,8 +885,30 @@ class HebeEngine:
                 stream.last_stream_live_transition_ts = now
             if is_live:
                 self._auto_enable_stream_if_live(stream, source="context_sync")
+                self._ensure_stream_memory_session_if_live(stream)
+            elif was_live:
+                stream_memory.close_active_stream_session(stream, reason="context_sync_offline")
+            self._maybe_research_game_after_context_sync(stream)
         print(f"[HEBE][STREAM_CONTEXT] refresh result success={ok}", flush=True)
         return ok
+
+    def _maybe_research_game_after_context_sync(self, stream) -> None:
+        service = getattr(self, "game_research", None)
+        if service is None or not getattr(service.config, "enabled", False):
+            return
+        category = getattr(stream, "current_category", None) or getattr(stream, "current_game", None)
+        if not category or category == getattr(self, "_last_game_research_category", None):
+            return
+        self._last_game_research_category = category
+        ok, profile, reason = service.maybe_research_on_category_change(
+            current_category=getattr(stream, "current_category", None),
+            current_title=getattr(stream, "current_stream_title", None),
+            current_game=getattr(stream, "current_game", None),
+        )
+        print(
+            f"[HEBE][GAME_RESEARCH] category_check ok={ok} reason={reason} profile={profile.game_slug}",
+            flush=True,
+        )
 
     def poll_stream_presence(self) -> None:
         now = time.time()
@@ -1022,6 +1271,10 @@ class HebeEngine:
         if run_reply is not None:
             return run_reply
 
+        shoutout_reply = self._handle_shoutout_manual_command(raw_command, normalized, stream)
+        if shoutout_reply is not None:
+            return shoutout_reply
+
         presence_modes = {
             "modo silencioso": ("silent", "Modo silencioso, Leo."),
             "silent mode": ("silent", "Silent mode, Leo."),
@@ -1057,6 +1310,46 @@ class HebeEngine:
         if normalized in {"desactiva modo stream", "desactiva stream", "stream off", "disable stream"}:
             stream.enabled = False
             return "Modo stream desactivado."
+
+        if normalized in {"inicia memoria de stream", "inicia la memoria de stream"}:
+            session_id = stream_memory.ensure_active_stream_session(stream, source="manual")
+            return f"Memoria de stream iniciada. Sesion activa: {session_id}."
+
+        if normalized in {"finaliza stream", "termina stream", "cierra stream"}:
+            summary = stream_memory.close_active_stream_session(stream, reason="manual_command")
+            stream.enabled = False
+            return self._format_stream_summary_reply(summary) if summary else "No habia una sesion de stream activa que finalizar."
+
+        if normalized in {"resume este stream", "resumen de este stream"}:
+            session_id = self._ensure_stream_memory_session_if_live(stream) or getattr(stream, "active_stream_session_id", None)
+            if not session_id:
+                return "No tengo una sesion de stream activa para resumir."
+            summary = stream_memory.summarize_stream_session(int(session_id), reason="manual_summary")
+            return self._format_stream_summary_reply(summary)
+
+        if normalized in {"que paso en el ultimo stream", "qué pasó en el último stream"}:
+            summary = stream_memory.get_latest_stream_summary()
+            return self._format_latest_stream_summary_reply(summary)
+
+        chatter_match = re.match(r"^(?:que dijo|qué dijo)\s+(.+?)\s+en el ultimo stream$", normalized)
+        if chatter_match:
+            target = chatter_match.group(1).strip()
+            summary = stream_memory.get_last_chatter_summary(target)
+            if not summary:
+                return f"No tengo resumen del ultimo stream para {target}."
+            return f"En el ultimo stream, {target}: {summary.get('summary_text') or 'sin resumen suficiente'}"
+
+        chatter_match = re.match(r"^(?:que sabes de|qué sabes de)\s+(.+)$", normalized)
+        if chatter_match and "este juego" not in normalized:
+            return stream_memory.format_chatter_profile_reply(chatter_match.group(1).strip())
+
+        chatter_match = re.match(r"^(?:cuando fue la ultima vez que hablo|cuándo fue la última vez que habló)\s+(.+)$", normalized)
+        if chatter_match:
+            return stream_memory.format_last_seen_reply(chatter_match.group(1).strip(), kind="message")
+
+        chatter_match = re.match(r"^(?:cuando fue la ultima vez que vimos a|cuándo fue la última vez que vimos a)\s+(.+)$", normalized)
+        if chatter_match:
+            return stream_memory.format_last_seen_reply(chatter_match.group(1).strip(), kind="seen")
 
         if normalized in {"hoy no hay stream", "no hay stream hoy", "today no stream"}:
             stream.no_stream_today_date = datetime.now(ZoneInfo("Europe/Madrid")).date().isoformat()
@@ -1104,15 +1397,13 @@ class HebeEngine:
                 target = target[: -len(" y envíalo")].strip()
             if not target:
                 target = "tester"
-            if send:
-                self._handle_twitch_raid_event(self._build_local_internal_event("twitch_raid", {
-                    "display_name": target,
-                    "user_login": target,
-                    "viewer_count": 1,
-                }))
-                return f"Raid simulado de {target} enviado."
-            self._manual_reply_ui_only = True
-            return self._build_raid_preview_reply(target, viewer_count=1)
+            self._handle_twitch_raid_event(self._build_local_internal_event("twitch_raid", {
+                "display_name": target,
+                "user_login": target,
+                "viewer_count": 1,
+                "_force_shoutout": True,
+            }))
+            return f"Raid simulado de {target} enviado." if send else f"Raid simulado de {target}: thank-you y SO probados."
 
         if normalized in {"activa simulacion de directo", "activa simulación de directo"}:
             stream.live_test_override = True
@@ -1133,6 +1424,21 @@ class HebeEngine:
         if normalized in {"espontaneidad con voz"}:
             stream.policies.allow_tts_idle_prompts = True
             return "Espontaneidad con voz activada. Con moderacion."
+
+        if normalized in {"activa stt ambiental", "activa stt ambiental de stream"}:
+            self.stream_ambient_stt_enabled = True
+            return "STT ambiental de stream activado. Escucho contexto, no respondo a todo."
+
+        if normalized in {"desactiva stt ambiental", "desactiva stt ambiental de stream"}:
+            self.stream_ambient_stt_enabled = False
+            return "STT ambiental de stream desactivado."
+
+        if normalized in {"limpia oido del stream", "limpia oído del stream"}:
+            stream.last_voice_event = None
+            stream.last_voice_event_ts = 0.0
+            stream.last_voice_summary = None
+            stream.leo_mood_hint = None
+            return "Oido ambiental limpiado."
 
         if normalized in {"pausa espontaneidad"}:
             stream.idle_spontaneity_enabled = False
@@ -1164,6 +1470,43 @@ class HebeEngine:
         if normalized in {"que sabes de este juego", "qué sabes de este juego", "que perfil de juego estas usando", "qué perfil de juego estás usando"}:
             return self._build_game_profile_reply(stream)
 
+        if normalized in {"investiga este juego sin spoilers", "actualiza conocimiento de este juego"}:
+            return self._research_current_game_reply(stream, force=normalized.startswith("actualiza"))
+
+        if normalized in {"olvida perfil de este juego"}:
+            profile = self.game_profiles.forget_profile(
+                current_category=getattr(stream, "current_category", None),
+                current_title=getattr(stream, "current_stream_title", None),
+                current_game=getattr(stream, "current_game", None),
+            )
+            return f"Perfil olvidado para esta sesion. Usare fallback: {profile.canonical_title}."
+
+        if normalized in {"desactiva investigacion de juegos", "desactiva investigación de juegos"}:
+            self.game_research = GameKnowledgeResearchService(
+                store=self.game_profiles,
+                config=GameKnowledgeResearchConfig(
+                    enabled=False,
+                    provider=getattr(getattr(self, "game_research", None), "config", GameKnowledgeResearchConfig()).provider,
+                    api_key=getattr(getattr(self, "game_research", None), "config", GameKnowledgeResearchConfig()).api_key,
+                    cache_days=getattr(getattr(self, "game_research", None), "config", GameKnowledgeResearchConfig()).cache_days,
+                ),
+            )
+            return "Investigacion de juegos desactivada. Usare perfiles locales/cacheados."
+
+        if normalized in {"activa investigacion de juegos", "activa investigación de juegos"}:
+            previous = getattr(getattr(self, "game_research", None), "config", GameKnowledgeResearchConfig.from_env())
+            self.game_research = GameKnowledgeResearchService(
+                store=self.game_profiles,
+                config=GameKnowledgeResearchConfig(
+                    enabled=True,
+                    provider=previous.provider,
+                    api_key=previous.api_key,
+                    cache_days=previous.cache_days,
+                ),
+                search_provider=getattr(getattr(self, "game_research", None), "search_provider", None),
+            )
+            return "Investigacion de juegos activada. Solo la usare en comandos o preparacion, no en cada mensaje."
+
         if normalized in {"recarga perfiles de juegos", "recarga perfiles de juego"}:
             count = self.game_profiles.reload()
             return f"Perfiles de juegos recargados: {count}."
@@ -1171,7 +1514,78 @@ class HebeEngine:
         if normalized in {"diagnostica twitch", "diagnostico twitch", "twitch diagnostic"}:
             return self._build_twitch_diagnostic_reply()
 
+        if normalized in {"estado de shoutouts", "estado shoutouts", "estado de so"}:
+            return self._build_shoutout_status_reply(stream)
+
         return None
+
+    def _handle_shoutout_manual_command(self, raw_command: str, normalized: str, stream) -> str | None:
+        preview = False
+        force = False
+        raw = raw_command.strip()
+        norm = normalized.strip()
+
+        if norm.startswith("previsualiza shoutout a ") or norm.startswith("previsualiza so a "):
+            preview = True
+            raw = re.sub(r"^\s*previsualiza\s+(?:shoutout|so)\s+a\s+", "", raw, flags=re.IGNORECASE).strip()
+            norm = self._normalize_text(raw)
+        elif norm.startswith("prueba shoutout a ") or norm.startswith("prueba so a "):
+            force = True
+            raw = re.sub(r"^\s*prueba\s+(?:shoutout|so)\s+a\s+", "", raw, flags=re.IGNORECASE).strip()
+            norm = self._normalize_text(raw)
+        else:
+            patterns = [
+                r"^(?:haz\s+un\s+so\s+a|haz\s+so\s+a|hazle\s+so\s+a|dale\s+un\s+so\s+a)\s+(.+)$",
+                r"^(?:haz\s+un\s+so\s+al|haz\s+so\s+al|hazle\s+so\s+al|dale\s+un\s+so\s+al)\s+(.+)$",
+                r"^(?:shoutout\s+a|haz\s+shoutout\s+a|shoutout)\s+(.+)$",
+                r"^(?:promociona\s+a|haz\s+promo\s+a|hazle\s+promo\s+a|dale\s+promo\s+a|recomienda\s+a)\s+(.+)$",
+                r"^(?:give\s+a\s+shoutout\s+to|shoutout|promote|so)\s+(.+)$",
+                r"^give\s+(.+)\s+a\s+promo$",
+                r"^(?:haz\s+so|haz\s+un\s+so|hazle\s+so|dale\s+un\s+so)$",
+            ]
+            match = None
+            for pattern in patterns:
+                match = re.match(pattern, norm, flags=re.IGNORECASE)
+                if match:
+                    break
+            if not match:
+                return None
+            if match.lastindex:
+                raw = raw.split()[-len(match.group(1).split()):]
+                raw = " ".join(raw)
+                norm = match.group(1).strip()
+            else:
+                raw = ""
+                norm = ""
+
+        target, reason = self._resolve_shoutout_target(raw or norm)
+        if reason == "missing_target":
+            return "¿A quién le hago el SO, Leo?"
+        if not target:
+            return "No encuentro un usuario válido para el SO, Leo."
+
+        command = self._build_shoutout_command_preview(target)
+        if preview:
+            self._manual_reply_ui_only = True
+            return f"Previsualizacion de shoutout: {command}"
+
+        ok, normalized_target, send_reason = self._send_shoutout(target, source="manual", force=force)
+        if ok:
+            return f"SO enviado a {normalized_target}."
+        if send_reason in {"blocked_bot_user", "own_channel", "invalid_target"}:
+            return "No le hago SO a ese usuario, Leo. Huele a bot o a bucle infernal."
+        if send_reason == "cooldown_active":
+            return f"Ya hice SO a {normalized_target} hace nada, Leo. Evito el spam."
+        return f"No he podido hacer el SO a {normalized_target or target}."
+
+    def _build_shoutout_command_preview(self, target: str) -> str:
+        twitch = getattr(self.runtime, "twitch", None)
+        build = getattr(twitch, "build_shoutout_command", None)
+        normalized = self._normalize_shoutout_target(target)
+        if callable(build):
+            return build(normalized)
+        template = os.getenv("HEBE_SHOUTOUT_COMMAND_TEMPLATE", "!so {username}") or "!so {username}"
+        return template.format(username=normalized)
 
     def _handle_run_context_command(self, raw_command: str, normalized: str, stream) -> str | None:
         now = time.time()
@@ -1281,17 +1695,71 @@ class HebeEngine:
             return ", ".join(items) if items else fallback
 
         return (
-            "Perfil de juego en uso:\n\n"
+            "Perfil spoiler-safe de juego:\n\n"
             f"* Juego: {profile.canonical_title}\n"
             f"* Slug: {profile.game_slug}\n"
+            f"* Fuente/categoria: {profile.source_category_name or 'perfil local'}\n"
             f"* Generos: {joined(profile.genres)}\n"
-            f"* Contexto del canal: {profile.channel_context or 'no detectado'}\n"
-            f"* Relacion con Leo: {profile.leo_relationship or 'no detectado'}\n"
+            f"* Tono/vibe: {profile.tone_vibe or 'no detectado'}\n"
+            f"* Resumen sin spoilers: {profile.general_non_spoiler_summary or profile.channel_context or 'no detectado'}\n"
+            f"* Sistemas no-spoiler: {joined(profile.gameplay_systems_non_spoiler)}\n"
             f"* Spoilers: {profile.spoiler_policy}\n"
             f"* Temas seguros: {joined(profile.safe_comment_topics)}\n"
+            f"* Hooks de challenge: {joined(profile.challenge_hooks or profile.challenge_notes)}\n"
             f"* Temas prohibidos: {joined(profile.unsafe_comment_topics)}\n"
-            f"* Hooks de stream: {joined(profile.stream_hooks)}"
+            f"* Hooks de stream: {joined(profile.stream_hooks)}\n"
+            f"* Fuentes: {joined(profile.sources_used, 'perfil local')}\n"
+            f"* Actualizado: {profile.updated_at or self._format_stream_context_age(profile.last_updated_ts)}"
         )
+
+    def _format_stream_summary_reply(self, summary: dict | None) -> str:
+        if not summary:
+            return "No he podido generar resumen del stream."
+        topics = []
+        try:
+            import json
+
+            topics = list((json.loads(summary.get("chat_topics_json") or "{}") or {}).keys())
+        except Exception:
+            topics = []
+        return (
+            "Resumen guardado del stream:\n\n"
+            f"* Sesion: {summary.get('stream_session_id')}.\n"
+            f"* Resumen: {summary.get('summary_text') or 'sin texto'}\n"
+            f"* Temas de chat: {', '.join(topics) if topics else 'sin temas suficientes'}."
+        )
+
+    def _format_latest_stream_summary_reply(self, summary: dict | None) -> str:
+        if not summary:
+            return "Todavia no tengo resumen de ningun stream."
+        return (
+            "Esto tengo del ultimo stream:\n\n"
+            f"* Juego/categoria: {summary.get('game') or summary.get('category') or 'sin categoria'}.\n"
+            f"* Titulo: {summary.get('title') or 'sin titulo'}.\n"
+            f"* Inicio: {summary.get('started_at') or 'desconocido'}.\n"
+            f"* Resumen: {summary.get('summary_text') or 'sin resumen'}"
+        )
+
+    def _research_current_game_reply(self, stream, *, force: bool = False) -> str:
+        service = getattr(self, "game_research", None)
+        if service is None:
+            service = GameKnowledgeResearchService(store=self.game_profiles)
+            self.game_research = service
+        ok, profile, reason = service.research_current_game(
+            current_category=getattr(stream, "current_category", None),
+            current_title=getattr(stream, "current_stream_title", None),
+            current_game=getattr(stream, "current_game", None),
+            force=force,
+        )
+        if ok:
+            if reason == "cached_profile":
+                return f"Conocimiento de juego ya cacheado: {profile.canonical_title}. Spoilers: {profile.spoiler_policy}."
+            return f"Conocimiento spoiler-safe actualizado: {profile.canonical_title}. Fuentes: {', '.join(profile.sources_used) or 'proveedor configurado'}."
+        if reason == "research_disabled":
+            return f"Investigacion de juegos desactivada. Uso perfil local: {profile.canonical_title}."
+        if reason == "research_provider_missing":
+            return f"Investigacion activada, pero falta proveedor/API configurado. Uso perfil local: {profile.canonical_title}."
+        return f"No he podido investigar ahora ({reason}). Uso perfil local: {profile.canonical_title}."
 
     def _add_completed_marker(self, stream, marker: str) -> None:
         value = str(marker or "").strip()
@@ -1526,7 +1994,31 @@ class HebeEngine:
             f"last stream context error: {error or 'none'}."
         )
 
+    def _build_shoutout_status_reply(self, stream) -> str:
+        twitch = getattr(self.runtime, "twitch", None)
+        template = getattr(twitch, "shoutout_command_template", None) or os.getenv("HEBE_SHOUTOUT_COMMAND_TEMPLATE", "!so {username}")
+        raid = getattr(stream, "last_raid_event", None) or {}
+        last_raider = raid.get("user_login") or raid.get("display_name") or "ninguno"
+        last_so_ts = float(getattr(stream, "last_shoutout_ts", 0.0) or 0.0)
+        last_so_age = self._format_stream_context_age(last_so_ts) if last_so_ts else "nunca"
+        blocked = sorted(set(getattr(self, "shoutout_blocked_users", set()) or set()) | self._load_shoutout_blocked_users())
+
+        return (
+            "Estado de shoutouts:\n\n"
+            f"* Auto shoutout raiders enabled: {'yes' if getattr(self, 'auto_shoutout_raiders', True) else 'no'}\n"
+            f"* Shoutout command template: {template}\n"
+            f"* Last raider: {last_raider}\n"
+            f"* Last SO target: {getattr(stream, 'last_shoutout_target', None) or 'ninguno'}\n"
+            f"* Last SO timestamp: {last_so_age}\n"
+            f"* Blocked users: {', '.join(blocked) if blocked else 'ninguno'}\n"
+            f"* Last SO error: {getattr(stream, 'last_shoutout_error', None) or 'ninguno'}"
+        )
+
     def _handle_tts_manual_command(self, text: str) -> str | None:
+        priority = self._handle_priority_tts_command(text)
+        if priority is not None:
+            return priority
+
         normalized = self._normalize_text(text)
         for prefix in ("hebe ", "ebe ", "eve ", "jebe "):
             if normalized.startswith(prefix):
@@ -1598,6 +2090,153 @@ class HebeEngine:
             return "Vale. Si toca, también hablaré en stream."
 
         return None
+
+    def _normalize_voice_command_text(self, text: str) -> str:
+        normalized = self._normalize_text(text)
+        aliases = ("hebe", "ebe", "eve", "jebe")
+        changed = True
+        while changed:
+            changed = False
+            for alias in aliases:
+                if normalized.startswith(alias + " "):
+                    normalized = normalized[len(alias):].strip()
+                    changed = True
+                if normalized.endswith(" " + alias):
+                    normalized = normalized[: -len(alias)].strip()
+                    changed = True
+        return normalized
+
+    def _handle_priority_tts_command(self, text: str) -> str | None:
+        normalized = self._normalize_voice_command_text(text)
+        global_on = {
+            "activa la voz",
+            "activa tu voz",
+            "activa voz",
+            "activa tts",
+            "activa el tts",
+            "quiero escucharte",
+            "habla con voz",
+            "usa voz",
+            "pon voz",
+            "enable voice",
+            "enable tts",
+            "turn on voice",
+            "turn on tts",
+        }
+        global_off = {
+            "desactiva la voz",
+            "desactiva tu voz",
+            "desactiva voz",
+            "desactiva tts",
+            "desactiva el tts",
+            "solo texto",
+            "responde solo por texto",
+            "callate la voz",
+            "cállate la voz",
+            "sin voz",
+            "disable voice",
+            "disable tts",
+            "text only",
+            "voice off",
+        }
+        if normalized in global_on:
+            self.runtime.state.tts_enabled = True
+            self.runtime.state.pending_tts_scope = {
+                "kind": "tts_scope",
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+            print("[HEBE][INTENT] voice command handled before reminder parser", flush=True)
+            print("[HEBE][INTENT] pending_tts_scope set", flush=True)
+            self._emit_audio_status()
+            return "Voz activada. ¿La quieres solo aquí/local o también para el stream?"
+        if normalized in global_off:
+            self.runtime.state.tts_enabled = False
+            self.runtime.state.pending_tts_scope = None
+            print("[HEBE][INTENT] voice command handled before reminder parser", flush=True)
+            self._emit_audio_status()
+            return "Vale, Leo. Me quedo en texto."
+        if normalized in {"estado de voz", "estado de tts", "voice status", "tts status"}:
+            return self._build_voice_status_reply()
+        return None
+
+    def _handle_pending_manual_intent(self, text: str) -> str | None:
+        normalized = self._normalize_voice_command_text(text)
+        cancel_phrases = {
+            "no quiero que guardes nada",
+            "no guardes nada",
+            "cancela",
+            "cancela eso",
+            "olvida eso",
+        }
+        if normalized in cancel_phrases:
+            if getattr(self.runtime.state, "pending_clarification", None) or getattr(self.runtime.state, "pending_reminder", None):
+                self.runtime.state.pending_clarification = None
+                self.runtime.state.pending_reminder = None
+                print("[HEBE][INTENT] reminder pending cancelled", flush=True)
+                return "Vale, no guardo nada."
+
+        if not getattr(self.runtime.state, "pending_tts_scope", None):
+            return None
+
+        local_phrases = {
+            "solo aqui",
+            "solo local",
+            "solo conmigo",
+            "solo por ahora",
+            "solo para escucharte",
+            "solo por ahora para poder escucharte",
+            "no en stream",
+            "en directo no",
+            "solo quiero escucharte",
+        }
+        stream_phrases = {
+            "tambien en stream",
+            "tambien en directo",
+            "para el stream",
+            "en stream si",
+            "en directo si",
+            "tambien para el stream",
+        }
+        stream = self._get_stream_state()
+        policies = getattr(stream, "policies", None) if stream else None
+        if normalized in local_phrases or any(phrase in normalized for phrase in local_phrases):
+            self.runtime.state.tts_enabled = True
+            if policies is not None:
+                policies.allow_tts_idle_prompts = False
+            self.runtime.state.pending_tts_scope = None
+            print("[HEBE][INTENT] resolved pending_tts_scope=local", flush=True)
+            self._emit_audio_status()
+            return "Perfecto, voz activada solo aquí. En stream seguiré en texto salvo que me digas lo contrario."
+        if normalized in stream_phrases or any(phrase in normalized for phrase in stream_phrases):
+            self.runtime.state.tts_enabled = True
+            if policies is not None:
+                policies.allow_tts_replies = True
+                policies.allow_tts_event_replies = True
+                policies.allow_tts_raid_thanks = True
+            self.runtime.state.pending_tts_scope = None
+            print("[HEBE][INTENT] resolved pending_tts_scope=stream", flush=True)
+            self._emit_audio_status()
+            return "Perfecto, voz activada aquí y también para eventos del stream. La espontaneidad idle sigue en texto salvo que me digas lo contrario."
+        return "Te he activado la voz. Dime si la quieres solo aquí o también para el stream."
+
+    def _build_voice_status_reply(self) -> str:
+        stream = self._get_stream_state()
+        policies = getattr(stream, "policies", None) if stream else None
+        tts_backend = getattr(getattr(getattr(self.runtime, "tts", None), "__class__", None), "__name__", "unknown")
+        speaking = bool(getattr(getattr(self.runtime, "tts", None), "is_speaking", False))
+
+        def yes_no(value) -> str:
+            return "yes" if bool(value) else "no"
+
+        return (
+            "Estado de voz/TTS:\n\n"
+            f"* Global TTS enabled: {yes_no(getattr(self.runtime.state, 'tts_enabled', False))}\n"
+            f"* TTS backend: {tts_backend}\n"
+            f"* Stream idle TTS: {yes_no(getattr(policies, 'allow_tts_idle_prompts', False))}\n"
+            f"* Event TTS: {yes_no(getattr(policies, 'allow_tts_event_replies', False))}\n"
+            f"* Raid TTS: {yes_no(getattr(policies, 'allow_tts_raid_thanks', False))}\n"
+            f"* Currently speaking: {yes_no(speaking)}"
+        )
 
     def _emit_audio_status(self) -> None:
         try:

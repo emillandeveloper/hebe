@@ -3,170 +3,725 @@
     {
       "game_slug": "generic_jrpg_rpg",
       "canonical_title": "Generic JRPG/RPG",
-      "aliases": ["JRPG", "RPG", "role playing game"],
-      "genres": ["JRPG", "RPG"],
+      "aliases": [
+        "JRPG",
+        "RPG",
+        "role playing game"
+      ],
+      "genres": [
+        "JRPG",
+        "RPG"
+      ],
       "channel_context": "Fallback profile for unknown RPG or JRPG streams.",
       "leo_relationship": "Use when Twitch category/title does not match a local profile.",
       "spoiler_policy": "no_spoilers",
-      "safe_comment_topics": ["equipment checks", "saving before risky choices", "resource management", "exploration", "hidden chests", "menu preparation"],
-      "unsafe_comment_topics": ["story spoilers", "boss identities", "exact puzzle solutions", "future party members", "endings"],
-      "stream_hooks": ["first playthrough", "challenge run", "JRPG logic", "preparation matters"],
-      "challenge_notes": ["In challenge runs, comment on preparation without giving exact solutions."],
-      "common_jokes": ["Opening one door can become a geopolitical incident."]
+      "safe_comment_topics": [
+        "equipment checks",
+        "saving before risky choices",
+        "resource management",
+        "exploration",
+        "hidden chests",
+        "menu preparation"
+      ],
+      "unsafe_comment_topics": [
+        "story spoilers",
+        "boss identities",
+        "exact puzzle solutions",
+        "future party members",
+        "endings"
+      ],
+      "stream_hooks": [
+        "first playthrough",
+        "challenge run",
+        "JRPG logic",
+        "preparation matters"
+      ],
+      "challenge_notes": [
+        "In challenge runs, comment on preparation without giving exact solutions."
+      ],
+      "common_jokes": [
+        "Opening one door can become a geopolitical incident."
+      ],
+      "source_category_name": "Generic JRPG/RPG",
+      "tone_vibe": "broad fantasy or role-playing adventure",
+      "general_non_spoiler_summary": "Fallback spoiler-safe RPG profile for unknown RPG or JRPG categories.",
+      "gameplay_systems_non_spoiler": [
+        "party preparation",
+        "resource management",
+        "exploration",
+        "menus"
+      ],
+      "challenge_hooks": [
+        "challenge runs reward planning without exact route advice"
+      ],
+      "sources_used": [
+        "local_seed_spoiler_safe"
+      ],
+      "created_at": "2026-06-02T22:31:23+00:00",
+      "updated_at": "2026-06-02T22:31:23+00:00",
+      "confidence": 0.55
     },
     {
       "game_slug": "final_fantasy_ix",
       "canonical_title": "Final Fantasy IX",
-      "aliases": ["FFIX", "FF9", "Final Fantasy 9"],
-      "genres": ["JRPG", "fantasy", "turn-based"],
+      "aliases": [
+        "FFIX",
+        "FF9",
+        "Final Fantasy 9"
+      ],
+      "genres": [
+        "JRPG",
+        "fantasy",
+        "turn-based"
+      ],
       "channel_context": "Classic Final Fantasy stream; safe focus on vibes, party preparation, and first-playthrough caution.",
       "leo_relationship": "Useful for Leo's JRPG-first-playthrough and challenge energy.",
       "spoiler_policy": "no_spoilers",
-      "safe_comment_topics": ["gear", "abilities learned from gear", "items/resources", "challenge preparation", "classic JRPG pacing", "no-spoiler caution", "general boss caution", "stealing only as generic if already in context"],
-      "unsafe_comment_topics": ["character reveals", "boss weaknesses", "story twists", "ending details", "exact synthesis or route advice", "sphere grid", "spheres", "esferas"],
-      "stream_hooks": ["first playthrough", "level 1 challenge", "classic JRPG pacing"],
-      "challenge_notes": ["For Level 1, mention preparation and menus, not exact strategy."],
-      "common_jokes": ["Every friendly NPC deserves at least mild suspicion."]
+      "safe_comment_topics": [
+        "gear",
+        "abilities learned from gear",
+        "items/resources",
+        "challenge preparation",
+        "classic JRPG pacing",
+        "no-spoiler caution",
+        "general boss caution",
+        "stealing only as generic if already in context"
+      ],
+      "unsafe_comment_topics": [
+        "character reveals",
+        "boss weaknesses",
+        "story twists",
+        "ending details",
+        "exact synthesis or route advice",
+        "sphere grid",
+        "spheres",
+        "esferas"
+      ],
+      "stream_hooks": [
+        "first playthrough",
+        "level 1 challenge",
+        "classic JRPG pacing"
+      ],
+      "challenge_notes": [
+        "For Level 1, mention preparation and menus, not exact strategy."
+      ],
+      "common_jokes": [
+        "Every friendly NPC deserves at least mild suspicion."
+      ],
+      "source_category_name": "Final Fantasy IX",
+      "tone_vibe": "theatrical fantasy, storybook adventure, emotional but whimsical",
+      "general_non_spoiler_summary": "Spoiler-safe profile for a classic fantasy JRPG with strong theatrical/storybook flavor.",
+      "gameplay_systems_non_spoiler": [
+        "turn-based combat",
+        "equipment-linked abilities",
+        "party management",
+        "items/resources"
+      ],
+      "challenge_hooks": [
+        "Level 1 turns normal preparation into a resource puzzle"
+      ],
+      "sources_used": [
+        "local_seed_spoiler_safe"
+      ],
+      "created_at": "2026-06-02T22:31:23+00:00",
+      "updated_at": "2026-06-02T22:31:23+00:00",
+      "confidence": 0.85
     },
     {
       "game_slug": "final_fantasy_x",
       "canonical_title": "Final Fantasy X",
-      "aliases": ["FFX", "FF10", "Final Fantasy 10"],
-      "genres": ["JRPG", "turn-based", "fantasy"],
+      "aliases": [
+        "FFX",
+        "FF10",
+        "Final Fantasy 10"
+      ],
+      "genres": [
+        "JRPG",
+        "turn-based",
+        "fantasy"
+      ],
       "channel_context": "Final Fantasy stream with strong no-spoiler needs.",
       "leo_relationship": "Fits Leo's JRPG and challenge-run channel identity.",
       "spoiler_policy": "no_spoilers",
-      "safe_comment_topics": ["resource checks", "save spheres", "preparation", "menus", "boss-room suspicion"],
-      "unsafe_comment_topics": ["story twists", "boss names", "sphere grid route solutions", "future party details", "ending details"],
-      "stream_hooks": ["first playthrough", "no sphere grid", "challenge run"],
-      "challenge_notes": ["No Sphere Grid comments should stay general: preparation, items, and patience."],
-      "common_jokes": ["If the game offers a save point, it is not being polite for free."]
+      "safe_comment_topics": [
+        "resource checks",
+        "save spheres",
+        "preparation",
+        "menus",
+        "boss-room suspicion"
+      ],
+      "unsafe_comment_topics": [
+        "story twists",
+        "boss names",
+        "sphere grid route solutions",
+        "future party details",
+        "ending details"
+      ],
+      "stream_hooks": [
+        "first playthrough",
+        "no sphere grid",
+        "challenge run"
+      ],
+      "challenge_notes": [
+        "No Sphere Grid comments should stay general: preparation, items, and patience."
+      ],
+      "common_jokes": [
+        "If the game offers a save point, it is not being polite for free."
+      ],
+      "source_category_name": "Final Fantasy X",
+      "tone_vibe": "pilgrimage fantasy, emotional, bright coastal melancholy",
+      "general_non_spoiler_summary": "Spoiler-safe profile for a turn-based Final Fantasy with strong journey energy.",
+      "gameplay_systems_non_spoiler": [
+        "turn-based combat",
+        "party roles",
+        "resource management",
+        "save points"
+      ],
+      "challenge_hooks": [
+        "No Sphere Grid comments stay about patience, items, and preparation"
+      ],
+      "sources_used": [
+        "local_seed_spoiler_safe"
+      ],
+      "created_at": "2026-06-02T22:31:23+00:00",
+      "updated_at": "2026-06-02T22:31:23+00:00",
+      "confidence": 0.85
     },
     {
       "game_slug": "final_fantasy_vii",
       "canonical_title": "Final Fantasy VII",
-      "aliases": ["FFVII", "FF7", "Final Fantasy 7"],
-      "genres": ["JRPG", "turn-based", "sci-fi fantasy"],
+      "aliases": [
+        "FFVII",
+        "FF7",
+        "Final Fantasy 7"
+      ],
+      "genres": [
+        "JRPG",
+        "turn-based",
+        "sci-fi fantasy"
+      ],
       "channel_context": "Classic JRPG stream; avoid all iconic spoiler bait.",
       "leo_relationship": "Good for retro/JRPG commentary without guide claims.",
       "spoiler_policy": "no_spoilers",
-      "safe_comment_topics": ["materia-like preparation only if already mentioned", "equipment checks", "saving", "dramatic JRPG energy"],
-      "unsafe_comment_topics": ["major story moments", "character fates", "boss weaknesses", "future locations", "endgame content"],
-      "stream_hooks": ["first playthrough", "retro JRPG", "preparation"],
-      "challenge_notes": ["Keep challenge comments about caution and resources."],
-      "common_jokes": ["Corporate architecture in JRPGs is never normal."]
+      "safe_comment_topics": [
+        "materia-like preparation only if already mentioned",
+        "equipment checks",
+        "saving",
+        "dramatic JRPG energy"
+      ],
+      "unsafe_comment_topics": [
+        "major story moments",
+        "character fates",
+        "boss weaknesses",
+        "future locations",
+        "endgame content"
+      ],
+      "stream_hooks": [
+        "first playthrough",
+        "retro JRPG",
+        "preparation"
+      ],
+      "challenge_notes": [
+        "Keep challenge comments about caution and resources."
+      ],
+      "common_jokes": [
+        "Corporate architecture in JRPGs is never normal."
+      ],
+      "source_category_name": "Final Fantasy VII",
+      "tone_vibe": "industrial sci-fi fantasy, dramatic, classic JRPG energy",
+      "general_non_spoiler_summary": "Spoiler-safe profile for a classic sci-fi fantasy JRPG.",
+      "gameplay_systems_non_spoiler": [
+        "turn-based combat",
+        "materia-like preparation when already in context",
+        "party management",
+        "resources"
+      ],
+      "challenge_hooks": [
+        "Challenge comments should stay broad and no-spoiler"
+      ],
+      "sources_used": [
+        "local_seed_spoiler_safe"
+      ],
+      "created_at": "2026-06-02T22:31:23+00:00",
+      "updated_at": "2026-06-02T22:31:23+00:00",
+      "confidence": 0.85
     },
     {
       "game_slug": "persona_5_royal",
       "canonical_title": "Persona 5 Royal",
-      "aliases": ["P5R", "Persona 5", "Persona Five Royal"],
-      "genres": ["JRPG", "social sim", "turn-based"],
+      "aliases": [
+        "P5R",
+        "Persona 5",
+        "Persona Five Royal"
+      ],
+      "genres": [
+        "JRPG",
+        "social sim",
+        "turn-based"
+      ],
       "channel_context": "Long-form JRPG/social sim stream.",
       "leo_relationship": "Useful for schedule, resource, and decision commentary.",
       "spoiler_policy": "no_spoilers",
-      "safe_comment_topics": ["time management", "resource checks", "decision pressure", "style", "menu preparation"],
-      "unsafe_comment_topics": ["palace solutions", "confidant outcomes", "story twists", "boss mechanics", "true ending requirements"],
-      "stream_hooks": ["first playthrough", "decision making", "planning tension"],
-      "challenge_notes": ["Avoid optimal-route advice unless asked."],
-      "common_jokes": ["The real boss is calendar anxiety."]
+      "safe_comment_topics": [
+        "time management",
+        "resource checks",
+        "decision pressure",
+        "style",
+        "menu preparation"
+      ],
+      "unsafe_comment_topics": [
+        "palace solutions",
+        "confidant outcomes",
+        "story twists",
+        "boss mechanics",
+        "true ending requirements"
+      ],
+      "stream_hooks": [
+        "first playthrough",
+        "decision making",
+        "planning tension"
+      ],
+      "challenge_notes": [
+        "Avoid optimal-route advice unless asked."
+      ],
+      "common_jokes": [
+        "The real boss is calendar anxiety."
+      ],
+      "source_category_name": "Persona 5 Royal",
+      "tone_vibe": "stylish urban supernatural, social pressure, time management",
+      "general_non_spoiler_summary": "Spoiler-safe profile for a long-form JRPG/social sim.",
+      "gameplay_systems_non_spoiler": [
+        "turn-based combat",
+        "calendar planning",
+        "social decisions",
+        "resource management"
+      ],
+      "challenge_hooks": [
+        "Challenge hooks focus on planning and decision pressure"
+      ],
+      "sources_used": [
+        "local_seed_spoiler_safe"
+      ],
+      "created_at": "2026-06-02T22:31:23+00:00",
+      "updated_at": "2026-06-02T22:31:23+00:00",
+      "confidence": 0.85
     },
     {
       "game_slug": "baldurs_gate_3",
       "canonical_title": "Baldur's Gate 3",
-      "aliases": ["BG3", "Baldurs Gate 3", "Baldur Gate 3"],
-      "genres": ["CRPG", "D&D", "tactical RPG"],
+      "aliases": [
+        "BG3",
+        "Baldurs Gate 3",
+        "Baldur Gate 3"
+      ],
+      "genres": [
+        "CRPG",
+        "D&D",
+        "tactical RPG"
+      ],
       "channel_context": "Choice-heavy RPG stream.",
       "leo_relationship": "Good for chaotic decision commentary and save-before-chaos jokes.",
       "spoiler_policy": "no_spoilers",
-      "safe_comment_topics": ["saving before decisions", "party resources", "dialogue risk", "chaotic choices", "inventory checks"],
-      "unsafe_comment_topics": ["quest solutions", "companion outcomes", "future consequences", "boss spoilers", "hidden checks"],
-      "stream_hooks": ["chat playthrough", "decision chaos", "roleplay"],
-      "challenge_notes": ["Comment on caution without revealing outcomes."],
-      "common_jokes": ["There is the sensible path and the content path."]
+      "safe_comment_topics": [
+        "saving before decisions",
+        "party resources",
+        "dialogue risk",
+        "chaotic choices",
+        "inventory checks"
+      ],
+      "unsafe_comment_topics": [
+        "quest solutions",
+        "companion outcomes",
+        "future consequences",
+        "boss spoilers",
+        "hidden checks"
+      ],
+      "stream_hooks": [
+        "chat playthrough",
+        "decision chaos",
+        "roleplay"
+      ],
+      "challenge_notes": [
+        "Comment on caution without revealing outcomes."
+      ],
+      "common_jokes": [
+        "There is the sensible path and the content path."
+      ],
+      "source_category_name": "Baldur's Gate 3",
+      "tone_vibe": "choice-heavy fantasy, tactical chaos, roleplay consequences",
+      "general_non_spoiler_summary": "Spoiler-safe profile for a tactical CRPG built around choices and party problem-solving.",
+      "gameplay_systems_non_spoiler": [
+        "party resources",
+        "dialogue choices",
+        "tactical combat",
+        "inventory management"
+      ],
+      "challenge_hooks": [
+        "Challenge hooks focus on preparation before chaos, never outcomes"
+      ],
+      "sources_used": [
+        "local_seed_spoiler_safe"
+      ],
+      "created_at": "2026-06-02T22:31:23+00:00",
+      "updated_at": "2026-06-02T22:31:23+00:00",
+      "confidence": 0.85
     },
     {
       "game_slug": "makai_kingdom",
       "canonical_title": "Makai Kingdom",
-      "aliases": ["Makai Kingdom: Reclaimed and Rebound", "Phantom Kingdom"],
-      "genres": ["strategy RPG", "tactical RPG", "Nippon Ichi"],
+      "aliases": [
+        "Makai Kingdom: Reclaimed and Rebound",
+        "Phantom Kingdom"
+      ],
+      "genres": [
+        "strategy RPG",
+        "tactical RPG",
+        "Nippon Ichi"
+      ],
       "channel_context": "Nippon Ichi tactical RPG stream with systems-heavy comedy.",
       "leo_relationship": "Fits Leo's taste for grind, menus, and questionable tactical decisions.",
       "spoiler_policy": "no_spoilers",
-      "safe_comment_topics": ["menu preparation", "unit management", "grind jokes", "tactical chaos", "resource checks"],
-      "unsafe_comment_topics": ["story reveals", "exact builds", "boss solutions", "late-game systems"],
-      "stream_hooks": ["challenge run", "grinding", "menus"],
-      "challenge_notes": ["Preparation jokes are safe; exact build advice is not."],
-      "common_jokes": ["The menu is not a pause screen; it is the arena."]
+      "safe_comment_topics": [
+        "menu preparation",
+        "unit management",
+        "grind jokes",
+        "tactical chaos",
+        "resource checks"
+      ],
+      "unsafe_comment_topics": [
+        "story reveals",
+        "exact builds",
+        "boss solutions",
+        "late-game systems"
+      ],
+      "stream_hooks": [
+        "challenge run",
+        "grinding",
+        "menus"
+      ],
+      "challenge_notes": [
+        "Preparation jokes are safe; exact build advice is not."
+      ],
+      "common_jokes": [
+        "The menu is not a pause screen; it is the arena."
+      ],
+      "source_category_name": "Makai Kingdom",
+      "tone_vibe": "systems-heavy tactical comedy, grindy, absurd power scaling",
+      "general_non_spoiler_summary": "Spoiler-safe profile for a Nippon Ichi tactical RPG with menus and grind as part of the fun.",
+      "gameplay_systems_non_spoiler": [
+        "tactical combat",
+        "unit management",
+        "menus",
+        "grind loops"
+      ],
+      "challenge_hooks": [
+        "Challenge hooks focus on menus and prep without build advice"
+      ],
+      "sources_used": [
+        "local_seed_spoiler_safe"
+      ],
+      "created_at": "2026-06-02T22:31:23+00:00",
+      "updated_at": "2026-06-02T22:31:23+00:00",
+      "confidence": 0.85
     },
     {
       "game_slug": "zwei_arges_adventure",
       "canonical_title": "Zwei!!: The Arges Adventure",
-      "aliases": ["Zwei", "Zwei!!", "Zwei The Arges Adventure", "Zwei: The Arges Adventure"],
-      "genres": ["action RPG", "retro", "dungeon crawler"],
+      "aliases": [
+        "Zwei",
+        "Zwei!!",
+        "Zwei The Arges Adventure",
+        "Zwei: The Arges Adventure"
+      ],
+      "genres": [
+        "action RPG",
+        "retro",
+        "dungeon crawler"
+      ],
       "channel_context": "Retro Weekend and first-playthrough friendly.",
       "leo_relationship": "Current retro stream context; use light action-RPG preparation and exploration comments.",
       "spoiler_policy": "no_spoilers",
-      "safe_comment_topics": ["food leveling", "exploration", "getting lost", "dungeon preparation", "resource checks"],
-      "unsafe_comment_topics": ["exact solutions", "story spoilers", "boss spoilers", "hidden route answers", "puzzle solutions"],
-      "stream_hooks": ["retro weekend", "first playthrough", "food for leveling", "dungeon prep"],
-      "challenge_notes": ["Keep comments playful and general; no route or puzzle claims."],
-      "common_jokes": ["Food is not a snack here; it is career development."]
+      "safe_comment_topics": [
+        "food leveling",
+        "exploration",
+        "getting lost",
+        "dungeon preparation",
+        "resource checks"
+      ],
+      "unsafe_comment_topics": [
+        "exact solutions",
+        "story spoilers",
+        "boss spoilers",
+        "hidden route answers",
+        "puzzle solutions"
+      ],
+      "stream_hooks": [
+        "retro weekend",
+        "first playthrough",
+        "food for leveling",
+        "dungeon prep"
+      ],
+      "challenge_notes": [
+        "Keep comments playful and general; no route or puzzle claims."
+      ],
+      "common_jokes": [
+        "Food is not a snack here; it is career development."
+      ],
+      "source_category_name": "Zwei!!: The Arges Adventure",
+      "tone_vibe": "retro action RPG, playful dungeon crawling, food-as-progression charm",
+      "general_non_spoiler_summary": "Spoiler-safe profile for a retro action RPG with exploration and food leveling.",
+      "gameplay_systems_non_spoiler": [
+        "action combat",
+        "food leveling",
+        "dungeon exploration",
+        "resource checks"
+      ],
+      "challenge_hooks": [
+        "Challenge hooks keep comments playful and general"
+      ],
+      "sources_used": [
+        "local_seed_spoiler_safe"
+      ],
+      "created_at": "2026-06-02T22:31:23+00:00",
+      "updated_at": "2026-06-02T22:31:23+00:00",
+      "confidence": 0.85
     },
     {
       "game_slug": "disgaea",
       "canonical_title": "Disgaea",
-      "aliases": ["Disgaea PC", "Disgaea 1", "Disgaea 2", "Disgaea 5", "Disgaea 7"],
-      "genres": ["strategy RPG", "tactical RPG", "grind"],
+      "aliases": [
+        "Disgaea PC",
+        "Disgaea 1",
+        "Disgaea 2",
+        "Disgaea 5",
+        "Disgaea 7"
+      ],
+      "genres": [
+        "strategy RPG",
+        "tactical RPG",
+        "grind"
+      ],
       "channel_context": "Systems-heavy tactical RPG stream.",
       "leo_relationship": "Good for grind, menus, and absurd number escalation jokes.",
       "spoiler_policy": "no_spoilers",
-      "safe_comment_topics": ["grinding", "menus", "unit prep", "item management", "absurd stats"],
-      "unsafe_comment_topics": ["story spoilers", "exact builds", "boss strategies", "late-game unlocks"],
-      "stream_hooks": ["challenge run", "grind", "menu preparation"],
-      "challenge_notes": ["Preparation and patience are safe themes."],
-      "common_jokes": ["The numbers are not high enough until they become a weather event."]
+      "safe_comment_topics": [
+        "grinding",
+        "menus",
+        "unit prep",
+        "item management",
+        "absurd stats"
+      ],
+      "unsafe_comment_topics": [
+        "story spoilers",
+        "exact builds",
+        "boss strategies",
+        "late-game unlocks"
+      ],
+      "stream_hooks": [
+        "challenge run",
+        "grind",
+        "menu preparation"
+      ],
+      "challenge_notes": [
+        "Preparation and patience are safe themes."
+      ],
+      "common_jokes": [
+        "The numbers are not high enough until they become a weather event."
+      ],
+      "source_category_name": "Disgaea",
+      "tone_vibe": "absurd tactical RPG comedy, grind, enormous numbers",
+      "general_non_spoiler_summary": "Spoiler-safe profile for systems-heavy tactical RPG streams.",
+      "gameplay_systems_non_spoiler": [
+        "tactical combat",
+        "unit prep",
+        "item management",
+        "grinding"
+      ],
+      "challenge_hooks": [
+        "Challenge hooks focus on preparation and patience"
+      ],
+      "sources_used": [
+        "local_seed_spoiler_safe"
+      ],
+      "created_at": "2026-06-02T22:31:23+00:00",
+      "updated_at": "2026-06-02T22:31:23+00:00",
+      "confidence": 0.85
     },
     {
       "game_slug": "pokemon_nuzlocke",
       "canonical_title": "Pokemon / Nuzlocke",
-      "aliases": ["Pokemon", "Pokémon", "Nuzlocke", "Pokemon Nuzlocke", "Pokémon Nuzlocke"],
-      "genres": ["monster catching", "RPG", "challenge run"],
+      "aliases": [
+        "Pokemon",
+        "Pokémon",
+        "Nuzlocke",
+        "Pokemon Nuzlocke",
+        "Pokémon Nuzlocke"
+      ],
+      "genres": [
+        "monster catching",
+        "RPG",
+        "challenge run"
+      ],
       "channel_context": "Challenge-friendly Pokemon stream.",
       "leo_relationship": "Good for caution, attachment, and bad decision jokes.",
       "spoiler_policy": "no_spoilers",
-      "safe_comment_topics": ["team safety", "resource checks", "overconfidence", "naming attachment", "risk management"],
-      "unsafe_comment_topics": ["exact encounter tables", "boss teams", "route solutions", "future fights"],
-      "stream_hooks": ["nuzlocke", "challenge run", "team prep"],
-      "challenge_notes": ["Never suggest exact matchup solutions unless asked."],
-      "common_jokes": ["Overconfidence is how a nickname becomes a memorial."]
+      "safe_comment_topics": [
+        "team safety",
+        "resource checks",
+        "overconfidence",
+        "naming attachment",
+        "risk management"
+      ],
+      "unsafe_comment_topics": [
+        "exact encounter tables",
+        "boss teams",
+        "route solutions",
+        "future fights"
+      ],
+      "stream_hooks": [
+        "nuzlocke",
+        "challenge run",
+        "team prep"
+      ],
+      "challenge_notes": [
+        "Never suggest exact matchup solutions unless asked."
+      ],
+      "common_jokes": [
+        "Overconfidence is how a nickname becomes a memorial."
+      ],
+      "source_category_name": "Pokemon / Nuzlocke",
+      "tone_vibe": "monster-catching adventure with challenge-run tension",
+      "general_non_spoiler_summary": "Spoiler-safe profile for Pokemon and Nuzlocke-style runs.",
+      "gameplay_systems_non_spoiler": [
+        "team safety",
+        "resources",
+        "risk management",
+        "encounter caution"
+      ],
+      "challenge_hooks": [
+        "Nuzlocke hooks focus on risk and attachment, not exact fights"
+      ],
+      "sources_used": [
+        "local_seed_spoiler_safe"
+      ],
+      "created_at": "2026-06-02T22:31:23+00:00",
+      "updated_at": "2026-06-02T22:31:23+00:00",
+      "confidence": 0.85
     },
     {
       "game_slug": "romancing_saga_minstrel_song",
       "canonical_title": "Romancing SaGa: Minstrel Song",
-      "aliases": ["Romancing SaGa Minstrel Song", "Minstrel Song", "Romancing Saga"],
-      "genres": ["JRPG", "open-ended RPG"],
+      "aliases": [
+        "Romancing SaGa Minstrel Song",
+        "Minstrel Song",
+        "Romancing Saga"
+      ],
+      "genres": [
+        "JRPG",
+        "open-ended RPG"
+      ],
       "channel_context": "Open-ended JRPG stream with exploration and confusion as safe themes.",
       "leo_relationship": "Good for getting-lost jokes and decision uncertainty.",
       "spoiler_policy": "no_spoilers",
-      "safe_comment_topics": ["exploration", "being lost", "party/resource checks", "open-ended decisions"],
-      "unsafe_comment_topics": ["quest solutions", "event timing", "boss spoilers", "character outcomes", "route optimization"],
-      "stream_hooks": ["first playthrough", "exploration", "open-ended RPG"],
-      "challenge_notes": ["Avoid route optimization."],
-      "common_jokes": ["The map is a suggestion, not a contract."]
+      "safe_comment_topics": [
+        "exploration",
+        "being lost",
+        "party/resource checks",
+        "open-ended decisions"
+      ],
+      "unsafe_comment_topics": [
+        "quest solutions",
+        "event timing",
+        "boss spoilers",
+        "character outcomes",
+        "route optimization"
+      ],
+      "stream_hooks": [
+        "first playthrough",
+        "exploration",
+        "open-ended RPG"
+      ],
+      "challenge_notes": [
+        "Avoid route optimization."
+      ],
+      "common_jokes": [
+        "The map is a suggestion, not a contract."
+      ],
+      "source_category_name": "Romancing SaGa: Minstrel Song",
+      "tone_vibe": "open-ended JRPG, wandering, discovery, opaque choices",
+      "general_non_spoiler_summary": "Spoiler-safe profile for an open-ended JRPG where exploration and uncertainty are central.",
+      "gameplay_systems_non_spoiler": [
+        "open-ended exploration",
+        "party resources",
+        "quest uncertainty",
+        "navigation"
+      ],
+      "challenge_hooks": [
+        "Challenge hooks avoid route optimization"
+      ],
+      "sources_used": [
+        "local_seed_spoiler_safe"
+      ],
+      "created_at": "2026-06-02T22:31:23+00:00",
+      "updated_at": "2026-06-02T22:31:23+00:00",
+      "confidence": 0.85
     },
     {
       "game_slug": "tales_of_arise",
       "canonical_title": "Tales of Arise",
-      "aliases": ["Arise", "Tales Arise"],
-      "genres": ["action RPG", "JRPG"],
+      "aliases": [
+        "Arise",
+        "Tales Arise"
+      ],
+      "genres": [
+        "action RPG",
+        "JRPG"
+      ],
       "channel_context": "Action-JRPG stream.",
       "leo_relationship": "Good for combat prep and resource reminders.",
       "spoiler_policy": "no_spoilers",
-      "safe_comment_topics": ["healing resources", "equipment checks", "combat readiness", "party management", "exploration"],
-      "unsafe_comment_topics": ["story reveals", "boss mechanics", "future party details", "ending details"],
-      "stream_hooks": ["first playthrough", "action combat", "preparation"],
-      "challenge_notes": ["General combat-readiness comments are safe."],
-      "common_jokes": ["The dramatic door probably charges rent in healing items."]
+      "safe_comment_topics": [
+        "healing resources",
+        "equipment checks",
+        "combat readiness",
+        "party management",
+        "exploration"
+      ],
+      "unsafe_comment_topics": [
+        "story reveals",
+        "boss mechanics",
+        "future party details",
+        "ending details"
+      ],
+      "stream_hooks": [
+        "first playthrough",
+        "action combat",
+        "preparation"
+      ],
+      "challenge_notes": [
+        "General combat-readiness comments are safe."
+      ],
+      "common_jokes": [
+        "The dramatic door probably charges rent in healing items."
+      ],
+      "source_category_name": "Tales of Arise",
+      "tone_vibe": "action-JRPG drama, kinetic combat, party adventure",
+      "general_non_spoiler_summary": "Spoiler-safe profile for an action JRPG with combat readiness and resource pressure.",
+      "gameplay_systems_non_spoiler": [
+        "action combat",
+        "healing resources",
+        "equipment checks",
+        "party management"
+      ],
+      "challenge_hooks": [
+        "Challenge hooks focus on general combat readiness"
+      ],
+      "sources_used": [
+        "local_seed_spoiler_safe"
+      ],
+      "created_at": "2026-06-02T22:31:23+00:00",
+      "updated_at": "2026-06-02T22:31:23+00:00",
+      "confidence": 0.85
     }
   ]
 }

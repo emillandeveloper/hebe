@@ -14,6 +14,8 @@ class HebeState:
     last_intent: Optional[str] = None
 
     pending_clarification: Optional[dict] = None
+    pending_tts_scope: Optional[dict] = None
+    pending_reminder: Optional[dict] = None
     pending_confirmation: Optional[dict] = None
 
     current_task: Optional[str] = None

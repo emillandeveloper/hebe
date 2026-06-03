@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import re
 from typing import Any
 
 
@@ -16,6 +18,7 @@ class TwitchService:
         helix_client: Any | None = None,
         channel_name: str = "",
         bot_username: str = "JotunBot",
+        shoutout_command_template: str | None = None,
     ) -> None:
         self.chat_client = chat_client
         self.target_resolver = target_resolver
@@ -24,6 +27,11 @@ class TwitchService:
         self.helix_client = helix_client
         self.channel_name = channel_name
         self.bot_username = bot_username
+        self.shoutout_command_template = (
+            shoutout_command_template
+            or os.getenv("HEBE_SHOUTOUT_COMMAND_TEMPLATE", "!so {username}")
+            or "!so {username}"
+        )
 
     def is_available(self) -> bool:
         return self.chat_client is not None
@@ -54,11 +62,26 @@ class TwitchService:
         return self.helix_client.get_channel_info()
 
     def shoutout(self, username: str) -> bool:
-        target = str(username or "").strip()
+        target = self.normalize_twitch_username(username)
         if not target:
             return False
 
-        return self.send_message(f"!shoutout {target}")
+        command = self.shoutout_command_template.format(username=target)
+        return self.send_message(command)
+
+    def build_shoutout_command(self, username: str) -> str:
+        target = self.normalize_twitch_username(username)
+        if not target:
+            return ""
+        return self.shoutout_command_template.format(username=target)
+
+    @staticmethod
+    def normalize_twitch_username(username: str) -> str:
+        target = str(username or "").strip().lstrip("@").strip()
+        target = re.sub(r"\s+", "", target)
+        if not re.fullmatch(r"[A-Za-z0-9_]{3,25}", target):
+            return ""
+        return target
 
     def resolve_user(self, raw_target: str) -> str | None:
         if self.target_resolver is None:

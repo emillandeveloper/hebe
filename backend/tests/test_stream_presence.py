@@ -1,11 +1,14 @@
 import os
 import time
 import unittest
+import tempfile
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from app.hebe_engine import HebeEngine
 from app.stream.context_sync import StreamContextSyncService
+from app.stream.game_research import GameKnowledgeResearchConfig, GameKnowledgeResearchService
 from app.stream.game_profiles import GameProfileStore
 from app.stream.state import StreamSessionState
 from app.stream.spontaneity import StreamSpontaneityConfig, StreamSpontaneityService
@@ -15,6 +18,8 @@ class FakeTwitch:
     def __init__(self):
         self.sent = []
         self.channel_name = "leonifelheim"
+        self.bot_username = "HebeNifelheim"
+        self.shoutout_command_template = "!so {username}"
         self.helix_client = SimpleNamespace(
             broadcaster_id="124070929",
             client_id="client",
@@ -28,6 +33,25 @@ class FakeTwitch:
     def send_message(self, text):
         self.sent.append(text)
 
+    def normalize_twitch_username(self, username):
+        value = str(username or "").strip().lstrip("@").strip()
+        return value.replace(" ", "") if value else ""
+
+    def build_shoutout_command(self, username):
+        return self.shoutout_command_template.format(username=self.normalize_twitch_username(username))
+
+    def shoutout(self, username):
+        self.send_message(self.build_shoutout_command(username))
+        return True
+
+    def resolve_user(self, raw_target):
+        return None
+
+
+class FailingShoutoutTwitch(FakeTwitch):
+    def shoutout(self, username):
+        raise RuntimeError("boom")
+
 
 class FakeSynth:
     def generate_stream_presence(self, **kwargs):
@@ -35,6 +59,19 @@ class FakeSynth:
 
     def generate_twitch_idle_prompt_preview(self, payload):
         return "First playthrough significa sospechar de todo NPC amable. Es ley."
+
+
+class FakeSearchProvider:
+    def __init__(self):
+        self.calls = []
+
+    def search(self, query):
+        self.calls.append(query)
+        return [{
+            "title": "Spoiler-free gameplay overview",
+            "snippet": "Spoiler-free overview with turn-based combat, equipment abilities, whimsical theatrical fantasy, and party resources.",
+            "url": "https://example.com/ff9",
+        }]
 
 
 def make_engine(stream=None):
@@ -48,6 +85,11 @@ def make_engine(stream=None):
         speak=Mock(),
     )
     engine.game_profiles = GameProfileStore()
+    engine.game_research = GameKnowledgeResearchService(
+        store=engine.game_profiles,
+        config=GameKnowledgeResearchConfig(enabled=False),
+    )
+    engine._last_game_research_category = None
     engine.response_synthesizer = FakeSynth()
     engine.stream_spontaneity = StreamSpontaneityService(
         config=StreamSpontaneityConfig(companion_jitter_sec=0, show_jitter_sec=0),
@@ -69,6 +111,10 @@ def make_engine(stream=None):
     engine.routine_poll_interval_sec = 30.0
     engine.auto_enable_stream_when_live = True
     engine.default_live_presence_mode = "companion"
+    engine.auto_shoutout_raiders = True
+    engine.shoutout_cooldown_seconds = 120
+    engine.shoutout_allow_bots = False
+    engine.shoutout_blocked_users = engine._load_shoutout_blocked_users()
     return engine
 
 
@@ -217,7 +263,7 @@ class StreamPresenceTests(unittest.TestCase):
             "viewer_count": 3,
         }))
 
-        self.assertEqual(engine.runtime.twitch.sent, ["Gracias por la raid."])
+        self.assertEqual(engine.runtime.twitch.sent, ["Gracias por la raid.", "!so Raider"])
 
     def test_readiness_reports_chat_active_blocked_reason(self):
         now = time.time()
@@ -502,6 +548,7 @@ class StreamPresenceTests(unittest.TestCase):
 
     def test_raid_event_sends_thank_you_in_reactive_mode(self):
         stream = StreamSessionState(enabled=True, presence_mode="reactive")
+        stream.is_live = True
         engine = make_engine(stream)
         engine._synthesize_internal_event_reply = Mock(return_value="Gracias por la raid, Raider.")
 
@@ -510,11 +557,12 @@ class StreamPresenceTests(unittest.TestCase):
             payload={"display_name": "Raider", "viewer_count": 5},
         ))
 
-        self.assertEqual(engine.runtime.twitch.sent, ["Gracias por la raid, Raider."])
+        self.assertEqual(engine.runtime.twitch.sent, ["Gracias por la raid, Raider.", "!so Raider"])
         self.assertEqual(stream.last_raid_event["display_name"], "Raider")
 
     def test_raid_thank_you_not_blocked_by_idle_cooldown(self):
         stream = StreamSessionState(enabled=True, presence_mode="reactive")
+        stream.is_live = True
         stream.cooldowns["stream_idle_prompt_next_ts"] = time.time() + 9999
         engine = make_engine(stream)
         engine._synthesize_internal_event_reply = Mock(return_value="Gracias por la raid, Raider.")
@@ -524,10 +572,11 @@ class StreamPresenceTests(unittest.TestCase):
             payload={"display_name": "Raider", "viewer_count": 5},
         ))
 
-        self.assertEqual(engine.runtime.twitch.sent, ["Gracias por la raid, Raider."])
+        self.assertEqual(engine.runtime.twitch.sent, ["Gracias por la raid, Raider.", "!so Raider"])
 
     def test_raid_text_sends_when_global_tts_off(self):
         stream = StreamSessionState(enabled=True, presence_mode="reactive")
+        stream.is_live = True
         engine = make_engine(stream)
         engine.runtime.state.tts_enabled = False
         engine._synthesize_internal_event_reply = Mock(return_value="Gracias por la raid, Raider.")
@@ -537,8 +586,132 @@ class StreamPresenceTests(unittest.TestCase):
             payload={"display_name": "Raider", "viewer_count": 5},
         ))
 
-        self.assertEqual(engine.runtime.twitch.sent, ["Gracias por la raid, Raider."])
+        self.assertEqual(engine.runtime.twitch.sent, ["Gracias por la raid, Raider.", "!so Raider"])
         engine.runtime.speak.assert_not_called()
+
+    def test_raid_duplicate_does_not_spam_shoutout_within_cooldown(self):
+        stream = StreamSessionState(enabled=True, presence_mode="reactive")
+        stream.is_live = True
+        engine = make_engine(stream)
+        engine._synthesize_internal_event_reply = Mock(return_value="Gracias por la raid, Raider.")
+        event = SimpleNamespace(
+            event_type="twitch_raid",
+            payload={"display_name": "Raider", "user_login": "Raider", "viewer_count": 5},
+        )
+
+        engine._handle_twitch_raid_event(event)
+        engine._handle_twitch_raid_event(event)
+
+        self.assertEqual(engine.runtime.twitch.sent, [
+            "Gracias por la raid, Raider.",
+            "!so Raider",
+            "Gracias por la raid, Raider.",
+        ])
+
+    def test_auto_shoutout_uses_configured_template(self):
+        stream = StreamSessionState(enabled=True, presence_mode="reactive")
+        stream.is_live = True
+        engine = make_engine(stream)
+        engine.runtime.twitch.shoutout_command_template = "!promo {username}"
+        engine._synthesize_internal_event_reply = Mock(return_value="Gracias.")
+
+        engine._handle_twitch_raid_event(SimpleNamespace(
+            event_type="twitch_raid",
+            payload={"display_name": "Raider", "user_login": "Raider", "viewer_count": 5},
+        ))
+
+        self.assertIn("!promo Raider", engine.runtime.twitch.sent)
+
+    def test_manual_shoutout_commands_send_so(self):
+        phrases = [
+            "Hebe, haz SO a Totodile",
+            "Hebe, haz shoutout a Totodile",
+            "Hebe, promociona a Totodile",
+            "Hebe, haz promo a Totodile",
+            "Hebe, give a shoutout to Totodile",
+        ]
+        for phrase in phrases:
+            with self.subTest(phrase=phrase):
+                engine = make_engine(StreamSessionState(enabled=True))
+                reply = engine._handle_stream_manual_command(phrase)
+                self.assertIn("SO enviado", reply)
+                self.assertEqual(engine.runtime.twitch.sent, ["!so Totodile"])
+
+    def test_manual_shoutout_normalizes_at_target(self):
+        engine = make_engine(StreamSessionState(enabled=True))
+
+        engine._handle_stream_manual_command("Hebe, haz SO a @Totodile")
+
+        self.assertEqual(engine.runtime.twitch.sent, ["!so Totodile"])
+
+    def test_manual_shoutout_uses_last_raider(self):
+        stream = StreamSessionState(enabled=True)
+        stream.last_raid_event = {"user_login": "LastRaider", "display_name": "LastRaider", "ts": time.time()}
+        engine = make_engine(stream)
+
+        engine._handle_stream_manual_command("Hebe, haz SO al ultimo raider")
+
+        self.assertEqual(engine.runtime.twitch.sent, ["!so LastRaider"])
+
+    def test_manual_shoutout_without_target_asks_for_clarification(self):
+        engine = make_engine(StreamSessionState(enabled=True))
+
+        reply = engine._handle_stream_manual_command("Hebe, haz SO")
+
+        self.assertIn("A quién", reply)
+        self.assertEqual(engine.runtime.twitch.sent, [])
+
+    def test_blocked_bot_users_do_not_receive_shoutout(self):
+        engine = make_engine(StreamSessionState(enabled=True))
+
+        reply = engine._handle_stream_manual_command("Hebe, haz SO a Nightbot")
+
+        self.assertIn("No le hago SO", reply)
+        self.assertEqual(engine.runtime.twitch.sent, [])
+
+    def test_hebe_does_not_shoutout_herself(self):
+        engine = make_engine(StreamSessionState(enabled=True))
+
+        reply = engine._handle_stream_manual_command("Hebe, haz SO a HebeNifelheim")
+
+        self.assertIn("No le hago SO", reply)
+        self.assertEqual(engine.runtime.twitch.sent, [])
+
+    def test_preview_shoutout_does_not_send_to_twitch(self):
+        engine = make_engine(StreamSessionState(enabled=True))
+
+        reply = engine._handle_stream_manual_command("Hebe, previsualiza shoutout a Totodile")
+
+        self.assertIn("!so Totodile", reply)
+        self.assertEqual(engine.runtime.twitch.sent, [])
+
+    def test_shoutout_command_failure_sets_error(self):
+        stream = StreamSessionState(enabled=True)
+        engine = make_engine(stream)
+        engine.runtime.twitch = FailingShoutoutTwitch()
+
+        reply = engine._handle_stream_manual_command("Hebe, haz SO a Totodile")
+
+        self.assertIn("No he podido", reply)
+        self.assertIn("send_failed", stream.last_shoutout_error)
+
+    def test_simulated_raid_sends_thank_you_and_shoutout(self):
+        stream = StreamSessionState(enabled=True, presence_mode="reactive")
+        engine = make_engine(stream)
+        engine._synthesize_internal_event_reply = Mock(return_value="Gracias por la raid.")
+
+        reply = engine._handle_stream_manual_command("Hebe, simula raid de Totodile")
+
+        self.assertIn("Raid simulado", reply)
+        self.assertEqual(engine.runtime.twitch.sent, ["Gracias por la raid.", "!so totodile"])
+
+    def test_shoutout_status_reports_debug_fields(self):
+        engine = make_engine(StreamSessionState(enabled=True))
+
+        reply = engine._handle_stream_manual_command("Hebe, estado de shoutouts")
+
+        self.assertIn("Auto shoutout raiders enabled", reply)
+        self.assertIn("!so {username}", reply)
 
     def test_game_profile_command_returns_readable_info(self):
         stream = StreamSessionState()
@@ -547,10 +720,60 @@ class StreamPresenceTests(unittest.TestCase):
 
         reply = engine._handle_stream_manual_command("Hebe, que perfil de juego estas usando")
 
-        self.assertIn("Perfil de juego en uso:", reply)
+        self.assertIn("Perfil spoiler-safe de juego:", reply)
         self.assertIn("Zwei!!: The Arges Adventure", reply)
         self.assertIn("no_spoilers", reply)
         self.assertIn("food leveling", reply)
+        self.assertIn("Tono/vibe:", reply)
+
+    def test_manual_research_disabled_uses_local_profile(self):
+        stream = StreamSessionState()
+        stream.current_category = "Final Fantasy IX"
+        engine = make_engine(stream)
+
+        reply = engine._handle_stream_manual_command("Hebe, investiga este juego sin spoilers")
+
+        self.assertIn("Investigacion de juegos desactivada", reply)
+        self.assertIn("Final Fantasy IX", reply)
+
+    def test_manual_research_enabled_calls_research_service(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            stream = StreamSessionState()
+            stream.current_category = "One Off Research RPG"
+            engine = make_engine(stream)
+            engine.game_profiles = GameProfileStore(cache_path=Path(tmp) / "cache.json")
+            provider = FakeSearchProvider()
+            engine.game_research = GameKnowledgeResearchService(
+                store=engine.game_profiles,
+                config=GameKnowledgeResearchConfig(enabled=True, provider="fake"),
+                search_provider=provider,
+                now_fn=lambda: 1_000_000.0,
+            )
+
+            reply = engine._handle_stream_manual_command("Hebe, investiga este juego sin spoilers")
+
+        self.assertIn("Conocimiento spoiler-safe actualizado", reply)
+        self.assertEqual(len(provider.calls), 1)
+
+    def test_idle_prompt_does_not_trigger_internet_research(self):
+        stream = StreamSessionState(enabled=True, presence_mode="show")
+        stream.current_category = "Imaginary RPG"
+        stream.is_live = True
+        stream.live_status_known = True
+        stream.stream_context_updated_ts = time.time()
+        stream.last_chat_activity_ts = time.time() - 60 * 60
+        engine = make_engine(stream)
+        provider = FakeSearchProvider()
+        engine.game_research = GameKnowledgeResearchService(
+            store=engine.game_profiles,
+            config=GameKnowledgeResearchConfig(enabled=True, provider="fake"),
+            search_provider=provider,
+        )
+
+        event = engine.stream_spontaneity.build_due_event(stream)
+
+        self.assertIsNotNone(event)
+        self.assertEqual(provider.calls, [])
 
     def test_reload_game_profiles_command(self):
         engine = make_engine(StreamSessionState())

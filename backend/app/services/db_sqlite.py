@@ -213,6 +213,13 @@ def init_db() -> None:
     conn.commit()
     conn.close()
 
+    try:
+        from app.stream.memory import init_stream_memory_schema
+
+        init_stream_memory_schema()
+    except Exception as exc:
+        print(f"[HEBE][STREAM_MEMORY] init failed: {exc!r}", flush=True)
+
 
 def get_recent_chat_turns(
     source: str = "ui",
