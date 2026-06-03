@@ -195,6 +195,16 @@ def init_db() -> None:
         """
     )
 
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS app_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+
     # Índices útiles
     cur.execute(
         "CREATE INDEX IF NOT EXISTS idx_memory_facts_kind_active ON memory_facts(kind, active)"
@@ -286,6 +296,52 @@ def log_internal_event(event_type: str, payload: Optional[dict] = None) -> int:
     conn.commit()
     conn.close()
     return event_id
+
+
+def ensure_app_settings_table() -> None:
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS app_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_setting(key: str, default: Optional[str] = None) -> Optional[str]:
+    ensure_app_settings_table()
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT value FROM app_settings WHERE key = ?", (key,))
+    row = cur.fetchone()
+    conn.close()
+    if row is None:
+        return default
+    return row["value"]
+
+
+def set_setting(key: str, value: Optional[str]) -> None:
+    ensure_app_settings_table()
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO app_settings (key, value, updated_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(key) DO UPDATE SET
+            value = excluded.value,
+            updated_at = excluded.updated_at
+        """,
+        (key, value, utc_now_iso()),
+    )
+    conn.commit()
+    conn.close()
 
 
 def seed_default_apps() -> None:

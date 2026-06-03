@@ -6,6 +6,7 @@ from urllib.parse import quote
 from fastapi import APIRouter, HTTPException, Query, Request
 
 from app.services import db_sqlite
+from app.core.log_bus import get_recent_logs
 
 router = APIRouter(prefix="/debug", tags=["debug"])
 
@@ -131,6 +132,11 @@ def list_db_tables():
     except Exception as exc:
         _log_db_error(f"list tables failed: {type(exc).__name__}: {exc}")
         raise HTTPException(status_code=500, detail="Database read failed")
+
+
+@router.get("/logs")
+def list_backend_logs(limit: int = Query(1000, ge=1, le=5000)):
+    return {"logs": get_recent_logs(limit=limit)}
 
 
 @router.get("/db/tables/{table_name}/schema")

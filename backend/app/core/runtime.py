@@ -11,7 +11,7 @@ load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), '..', '..', '.en
 
 from app.core.ui_bridge import emit
 from app.core.state import HebeState
-from app.services.db_sqlite import log_chat
+from app.services.db_sqlite import get_setting, log_chat
 from app.services.interaction_actions import InteractionActions
 from app.services.llm_factory import create_conversation_llm
 from app.services.speech_output import speak as _speak
@@ -77,11 +77,43 @@ def build_runtime() -> HebeRuntime:
 
     speak = build_speak(state)
 
+    stt_config = STTConfig()
+    persisted_device = get_setting("stt.input_device_id", os.getenv("HEBE_STT_INPUT_DEVICE", "") or "")
+    persisted_device_name = get_setting("stt.input_device_name", os.getenv("HEBE_STT_INPUT_DEVICE_NAME", "") or "")
+    persisted_host_api = get_setting("stt.input_device_host_api", os.getenv("HEBE_STT_INPUT_DEVICE_HOST_API", "") or "")
+    persisted_sample_rate = get_setting("stt.input_device_sample_rate", os.getenv("HEBE_STT_INPUT_DEVICE_SAMPLE_RATE", "") or "")
+    persisted_channels = get_setting("stt.input_device_channels", os.getenv("HEBE_STT_INPUT_DEVICE_CHANNELS", "") or "")
+    persisted_signature = get_setting("stt.input_device_signature", os.getenv("HEBE_STT_INPUT_DEVICE_SIGNATURE", "") or "")
+    if persisted_device and str(persisted_device).isdigit():
+        stt_config.input_device_index = int(str(persisted_device))
+    if persisted_device_name:
+        stt_config.input_device_name = persisted_device_name
+    if persisted_host_api:
+        stt_config.input_device_host_api = persisted_host_api
+    if str(persisted_sample_rate or "").isdigit():
+        stt_config.input_device_sample_rate = int(str(persisted_sample_rate))
+    if str(persisted_channels or "").isdigit():
+        stt_config.input_device_channels = int(str(persisted_channels))
+    if persisted_signature:
+        stt_config.input_device_signature = persisted_signature
+
     stt = STTService(
-        config=STTConfig(),
+        config=stt_config,
         emit=emit,
         log_chat=log_chat,
     )
+    if persisted_device or persisted_device_name:
+        try:
+            stt.set_input_device(
+                device_id=persisted_device or "",
+                device_name=persisted_device_name or "",
+                host_api=persisted_host_api or "",
+                sample_rate=int(str(persisted_sample_rate)) if str(persisted_sample_rate or "").isdigit() else None,
+                channels=int(str(persisted_channels)) if str(persisted_channels or "").isdigit() else None,
+                signature=persisted_signature or "",
+            )
+        except Exception as exc:
+            print(f"[HEBE][STT][ERROR] persisted input device invalid: {exc!r}", flush=True)
 
     # Modelo conversacional: habla como Hebe.
     # Se elige por .env con HEBE_LLM_PROVIDER:

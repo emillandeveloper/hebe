@@ -326,7 +326,7 @@ class StreamPresenceTests(unittest.TestCase):
 
         reply = engine._handle_stream_manual_command("Hebe, actualiza contexto de stream")
 
-        self.assertEqual(reply, "Contexto de stream actualizado.")
+        self.assertEqual(str(reply), "Contexto de stream actualizado.")
         self.assertEqual(sync.calls, [stream])
 
     def test_context_query_includes_last_stream_context_error(self):

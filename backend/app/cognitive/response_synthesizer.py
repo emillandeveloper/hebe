@@ -6,6 +6,7 @@ import uuid
 from typing import Any
 
 from app.cognitive.context_builder import BuiltContext
+from app.cognitive.command_result import CommandResult
 from app.cognitive.entity_resolver import entity_prompt_lines
 from app.cognitive.models import DeliberationResult, ExecutionResult
 from app.cognitive.persona.chatter_names import normalize_chatter_name
@@ -447,6 +448,52 @@ class ResponseSynthesizer:
         return system, user
 
 
+
+    def synthesize_command_result(self, result: CommandResult, *, input_text: str | None = None, state: Any | None = None) -> str:
+        fallback = result.fallback_text or result.user_visible_summary or "Hecho."
+        if not result.requires_model_response or not result.success:
+            return fallback
+
+        system = (
+            f"{build_hebe_core_identity()}\n\n"
+            "You are writing Hebe's final reply after deterministic code already updated state.\n"
+            "Rules:\n"
+            "- Speak as Hebe, warm, concise, slightly divine/playful if natural.\n"
+            "- One short reply only, no markdown.\n"
+            "- Do not undo, reinterpret, or add actions beyond the state_changes.\n"
+            "- Do not ask for clarification if the action is already resolved.\n"
+            "- Keep the exact meaning of the message_goal and state_changes.\n"
+            "- If constraints forbid a topic, avoid it."
+        )
+        user = (
+            "Manual command result:\n"
+            f"action_type: {result.action_type}\n"
+            f"success: {result.success}\n"
+            f"user_input: {input_text or ''}\n"
+            f"user_visible_summary: {result.user_visible_summary}\n"
+            f"state_changes: {result.state_changes}\n"
+            f"constraints: {result.constraints}\n"
+            f"suggested_tone: {result.suggested_tone}\n"
+            f"message_goal: {result.metadata.get('message_goal') or result.user_visible_summary}\n\n"
+            "Write Hebe's reply now."
+        )
+        raw = self._call_model(system, user, fallback=fallback)
+        reply = clean_jarvis_reply(raw).strip()
+        if not self._valid_command_reply(reply, result):
+            return fallback
+        return reply
+
+    def _valid_command_reply(self, reply: str, result: CommandResult) -> bool:
+        if not reply:
+            return False
+        lowered = reply.lower()
+        if result.action_type in {"tts_scope_resolved", "tts_disabled"} and "?" in reply:
+            return False
+        if result.action_type == "tts_scope_resolved" and result.metadata.get("scope") == "local":
+            forbidden = ("tambien para el stream", "también para el stream", "en stream activ")
+            if any(item in lowered for item in forbidden):
+                return False
+        return True
 
     # =========================
     # Model call con system/user separados

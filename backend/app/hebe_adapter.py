@@ -96,3 +96,47 @@ class HebeAdapter:
             return
 
         await self.event_q.put(Event(type="status", data={"command": name, "payload": payload}, ts=time.time()))
+
+    async def set_audio_input_device(
+        self,
+        *,
+        device_id: str = "",
+        device_name: str = "",
+        host_api: str = "",
+        sample_rate: int | None = None,
+        channels: int | None = None,
+        signature: str = "",
+    ) -> bool:
+        if not self.running or not self._engine:
+            await self.event_q.put(
+                Event(
+                    type="status",
+                    data={
+                        "stt_input_device": {
+                            "device_id": device_id,
+                            "device_name": device_name,
+                            "host_api": host_api,
+                            "applied": False,
+                            "reason": "engine_not_running",
+                        }
+                    },
+                    ts=time.time(),
+                )
+            )
+            return False
+        selected = self._engine.apply_stt_input_device(
+            device_id=device_id,
+            device_name=device_name,
+            host_api=host_api,
+            sample_rate=sample_rate,
+            channels=channels,
+            signature=signature,
+        )
+        await self.event_q.put(
+            Event(
+                type="status",
+                data={"stt_input_device": selected},
+                ts=time.time(),
+            )
+        )
+        return True

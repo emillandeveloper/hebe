@@ -2,6 +2,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+from app.cognitive.command_result import CommandResult
 from app.hebe_engine import HebeEngine
 from app.stream.state import StreamSessionState
 
@@ -41,7 +42,9 @@ class TTSControlTests(unittest.TestCase):
         reply = engine._handle_tts_manual_command("Hebe, desactiva tu voz")
 
         self.assertFalse(engine.runtime.state.tts_enabled)
-        self.assertEqual(reply, "Vale, Leo. Me quedo en texto.")
+        self.assertIsInstance(reply, CommandResult)
+        self.assertEqual(reply.action_type, "tts_disabled")
+        self.assertEqual(reply.fallback_text, "Vale, Leo. Me quedo en texto.")
 
     def test_global_tts_on_command_enables_voice(self):
         engine = make_engine(tts_enabled=False)
@@ -50,6 +53,7 @@ class TTSControlTests(unittest.TestCase):
 
         self.assertTrue(engine.runtime.state.tts_enabled)
         self.assertIsNotNone(engine.runtime.state.pending_tts_scope)
+        self.assertIsInstance(reply, CommandResult)
         self.assertIn("solo", reply.lower())
 
     def test_global_tts_on_command_with_suffix_hebe_enables_voice(self):
@@ -59,6 +63,7 @@ class TTSControlTests(unittest.TestCase):
 
         self.assertTrue(engine.runtime.state.tts_enabled)
         self.assertIsNotNone(engine.runtime.state.pending_tts_scope)
+        self.assertIsInstance(reply, CommandResult)
         self.assertIn("stream", reply.lower())
 
     def test_tts_scope_followup_local_does_not_trigger_reminder(self):
@@ -70,7 +75,117 @@ class TTSControlTests(unittest.TestCase):
         self.assertTrue(engine.runtime.state.tts_enabled)
         self.assertIsNone(engine.runtime.state.pending_tts_scope)
         self.assertFalse(engine.runtime.state.stream.policies.allow_tts_idle_prompts)
+        self.assertIsInstance(reply, CommandResult)
         self.assertIn("solo", reply.lower())
+
+    def test_tts_scope_followup_short_local_resolves(self):
+        engine = make_engine(tts_enabled=False)
+        engine._handle_tts_manual_command("hebe activa la voz")
+
+        reply = engine._handle_pending_manual_intent("local")
+
+        self.assertTrue(engine.runtime.state.tts_enabled)
+        self.assertIsNone(engine.runtime.state.pending_tts_scope)
+        self.assertFalse(engine.runtime.state.stream.policies.allow_tts_idle_prompts)
+        self.assertIsInstance(reply, CommandResult)
+        self.assertIn("stream", reply.lower())
+
+    def test_tts_scope_followup_aqui_resolves_local(self):
+        engine = make_engine(tts_enabled=False)
+        engine._handle_tts_manual_command("activa la voz")
+
+        reply = engine._handle_pending_manual_intent("aquí")
+
+        self.assertIsNone(engine.runtime.state.pending_tts_scope)
+        self.assertIsInstance(reply, CommandResult)
+        self.assertIn("stream", reply.lower())
+
+    def test_tts_scope_followup_stream_resolves_stream(self):
+        engine = make_engine(tts_enabled=False)
+        engine.runtime.state.stream.policies.allow_tts_replies = False
+        engine._handle_tts_manual_command("activa la voz")
+
+        reply = engine._handle_pending_manual_intent("stream")
+
+        self.assertIsNone(engine.runtime.state.pending_tts_scope)
+        self.assertTrue(engine.runtime.state.stream.policies.allow_tts_replies)
+        self.assertTrue(engine.runtime.state.stream.policies.allow_tts_event_replies)
+        self.assertTrue(engine.runtime.state.stream.policies.allow_tts_raid_thanks)
+        self.assertIsInstance(reply, CommandResult)
+        self.assertIn("stream", reply.lower())
+
+    def test_tts_scope_followup_tambien_en_directo_resolves_stream(self):
+        engine = make_engine(tts_enabled=False)
+        engine.runtime.state.stream.policies.allow_tts_replies = False
+        engine._handle_tts_manual_command("activa la voz")
+
+        reply = engine._handle_pending_manual_intent("también en directo")
+
+        self.assertIsNone(engine.runtime.state.pending_tts_scope)
+        self.assertTrue(engine.runtime.state.stream.policies.allow_tts_replies)
+        self.assertIsInstance(reply, CommandResult)
+        self.assertIn("eventos", reply.lower())
+
+    def test_pending_tts_scope_does_not_hijack_new_explicit_text_command(self):
+        engine = make_engine(tts_enabled=False)
+        engine._handle_tts_manual_command("activa la voz")
+
+        reply = engine._handle_pending_manual_intent("solo texto")
+
+        self.assertIsNone(reply)
+        self.assertIsNone(engine.runtime.state.pending_tts_scope)
+
+    def test_pending_tts_scope_does_not_hijack_new_explicit_stt_command(self):
+        engine = make_engine(tts_enabled=False)
+        engine.stream_ambient_stt_enabled = True
+        engine._handle_tts_manual_command("activa la voz")
+
+        pending_reply = engine._handle_pending_manual_intent("Hebe, desactiva STT ambiental")
+        action = engine._handle_stream_manual_command("Hebe, desactiva STT ambiental")
+
+        self.assertIsNone(pending_reply)
+        self.assertIsNone(engine.runtime.state.pending_tts_scope)
+        self.assertIsInstance(action, CommandResult)
+        self.assertEqual(action.action_type, "stream_ambient_stt_disabled")
+        self.assertFalse(engine.stream_ambient_stt_enabled)
+
+    def test_pending_tts_scope_unclear_asks_once_then_defaults_local(self):
+        engine = make_engine(tts_enabled=False)
+        engine._handle_tts_manual_command("activa la voz")
+
+        first = engine._handle_pending_manual_intent("patata")
+        second = engine._handle_pending_manual_intent("patata otra vez")
+
+        self.assertIn("local", first.lower())
+        self.assertIsNone(engine.runtime.state.pending_tts_scope)
+        self.assertIsInstance(second, CommandResult)
+        self.assertIn("local", second.lower())
+
+    def test_synthesizer_receives_command_result(self):
+        engine = make_engine(tts_enabled=False)
+        synth = Mock()
+        synth.synthesize_command_result.return_value = "Hecho con estilo."
+        engine.response_synthesizer = synth
+
+        result = engine._handle_pending_manual_intent("no guardes nada")
+        self.assertIsNone(result)
+        command_result = engine._handle_tts_manual_command("activa la voz")
+        text = engine._synthesize_command_result(command_result, input_text="activa la voz")
+
+        self.assertEqual(text, "Hecho con estilo.")
+        synth.synthesize_command_result.assert_called_once()
+        self.assertIs(synth.synthesize_command_result.call_args.args[0], command_result)
+
+    def test_synthesizer_failure_uses_fallback(self):
+        engine = make_engine(tts_enabled=False)
+        synth = Mock()
+        synth.synthesize_command_result.side_effect = RuntimeError("boom")
+        engine.response_synthesizer = synth
+        command_result = engine._handle_tts_manual_command("desactiva la voz")
+
+        text = engine._synthesize_command_result(command_result, input_text="desactiva la voz")
+
+        self.assertEqual(text, command_result.fallback_text)
 
     def test_cancel_pending_reminder_clears_state(self):
         engine = make_engine(tts_enabled=False)

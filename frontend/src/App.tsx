@@ -56,6 +56,33 @@ type DbCellSelection = {
   value: unknown;
 } | null;
 
+type AudioInputDevice = {
+  id: string;
+  index?: number;
+  name: string;
+  host_api?: string;
+  is_default?: boolean;
+  is_default_input?: boolean;
+  is_loopback?: boolean;
+  channels?: number;
+  sample_rate?: number;
+  max_input_channels?: number;
+  max_output_channels?: number;
+  default_sample_rate?: number;
+  display_label?: string;
+  signature?: string;
+};
+
+type VoiceCommandDebug = {
+  raw_text?: string;
+  normalized_text?: string;
+  intent?: string;
+  target?: string;
+  confidence?: number;
+  status?: string;
+  reason?: string;
+};
+
 const LS_KEY = "hebe.ui.settings.v1";
 
 function readSettings(): { volume: number; speed: number; lang: LangMode } {
@@ -85,7 +112,22 @@ export default function App() {
   const [engineReady, setEngineReady] = useState<boolean>(false);
 
   const [ttsState, setTtsState] = useState<"idle" | "speaking">("idle");
+  const [ttsEnabled, setTtsEnabled] = useState<boolean | null>(null);
+  const [sttStatus, setSttStatus] = useState<string>("off");
   const [sttLive, setSttLive] = useState<string>("");
+  const [sttLevel, setSttLevel] = useState<number>(0);
+  const [sttRms, setSttRms] = useState<number>(0);
+  const [sttPeak, setSttPeak] = useState<number>(0);
+  const [lastSttFinal, setLastSttFinal] = useState<string>("");
+  const [lastSttLevelAt, setLastSttLevelAt] = useState<number>(Date.now());
+  const [uiTick, setUiTick] = useState<number>(Date.now());
+  const [micDevices, setMicDevices] = useState<AudioInputDevice[]>([]);
+  const [selectedMicId, setSelectedMicId] = useState<string>("");
+  const [selectedMicName, setSelectedMicName] = useState<string>("");
+  const [selectedMicHostApi, setSelectedMicHostApi] = useState<string>("");
+  const [micTestResult, setMicTestResult] = useState<any>(null);
+  const [micError, setMicError] = useState<string>("");
+  const [voiceCommandDebug, setVoiceCommandDebug] = useState<VoiceCommandDebug | null>(null);
 
   const [messages, setMessages] = useState<ChatMsg[]>(() => ([]));
   const [logs, setLogs] = useState<{ id: string; ev: HebeEvent }[]>([]);
@@ -236,14 +278,53 @@ export default function App() {
         if (typeof ev.data?.running === "boolean") setBackendRunning(ev.data.running);
         if (typeof ev.data?.stage === "string") setEngineStage(ev.data.stage);
         if (typeof ev.data?.engine === "string") setEngineReady(ev.data.engine === "ready");
+        if (typeof ev.data?.tts_enabled === "boolean") setTtsEnabled(ev.data.tts_enabled);
+        if (typeof ev.data?.stt_enabled === "boolean") setSttStatus(ev.data.stt_enabled ? "listening" : "off");
+        if (typeof ev.data?.stt === "string") setSttStatus(ev.data.stt);
+        if (typeof ev.data?.last_stt_error === "string" && ev.data.last_stt_error) setMicError(ev.data.last_stt_error);
+        if (ev.data?.stt_input_device && typeof ev.data.stt_input_device === "object") {
+          const device = ev.data.stt_input_device as any;
+          if (typeof device.device_id === "string") setSelectedMicId(device.device_id);
+          if (typeof device.device_name === "string") setSelectedMicName(device.device_name);
+          if (typeof device.host_api === "string") setSelectedMicHostApi(device.host_api);
+          if (typeof device.error === "string") setMicError(device.error);
+          if (typeof device.failed_error === "string" && device.failed_error) setMicError(device.failed_error);
+        }
         break;
       }
       case "stt.partial": {
-        setSttLive(String(ev.data?.text ?? ""));
+        const text = String(ev.data?.text ?? "");
+        const parsedLevel = Number((text.match(/lvl\s+([0-9.]+)/i) || [])[1] ?? 0);
+        const parsedRms = Number((text.match(/rms\s+([0-9.]+)/i) || [])[1] ?? parsedLevel);
+        const parsedPeak = Number((text.match(/peak\s+([0-9.]+)/i) || [])[1] ?? parsedLevel);
+        const level = typeof ev.data?.level === "number" ? Number(ev.data.level) : parsedLevel;
+        const rms = typeof ev.data?.rms === "number" ? Number(ev.data.rms) : parsedRms;
+        const peak = typeof ev.data?.peak === "number" ? Number(ev.data.peak) : parsedPeak;
+        setSttLive(text);
+        if (Number.isFinite(level)) {
+          setSttLevel(level);
+          setSttRms(Number.isFinite(rms) ? rms : level);
+          setSttPeak(Number.isFinite(peak) ? peak : level);
+          if (level > 0.001 || rms > 0.003) setLastSttLevelAt(Date.now());
+        }
         break;
       }
       case "stt.final": {
+        const text = String(ev.data?.text ?? "").trim();
         setSttLive("");
+        if (text) setLastSttFinal(text);
+        break;
+      }
+      case "voice.command": {
+        setVoiceCommandDebug({
+          raw_text: String(ev.data?.raw_text ?? ""),
+          normalized_text: String(ev.data?.normalized_text ?? ""),
+          intent: ev.data?.intent ? String(ev.data.intent) : "",
+          target: ev.data?.target ? String(ev.data.target) : "",
+          confidence: typeof ev.data?.confidence === "number" ? Number(ev.data.confidence) : undefined,
+          status: ev.data?.status ? String(ev.data.status) : "",
+          reason: ev.data?.reason ? String(ev.data.reason) : "",
+        });
         break;
       }
       case "chat.user": {
@@ -345,6 +426,98 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [volume, speed, lang]);
 
+  async function refreshMicDevices() {
+    setMicError("");
+    try {
+      const [devicesRes, selectedRes] = await Promise.all([
+        fetch(`${apiBase}/audio/input-devices`),
+        fetch(`${apiBase}/audio/input-device`),
+      ]);
+      if (!devicesRes.ok) throw new Error(await devicesRes.text());
+      const devicesPayload = await devicesRes.json();
+      const selectedPayload = selectedRes.ok ? await selectedRes.json() : {};
+      const devices = Array.isArray(devicesPayload?.devices) ? devicesPayload.devices : [];
+      setMicDevices(devices);
+      setSelectedMicId(String(selectedPayload?.device_id ?? ""));
+      setSelectedMicName(String(selectedPayload?.device_name ?? ""));
+      setSelectedMicHostApi(String(selectedPayload?.host_api ?? ""));
+      if (selectedPayload?.error) setMicError(String(selectedPayload.error));
+    } catch (err: any) {
+      setMicError(err?.message || "No he podido listar micrófonos.");
+    }
+  }
+
+  async function selectMic(deviceId: string) {
+    const device = micDevices.find((item) => String(item.id) === String(deviceId));
+    const deviceName = device?.name ?? "";
+    const hostApi = device?.host_api ?? "";
+    setSelectedMicId(deviceId);
+    setSelectedMicName(deviceName);
+    setSelectedMicHostApi(hostApi);
+    setMicTestResult(null);
+    setMicError("");
+    try {
+      const res = await fetch(`${apiBase}/audio/input-device`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          device_id: deviceId,
+          device_name: deviceName,
+          host_api: hostApi,
+          sample_rate: device?.default_sample_rate ?? device?.sample_rate ?? null,
+          channels: device?.max_input_channels ?? device?.channels ?? null,
+          signature: device?.signature ?? "",
+        }),
+      });
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok || payload?.ok === false) {
+        throw new Error(payload?.error || payload?.detail || "No he podido cambiar el micrófono.");
+      }
+      pushLog({ type: "status", data: { message: `Micrófono STT seleccionado: ${deviceName || "default"}` }, ts: Date.now() / 1000 });
+    } catch (err: any) {
+      setMicError(err?.message || "No he podido cambiar el micrófono.");
+    }
+  }
+
+  async function testSelectedMic() {
+    setMicError("");
+    setMicTestResult(null);
+    const device = micDevices.find((item) => String(item.id) === String(selectedMicId));
+    try {
+      const res = await fetch(`${apiBase}/audio/input-device/test`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          device_id: selectedMicId,
+          device_name: selectedMicName || device?.name || "",
+          host_api: selectedMicHostApi || device?.host_api || "",
+          seconds: 4,
+        }),
+      });
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok || payload?.ok === false) {
+        throw new Error(payload?.detail || payload?.error || "No he podido probar el micro.");
+      }
+      setMicTestResult(payload);
+      setSttRms(Number(payload?.rms ?? 0));
+      setSttPeak(Number(payload?.peak ?? 0));
+      setSttLevel(Number(payload?.peak ?? 0));
+      if (payload?.signal_detected) setLastSttLevelAt(Date.now());
+    } catch (err: any) {
+      setMicError(err?.message || "No he podido probar el micro.");
+    }
+  }
+
+  useEffect(() => {
+    refreshMicDevices();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [apiBase]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setUiTick(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+
   const [input, setInput] = useState("");
   const startDisabled = backendRunning === true;
   const stopDisabled = backendRunning === false;
@@ -411,7 +584,7 @@ export default function App() {
         {view === "database" ? (
           <DatabaseInspector apiBase={apiBase} />
         ) : view === "logs" ? (
-          <LogsView logs={logs} onClearVisible={(ids) => setLogs((prev) => prev.filter((item) => !ids.has(item.id)))} />
+          <LogsView apiBase={apiBase} logs={logs} onClearVisible={(ids) => setLogs((prev) => prev.filter((item) => !ids.has(item.id)))} />
         ) : (
         <main className="grid">
           <section className="glass panel chat">
@@ -477,9 +650,12 @@ export default function App() {
               ))}
             </div>
 
-            <QuickControlToolbar
+            <LiveControlToolbar
               disabled={!connected}
               onCommand={(command) => sendText(command)}
+              onStopSpeaking={() => sendCommand("stop_speaking")}
+              ttsEnabled={ttsEnabled}
+              sttStatus={sttStatus}
             />
 
             <div className="composer">
@@ -547,15 +723,36 @@ export default function App() {
                 </div>
               </div>
 
+              <MicSelector
+                devices={micDevices}
+                selectedId={selectedMicId}
+                selectedName={selectedMicName}
+                selectedHostApi={selectedMicHostApi}
+                rms={sttRms}
+                peak={sttPeak || sttLevel}
+                sttStatus={sttStatus}
+                lastPartial={sttLive}
+                lastFinal={lastSttFinal}
+                testResult={micTestResult}
+                warning={sttStatus !== "off" && sttStatus !== "idle" && uiTick - lastSttLevelAt > 10000 && sttRms <= 0.003 && (sttPeak || sttLevel) <= 0.001}
+                error={micError}
+                disabled={!connected}
+                onRefresh={refreshMicDevices}
+                onSelect={selectMic}
+                onTest={testSelectedMic}
+              />
+              <VoiceCommandDebugPanel debug={voiceCommandDebug} />
+
               <div className="card">
-                <div className="cardTitle row">
-                  <span>Estado</span>
-                  <button className="btn compact" onClick={() => setView("logs")}>Abrir Logs</button>
-                </div>
-                <div className="kv">
+                <div className="cardTitle">Estado</div>
+                <div className="statusList">
                   <div className="k">Conexión</div><div className="v">{connected ? "OK" : "OFF"}</div>
-                  <div className="k">Hebe</div><div className="v">{engineReady ? "lista" : "arrancando"}</div>
-                  <div className="k">TTS</div><div className="v">{ttsState}</div>
+                  <StatusLine label="Conexion" value={connected ? "OK" : "OFF"} tone={connected ? "ok" : "bad"} />
+                  <StatusLine label="Hebe" value={engineReady ? "lista" : "arrancando"} tone={engineReady ? "ok" : "warn"} />
+                  <StatusLine label="TTS" value={ttsEnabled === false ? "off" : ttsState} tone={ttsState === "speaking" ? "warn" : ttsEnabled === false ? "idle" : "ok"} />
+                  <StatusLine label="STT" value={sttStatus} tone={sttStatus === "recording" || sttStatus === "listening" ? "warn" : sttStatus === "off" ? "idle" : "ok"} />
+                  <StatusLine label="Stream" value="ver Estado" tone="idle" />
+                  <StatusLine label="Espontaneidad" value="ver Estado" tone="idle" />
                 </div>
 
               </div>
@@ -577,6 +774,7 @@ export default function App() {
 }
 
 function QuickControlToolbar({ disabled, onCommand }: { disabled: boolean; onCommand: (command: string) => void }) {
+  const [expanded, setExpanded] = useState(false);
   const groups = [
     {
       title: "Stream",
@@ -607,7 +805,7 @@ function QuickControlToolbar({ disabled, onCommand }: { disabled: boolean; onCom
         ["🎙️", "STT amb ON", "Hebe, activa STT ambiental"],
         ["🎙️", "STT amb OFF", "Hebe, desactiva STT ambiental"],
         ["👂", "Qué ha oído", "Hebe, qué ha oído del stream"],
-        ["🧹", "Limpiar oído", "Hebe, limpia oído del stream"],
+        ["🧹", "Limpiar", "Hebe, limpia contexto oído"],
         ["🔊", "Activar voz", "Hebe, activa la voz"],
         ["🔇", "Solo texto", "Hebe, desactiva la voz"],
         ["🛑", "Stop voz", "Hebe, desactiva la voz"],
@@ -622,57 +820,330 @@ function QuickControlToolbar({ disabled, onCommand }: { disabled: boolean; onCom
       ],
     },
   ] as const;
+  const items = groups.flatMap((group) => group.items.map((item) => ({ group: group.title, icon: item[0], label: item[1], command: item[2] })));
+  const visibleItems = expanded ? items : items.slice(0, 12);
 
   return (
-    <div className="quickToolbar">
-      {groups.map((group) => (
-        <div className="quickGroup" key={group.title}>
-          <div className="quickGroupTitle">{group.title}</div>
-          <div className="quickButtons">
-            {group.items.map(([icon, label, command]) => (
-              <button
-                className="quickBtn"
-                key={command}
-                disabled={disabled}
-                onClick={() => onCommand(command)}
-                title={command}
-              >
-                <span className="quickIcon">{icon}</span>
-                <span>{label}</span>
-              </button>
-            ))}
-          </div>
-        </div>
-      ))}
+    <div className={"quickToolbar compact " + (expanded ? "expanded" : "")}>
+      <div className="quickToolbarTop">
+        <span className="quickToolbarTitle">Live controls</span>
+        <button className="quickMoreBtn" onClick={() => setExpanded((value) => !value)}>
+          {expanded ? "Menos" : "Más"}
+        </button>
+      </div>
+      <div className="quickButtons">
+        {visibleItems.map((item) => (
+          <button
+            className="quickBtn"
+            key={item.command}
+            disabled={disabled}
+            onClick={() => onCommand(item.command)}
+            title={`${item.group}: ${item.command}`}
+          >
+            <span className="quickIcon">{item.icon}</span>
+            <span>{item.label}</span>
+          </button>
+        ))}
+      </div>
     </div>
   );
 }
 
-function LogsView({ logs, onClearVisible }: { logs: { id: string; ev: HebeEvent }[]; onClearVisible: (ids: Set<string>) => void }) {
+function StatusLine({ label, value, tone }: { label: string; value: string; tone: "ok" | "warn" | "bad" | "idle" }) {
+  return (
+    <div className="statusLine">
+      <span className="statusLabel">{label}</span>
+      <span className={"statusValue " + tone}>
+        <span className="statusDot" />
+        {value}
+      </span>
+    </div>
+  );
+}
+
+type QuickItem = {
+  icon: string;
+  label: string;
+  command: string;
+  featured?: boolean;
+};
+
+function LiveControlToolbar({
+  disabled,
+  onCommand,
+  onStopSpeaking,
+  ttsEnabled,
+  sttStatus,
+}: {
+  disabled: boolean;
+  onCommand: (command: string) => void;
+  onStopSpeaking: () => void;
+  ttsEnabled: boolean | null;
+  sttStatus: string;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const sttOn = sttStatus !== "off" && sttStatus !== "idle";
+  const groups: { title: string; items: QuickItem[] }[] = [
+    {
+      title: "STREAM",
+      items: [
+        { icon: "🔄", label: "Contexto", command: "Hebe, actualiza contexto de stream", featured: true },
+        { icon: "📡", label: "Estado", command: "Hebe, qué contexto de stream tienes", featured: true },
+        { icon: "🧠", label: "Partida", command: "Hebe, qué contexto de partida tienes", featured: true },
+        { icon: "💾", label: "Snapshot", command: "Hebe, guarda snapshot del stream" },
+        { icon: "🏁", label: "Finalizar", command: "Hebe, finaliza stream" },
+      ],
+    },
+    {
+      title: "ESPONTANEIDAD",
+      items: [
+        { icon: "💬", label: "Estado", command: "Hebe, estado de espontaneidad", featured: true },
+        { icon: "⏸", label: "Pausar", command: "Hebe, pausa espontaneidad", featured: true },
+        { icon: "▶", label: "Activar", command: "Hebe, activa espontaneidad", featured: true },
+        { icon: "🤫", label: "Reactiva", command: "Hebe, modo reactiva" },
+        { icon: "🧍", label: "Compañera", command: "Hebe, modo compañera" },
+        { icon: "🎭", label: "Show", command: "Hebe, modo show" },
+        { icon: "🔇", label: "Idle voz OFF", command: "Hebe, espontaneidad en texto" },
+        { icon: "🔊", label: "Idle voz ON", command: "Hebe, espontaneidad con voz" },
+      ],
+    },
+    {
+      title: "VOZ / STT",
+      items: [
+        { icon: "🎙", label: "STT ON", command: "Hebe, activa STT ambiental", featured: !sttOn },
+        { icon: "🎙", label: "STT OFF", command: "Hebe, desactiva STT ambiental", featured: sttOn },
+        { icon: "👂", label: "Oído", command: "Hebe, qué ha oído del stream" },
+        { icon: "🧹", label: "Limpiar", command: "Hebe, limpia contexto oído" },
+        { icon: "🔊", label: "Voz ON", command: "Hebe, activa la voz", featured: ttsEnabled === false },
+        { icon: "🔇", label: "Solo texto", command: "Hebe, solo texto", featured: ttsEnabled !== false },
+        { icon: "🛑", label: "Stop voz", command: "__stop_speaking__", featured: true },
+      ],
+    },
+    {
+      title: "TWITCH",
+      items: [
+        { icon: "📣", label: "SO", command: "Hebe, prueba SO", featured: true },
+        { icon: "🧪", label: "Raid", command: "Hebe, prueba raid", featured: true },
+        { icon: "👥", label: "Chat", command: "Hebe, qué está pasando en chat" },
+      ],
+    },
+  ];
+
+  return (
+    <div className={"quickToolbar compact grouped " + (expanded ? "expanded" : "")}>
+      <div className="quickToolbarTop">
+        <span className="quickToolbarTitle">Live control dashboard</span>
+        <button className="quickMoreBtn" onClick={() => setExpanded((value) => !value)}>
+          {expanded ? "Menos" : "Más"}
+        </button>
+      </div>
+      <div className="quickGroupGrid">
+        {groups.map((group) => {
+          const items = expanded ? group.items : group.items.filter((item) => item.featured);
+          return (
+            <div className="quickGroup" key={group.title}>
+              <div className="quickGroupTitle">{group.title}</div>
+              <div className="quickButtons">
+                {items.map((item) => {
+                  const active = (item.label === "Voz ON" && ttsEnabled === true)
+                    || (item.label === "Solo texto" && ttsEnabled === false)
+                    || (item.label === "STT OFF" && sttOn);
+                  return (
+                    <button
+                      className={"quickBtn " + (active ? "active" : "")}
+                      key={item.command}
+                      disabled={disabled}
+                      onClick={() => item.command === "__stop_speaking__" ? onStopSpeaking() : onCommand(item.command)}
+                      title={`${group.title}: ${item.command === "__stop_speaking__" ? "stop speaking" : item.command}`}
+                    >
+                      <span className="quickIcon">{item.icon}</span>
+                      <span>{item.label}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function MicSelector({
+  devices,
+  selectedId,
+  selectedName,
+  selectedHostApi,
+  rms,
+  peak,
+  sttStatus,
+  lastPartial,
+  lastFinal,
+  testResult,
+  warning,
+  error,
+  disabled,
+  onRefresh,
+  onSelect,
+  onTest,
+}: {
+  devices: AudioInputDevice[];
+  selectedId: string;
+  selectedName: string;
+  selectedHostApi: string;
+  rms: number;
+  peak: number;
+  sttStatus: string;
+  lastPartial: string;
+  lastFinal: string;
+  testResult: any;
+  warning: boolean;
+  error: string;
+  disabled: boolean;
+  onRefresh: () => void;
+  onSelect: (deviceId: string) => void;
+  onTest: () => void;
+}) {
+  const pct = Math.max(0, Math.min(100, Math.round(Math.max(rms * 500, peak * 100))));
+  const selectedDevice = devices.find((item) => String(item.id) === String(selectedId));
+  const defaultDevice = devices.find((item) => item.is_default_input || item.is_default);
+  const currentName = selectedDevice?.display_label || selectedName || defaultDevice?.display_label || "Dispositivo por defecto";
+  const defaultLabel = defaultDevice?.display_label || "no detectado";
+  const selectedIsDefault = selectedDevice && defaultDevice && String(selectedDevice.id) === String(defaultDevice.id);
+  return (
+    <div className="card micCard">
+      <div className="cardTitle row">
+        <span>Micrófono STT</span>
+        <div className="miniActions">
+          <button className="miniBtn" disabled={disabled} onClick={onRefresh}>Actualizar</button>
+          <button className="miniBtn" disabled={disabled} onClick={onTest}>Probar micro</button>
+        </div>
+      </div>
+      <select className="select" value={selectedId} disabled={disabled} onChange={(e) => onSelect(e.target.value)}>
+        <option value="">Default del sistema</option>
+        {devices.map((device) => (
+          <option key={device.id} value={device.id}>
+            {device.display_label || `${device.name} - ${device.host_api || "API ?"} - id ${device.id}`}{device.is_default_input || device.is_default ? " (default)" : ""}
+          </option>
+        ))}
+      </select>
+      <div className="micCurrent" title={currentName}>{currentName}</div>
+      <div className="muted small">Default Windows: {defaultLabel}</div>
+      {selectedDevice && !selectedIsDefault && <div className="muted small">Seleccionado distinto del default.</div>}
+      {selectedHostApi && <div className="muted small">Ruta: {selectedHostApi}</div>}
+      {selectedDevice?.host_api_warning && <div className="micWarn">{selectedDevice.host_api_warning}</div>}
+      <div className="meter" aria-label="Nivel de entrada STT">
+        <div className="meterFill" style={{ width: `${pct}%` }} />
+      </div>
+      <div className="micMeta">
+        <span>STT: {sttStatus}</span>
+        <span>rms {rms.toFixed(4)} / peak {peak.toFixed(4)}</span>
+      </div>
+      {lastPartial && <div className="muted small">Parcial: <span className="mono">{lastPartial}</span></div>}
+      {lastFinal && <div className="muted small">Último final: {lastFinal}</div>}
+      {testResult && (
+        <div className={testResult.signal_detected ? "micOk" : "micWarn"}>
+          {testResult.signal_detected ? "Micro OK: entra señal." : "No entra señal en este dispositivo. Prueba otro Yeti GX / host API."}
+          <div className="mono">RMS {Number(testResult.rms || 0).toFixed(5)} / Peak {Number(testResult.peak || 0).toFixed(5)}</div>
+          <div className="mono">{testResult.sample_rate}Hz / {testResult.channels}ch</div>
+        </div>
+      )}
+      {warning && <div className="micWarn">No entra señal del micrófono.</div>}
+      {error && <div className="micError">{error}</div>}
+      {!devices.length && !error && <div className="muted small">No hay micrófonos detectados.</div>}
+    </div>
+  );
+}
+
+function VoiceCommandDebugPanel({ debug }: { debug: VoiceCommandDebug | null }) {
+  if (!debug || (!debug.raw_text && !debug.normalized_text)) return null;
+  const status = debug.status || "unknown";
+  const statusClass = status === "accepted" ? "ok" : status === "needs_confirmation" ? "warn" : "bad";
+  return (
+    <div className="voiceCommandDebug">
+      <div className="voiceCommandDebugTop">
+        <span>Comando de voz</span>
+        <span className={`voiceCommandBadge ${statusClass}`}>{status}</span>
+      </div>
+      <div className="voiceCommandGrid">
+        <span>Raw</span><code>{debug.raw_text || "-"}</code>
+        <span>Normalizado</span><code>{debug.normalized_text || "-"}</code>
+        <span>Intent</span><code>{debug.intent || "-"}</code>
+        <span>Target</span><code>{debug.target || "-"}</code>
+        <span>Confianza</span><code>{typeof debug.confidence === "number" ? debug.confidence.toFixed(2) : "-"}</code>
+        <span>Razón</span><code>{debug.reason || "-"}</code>
+      </div>
+    </div>
+  );
+}
+
+function LogsView({ apiBase, logs, onClearVisible }: { apiBase: string; logs: { id: string; ev: HebeEvent }[]; onClearVisible: (ids: Set<string>) => void }) {
+  const [backendBuffer, setBackendBuffer] = useState<{ id: string; ev: HebeEvent }[]>([]);
   const [filter, setFilter] = useState<LogFilter>("all");
   const [search, setSearch] = useState("");
   const [autoScroll, setAutoScroll] = useState(true);
   const [wrap, setWrap] = useState(true);
+  const [hiddenKeys, setHiddenKeys] = useState<Set<string>>(() => new Set());
   const listRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function loadBackendLogs() {
+      try {
+        const res = await fetch(`${apiBase}/debug/logs?limit=1500`);
+        const payload = await res.json();
+        if (cancelled) return;
+        const entries = Array.isArray(payload?.logs) ? payload.logs : [];
+        setBackendBuffer(entries.map((entry: any, idx: number) => ({
+          id: `backend-buffer-${entry.ts || idx}-${idx}`,
+          ev: { type: "backend.log", data: entry, ts: Number(entry.ts || Date.now() / 1000) },
+        })));
+      } catch {
+        if (!cancelled) setBackendBuffer([]);
+      }
+    }
+    loadBackendLogs();
+    const timer = window.setInterval(loadBackendLogs, 3000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [apiBase]);
+
+  const mergedLogs = useMemo(() => {
+    const seen = new Set<string>();
+    return [...backendBuffer, ...logs].filter((item) => {
+      const key = logEntryKey(item);
+      if (seen.has(key)) return false;
+      if (hiddenKeys.has(key)) return false;
+      seen.add(key);
+      return true;
+    }).sort((a, b) => a.ev.ts - b.ev.ts);
+  }, [backendBuffer, logs, hiddenKeys]);
 
   const filtered = useMemo(() => {
     const needle = search.trim().toLowerCase();
-    return logs.filter(({ ev }) => {
+    return mergedLogs.filter(({ ev }) => {
       const type = ev.type || "";
-      const text = `${type} ${safeString(ev.data)}`.toLowerCase();
+      const category = String(ev.data?.category || "");
+      const level = String(ev.data?.level || "");
+      const raw = String(ev.data?.raw || ev.data?.message || safeString(ev.data));
+      const text = `${type} ${category} ${level} ${raw}`.toLowerCase();
       const matchesSearch = !needle || text.includes(needle);
       const matchesFilter =
         filter === "all" ||
         type === filter ||
-        (filter === "twitch" && type.includes("twitch")) ||
-        (filter === "stream_context" && (type.includes("stream") || text.includes("stream_context"))) ||
-        (filter === "stt" && type.startsWith("stt")) ||
-        (filter === "tts" && type.startsWith("tts")) ||
-        (filter === "db" && text.includes("db")) ||
-        (filter === "errors" && type === "error");
+        category === filter ||
+        (filter === "twitch" && (type.includes("twitch") || category === "twitch")) ||
+        (filter === "stream_context" && (type.includes("stream") || category === "stream_context" || text.includes("stream_context"))) ||
+        (filter === "stt" && (type.startsWith("stt") || category === "stt")) ||
+        (filter === "tts" && (type.startsWith("tts") || category === "tts")) ||
+        (filter === "db" && (category === "db" || text.includes("[hebe][db"))) ||
+        (filter === "errors" && (type === "error" || level === "error" || category === "errors"));
       return matchesSearch && matchesFilter;
     });
-  }, [logs, filter, search]);
+  }, [mergedLogs, filter, search]);
 
   useEffect(() => {
     if (autoScroll && listRef.current) {
@@ -680,8 +1151,8 @@ function LogsView({ logs, onClearVisible }: { logs: { id: string; ev: HebeEvent 
     }
   }, [filtered.length, autoScroll]);
 
-  async function copyLogs() {
-    const text = filtered.map(({ ev }) => `${fmtTime(ev.ts)} ${ev.type} ${safeString(ev.data)}`).join("\n");
+  async function copyLogs(entries = filtered) {
+    const text = entries.map(({ ev }) => `${fmtTime(ev.ts)} ${formatLogKind(ev)} ${formatLogMessage(ev)}`).join("\n");
     await navigator.clipboard.writeText(text);
   }
 
@@ -693,7 +1164,7 @@ function LogsView({ logs, onClearVisible }: { logs: { id: string; ev: HebeEvent 
         <div className="panelHeader">
           <div>
             <div className="panelTitle">Logs</div>
-            <div className="panelMeta">{filtered.length} visibles / {logs.length} eventos</div>
+            <div className="panelMeta">{filtered.length} visibles / {mergedLogs.length} eventos</div>
           </div>
           <div className="logsActions">
             <input className="input logsSearch" placeholder="Buscar logs..." value={search} onChange={(e) => setSearch(e.target.value)} />
@@ -702,19 +1173,28 @@ function LogsView({ logs, onClearVisible }: { logs: { id: string; ev: HebeEvent 
             </select>
             <label className="toggle mini"><input type="checkbox" checked={autoScroll} onChange={(e) => setAutoScroll(e.target.checked)} /><span className="toggleLabel">Auto</span></label>
             <label className="toggle mini"><input type="checkbox" checked={wrap} onChange={(e) => setWrap(e.target.checked)} /><span className="toggleLabel">Wrap</span></label>
-            <button className="btn compact" onClick={copyLogs}>Copiar</button>
-            <button className="btn compact danger" onClick={() => onClearVisible(new Set(filtered.map((item) => item.id)))}>Limpiar visibles</button>
+            <button className="btn compact" onClick={() => copyLogs()}>Copiar visibles</button>
+            <button className="btn compact" onClick={() => copyLogs(filtered.slice(-200))}>Copiar últimos 200</button>
+            <button
+              className="btn compact danger"
+              onClick={() => {
+                setHiddenKeys((prev) => new Set([...prev, ...filtered.map(logEntryKey)]));
+                onClearVisible(new Set(filtered.map((item) => item.id)));
+              }}
+            >
+              Limpiar visibles
+            </button>
           </div>
         </div>
         <div className={"logsFullBox " + (wrap ? "wrap" : "nowrap")} ref={listRef}>
           {filtered.map(({ id, ev }) => (
             <div className="logFullLine" key={id}>
               <span className="mono muted">{fmtTime(ev.ts)}</span>
-              <span className={"badge " + (ev.type === "error" ? "bad" : ev.type.startsWith("tts") ? "warn" : "")}>{ev.type}</span>
-              <span className="mono logMsg">{safeString(ev.data)}</span>
+              <span className={"badge " + logBadgeClass(ev)}>{formatLogKind(ev)}</span>
+              <span className="mono logMsg">{formatLogMessage(ev)}</span>
             </div>
           ))}
-          {filtered.length === 0 && <div className="emptyState">No hay logs con ese filtro.</div>}
+          {filtered.length === 0 && <div className="emptyState">No hay logs visibles con este filtro.</div>}
         </div>
       </section>
     </main>
@@ -1079,6 +1559,33 @@ function formatDbValue(value: unknown, pretty = false) {
     }
   }
   return text;
+}
+
+function formatLogKind(ev: HebeEvent) {
+  const category = String(ev.data?.category || "").trim();
+  const source = String(ev.data?.source || "").trim();
+  if (ev.type === "backend.log") return category ? `backend:${category}` : `backend:${source || "log"}`;
+  return ev.type;
+}
+
+function logEntryKey(item: { id: string; ev: HebeEvent }) {
+  return `${item.ev.type}:${item.ev.ts}:${formatLogMessage(item.ev)}`;
+}
+
+function formatLogMessage(ev: HebeEvent) {
+  if (ev.type === "backend.log") {
+    return String(ev.data?.raw || ev.data?.message || "");
+  }
+  return safeString(ev.data);
+}
+
+function logBadgeClass(ev: HebeEvent) {
+  const level = String(ev.data?.level || "");
+  const category = String(ev.data?.category || "");
+  if (ev.type === "error" || level === "error" || category === "errors") return "bad";
+  if (ev.type.startsWith("tts") || category === "tts" || category === "stream_context") return "warn";
+  if (category === "twitch" || category === "db") return "ok";
+  return "";
 }
 
 function safeString(x: any) {

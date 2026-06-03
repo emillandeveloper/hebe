@@ -31,6 +31,12 @@ class StreamSessionState:
     last_voice_event: Optional[str] = None
     last_voice_event_ts: float = 0.0
     last_voice_summary: Optional[str] = None
+    last_voice_raw_transcript: Optional[str] = None
+    last_voice_normalized_command: Optional[str] = None
+    last_voice_command_intent: Optional[str] = None
+    last_voice_command_target: Optional[str] = None
+    last_voice_command_status: Optional[str] = None
+    last_voice_command_confidence: float = 0.0
     leo_mood_hint: Optional[str] = None
     last_event_id: Optional[str] = None
     last_chat_activity_ts: float = 0.0

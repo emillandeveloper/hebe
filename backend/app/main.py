@@ -10,6 +10,8 @@ from .ws import WSManager
 from .events import Event, ClientMsg
 from .hebe_adapter import HebeAdapter
 from .api.debug import router as debug_router
+from .api.audio import router as audio_router
+from .core.log_bus import get_recent_logs, install_log_capture
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -25,6 +27,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.include_router(debug_router)
+app.include_router(audio_router)
 
 ws_manager = WSManager()
 event_q: asyncio.Queue[Event] = asyncio.Queue()
@@ -137,6 +140,19 @@ def debug_memory():
 @app.on_event("startup")
 async def startup():
     # NO arrancar el motor aquí (XTTS/Whisper pueden tardar bastante)
+    loop = asyncio.get_running_loop()
+
+    def _broadcast_backend_log(entry: dict) -> None:
+        try:
+            loop.call_soon_threadsafe(
+                event_q.put_nowait,
+                Event(type="backend.log", data=entry, ts=float(entry.get("ts") or time.time())),
+            )
+        except Exception:
+            pass
+
+    install_log_capture(_broadcast_backend_log)
+    print("[HEBE][LOG_BUS] capture installed", flush=True)
     asyncio.create_task(event_pump())
     await event_q.put(Event(type="status", data={"backend": "up", "running": False}, ts=time.time()))
 
@@ -155,6 +171,8 @@ async def ws_endpoint(ws: WebSocket):
     await ws_manager.connect(ws)
     try:
         await ws.send_json({"type": "status", "data": {"connected": True}, "ts": time.time()})
+        for entry in get_recent_logs(limit=1000):
+            await ws.send_json({"type": "backend.log", "data": entry, "ts": float(entry.get("ts") or time.time())})
         
         if not hebe.running:
             asyncio.create_task(hebe.start())

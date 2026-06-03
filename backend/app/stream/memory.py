@@ -929,6 +929,32 @@ def get_chatter_profile(username: str) -> dict | None:
     return profile
 
 
+def list_recent_chatter_names(limit: int = 80) -> list[str]:
+    conn = db_sqlite.get_db_connection()
+    try:
+        rows = conn.execute(
+            """
+            SELECT username, display_name
+            FROM chatter_profiles
+            ORDER BY COALESCE(last_message_at, last_seen_at, updated_at, first_seen_at) DESC
+            LIMIT ?
+            """,
+            (max(1, min(int(limit or 80), 250)),),
+        ).fetchall()
+    except Exception:
+        conn.close()
+        return []
+    conn.close()
+
+    names: list[str] = []
+    for row in rows:
+        for key in ("username", "display_name"):
+            value = str(row[key] or "").strip()
+            if value and value.lower() not in {item.lower() for item in names}:
+                names.append(value)
+    return names
+
+
 def get_last_chatter_summary(username: str) -> dict | None:
     user = _norm_user(username)
     if not user:

@@ -5,6 +5,7 @@ import threading
 from typing import Optional
 
 from app.core.input_bus import submit_text_from_voice
+from app.services.stt_whisper import STTDeviceOpenFailure
 
 
 class STTWorker:
@@ -26,6 +27,9 @@ class STTWorker:
                     if text:
                         print(f"[STT_WORKER] voice -> {text!r}", flush=True)
                         submit_text_from_voice(text)
+                except STTDeviceOpenFailure as e:
+                    print(f"[STT_WORKER] paused: {e}", flush=True)
+                    break
                 except Exception as e:
                     print(f"[STT_WORKER] error: {e}", flush=True)
 
