@@ -110,6 +110,8 @@ export default function App() {
   const [backendRunning, setBackendRunning] = useState<boolean | null>(null);
   const [engineStage, setEngineStage] = useState<string>("");
   const [engineReady, setEngineReady] = useState<boolean>(false);
+  const [hebeSleeping, setHebeSleeping] = useState<boolean>(false);
+  const [wakeRequired, setWakeRequired] = useState<boolean>(false);
 
   const [ttsState, setTtsState] = useState<"idle" | "speaking">("idle");
   const [ttsEnabled, setTtsEnabled] = useState<boolean | null>(null);
@@ -279,6 +281,8 @@ export default function App() {
         if (typeof ev.data?.stage === "string") setEngineStage(ev.data.stage);
         if (typeof ev.data?.engine === "string") setEngineReady(ev.data.engine === "ready");
         if (typeof ev.data?.tts_enabled === "boolean") setTtsEnabled(ev.data.tts_enabled);
+        if (typeof ev.data?.hebe_sleeping === "boolean") setHebeSleeping(ev.data.hebe_sleeping);
+        if (typeof ev.data?.wake_required === "boolean") setWakeRequired(ev.data.wake_required);
         if (typeof ev.data?.stt_enabled === "boolean") setSttStatus(ev.data.stt_enabled ? "listening" : "off");
         if (typeof ev.data?.stt === "string") setSttStatus(ev.data.stt);
         if (typeof ev.data?.last_stt_error === "string" && ev.data.last_stt_error) setMicError(ev.data.last_stt_error);
@@ -656,6 +660,7 @@ export default function App() {
               onStopSpeaking={() => sendCommand("stop_speaking")}
               ttsEnabled={ttsEnabled}
               sttStatus={sttStatus}
+              hebeSleeping={hebeSleeping}
             />
 
             <div className="composer">
@@ -748,7 +753,8 @@ export default function App() {
                 <div className="statusList">
                   <div className="k">Conexión</div><div className="v">{connected ? "OK" : "OFF"}</div>
                   <StatusLine label="Conexion" value={connected ? "OK" : "OFF"} tone={connected ? "ok" : "bad"} />
-                  <StatusLine label="Hebe" value={engineReady ? "lista" : "arrancando"} tone={engineReady ? "ok" : "warn"} />
+                  <StatusLine label="Hebe" value={hebeSleeping ? "dormida" : engineReady ? "despierta" : "arrancando"} tone={hebeSleeping ? "idle" : engineReady ? "ok" : "warn"} />
+                  <StatusLine label="Wake required" value={wakeRequired ? "yes" : "no"} tone={wakeRequired ? "warn" : "ok"} />
                   <StatusLine label="TTS" value={ttsEnabled === false ? "off" : ttsState} tone={ttsState === "speaking" ? "warn" : ttsEnabled === false ? "idle" : "ok"} />
                   <StatusLine label="STT" value={sttStatus} tone={sttStatus === "recording" || sttStatus === "listening" ? "warn" : sttStatus === "off" ? "idle" : "ok"} />
                   <StatusLine label="Stream" value="ver Estado" tone="idle" />
@@ -874,12 +880,14 @@ function LiveControlToolbar({
   onStopSpeaking,
   ttsEnabled,
   sttStatus,
+  hebeSleeping,
 }: {
   disabled: boolean;
   onCommand: (command: string) => void;
   onStopSpeaking: () => void;
   ttsEnabled: boolean | null;
   sttStatus: string;
+  hebeSleeping: boolean;
 }) {
   const [expanded, setExpanded] = useState(false);
   const sttOn = sttStatus !== "off" && sttStatus !== "idle";
@@ -905,6 +913,13 @@ function LiveControlToolbar({
         { icon: "🎭", label: "Show", command: "Hebe, modo show" },
         { icon: "🔇", label: "Idle voz OFF", command: "Hebe, espontaneidad en texto" },
         { icon: "🔊", label: "Idle voz ON", command: "Hebe, espontaneidad con voz" },
+      ],
+    },
+    {
+      title: "HEBE",
+      items: [
+        { icon: "☀️", label: "Despertar", command: "Hebe, despierta", featured: hebeSleeping },
+        { icon: "🌙", label: "Dormir", command: "Hebe, duerme", featured: !hebeSleeping },
       ],
     },
     {

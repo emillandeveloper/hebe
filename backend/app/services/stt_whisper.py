@@ -37,6 +37,8 @@ class STTConfig:
 
     silence_threshold: float = 0.01
     silence_rms_threshold: float = float(os.getenv("HEBE_STT_SILENCE_RMS_THRESHOLD", "0.003") or "0.003")
+    silence_warning_after_seconds: float = float(os.getenv("HEBE_STT_SILENCE_WARNING_AFTER_SECONDS", "10") or "10")
+    silence_warning_rate_limit_seconds: float = float(os.getenv("HEBE_STT_SILENCE_WARNING_RATE_LIMIT_SECONDS", "60") or "60")
     max_device_open_retries: int = int(os.getenv("HEBE_STT_MAX_DEVICE_OPEN_RETRIES", "1") or "1")
     retry_backoff_seconds: float = float(os.getenv("HEBE_STT_RETRY_BACKOFF_SECONDS", "30") or "30")
     disable_on_device_open_failure: bool = os.getenv(
@@ -96,6 +98,7 @@ class STTService:
         self.failed_input_error = ""
         self.failed_input_ts = 0.0
         self._open_fail_counts: dict[str, int] = {}
+        self._last_silence_warning_ts = 0.0
 
         self._silence_frames_needed = int(self.cfg.silence_end_seconds / (self.cfg.chunk / self.cfg.rate))
 
@@ -404,7 +407,13 @@ class STTService:
                 tick += 1
 
                 if tick % 10 == 0:
-                    if rms <= self.cfg.silence_rms_threshold:
+                    now = time.time()
+                    if (
+                        rms <= self.cfg.silence_rms_threshold
+                        and now - start_time >= self.cfg.silence_warning_after_seconds
+                        and now - self._last_silence_warning_ts >= self.cfg.silence_warning_rate_limit_seconds
+                    ):
+                        self._last_silence_warning_ts = now
                         print(
                             f"[HEBE][STT][WARN] selected input opened but signal is silent rms={rms:.4f} peak={peak:.4f}",
                             flush=True,
