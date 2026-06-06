@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from app.cognitive.input_event import InputEvent
+from app.core.state import HebeState
 from app.hebe_engine import HebeEngine
 from app.services.voice_command_recovery import normalize_stt_transcript
 from app.stream.action_planner import StreamActionPlanner
@@ -49,7 +50,7 @@ def make_engine(chatters=None, *, live=True):
     stream.recent_active_users = list(chatters or ["nuria", "charlie", "totodile", "alguien_del_chat"])
     engine = HebeEngine.__new__(HebeEngine)
     engine.runtime = SimpleNamespace(
-        state=SimpleNamespace(stream=stream),
+        state=SimpleNamespace(stream=stream, hebe_sleeping=False, mode="active", pending_clarification=None),
         twitch=FakeTwitch(),
         twitch_chat_bot=None,
         speak=Mock(),
@@ -66,6 +67,23 @@ def make_engine(chatters=None, *, live=True):
 
 
 class VoiceCommandPipelineTests(unittest.TestCase):
+    def test_start_awake_default_initializes_not_sleeping(self):
+        runtime = SimpleNamespace(
+            state=HebeState(),
+            llm=None,
+            intent_llm=None,
+            twitch=FakeTwitch(),
+            twitch_chat_bot=None,
+            twitch_events=None,
+            speak=Mock(),
+        )
+
+        engine = HebeEngine(runtime=runtime, use_wakeword=True)
+
+        self.assertTrue(engine.start_awake)
+        self.assertFalse(runtime.state.hebe_sleeping)
+        self.assertEqual(runtime.state.mode, "active")
+
     def test_stt_normalization_only_does_not_execute(self):
         result = normalize_stt_transcript("ebe az promo anuria", known_targets=["nuria"])
 
@@ -226,6 +244,43 @@ class VoiceCommandPipelineTests(unittest.TestCase):
         self.assertIn("[HEBE][ACTION_EXECUTOR] executing action_type=stream_ambient_stt_disabled", joined)
         self.assertIn("[HEBE][RESPONSE_SYNTH]", joined)
 
+    def test_stt_worker_transcript_process_helper_routes_to_cognition(self):
+        engine = make_engine(["nuria"])
+        engine.stream_ambient_stt_enabled = True
+        delivered = []
+        logs = []
+        engine._deliver_manual_reply = lambda text, *, source: delivered.append((source, text))
+
+        with patch("builtins.print", lambda *args, **kwargs: logs.append(" ".join(str(arg) for arg in args))):
+            result = engine._process_stt_voice_transcript("Hebe, desactiva STT ambiental")
+
+        joined = "\n".join(logs)
+        self.assertEqual(result, "continue")
+        self.assertFalse(engine.stream_ambient_stt_enabled)
+        self.assertEqual(delivered, [("stt_voice", "modelo:stream_ambient_stt_disabled:")])
+        self.assertIn("[HEBE][INPUT] source=stt_voice raw='Hebe, desactiva STT ambiental'", joined)
+        self.assertIn("[HEBE][STT][NORMALIZED] raw='Hebe, desactiva STT ambiental' normalized='hebe desactiva stt ambiental'", joined)
+        self.assertIn("[HEBE][COG] incoming source='stt_voice'", joined)
+        self.assertIn("[HEBE][COG] decision=command", joined)
+        self.assertIn("[HEBE][ACTION_PLAN] action_type=stream_ambient_stt_disabled", joined)
+        self.assertIn("[HEBE][ACTION_EXECUTOR] success=true", joined)
+        self.assertIn("[HEBE][RESPONSE_SYNTH]", joined)
+
+    def test_stt_worker_transcript_process_helper_logs_rejected_decision(self):
+        engine = make_engine(["nuria"])
+        engine.runtime.state.stream.enabled = False
+        engine.stream_ambient_stt_enabled = False
+        logs = []
+
+        with patch("builtins.print", lambda *args, **kwargs: logs.append(" ".join(str(arg) for arg in args))):
+            result = engine._process_stt_voice_transcript("Estoy hablando solo")
+
+        joined = "\n".join(logs)
+        self.assertEqual(result, "continue")
+        self.assertIn("[HEBE][INPUT] source=stt_voice raw='Estoy hablando solo'", joined)
+        self.assertIn("[HEBE][COG] incoming source='stt_voice'", joined)
+        self.assertIn("[HEBE][COG] decision=rejected reason=not_direct_command", joined)
+
     def test_stt_shoutout_without_wakeword_still_has_action_intent(self):
         engine = make_engine(["nuria"])
         normalization = engine._normalize_stt_input("Haz una promo a Nuria")
@@ -240,6 +295,68 @@ class VoiceCommandPipelineTests(unittest.TestCase):
         plan = engine._get_stream_action_planner().plan(event)
         self.assertEqual(plan.action_type, "twitch_shoutout")
         self.assertEqual(plan.target, "nuria")
+
+    def test_awake_shoutout_without_despierta_enters_cognition(self):
+        engine = make_engine(["nuria"])
+        delivered = []
+        engine._deliver_manual_reply = lambda text, *, source: delivered.append((source, text))
+
+        result = engine.cognitive_flow("haz promo a nuria", source="stt_voice")
+
+        self.assertEqual(result, "continue")
+        self.assertEqual(engine.runtime.twitch.sent, ["!so nuria"])
+        self.assertEqual(delivered, [("stt_voice", "modelo:twitch_shoutout:nuria")])
+
+    def test_awake_hebe_despierta_returns_already_awake(self):
+        engine = make_engine(["nuria"])
+        delivered = []
+        engine._deliver_manual_reply = lambda text, *, source: delivered.append((source, text))
+
+        result = engine.cognitive_flow("hebe despierta", source="stt_voice")
+
+        self.assertEqual(result, "continue")
+        self.assertFalse(engine.runtime.state.hebe_sleeping)
+        self.assertEqual(delivered, [("stt_voice", "modelo:already_awake:")])
+
+    def test_sleep_command_sets_sleeping_and_pauses_idle(self):
+        engine = make_engine(["nuria"])
+        engine.runtime.state.stream.idle_spontaneity_enabled = True
+        delivered = []
+        engine._deliver_manual_reply = lambda text, *, source: delivered.append((source, text))
+
+        result = engine.cognitive_flow("hebe duerme", source="ui")
+
+        self.assertEqual(result, "continue")
+        self.assertTrue(engine.runtime.state.hebe_sleeping)
+        self.assertFalse(engine.runtime.state.stream.idle_spontaneity_enabled)
+        self.assertEqual(delivered, [("ui", "modelo:sleep_mode:")])
+
+    def test_sleeping_ignores_non_wake_command(self):
+        engine = make_engine(["nuria"])
+        engine.runtime.state.hebe_sleeping = True
+        delivered = []
+        engine._deliver_manual_reply = lambda text, *, source: delivered.append((source, text))
+
+        result = engine.cognitive_flow("haz promo a nuria", source="stt_voice")
+
+        self.assertEqual(result, "continue")
+        self.assertEqual(engine.runtime.twitch.sent, [])
+        self.assertEqual(delivered, [])
+
+    def test_sleeping_wake_command_wakes_then_commands_work(self):
+        engine = make_engine(["nuria"])
+        engine.runtime.state.hebe_sleeping = True
+        delivered = []
+        engine._deliver_manual_reply = lambda text, *, source: delivered.append((source, text))
+
+        wake = engine.cognitive_flow("hebe despierta", source="stt_voice")
+        command = engine.cognitive_flow("haz promo a nuria", source="stt_voice")
+
+        self.assertEqual(wake, "continue")
+        self.assertEqual(command, "continue")
+        self.assertFalse(engine.runtime.state.hebe_sleeping)
+        self.assertEqual(engine.runtime.twitch.sent, ["!so nuria"])
+        self.assertEqual(delivered[0], ("stt_voice", "modelo:wake_from_sleep:"))
 
 
 if __name__ == "__main__":

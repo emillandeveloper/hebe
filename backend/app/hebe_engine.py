@@ -15,7 +15,7 @@ from app.services.db_sqlite import (
 from app.services.vts_client import vts_hotkey
 from app.services.voice_command_recovery import TranscriptNormalizationResult, normalize_stt_transcript
 from app.core.ui_bridge import emit
-from app.core.input_bus import submit_text_from_ui, submit_text_from_voice, get_ui_inbox, get_voice_inbox
+from app.core.input_bus import submit_text_from_ui, get_ui_inbox, get_voice_inbox
 from app.core.stt_worker import STTWorker
 from app.core.runtime import build_runtime, HebeRuntime
 
@@ -66,6 +66,17 @@ class HebeEngine:
         self._thread: threading.Thread | None = None
         self._started = False
         self.use_wakeword = use_wakeword
+        self.start_awake = os.getenv("HEBE_START_AWAKE", "true").strip().lower() in ("1", "true", "yes", "on")
+        if self.start_awake:
+            self.runtime.state.hebe_sleeping = False
+            self.runtime.state.mode = "active"
+            print("[HEBE][WAKE] startup hebe_sleeping=false reason=start_awake_default", flush=True)
+        else:
+            self.runtime.state.hebe_sleeping = bool(getattr(self.runtime.state, "hebe_sleeping", False))
+            print(
+                f"[HEBE][WAKE] startup hebe_sleeping={bool(self.runtime.state.hebe_sleeping)} reason=config",
+                flush=True,
+            )
 
         chat_runtime = getattr(self.runtime, "llm", None)
 
@@ -563,6 +574,85 @@ class HebeEngine:
             return "stop"
 
         return "continue"    
+
+    def _handle_wake_sleep_command(self, text: str) -> CommandResult | None:
+        normalized = self._normalize_voice_command_text(text)
+        wake_phrases = {
+            "despierta",
+            "levanta",
+            "despierta hebe",
+            "levanta hebe",
+            "hebe despierta",
+            "hebe levanta",
+            "wake up",
+            "wake up hebe",
+        }
+        sleep_phrases = {
+            "duerme",
+            "vete a dormir",
+            "descansa",
+            "modo sueno",
+            "modo sueño",
+            "modo dormida",
+            "modo dormir",
+            "modo espera",
+            "modo de espera",
+            "sleep",
+            "sleep mode",
+        }
+
+        if normalized in wake_phrases:
+            was_sleeping = bool(getattr(self.runtime.state, "hebe_sleeping", False))
+            print("[HEBE][WAKE] wake command detected", flush=True)
+            self.runtime.state.hebe_sleeping = False
+            self.runtime.state.mode = "active"
+            self._emit_audio_status()
+            if was_sleeping:
+                return CommandResult(
+                    action_type="wake_from_sleep",
+                    success=True,
+                    user_visible_summary="Hebe is awake and ready.",
+                    state_changes={"hebe_sleeping": False, "mode": "active"},
+                    constraints=["Do not claim the app restarted.", "Do not ask for clarification."],
+                    suggested_tone="short Hebe wake reply",
+                    fallback_text="Ya estoy despierta, Leo.",
+                    requires_model_response=True,
+                    metadata={"message_goal": "Tell Leo that Hebe is awake and ready."},
+                )
+            print("[HEBE][WAKE] already awake", flush=True)
+            return CommandResult(
+                action_type="already_awake",
+                success=True,
+                user_visible_summary="Hebe was already awake.",
+                state_changes={"hebe_sleeping": False, "mode": "active"},
+                constraints=["Do not claim the app restarted.", "Do not ask for clarification."],
+                suggested_tone="short Hebe status reply",
+                fallback_text="Ya estaba despierta, mi señor.",
+                requires_model_response=True,
+                metadata={"message_goal": "Tell Leo that Hebe is already awake."},
+            )
+
+        if normalized in sleep_phrases:
+            print("[HEBE][WAKE] sleep command detected", flush=True)
+            self.runtime.state.hebe_sleeping = True
+            self.runtime.state.mode = "sleep"
+            stream = self._get_stream_state()
+            if stream is not None:
+                stream.idle_spontaneity_enabled = False
+            self._emit_audio_status()
+            return CommandResult(
+                action_type="sleep_mode",
+                success=True,
+                user_visible_summary="Hebe is going to sleep; idle spontaneity is paused.",
+                state_changes={"hebe_sleeping": True, "mode": "sleep", "idle_spontaneity_enabled": False},
+                constraints=["Do not claim the app is shutting down.", "Do not ask for clarification."],
+                suggested_tone="short Hebe sleep reply",
+                fallback_text="Me duermo, Leo. Si me necesitas, me despiertas.",
+                requires_model_response=True,
+                metadata={"message_goal": "Tell Leo Hebe is going to sleep and will ignore normal voice input until woken."},
+            )
+
+        return None
     
     def cognitive_flow(self, command: str, source: str = "voice") -> str:
         print(
@@ -573,12 +663,27 @@ class HebeEngine:
             flush=True,
         )
 
+        wake_sleep = self._handle_wake_sleep_command(command)
+        if wake_sleep is not None:
+            print("[HEBE][COG] decision=command", flush=True)
+            text = self._synthesize_command_result(wake_sleep, input_text=command)
+            self._deliver_manual_reply(text, source=source)
+            return "continue"
+
+        if bool(getattr(self.runtime.state, "hebe_sleeping", False)):
+            print("[HEBE][WAKE] sleeping; ignored input reason=not_wake_command", flush=True)
+            print("[HEBE][COG] decision=rejected reason=hebe_sleeping", flush=True)
+            return "continue"
+
+        print("[HEBE][WAKE] awake; routing input to cognition", flush=True)
+
         manual = self._handle_pending_manual_intent(command)
         if manual is None:
             manual = self._handle_tts_manual_command(command)
         if manual is None:
             manual = self._handle_stream_manual_command(command)
         if manual is not None:
+            print("[HEBE][COG] decision=command", flush=True)
             force_ui = bool(getattr(self, "_manual_reply_ui_only", False))
             self._manual_reply_ui_only = False
             if isinstance(manual, CommandResult):
@@ -587,6 +692,9 @@ class HebeEngine:
                 manual_text = str(manual)
             self._deliver_manual_reply(manual_text, source="ui" if force_ui else source)
             return "continue"
+
+        if source == "stt_voice":
+            print("[HEBE][COG] decision=conversation", flush=True)
 
         context = self.context_builder.build(
             state=self.runtime.state,
@@ -672,9 +780,6 @@ class HebeEngine:
                 print(f"[HEBE][COG] speak failed: {e!r}", flush=True)
 
         normalized = self._normalize_text(command)
-
-        if normalized in {"duerme", "modo espera", "modo de espera"}:
-            return "sleep"
 
         if normalized in {"apaga hebe", "detente", "stop engine"}:
             return "stop"
@@ -934,6 +1039,8 @@ class HebeEngine:
         )
 
     def poll_stream_presence(self) -> None:
+        if bool(getattr(self.runtime.state, "hebe_sleeping", False)):
+            return
         now = time.time()
         if now - self._last_presence_poll_ts < self.presence_poll_interval_sec:
             return
@@ -1053,10 +1160,12 @@ class HebeEngine:
                         "tts_enabled": bool(getattr(self.runtime.state, "tts_enabled", False)),
                         "stream_tts_enabled": bool(getattr(policies, "allow_tts_replies", False)),
                         "stt_enabled": bool(getattr(self.runtime, "stt_enabled", False)),
+                        "hebe_sleeping": bool(getattr(self.runtime.state, "hebe_sleeping", False)),
+                        "wake_required": bool(getattr(self.runtime.state, "hebe_sleeping", False)),
                     },
                 )
 
-                target = self.wakeword_loop if self.use_wakeword else self.engine_loop
+                target = self.engine_loop
                 kwargs = {"say_hello": self.say_hello}
 
                 self._thread = threading.Thread(
@@ -1067,7 +1176,7 @@ class HebeEngine:
                 self._thread.start()
 
                 self.runtime.state.is_running = True
-                self.runtime.state.mode = "wakeword" if self.use_wakeword else "active"
+                self.runtime.state.mode = "sleep" if getattr(self.runtime.state, "hebe_sleeping", False) else "active"
 
             except Exception as e:
                 emit("status", {"engine": "error", "stage": "boot", "error": str(e)})
@@ -1146,6 +1255,7 @@ class HebeEngine:
         print(
             "[HEBE][STT][NORMALIZED] "
             f"raw={result.raw_text!r} "
+            f"normalized={result.normalized_text!r} "
             f"normalized_candidates={result.normalized_candidates!r}",
             flush=True,
         )
@@ -1191,6 +1301,43 @@ class HebeEngine:
         except Exception as exc:
             print(f"[HEBE][ACTION_PLAN] probe failed: {exc!r}", flush=True)
             return False
+
+    def _process_stt_voice_transcript(self, raw_voice_command: str, *, allow_wakeword_prompt: bool = False) -> str:
+        normalization = self._normalize_stt_input(str(raw_voice_command))
+        command = normalization.normalized_text
+        self._current_input_event = self._build_input_event(
+            source="stt_voice",
+            raw_text=str(raw_voice_command),
+            normalized_text=command,
+            stt_metadata=normalization.as_event(),
+        )
+        voice_type, mood_hint = self._classify_voice_event(command)
+        has_action_intent = self._input_event_has_action_intent(getattr(self, "_current_input_event", None))
+        print(
+            f"[HEBE][VOICE] type={voice_type} mood={mood_hint!r} text={command!r}",
+            flush=True,
+        )
+
+        if allow_wakeword_prompt and any(keyword in command for keyword in WAKE_WORDS):
+            self.runtime.state.mode = "active"
+            vts_hotkey("HebeIdle")
+            self._deliver_voice_reply("Dime, Leo.")
+            self._current_input_event = None
+            return self.command_loop()
+
+        if voice_type == "direct_command_to_hebe" or has_action_intent:
+            self.runtime.state.mode = "active"
+            result = self.handle_command(command, source="stt_voice")
+            self._current_input_event = None
+            return result
+
+        if self._is_stream_enabled() and bool(getattr(self, "stream_ambient_stt_enabled", False)):
+            self._record_voice_event(command, voice_type, mood_hint)
+            self._log_stt_non_command_decision(command, "ambient_context_only", reason=voice_type)
+        else:
+            self._log_stt_non_command_decision(command, "rejected", reason="not_direct_command")
+        self._current_input_event = None
+        return "continue"
 
     def _today_at(self, hhmm: str) -> datetime:
         hour, minute = [int(part) for part in hhmm.split(":", 1)]
@@ -1287,7 +1434,8 @@ class HebeEngine:
         normalized = self._normalize_text(text)
         if not normalized:
             return "unknown", None
-        if "hebe" in normalized or normalized.startswith(("prepara stream", "activa modo stream", "desactiva modo stream")):
+        words = set(normalized.split())
+        if words.intersection({"hebe", "ebe", "eve", "jebe", "heve"}) or normalized.startswith(("prepara stream", "activa modo stream", "desactiva modo stream")):
             return "direct_command_to_hebe", None
         if normalized.startswith(("ya hemos pasado ", "hemos pasado ")):
             return "completed_marker", None
@@ -1316,6 +1464,16 @@ class HebeEngine:
         if len(normalized.split()) <= 10:
             return "casual_comment", None
         return "unknown", None
+
+    def _log_stt_non_command_decision(self, command: str, decision: str, *, reason: str | None = None) -> None:
+        print(
+            "[HEBE][COG] incoming "
+            f"source='stt_voice' command={command!r} "
+            f"current_pending={getattr(self.runtime.state, 'pending_clarification', None)!r}",
+            flush=True,
+        )
+        suffix = f" reason={reason}" if reason else ""
+        print(f"[HEBE][COG] decision={decision}{suffix}", flush=True)
 
     def _record_voice_event(self, text: str, event_type: str, mood_hint: str | None) -> None:
         stream = self._get_stream_state()
@@ -2982,6 +3140,8 @@ class HebeEngine:
                     "stt": getattr(stt, "status", "off") if stt is not None else "off",
                     "last_stt_error": getattr(stt, "last_input_device_error", None) if stt is not None else None,
                     "stt_input_device": stt_device,
+                    "hebe_sleeping": bool(getattr(self.runtime.state, "hebe_sleeping", False)),
+                    "wake_required": bool(getattr(self.runtime.state, "hebe_sleeping", False)),
                 },
             )
         except Exception:
@@ -3149,6 +3309,11 @@ class HebeEngine:
                         flush=True,
                     )
                     if voice_type != "direct_command_to_hebe" and not self._stream_is_armed() and not has_action_intent:
+                        self._log_stt_non_command_decision(
+                            command,
+                            "ambient_context_only",
+                            reason=voice_type,
+                        )
                         continue
 
                 handled, stream_command = self._extract_stream_command(command)
@@ -3212,22 +3377,11 @@ class HebeEngine:
 
             # Si stream mode está activo, dejamos que command_loop gestione
             # el gate fino con wakeword corto tipo "hebe"/"eve".
-            if self._is_stream_enabled():
-                submit_text_from_voice(str(raw_voice_command))
-                res = self.command_loop()
-                if res == "stop":
-                    return "stop"
-                continue
-
-            command = self._normalize_text(str(raw_voice_command))
-
-            if any(keyword in command for keyword in WAKE_WORDS):
-                self.runtime.state.mode = "active"
-                vts_hotkey("HebeIdle")
-                self._deliver_voice_reply("Dime, Leo.")
-                res = self.command_loop()
-                if res == "stop":
-                    return "stop"
+            # Route every accepted STT transcript through Hebe cognition.
+            res = self._process_stt_voice_transcript(str(raw_voice_command), allow_wakeword_prompt=True)
+            if res == "stop":
+                return "stop"
+            continue
 
     def engine_loop(self, say_hello: bool = True) -> str:
         self.runtime.state.mode = "active"
@@ -3244,10 +3398,10 @@ class HebeEngine:
                 return "stop"
 
             if res == "sleep":
+                self.runtime.state.hebe_sleeping = True
                 self.runtime.state.mode = "sleep"
-                res2 = self.wakeword_loop(say_hello=False)
-                if res2 == "stop":
-                    return "stop"
+                self._emit_audio_status()
+                continue
 
 
 if __name__ == "__main__":
