@@ -32,6 +32,7 @@ from app.cognitive.scheduler import InternalEvent
 from app.cognitive.command_result import CommandResult
 from app.cognitive.input_event import InputEvent
 from app.cognitive.action_plan import ActionPlan
+from app.cognitive.wake_name_resolver import WakeNameResolver
 from app.cognitive.context_builder import ContextBuilder
 from app.cognitive.deliberation_service import DeliberationService
 from app.cognitive.plan_executor import PlanExecutor
@@ -42,6 +43,7 @@ from app.stream.context_sync import StreamContextSyncService
 from app.stream.game_profiles import GameProfileStore
 from app.stream.game_research import GameKnowledgeResearchConfig, GameKnowledgeResearchService
 from app.stream import memory as stream_memory
+from app.stream.ambient_context import AmbientContextExtractor
 from app.stream.action_planner import StreamActionPlanner
 from app.stream.spontaneity import StreamSpontaneityConfig, StreamSpontaneityService
 
@@ -103,6 +105,7 @@ class HebeEngine:
         self.memory_store = MemoryStore()
         self.scheduler = SchedulerService(self.memory_store)
         self.context_builder = ContextBuilder(self.memory_store)
+        self.wake_name_resolver = WakeNameResolver()
 
         # Conectar Twitch events al scheduler
         if hasattr(self.runtime, 'twitch_events') and self.runtime.twitch_events:
@@ -170,6 +173,7 @@ class HebeEngine:
                 show_max_per_hour=int(os.getenv("HEBE_MAX_IDLE_PROMPTS_PER_HOUR_SHOW", "5")),
                 max_per_stream=int(os.getenv("HEBE_MAX_IDLE_PROMPTS_PER_STREAM", "6")),
                 save_equip_topic_cooldown_sec=float(os.getenv("HEBE_SAVE_EQUIP_TOPIC_COOLDOWN_MINUTES", "60")) * 60,
+                require_specific_context=os.getenv("HEBE_SPONTANEITY_REQUIRE_SPECIFIC_CONTEXT", "true").strip().lower() in ("1", "true", "yes", "on"),
                 chat_activity_window_sec=float(os.getenv("HEBE_CHAT_ACTIVITY_WINDOW_SECONDS", "180")),
                 chat_active_message_threshold=int(os.getenv("HEBE_CHAT_ACTIVE_MESSAGE_THRESHOLD", "3")),
                 chat_active_user_threshold=int(os.getenv("HEBE_CHAT_ACTIVE_USER_THRESHOLD", "1")),
@@ -180,6 +184,7 @@ class HebeEngine:
         self.stream_context_sync = StreamContextSyncService(
             twitch_api=getattr(self.runtime, "twitch", None),
         )
+        self.ambient_context_extractor = AmbientContextExtractor()
         self.memory_extractor = MemoryExtractor(
             intent_model=getattr(self.runtime, "intent_llm", None),
         )
@@ -245,7 +250,26 @@ class HebeEngine:
             normalize_target=self._normalize_shoutout_target,
             build_shoutout_command=self._build_shoutout_command_preview,
             stream_state_provider=self._get_stream_state,
+            target_resolver=self._resolve_twitch_target_details,
         )
+
+    def _resolve_twitch_target_details(self, raw_target: str):
+        twitch = getattr(self.runtime, "twitch", None)
+        resolver = getattr(twitch, "resolve_user_details", None)
+        if callable(resolver):
+            try:
+                return resolver(raw_target, intent="twitch_shoutout")
+            except Exception as exc:
+                print(f"[HEBE][TWITCH][TARGET] resolver failed target={raw_target!r} error={exc!r}", flush=True)
+        resolve_user = getattr(twitch, "resolve_user", None)
+        if callable(resolve_user):
+            try:
+                username = resolve_user(raw_target)
+                if username:
+                    return {"username": username, "confidence": 0.82, "candidates": [username], "reason": "legacy_resolver"}
+            except Exception as exc:
+                print(f"[HEBE][TWITCH][TARGET] legacy resolver failed target={raw_target!r} error={exc!r}", flush=True)
+        return None
 
     def observe_twitch_chat_message(self, username: str, display_name: str, text: str, channel: str = "") -> None:
         if not getattr(self, "stream_observe_chat", True):
@@ -257,6 +281,15 @@ class HebeEngine:
         message = str(text or "").strip()
         if not message:
             return
+
+        print(f"[HEBE][TWITCH][CHAT] observed username={username} message={message!r}", flush=True)
+        twitch = getattr(self.runtime, "twitch", None)
+        remember = getattr(twitch, "remember_chat_message", None)
+        if callable(remember):
+            try:
+                remember(username=username, display_name=display_name or username, text=message)
+            except Exception as exc:
+                print(f"[HEBE][TWITCH][CHAT] cache_update_failed username={username} error={exc!r}", flush=True)
 
         now = time.time()
         recent_existing = list(getattr(stream, "recent_chat_messages", []) or [])
@@ -299,6 +332,7 @@ class HebeEngine:
             if user and user.lower() not in {u.lower() for u in users}:
                 users.append(user)
         stream.recent_active_users = users[-20:]
+        print(f"[HEBE][CHATTER] recent_chatter updated username={username} display={display_name or username}", flush=True)
 
         topics = [item.get("topic") for item in stream.recent_chat_messages if item.get("topic")]
         stream.recent_chat_topics = topics[-12:]
@@ -576,32 +610,28 @@ class HebeEngine:
         return "continue"    
 
     def _handle_wake_sleep_command(self, text: str) -> CommandResult | None:
-        normalized = self._normalize_voice_command_text(text)
-        wake_phrases = {
-            "despierta",
-            "levanta",
-            "despierta hebe",
-            "levanta hebe",
-            "hebe despierta",
-            "hebe levanta",
-            "wake up",
-            "wake up hebe",
-        }
-        sleep_phrases = {
-            "duerme",
-            "vete a dormir",
-            "descansa",
-            "modo sueno",
-            "modo sueño",
-            "modo dormida",
-            "modo dormir",
-            "modo espera",
-            "modo de espera",
-            "sleep",
-            "sleep mode",
-        }
+        normalized = self._normalize_text(text)
+        resolver = getattr(self, "wake_name_resolver", None) or WakeNameResolver()
+        self.wake_name_resolver = resolver
+        resolution = resolver.resolve(
+            raw_text=text,
+            normalized_text=normalized,
+            source="command",
+            is_sleeping=bool(getattr(self.runtime.state, "hebe_sleeping", False)),
+            command_markers={"despierta", "levanta", "duerme", "descansa", "sleep", "wake", "modo"},
+        )
+        print(
+            "[HEBE][WAKE_RESOLVER] "
+            f"addressed_to_hebe={resolution.addressed_to_hebe} "
+            f"wake_command={resolution.wake_command} "
+            f"sleep_command={resolution.sleep_command} "
+            f"matched_name={resolution.matched_name!r} "
+            f"confidence={resolution.confidence:.3f} "
+            f"reason={resolution.reason}",
+            flush=True,
+        )
 
-        if normalized in wake_phrases:
+        if resolution.wake_command or self._is_wake_concept_only(normalized):
             was_sleeping = bool(getattr(self.runtime.state, "hebe_sleeping", False))
             print("[HEBE][WAKE] wake command detected", flush=True)
             self.runtime.state.hebe_sleeping = False
@@ -632,7 +662,7 @@ class HebeEngine:
                 metadata={"message_goal": "Tell Leo that Hebe is already awake."},
             )
 
-        if normalized in sleep_phrases:
+        if resolution.sleep_command or self._is_sleep_concept_only(normalized):
             print("[HEBE][WAKE] sleep command detected", flush=True)
             self.runtime.state.hebe_sleeping = True
             self.runtime.state.mode = "sleep"
@@ -653,6 +683,14 @@ class HebeEngine:
             )
 
         return None
+
+    def _is_wake_concept_only(self, normalized: str) -> bool:
+        tokens = set(str(normalized or "").split())
+        return bool(tokens & {"despierta", "levanta", "wake", "awake"}) and len(tokens) <= 3
+
+    def _is_sleep_concept_only(self, normalized: str) -> bool:
+        tokens = set(str(normalized or "").split())
+        return bool(tokens & {"duerme", "descansa", "dormir", "sleep", "espera"}) and len(tokens) <= 4
     
     def cognitive_flow(self, command: str, source: str = "voice") -> str:
         print(
@@ -822,8 +860,14 @@ class HebeEngine:
         if event.event_type == "twitch_idle_prompt":
             stream = self._get_stream_state()
             service = getattr(self, "stream_spontaneity", None)
-            if service is not None and service.is_too_similar_to_recent(stream, reply_text):
-                reply_text = self._idle_fallback_for_topic((getattr(event, "payload", {}) or {}).get("idle_topic"))
+            if service is not None:
+                if service.is_too_similar_to_recent(stream, reply_text):
+                    print("[HEBE][SPONTANEITY] skipped reason=too_similar_to_recent", flush=True)
+                    return
+                motif = service.motif_on_cooldown(stream, reply_text)
+                if motif:
+                    print(f"[HEBE][SPONTANEITY] skipped reason=motif_cooldown motif={motif}", flush=True)
+                    return
 
         if event.event_type.startswith("twitch_"):
             self._deliver_twitch_reply(reply_text, event_type=event.event_type, payload=getattr(event, "payload", {}) or {})
@@ -1208,7 +1252,9 @@ class HebeEngine:
 
     def _normalize_text(self, text: str) -> str:
         cleaned = "".join(ch if ch.isalnum() or ch.isspace() else " " for ch in (text or "").strip().lower())
-        return " ".join(cleaned.split())
+        normalized = " ".join(cleaned.split())
+        print(f"[HEBE][NORMALIZE] raw={text!r} normalized={normalized!r}", flush=True)
+        return normalized
 
     def _known_voice_command_targets(self) -> list[str]:
         stream = self._get_stream_state()
@@ -1303,6 +1349,21 @@ class HebeEngine:
             return False
 
     def _process_stt_voice_transcript(self, raw_voice_command: str, *, allow_wakeword_prompt: bool = False) -> str:
+        script = self._unsupported_stt_script(raw_voice_command)
+        if script:
+            print(f"[HEBE][STT][REJECTED] reason=language_not_allowed script={script} text={raw_voice_command!r}", flush=True)
+            emit(
+                "voice.command",
+                {
+                    "raw_text": str(raw_voice_command or ""),
+                    "normalized_text": "",
+                    "status": "rejected",
+                    "reason": "language_not_allowed",
+                    "script": script,
+                    "message": "Raw STT rejected: unsupported language/script.",
+                },
+            )
+            return "continue"
         normalization = self._normalize_stt_input(str(raw_voice_command))
         command = normalization.normalized_text
         self._current_input_event = self._build_input_event(
@@ -1338,6 +1399,31 @@ class HebeEngine:
             self._log_stt_non_command_decision(command, "rejected", reason="not_direct_command")
         self._current_input_event = None
         return "continue"
+
+    def _unsupported_stt_script(self, text: str) -> str | None:
+        allowed = {
+            part.strip().lower()
+            for part in os.getenv("HEBE_STT_ALLOWED_LANGUAGES", "es,en").split(",")
+            if part.strip()
+        }
+        if not allowed.issubset({"es", "en"}):
+            return None
+        checks = [
+            ("japanese", r"[\u3040-\u30ff]"),
+            ("cyrillic", r"[\u0400-\u04ff]"),
+            ("chinese", r"[\u3400-\u9fff]"),
+            ("devanagari", r"[\u0900-\u097f]"),
+            ("sinhala", r"[\u0d80-\u0dff]"),
+            ("korean", r"[\uac00-\ud7af]"),
+            ("thai", r"[\u0e00-\u0e7f]"),
+            ("arabic", r"[\u0600-\u06ff]"),
+            ("hebrew", r"[\u0590-\u05ff]"),
+        ]
+        value = str(text or "")
+        for name, pattern in checks:
+            if re.search(pattern, value):
+                return name
+        return None
 
     def _today_at(self, hhmm: str) -> datetime:
         hour, minute = [int(part) for part in hhmm.split(":", 1)]
@@ -1485,6 +1571,48 @@ class HebeEngine:
         if mood_hint:
             stream.leo_mood_hint = mood_hint
         self._apply_ambient_voice_to_run_context(stream, text, event_type)
+        self._extract_and_store_ambient_context(stream, text, event_type)
+
+    def _extract_and_store_ambient_context(self, stream, text: str, event_type: str) -> None:
+        extractor = getattr(self, "ambient_context_extractor", None)
+        if extractor is None:
+            extractor = AmbientContextExtractor()
+            self.ambient_context_extractor = extractor
+        extraction = extractor.extract(text, event_type=event_type)
+        if not extraction.useful:
+            print(f"[HEBE][AMBIENT_CONTEXT] ignored reason={extraction.reason}", flush=True)
+            return
+        facts = list(getattr(stream, "recent_run_context_facts", []) or [])
+        now = time.time()
+        facts = [
+            fact for fact in facts
+            if float(fact.get("expires_at", 0.0) or 0.0) > now
+        ]
+        facts.extend(extraction.facts)
+        stream.recent_run_context_facts = facts[-20:]
+        stream.run_context_updated_ts = now
+        stream.run_context_source = "stt_voice"
+        if extraction.mood:
+            stream.leo_mood_hint = extraction.mood
+        self._apply_extracted_facts_to_stream(stream, extraction.facts)
+        print(f"[HEBE][AMBIENT_CONTEXT] extracted facts={extraction.facts!r}", flush=True)
+        print(
+            f"[HEBE][RUN_CONTEXT] updated source=stt_voice facts={len(extraction.facts)}",
+            flush=True,
+        )
+
+    def _apply_extracted_facts_to_stream(self, stream, facts: list[dict]) -> None:
+        for fact in facts:
+            kind = str(fact.get("kind") or "")
+            text = str(fact.get("text") or "").strip()
+            if not text:
+                continue
+            if kind == "objective":
+                stream.current_run_objective = text[:120]
+            elif kind == "location":
+                stream.current_run_location = text[:80]
+            elif kind in {"level_gap", "phase", "ambient_note", "game_relation"}:
+                stream.current_run_phase = text[:160]
 
     def _apply_ambient_voice_to_run_context(self, stream, text: str, event_type: str) -> None:
         if event_type not in {"completed_marker", "objective_update", "location_update"}:
@@ -1559,6 +1687,14 @@ class HebeEngine:
                 requires_model_response=success,
                 metadata={"message_goal": message_goal or fallback_text},
             )
+
+        alias_result = self._handle_chatter_alias_command(raw_command, normalized)
+        if alias_result is not None:
+            return alias_result
+
+        preview_result = self._handle_shoutout_preview_intent(raw_command, normalized)
+        if preview_result is not None:
+            return preview_result
 
         action_result = self._plan_and_execute_stream_action(raw_command, normalized, stream)
         if action_result is not None:
@@ -1882,6 +2018,36 @@ class HebeEngine:
 
         return None
 
+    def _handle_chatter_alias_command(self, raw_command: str, normalized: str) -> CommandResult | None:
+        match = re.match(r"^(?:recuerda que\s+)?(.+?)\s+es\s+(@?[A-Za-z0-9_]{3,25})$", str(raw_command or "").strip(), flags=re.IGNORECASE)
+        if not match:
+            match = re.match(r"^(?:recuerda que\s+)?(.+?)\s+es\s+(@?[A-Za-z0-9_]{3,25})$", str(normalized or "").strip(), flags=re.IGNORECASE)
+        if not match:
+            return None
+        alias = match.group(1).strip()
+        username = match.group(2).strip().lstrip("@")
+        if not alias or not username:
+            return None
+        twitch = getattr(self.runtime, "twitch", None)
+        remember = getattr(twitch, "remember_user_alias", None)
+        ok = bool(remember(alias, username)) if callable(remember) else False
+        if not ok:
+            resolver = getattr(twitch, "target_resolver", None)
+            remember_resolver = getattr(resolver, "remember_alias", None)
+            ok = bool(remember_resolver(alias, username)) if callable(remember_resolver) else False
+        print(f"[HEBE][CHATTER] alias stored alias={alias!r} username={username!r} success={ok}", flush=True)
+        return CommandResult(
+            action_type="chatter_alias_stored",
+            success=ok,
+            user_visible_summary=f"Alias {alias} stored for {username}." if ok else "Could not store chatter alias.",
+            state_changes={"alias": alias, "username": username},
+            constraints=["Do not ask for clarification.", "Do not claim a shoutout was sent."],
+            suggested_tone="short Hebe stream-control reply",
+            fallback_text=(f"Vale, recordaré que {alias} es {username}." if ok else "No he podido guardar ese alias."),
+            requires_model_response=ok,
+            metadata={"message_goal": f"Confirm that alias {alias} now resolves to {username}."},
+        )
+
     def _get_stream_action_planner(self) -> StreamActionPlanner:
         planner = getattr(self, "stream_action_planner", None)
         if planner is None:
@@ -2075,79 +2241,26 @@ class HebeEngine:
             metadata={"action_plan": plan.as_log_dict(), "message_goal": "Tell Leo the shoutout could not be sent."},
         )
 
-    def _handle_shoutout_manual_command(self, raw_command: str, normalized: str, stream) -> str | CommandResult | None:
-        preview = False
-        force = False
-        raw = raw_command.strip()
-        norm = normalized.strip()
+    def _handle_shoutout_preview_intent(self, raw_command: str, normalized: str) -> str | None:
+        tokens = set(str(normalized or "").split())
+        if not (tokens & {"previsualiza", "preview"}):
+            return None
 
-        if norm.startswith("previsualiza shoutout a ") or norm.startswith("previsualiza so a "):
-            preview = True
-            raw = re.sub(r"^\s*previsualiza\s+(?:shoutout|so)\s+a\s+", "", raw, flags=re.IGNORECASE).strip()
-            norm = self._normalize_text(raw)
-        elif norm.startswith("prueba shoutout a ") or norm.startswith("prueba so a "):
-            force = True
-            raw = re.sub(r"^\s*prueba\s+(?:shoutout|so)\s+a\s+", "", raw, flags=re.IGNORECASE).strip()
-            norm = self._normalize_text(raw)
-        elif norm in {"prueba so", "prueba shoutout"}:
-            preview = True
-            last_raider = getattr(stream, "last_raider_username", None) or getattr(stream, "last_raider_display_name", None)
-            raw = str(last_raider or "tester")
-            norm = self._normalize_text(raw)
-        else:
-            patterns = [
-                r"^(?:haz\s+un\s+so\s+a|haz\s+so\s+a|hazle\s+so\s+a|dale\s+un\s+so\s+a)\s+(.+)$",
-                r"^(?:haz\s+un\s+so\s+al|haz\s+so\s+al|hazle\s+so\s+al|dale\s+un\s+so\s+al)\s+(.+)$",
-                r"^(?:shoutout\s+a|haz\s+shoutout\s+a|shoutout)\s+(.+)$",
-                r"^(?:promociona\s+a|haz\s+promo\s+a|hazle\s+promo\s+a|dale\s+promo\s+a|recomienda\s+a)\s+(.+)$",
-                r"^(?:give\s+a\s+shoutout\s+to|shoutout|promote|so)\s+(.+)$",
-                r"^give\s+(.+)\s+a\s+promo$",
-                r"^(?:haz\s+so|haz\s+un\s+so|hazle\s+so|dale\s+un\s+so)$",
-            ]
-            match = None
-            for pattern in patterns:
-                match = re.match(pattern, norm, flags=re.IGNORECASE)
-                if match:
-                    break
-            if not match:
-                return None
-            if match.lastindex:
-                raw = raw.split()[-len(match.group(1).split()):]
-                raw = " ".join(raw)
-                norm = match.group(1).strip()
-            else:
-                raw = ""
-                norm = ""
-
-        target, reason = self._resolve_shoutout_target(raw or norm)
-        if reason == "missing_target":
+        planner = self._get_stream_action_planner()
+        plan = planner.plan(InputEvent(
+            source="typed_ui",
+            raw_text=raw_command,
+            normalized_text=raw_command,
+        ))
+        if plan is None or plan.action_type != "twitch_shoutout":
+            return None
+        self._manual_reply_ui_only = True
+        if plan.status == "needs_confirmation":
             return "¿A quién le hago el SO, Leo?"
-        if not target:
-            return "No encuentro un usuario válido para el SO, Leo."
+        return f"Previsualizacion de shoutout: {plan.command or self._build_shoutout_command_preview(plan.target or '')}"
 
-        command = self._build_shoutout_command_preview(target)
-        if preview:
-            self._manual_reply_ui_only = True
-            return f"Previsualizacion de shoutout: {command}"
-
-        ok, normalized_target, send_reason = self._send_shoutout(target, source="manual", force=force)
-        if ok:
-            return CommandResult(
-                action_type="shoutout_sent",
-                success=True,
-                user_visible_summary=f"SO sent to {normalized_target}.",
-                state_changes={"shoutout_sent": True, "target": normalized_target},
-                constraints=["Do not claim anything beyond the shoutout command being sent.", "Do not ask for clarification."],
-                suggested_tone="short Hebe stream-control reply",
-                fallback_text=f"SO enviado a {normalized_target}.",
-                requires_model_response=True,
-                metadata={"message_goal": f"Confirm the SO command was sent to {normalized_target}."},
-            )
-        if send_reason in {"blocked_bot_user", "own_channel", "invalid_target"}:
-            return "No le hago SO a ese usuario, Leo. Huele a bot o a bucle infernal."
-        if send_reason == "cooldown_active":
-            return f"Ya hice SO a {normalized_target} hace nada, Leo. Evito el spam."
-        return f"No he podido hacer el SO a {normalized_target or target}."
+    def _handle_shoutout_manual_command(self, raw_command: str, normalized: str, stream) -> str | CommandResult | None:
+        return None
 
     def _build_shoutout_command_preview(self, target: str) -> str:
         twitch = getattr(self.runtime, "twitch", None)
@@ -2585,7 +2698,7 @@ class HebeEngine:
             f"* Last SO error: {getattr(stream, 'last_shoutout_error', None) or 'ninguno'}"
         )
 
-    def _handle_tts_manual_command(self, text: str) -> str | None:
+    def _handle_tts_manual_command(self, text: str) -> str | CommandResult | None:
         priority = self._handle_priority_tts_command(text)
         if priority is not None:
             return priority
@@ -2649,71 +2762,10 @@ class HebeEngine:
             except Exception as exc:
                 return f"No he podido cambiar el micrófono STT: {type(exc).__name__}: {exc}"
 
-        global_off = {
-            "desactiva tu voz",
-            "apaga tu voz",
-            "desactiva el tts",
-            "solo texto",
-            "callate la voz",
-            "cállate la voz",
-            "disable your voice",
-            "text only",
-            "disable tts",
-        }
-        if normalized in global_off:
-            self.runtime.state.tts_enabled = False
-            print("[HEBE][TTS] global enabled=false source=command", flush=True)
-            self._emit_audio_status()
-            return "Vale, Leo. Me quedo en texto."
-
-        global_on = {
-            "activa tu voz",
-            "vuelve a hablar",
-            "activa el tts",
-            "modo voz",
-            "enable your voice",
-            "enable tts",
-            "voice mode",
-        }
-        if normalized in global_on:
-            self.runtime.state.tts_enabled = True
-            print("[HEBE][TTS] global enabled=true source=command", flush=True)
-            self._emit_audio_status()
-            return "Lista, Leo. Vuelvo a hablar."
-
         stream = self._get_stream_state()
         policies = getattr(stream, "policies", None) if stream else None
         if policies is None:
             return None
-
-        stream_off = {
-            "silencia tu voz en stream",
-            "desactiva tts en stream",
-            "desactiva el tts en stream",
-            "responde solo por chat",
-            "disable stream tts",
-            "text only on stream",
-        }
-        if normalized in stream_off:
-            policies.allow_tts_replies = False
-            print("[HEBE][TTS] stream enabled=false source=command", flush=True)
-            self._emit_audio_status()
-            return "Entendido. En stream responderé solo por chat."
-
-        stream_on = {
-            "puedes hablar en stream",
-            "activa tts en stream",
-            "activa el tts en stream",
-            "vuelve a hablar en directo",
-            "enable stream tts",
-            "enable tts on stream",
-        }
-        if normalized in stream_on:
-            policies.allow_tts_replies = True
-            print("[HEBE][TTS] stream enabled=true source=command", flush=True)
-            self._emit_audio_status()
-            return "Vale. Si toca, también hablaré en stream."
-
         return None
 
     def _normalize_voice_command_text(self, text: str) -> str:
@@ -2731,40 +2783,10 @@ class HebeEngine:
                     changed = True
         return normalized
 
-    def _handle_priority_tts_command(self, text: str) -> str | None:
+    def _handle_priority_tts_command(self, text: str) -> CommandResult | str | None:
         normalized = self._normalize_voice_command_text(text)
-        global_on = {
-            "activa la voz",
-            "activa tu voz",
-            "activa voz",
-            "activa tts",
-            "activa el tts",
-            "quiero escucharte",
-            "habla con voz",
-            "usa voz",
-            "pon voz",
-            "enable voice",
-            "enable tts",
-            "turn on voice",
-            "turn on tts",
-        }
-        global_off = {
-            "desactiva la voz",
-            "desactiva tu voz",
-            "desactiva voz",
-            "desactiva tts",
-            "desactiva el tts",
-            "solo texto",
-            "responde solo por texto",
-            "callate la voz",
-            "cállate la voz",
-            "sin voz",
-            "disable voice",
-            "disable tts",
-            "text only",
-            "voice off",
-        }
-        if normalized in global_on:
+        intent = self._parse_tts_control_intent(normalized)
+        if intent == "global_on":
             self.runtime.state.tts_enabled = True
             self.runtime.state.pending_tts_scope = {
                 "kind": "tts_scope",
@@ -2784,7 +2806,7 @@ class HebeEngine:
                 requires_model_response=True,
                 metadata={"message_goal": "Confirm voice is enabled and ask whether Leo wants local only or also stream scope."},
             )
-        if normalized in global_off:
+        if intent == "global_off":
             self.runtime.state.tts_enabled = False
             self.runtime.state.pending_tts_scope = None
             print("[HEBE][INTENT] voice command handled before reminder parser", flush=True)
@@ -2799,25 +2821,81 @@ class HebeEngine:
                 requires_model_response=True,
                 metadata={"message_goal": "Confirm voice/TTS is disabled and Hebe will stay in text."},
             )
-        if normalized in {"estado de voz", "estado de tts", "voice status", "tts status"}:
+        if intent in {"stream_on", "stream_off"}:
+            stream = self._get_stream_state()
+            policies = getattr(stream, "policies", None) if stream else None
+            if policies is None:
+                return None
+            enabled = intent == "stream_on"
+            policies.allow_tts_replies = enabled
+            print(f"[HEBE][TTS] stream enabled={str(enabled).lower()} source=command", flush=True)
+            self._emit_audio_status()
+            return CommandResult(
+                action_type="stream_tts_enabled" if enabled else "stream_tts_disabled",
+                success=True,
+                user_visible_summary=(
+                    "Stream TTS replies enabled by policy."
+                    if enabled
+                    else "Stream TTS replies disabled; Twitch replies remain text chat only."
+                ),
+                state_changes={"stream_tts": enabled},
+                constraints=["Do not ask for clarification.", "Do not claim idle spontaneous TTS changed."],
+                fallback_text=(
+                    "Vale. Si toca, también hablaré en stream."
+                    if enabled
+                    else "Entendido. En stream responderé solo por chat."
+                ),
+                requires_model_response=True,
+                metadata={
+                    "message_goal": (
+                        "Tell Leo that stream voice replies are enabled when policy allows."
+                        if enabled
+                        else "Tell Leo that stream voice replies are disabled and stream replies remain text-only."
+                    )
+                },
+            )
+        if intent == "status":
             return self._build_voice_status_reply()
         return None
 
-    def _handle_pending_manual_intent(self, text: str) -> str | None:
+    def _parse_tts_control_intent(self, normalized: str) -> str | None:
+        tokens = set(str(normalized or "").split())
+        if not tokens:
+            return None
+        voice = {"voz", "tts", "voice", "hablar"}
+        enable = {"activa", "enciende", "enable", "on", "habla", "usa", "pon", "quiero", "puedes", "vuelve"}
+        disable = {"desactiva", "apaga", "disable", "off", "callate", "sin", "solo", "silencia", "text", "texto"}
+        stream = {"stream", "directo", "chat"}
+        status = {"estado", "status"}
+        if tokens & status and (tokens & voice or "tts" in tokens):
+            return "status"
+        if tokens & stream and tokens & disable:
+            return "stream_off"
+        if tokens & stream and (tokens & enable or "hablar" in tokens):
+            return "stream_on"
+        if tokens & disable and (tokens & voice or "texto" in tokens or "text" in tokens):
+            return "global_off"
+        if tokens & enable and (tokens & voice or "escucharte" in tokens):
+            return "global_on"
+        return None
+
+    def _handle_pending_manual_intent(self, text: str) -> CommandResult | str | None:
         normalized = self._normalize_voice_command_text(text)
-        cancel_phrases = {
-            "no quiero que guardes nada",
-            "no guardes nada",
-            "cancela",
-            "cancela eso",
-            "olvida eso",
-        }
-        if normalized in cancel_phrases:
+        if self._is_cancel_pending_reminder(normalized):
             if getattr(self.runtime.state, "pending_clarification", None) or getattr(self.runtime.state, "pending_reminder", None):
                 self.runtime.state.pending_clarification = None
                 self.runtime.state.pending_reminder = None
                 print("[HEBE][INTENT] reminder pending cancelled", flush=True)
-                return "Vale, no guardo nada."
+                return CommandResult(
+                    action_type="pending_reminder_cancelled",
+                    success=True,
+                    user_visible_summary="Pending reminder or appointment clarification was cancelled.",
+                    state_changes={"pending_clarification": None, "pending_reminder": None},
+                    constraints=["Do not ask for clarification."],
+                    fallback_text="Vale, no guardo nada.",
+                    requires_model_response=True,
+                    metadata={"message_goal": "Tell Leo the pending reminder clarification was cancelled."},
+                )
 
         if not getattr(self.runtime.state, "pending_tts_scope", None):
             return None
@@ -2825,138 +2903,103 @@ class HebeEngine:
         pending_tts = getattr(self.runtime.state, "pending_tts_scope", {}) or {}
         print("[HEBE][PENDING] active=pending_tts_scope", flush=True)
         print("[HEBE][INTENT] pending_tts_scope active", flush=True)
-        local_phrases = {
-            "local",
-            "aqui",
-            "aquÃ­",
-            "aquí",
-            "solo aqui",
-            "solo aquÃ­",
-            "solo aquí",
-            "solo local",
-            "solo conmigo",
-            "solo por ahora",
-            "solo para escucharte",
-            "solo por ahora para poder escucharte",
-            "no en stream",
-            "en stream no",
-            "en directo no",
-            "no en directo",
-            "solo quiero escucharte",
-        }
-        stream_phrases = {
-            "stream",
-            "en stream",
-            "tambien stream",
-            "tambien en stream",
-            "tambiÃ©n en stream",
-            "también en stream",
-            "para stream",
-            "tambien en directo",
-            "tambiÃ©n en directo",
-            "también en directo",
-            "para el stream",
-            "en directo",
-            "en stream si",
-            "en directo si",
-            "tambien para el stream",
-        }
-        stream = self._get_stream_state()
-        policies = getattr(stream, "policies", None) if stream else None
-        if normalized not in local_phrases and normalized not in stream_phrases:
-            if self._is_explicit_command_while_pending(normalized):
-                self.runtime.state.pending_tts_scope = None
-                print("[HEBE][PENDING] new explicit command detected; clearing pending_tts_scope", flush=True)
-                print("[HEBE][INTENT] cleared pending_tts_scope", flush=True)
-                return None
+        if self._is_explicit_command_while_pending(normalized):
+            self.runtime.state.pending_tts_scope = None
+            print("[HEBE][PENDING] new explicit command detected; clearing pending_tts_scope", flush=True)
+            print("[HEBE][INTENT] cleared pending_tts_scope", flush=True)
+            return None
 
-        if normalized in local_phrases:
-            self.runtime.state.tts_enabled = True
-            if policies is not None:
-                policies.allow_tts_idle_prompts = False
-            self.runtime.state.pending_tts_scope = None
-            print("[HEBE][INTENT] resolved pending_tts_scope=local", flush=True)
-            print("[HEBE][INTENT] cleared pending_tts_scope", flush=True)
-            self._emit_audio_status()
-            return CommandResult(
-                action_type="tts_scope_resolved",
-                success=True,
-                user_visible_summary="Voice is enabled locally only; stream remains text-only unless Leo asks otherwise.",
-                state_changes={"tts_enabled": True, "stream_idle_tts": False, "pending_tts_scope": False},
-                constraints=[
-                    "Do not ask for more clarification.",
-                    "Do not claim stream voice is enabled.",
-                    "Keep stream text-only unless Leo asks otherwise.",
-                ],
-                fallback_text="Perfecto, voz activada solo aquí. En stream seguiré en texto salvo que me digas lo contrario.",
-                requires_model_response=True,
-                metadata={
-                    "scope": "local",
-                    "message_goal": "Confirm to Leo that voice is enabled locally only, and stream will remain text-only unless he asks otherwise.",
-                },
-            )
-        if normalized in stream_phrases:
-            self.runtime.state.tts_enabled = True
-            if policies is not None:
-                policies.allow_tts_replies = True
-                policies.allow_tts_event_replies = True
-                policies.allow_tts_raid_thanks = True
-            self.runtime.state.pending_tts_scope = None
-            print("[HEBE][INTENT] resolved pending_tts_scope=stream", flush=True)
-            print("[HEBE][INTENT] cleared pending_tts_scope", flush=True)
-            self._emit_audio_status()
-            return CommandResult(
-                action_type="tts_scope_resolved",
-                success=True,
-                user_visible_summary="Voice is enabled locally and for stream event replies; idle spontaneity remains text-only unless Leo asks otherwise.",
-                state_changes={
-                    "tts_enabled": True,
-                    "stream_replies_tts": True,
-                    "stream_event_tts": True,
-                    "stream_raid_tts": True,
-                    "pending_tts_scope": False,
-                },
-                constraints=[
-                    "Do not ask for more clarification.",
-                    "Do not claim idle spontaneous voice is enabled.",
-                ],
-                fallback_text="Perfecto, voz activada aquí y también para eventos del stream. La espontaneidad idle sigue en texto salvo que me digas lo contrario.",
-                requires_model_response=True,
-                metadata={
-                    "scope": "stream",
-                    "message_goal": "Confirm voice is enabled locally and for stream event replies, while idle spontaneity remains text-only.",
-                },
-            )
+        scope = self._parse_tts_scope_followup(normalized)
+        if scope == "local":
+            return self._resolve_pending_tts_scope_local()
+        if scope == "stream":
+            return self._resolve_pending_tts_scope_stream()
+
         if not pending_tts.get("unclear_asked"):
             pending_tts["unclear_asked"] = True
             self.runtime.state.pending_tts_scope = pending_tts
-            return "No te he entendido, Leo. ¿Local o también para stream?"
+            return CommandResult(
+                action_type="tts_scope_clarify",
+                success=False,
+                user_visible_summary="TTS scope follow-up was unclear; ask whether local or stream.",
+                state_changes={"pending_tts_scope": True},
+                constraints=["Ask one concise clarification question."],
+                fallback_text="No te he entendido, Leo. ¿Local o también para stream?",
+                requires_model_response=False,
+                metadata={"message_goal": "Ask Leo whether voice should be local only or also for stream."},
+            )
+        return self._resolve_pending_tts_scope_local(defaulted=True)
 
+    def _is_cancel_pending_reminder(self, normalized: str) -> bool:
+        tokens = set(str(normalized or "").split())
+        return bool(tokens & {"cancela", "olvida"}) or ({"no", "guardes"}.issubset(tokens))
+
+    def _parse_tts_scope_followup(self, normalized: str) -> str | None:
+        tokens = set(str(normalized or "").split())
+        if not tokens:
+            return None
+        stream_tokens = {"stream", "directo"}
+        local_tokens = {"local", "aqui", "aquí", "conmigo", "ahora", "escucharte"}
+        negation_tokens = {"no", "solo"}
+        if tokens & stream_tokens and not (tokens & negation_tokens):
+            return "stream"
+        if tokens & local_tokens:
+            return "local"
+        if "solo" in tokens and not (tokens & stream_tokens):
+            return "local"
+        if tokens & stream_tokens and tokens & negation_tokens:
+            return "local"
+        return None
+
+    def _resolve_pending_tts_scope_local(self, *, defaulted: bool = False) -> CommandResult:
+        stream = self._get_stream_state()
+        policies = getattr(stream, "policies", None) if stream else None
         self.runtime.state.tts_enabled = True
         if policies is not None:
             policies.allow_tts_idle_prompts = False
         self.runtime.state.pending_tts_scope = None
         print("[HEBE][INTENT] resolved pending_tts_scope=local", flush=True)
         print("[HEBE][INTENT] cleared pending_tts_scope", flush=True)
-        self._emit_audio_status()
         return CommandResult(
             action_type="tts_scope_resolved",
             success=True,
-            user_visible_summary="Ambiguous scope defaulted to local for safety; stream remains text-only.",
-            state_changes={"tts_enabled": True, "stream_idle_tts": False, "pending_tts_scope": False},
+            user_visible_summary="Voice is enabled locally only; stream remains text-only unless Leo asks otherwise.",
+            state_changes={"tts_enabled": True, "stream_idle_tts": False, "pending_tts_scope": False, "defaulted": defaulted},
             constraints=["Do not ask for more clarification.", "Do not claim stream voice is enabled."],
-            fallback_text="Lo dejo en local por seguridad. En stream seguiré en texto salvo que me digas lo contrario.",
+            fallback_text="Perfecto, voz activada solo aquí. En stream seguiré en texto salvo que me digas lo contrario.",
             requires_model_response=True,
-            metadata={
-                "scope": "local",
-                "message_goal": "Tell Leo Hebe defaults voice scope to local for safety and stream remains text-only.",
-            },
+            metadata={"scope": "local", "message_goal": "Confirm voice is enabled locally only, and stream remains text-only unless Leo asks otherwise."},
+        )
+
+    def _resolve_pending_tts_scope_stream(self) -> CommandResult:
+        stream = self._get_stream_state()
+        policies = getattr(stream, "policies", None) if stream else None
+        self.runtime.state.tts_enabled = True
+        if policies is not None:
+            policies.allow_tts_replies = True
+            policies.allow_tts_event_replies = True
+            policies.allow_tts_raid_thanks = True
+        self.runtime.state.pending_tts_scope = None
+        print("[HEBE][INTENT] resolved pending_tts_scope=stream", flush=True)
+        print("[HEBE][INTENT] cleared pending_tts_scope", flush=True)
+        return CommandResult(
+            action_type="tts_scope_resolved",
+            success=True,
+            user_visible_summary="Voice is enabled locally and for stream event replies; idle spontaneity remains text-only unless Leo asks otherwise.",
+            state_changes={"tts_enabled": True, "stream_replies_tts": True, "stream_event_tts": True, "stream_raid_tts": True, "pending_tts_scope": False},
+            constraints=["Do not ask for more clarification.", "Do not claim idle spontaneous voice is enabled."],
+            fallback_text="Perfecto, voz activada aquí y también para eventos del stream. La espontaneidad idle sigue en texto salvo que me digas lo contrario.",
+            requires_model_response=True,
+            metadata={"scope": "stream", "message_goal": "Confirm voice is enabled locally and for stream event replies, while idle spontaneity remains text-only."},
         )
 
     def _is_explicit_command_while_pending(self, normalized: str) -> bool:
         text = str(normalized or "").strip()
         if not text:
             return False
+
+        if self._parse_tts_control_intent(text) is not None:
+            return True
 
         try:
             plan = self._get_stream_action_planner().plan(
@@ -2967,42 +3010,14 @@ class HebeEngine:
         except Exception:
             pass
 
-        command_prefixes = (
-            "activa ",
-            "desactiva ",
-            "enciende ",
-            "apaga ",
-            "pausa ",
-            "reanuda ",
-            "resume ",
-            "modo ",
-            "actualiza ",
-            "comprueba ",
-            "estado ",
-            "que contexto ",
-            "qué contexto ",
-            "guarda ",
-            "finaliza ",
-            "haz ",
-            "hazle ",
-            "dale ",
-            "manda ",
-            "pon ",
-            "promociona ",
-            "recomienda ",
-            "shoutout ",
-            "so ",
-            "solo texto",
-            "responde solo ",
-            "para de hablar",
-            "stop speaking",
-        )
-        return text.startswith(command_prefixes) or text in {
-            "texto",
-            "sin voz",
-            "voice off",
-            "text only",
+        tokens = set(text.split())
+        action_tokens = {
+            "activa", "desactiva", "enciende", "apaga", "pausa", "reanuda", "resume",
+            "actualiza", "comprueba", "guarda", "finaliza", "haz", "hazle", "dale",
+            "manda", "pon", "promociona", "recomienda", "shoutout", "so", "stop",
         }
+        object_tokens = {"stt", "tts", "voz", "stream", "contexto", "modo", "promo", "shoutout", "texto"}
+        return bool(tokens & action_tokens and tokens & object_tokens)
 
     def _build_voice_status_reply(self) -> str:
         stream = self._get_stream_state()
@@ -3411,3 +3426,4 @@ if __name__ == "__main__":
 
     while True:
         time.sleep(1)
+

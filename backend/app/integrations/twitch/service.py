@@ -93,6 +93,27 @@ class TwitchService:
 
         return resolve_fn(raw_target)
 
+    def resolve_user_details(self, raw_target: str, intent: str = ""):
+        if self.target_resolver is None:
+            return None
+
+        resolve_fn = getattr(self.target_resolver, "resolve_user_details", None)
+        if callable(resolve_fn):
+            return resolve_fn(raw_target, intent=intent)
+
+        username = self.resolve_user(raw_target)
+        if not username:
+            return None
+        return {"username": username, "confidence": 0.82, "candidates": [username], "reason": "legacy_resolver"}
+
+    def remember_user_alias(self, alias: str, username: str) -> bool:
+        if self.target_resolver is None:
+            return False
+        remember_fn = getattr(self.target_resolver, "remember_alias", None)
+        if not callable(remember_fn):
+            return False
+        return bool(remember_fn(alias, username))
+
     def remember_chat_message(
         self,
         *,

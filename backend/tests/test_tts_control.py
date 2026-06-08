@@ -159,7 +159,8 @@ class TTSControlTests(unittest.TestCase):
         self.assertIn("local", first.lower())
         self.assertIsNone(engine.runtime.state.pending_tts_scope)
         self.assertIsInstance(second, CommandResult)
-        self.assertIn("local", second.lower())
+        self.assertEqual(second.action_type, "tts_scope_resolved")
+        self.assertEqual(second.metadata["scope"], "local")
 
     def test_synthesizer_receives_command_result(self):
         engine = make_engine(tts_enabled=False)
@@ -196,7 +197,9 @@ class TTSControlTests(unittest.TestCase):
 
         self.assertIsNone(engine.runtime.state.pending_clarification)
         self.assertIsNone(engine.runtime.state.pending_reminder)
-        self.assertEqual(reply, "Vale, no guardo nada.")
+        self.assertIsInstance(reply, CommandResult)
+        self.assertEqual(reply.action_type, "pending_reminder_cancelled")
+        self.assertEqual(reply.fallback_text, "Vale, no guardo nada.")
 
     def test_global_tts_disabled_skips_runtime_speak_and_emits_text(self):
         engine = make_engine(tts_enabled=False)
@@ -213,7 +216,9 @@ class TTSControlTests(unittest.TestCase):
         reply = engine._handle_tts_manual_command("Hebe, responde solo por chat")
 
         self.assertFalse(engine.runtime.state.stream.policies.allow_tts_replies)
-        self.assertEqual(reply, "Entendido. En stream responderé solo por chat.")
+        self.assertIsInstance(reply, CommandResult)
+        self.assertEqual(reply.action_type, "stream_tts_disabled")
+        self.assertEqual(reply.fallback_text, "Entendido. En stream responderé solo por chat.")
 
         engine._deliver_twitch_reply("Mensaje de Twitch.")
 
@@ -227,7 +232,9 @@ class TTSControlTests(unittest.TestCase):
         reply = engine._handle_tts_manual_command("Hebe, puedes hablar en stream")
 
         self.assertTrue(engine.runtime.state.stream.policies.allow_tts_replies)
-        self.assertEqual(reply, "Vale. Si toca, también hablaré en stream.")
+        self.assertIsInstance(reply, CommandResult)
+        self.assertEqual(reply.action_type, "stream_tts_enabled")
+        self.assertEqual(reply.fallback_text, "Vale. Si toca, también hablaré en stream.")
 
     def test_global_tts_disabled_blocks_stream_tts_even_when_policy_allows(self):
         engine = make_engine(tts_enabled=False)

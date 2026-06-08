@@ -27,6 +27,7 @@ class StreamSpontaneityConfig:
     companion_max_per_hour: int = 2
     show_max_per_hour: int = 5
     max_per_stream: int = 6
+    require_specific_context: bool = False
     title_marker_ttl_sec: float = 55 * 60
     save_equip_topic_cooldown_sec: float = 60 * 60
     cooldown_key: str = "stream_idle_prompt_next_ts"
@@ -112,6 +113,7 @@ class StreamSpontaneityService:
             "next_possible_idle_prompt_ts": 0.0,
             "title_markers_fresh": [],
             "title_markers_stale": [],
+            "specific_context_anchors": [],
         }
         if not stream:
             return result
@@ -160,6 +162,12 @@ class StreamSpontaneityService:
         title_context = self._title_marker_context(stream, now)
         result["title_markers_fresh"] = title_context["fresh"]
         result["title_markers_stale"] = title_context["stale"]
+        anchors = self._specific_context_anchors(stream, now, title_context=title_context)
+        result["specific_context_anchors"] = anchors
+        if self.config.require_specific_context and not anchors:
+            result["blocked_reason"] = "no_specific_context"
+            print("[HEBE][SPONTANEITY] skipped reason=no_specific_context", flush=True)
+            return result
 
         chat_snapshot = self._chat_activity_snapshot(stream, now)
         result["chat_active"] = chat_snapshot["active"]
@@ -219,6 +227,8 @@ class StreamSpontaneityService:
             result["blocked_reason"] = "topic_recently_used"
             return result
         result["candidate_topic"] = topic
+        print(f"[HEBE][SPONTANEITY] anchors={anchors}", flush=True)
+        print(f"[HEBE][SPONTANEITY] generated topic={topic}", flush=True)
 
         result["would_send"] = True
         result["blocked_reason"] = "ready"
@@ -274,6 +284,15 @@ class StreamSpontaneityService:
                 "phase": getattr(stream, "current_run_phase", None),
                 "source": getattr(stream, "run_context_source", None),
                 "updated_ts": getattr(stream, "run_context_updated_ts", 0.0),
+                "facts": [
+                    {
+                        "kind": item.get("kind"),
+                        "text": item.get("text"),
+                        "confidence": item.get("confidence"),
+                    }
+                    for item in list(getattr(stream, "recent_run_context_facts", []) or [])[-8:]
+                    if item.get("text")
+                ],
                 "completed_markers": list(getattr(stream, "completed_run_markers", []) or []),
                 "title_markers_fresh": title_context["fresh"],
                 "title_markers_stale": title_context["stale"],
@@ -284,8 +303,14 @@ class StreamSpontaneityService:
                 "recent_topics": chat_snapshot["topics"],
                 "summary": chat_snapshot["summary"],
             },
+            "specific_context_anchors": self._specific_context_anchors(stream, now, title_context=title_context, chat_snapshot=chat_snapshot),
             "recent_idle_topics": [item.get("topic") for item in recent_idle[-8:] if item.get("topic")],
             "recent_idle_messages": [item.get("text") for item in recent_idle[-5:] if item.get("text")],
+            "recent_style_motifs": [
+                item.get("motif")
+                for item in list(getattr(stream, "recent_style_motifs", []) or [])[-12:]
+                if item.get("motif")
+            ],
             "game_profile": profile.compact_prompt_context(),
         }
 
@@ -306,6 +331,7 @@ class StreamSpontaneityService:
         messages.append(entry)
         stream.recent_idle_messages = messages[-30:]
         stream.idle_prompts_sent_stream = int(getattr(stream, "idle_prompts_sent_stream", 0) or 0) + 1
+        self._record_style_motifs(stream, text, now=now)
 
     def is_too_similar_to_recent(self, stream: StreamSessionState | None, text: str) -> bool:
         if not stream:
@@ -389,6 +415,87 @@ class StreamSpontaneityService:
         if not available:
             return None
         return available[0]
+
+    def _specific_context_anchors(
+        self,
+        stream: StreamSessionState,
+        now: float,
+        *,
+        title_context: dict | None = None,
+        chat_snapshot: dict | None = None,
+    ) -> list[str]:
+        anchors: list[str] = []
+        if getattr(stream, "current_game", None) or getattr(stream, "current_category", None):
+            anchors.append("game")
+        if getattr(stream, "current_stream_title", None):
+            anchors.append("title")
+        title_context = title_context or self._title_marker_context(stream, now)
+        if title_context.get("fresh"):
+            anchors.append("title_markers")
+        if getattr(stream, "current_playthrough_type", None):
+            anchors.append("playthrough_type")
+        if getattr(stream, "current_challenge", None):
+            anchors.append("challenge")
+        run_updated = float(getattr(stream, "run_context_updated_ts", 0.0) or 0.0)
+        if run_updated and now - run_updated <= 45 * 60:
+            if (
+                getattr(stream, "current_run_objective", None)
+                or getattr(stream, "current_run_location", None)
+                or getattr(stream, "current_run_phase", None)
+                or getattr(stream, "recent_run_context_facts", None)
+            ):
+                anchors.append("run_context")
+        chat_snapshot = chat_snapshot or self._chat_activity_snapshot(stream, now)
+        if chat_snapshot.get("topics"):
+            anchors.append("chat_topic")
+        last_voice_ts = float(getattr(stream, "last_voice_event_ts", 0.0) or 0.0)
+        if last_voice_ts and now - last_voice_ts <= 30 * 60 and getattr(stream, "last_voice_event", None):
+            anchors.append("recent_voice_event")
+        if getattr(stream, "last_raid_event", None):
+            anchors.append("recent_event")
+        return list(dict.fromkeys(anchors))
+
+    def _record_style_motifs(self, stream: StreamSessionState, text: str, *, now: float) -> None:
+        motifs = self.detect_style_motifs(text)
+        if not motifs:
+            return
+        recent = list(getattr(stream, "recent_style_motifs", []) or [])
+        recent.extend({"motif": motif, "timestamp": now, "text": str(text or "")[:160]} for motif in motifs)
+        stream.recent_style_motifs = recent[-80:]
+
+    def detect_style_motifs(self, text: str) -> list[str]:
+        lowered = str(text or "").lower()
+        motifs: list[str] = []
+        motif_terms = {
+            "cafe": ("cafe", "café", "coffee", "cafeina", "cafeína"),
+            "energy": ("energia", "energía", "pilas", "cansancio"),
+            "florist": ("florist", "florister", "flores"),
+            "creator": ("creador", "creadores"),
+            "chaos": ("caos", "caotico", "caótico"),
+        }
+        for motif, terms in motif_terms.items():
+            if any(term in lowered for term in terms):
+                motifs.append(motif)
+        return motifs
+
+    def motif_on_cooldown(self, stream: StreamSessionState | None, text: str, *, now: float | None = None) -> str | None:
+        if not stream:
+            return None
+        now = self._now() if now is None else float(now)
+        cooldown_min = float(__import__("os").environ.get("HEBE_STYLE_MOTIF_COOLDOWN_MINUTES", "90") or 90)
+        configured = __import__("os").environ.get("HEBE_STYLE_OVERUSED_MOTIFS", "cafe,coffee,energy,florist,creator")
+        overused = {item.strip().lower() for item in configured.split(",") if item.strip()}
+        aliases = {"coffee": "cafe"}
+        motifs = [aliases.get(motif, motif) for motif in self.detect_style_motifs(text)]
+        recent = list(getattr(stream, "recent_style_motifs", []) or [])
+        for motif in motifs:
+            if motif not in overused:
+                continue
+            for item in reversed(recent):
+                item_motif = aliases.get(str(item.get("motif") or "").lower(), str(item.get("motif") or "").lower())
+                if item_motif == motif and now - float(item.get("timestamp", 0.0) or 0.0) < cooldown_min * 60:
+                    return motif
+        return None
 
     def _normalize_marker(self, text: str) -> str:
         return self._normalize_for_similarity(text)

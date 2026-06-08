@@ -64,6 +64,7 @@ class StreamSessionState:
     current_run_objective: Optional[str] = None
     current_run_location: Optional[str] = None
     current_run_phase: Optional[str] = None
+    recent_run_context_facts: list[dict] = field(default_factory=list)
     completed_run_markers: list[str] = field(default_factory=list)
     title_context_markers: list[str] = field(default_factory=list)
     title_context_updated_ts: float = 0.0
@@ -76,6 +77,7 @@ class StreamSessionState:
     last_stream_spontaneity_blocked_reason: Optional[str] = None
     idle_spontaneity_enabled: bool = True
     recent_idle_messages: list[dict] = field(default_factory=list)
+    recent_style_motifs: list[dict] = field(default_factory=list)
     idle_prompts_sent_stream: int = 0
     last_raid_event: Optional[dict] = None
     last_shoutout_target: Optional[str] = None

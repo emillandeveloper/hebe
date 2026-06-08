@@ -196,6 +196,31 @@ class StreamPresenceTests(unittest.TestCase):
         self.assertEqual(stream.leo_mood_hint, "confused")
         self.assertEqual(stream.last_voice_summary, "no entiendo donde voy ahora")
 
+    def test_ambient_stt_level_gap_updates_run_context(self):
+        engine = make_engine(StreamSessionState(enabled=True))
+        event_type, mood = engine._classify_voice_event("ahora mismo son cuatro niveles más que yo")
+
+        engine._record_voice_event("ahora mismo son cuatro niveles más que yo", event_type, mood)
+
+        stream = engine.runtime.state.stream
+        facts = stream.recent_run_context_facts
+        self.assertTrue(any(item.get("kind") == "level_gap" for item in facts))
+        self.assertEqual(stream.run_context_source, "stt_voice")
+        self.assertIn("4 levels", stream.current_run_phase)
+
+    def test_unsupported_script_stt_is_rejected_before_cognition(self):
+        engine = make_engine(StreamSessionState(enabled=True))
+        logs = []
+        emitted = []
+
+        with patch("builtins.print", lambda *args, **kwargs: logs.append(" ".join(str(arg) for arg in args))), \
+             patch("app.hebe_engine.emit", lambda event_type, data=None: emitted.append((event_type, data or {}))):
+            result = engine._process_stt_voice_transcript("これはテストです")
+
+        self.assertEqual(result, "continue")
+        self.assertIn("[HEBE][STT][REJECTED] reason=language_not_allowed script=japanese", "\n".join(logs))
+        self.assertTrue(any(data.get("message") == "Raw STT rejected: unsupported language/script." for _, data in emitted))
+
     def test_chat_message_without_mention_updates_activity_without_reply(self):
         engine = make_engine(StreamSessionState(enabled=True))
 

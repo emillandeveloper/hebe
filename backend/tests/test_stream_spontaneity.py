@@ -182,6 +182,53 @@ class StreamSpontaneityTests(unittest.TestCase):
 
         self.assertEqual(readiness["blocked_reason"], "hourly_limit")
 
+    def test_specificity_gate_skips_without_context_anchor(self):
+        now = 1_000_000.0
+        stream = self.make_stream(now=now, presence_mode="show")
+        stream.last_chat_activity_ts = now - 60 * 60
+        service = StreamSpontaneityService(
+            config=StreamSpontaneityConfig(
+                show_silence_sec=5 * 60,
+                show_jitter_sec=0,
+                require_specific_context=True,
+            ),
+            now_fn=lambda: now,
+        )
+
+        readiness = service.evaluate(stream, now=now)
+
+        self.assertFalse(readiness["would_send"])
+        self.assertEqual(readiness["blocked_reason"], "no_specific_context")
+
+    def test_specificity_gate_allows_current_game_anchor(self):
+        now = 1_000_000.0
+        stream = self.make_stream(now=now, presence_mode="show")
+        stream.current_category = "Zwei!!: The Arges Adventure"
+        stream.last_chat_activity_ts = now - 60 * 60
+        service = StreamSpontaneityService(
+            config=StreamSpontaneityConfig(
+                show_silence_sec=5 * 60,
+                show_jitter_sec=0,
+                require_specific_context=True,
+            ),
+            now_fn=lambda: now,
+        )
+
+        event = service.build_due_event(stream)
+
+        self.assertIsNotNone(event)
+        self.assertIn("game", event.payload["specific_context_anchors"])
+
+    def test_motif_cooldown_blocks_repeated_coffee(self):
+        now = 1_000_000.0
+        stream = self.make_stream(now=now, presence_mode="show")
+        service = self.make_service(now)
+        service.record_idle_message(stream, "Esto pide café antes del boss.", topic="game_vibe")
+
+        motif = service.motif_on_cooldown(stream, "Otro comentario de café, Leo.", now=now + 60)
+
+        self.assertEqual(motif, "cafe")
+
     def test_idle_tts_is_disabled_by_default(self):
         stream = StreamSessionState()
 

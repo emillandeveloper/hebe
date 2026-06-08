@@ -5,6 +5,8 @@ from unittest.mock import Mock, patch
 from app.cognitive.input_event import InputEvent
 from app.core.state import HebeState
 from app.hebe_engine import HebeEngine
+from app.integrations.twitch.chat_cache import TwitchChatCache
+from app.integrations.twitch.target_resolver import TwitchTargetResolver
 from app.services.voice_command_recovery import normalize_stt_transcript
 from app.stream.action_planner import StreamActionPlanner
 from app.stream.state import StreamSessionState
@@ -16,6 +18,8 @@ class FakeTwitch:
         self.channel_name = "leonifelheim"
         self.bot_username = "HebeNifelheim"
         self.shoutout_command_template = "!so {username}"
+        self.chat_cache = TwitchChatCache()
+        self.target_resolver = TwitchTargetResolver(self.chat_cache, event_memory=None, aliases={})
 
     def is_available(self):
         return True
@@ -31,7 +35,16 @@ class FakeTwitch:
         return True
 
     def resolve_user(self, raw_target):
-        return None
+        return self.target_resolver.resolve_user(raw_target)
+
+    def resolve_user_details(self, raw_target, intent=""):
+        return self.target_resolver.resolve_user_details(raw_target, intent=intent)
+
+    def remember_user_alias(self, alias, username):
+        return self.target_resolver.remember_alias(alias, username)
+
+    def remember_chat_message(self, *, username, display_name="", text=""):
+        self.chat_cache.add_message(username=username, display_name=display_name, text=text)
 
 
 class FakeSynth:
@@ -137,6 +150,31 @@ class VoiceCommandPipelineTests(unittest.TestCase):
         self.assertTrue(result.success)
         self.assertEqual(engine.runtime.twitch.sent, ["!so nuria"])
         self.assertEqual(reply, "modelo:twitch_shoutout:nuria")
+
+    def test_recent_chatter_can_resolve_spoken_promo_target(self):
+        engine = make_engine([])
+
+        engine.observe_twitch_chat_message("er_tito_xarly", "er_tito_xarly", "leo^^", "#chan")
+        plan = engine._get_stream_action_planner().plan(
+            InputEvent(source="stt_voice", raw_text="hazle una promo a Charlie", normalized_text="hazle una promo a Charlie", is_voice=True)
+        )
+
+        self.assertEqual(plan.action_type, "twitch_shoutout")
+        self.assertEqual(plan.target, "er_tito_xarly")
+        self.assertEqual(plan.status, "complete")
+
+    def test_manual_alias_resolves_spoken_promo_target(self):
+        engine = make_engine([])
+
+        alias_result = engine._handle_stream_manual_command("Hebe, Charlie es er_tito_xarly")
+        plan = engine._get_stream_action_planner().plan(
+            InputEvent(source="stt_voice", raw_text="hazle una promo a Charlie", normalized_text="hazle una promo a Charlie", is_voice=True)
+        )
+
+        self.assertEqual(alias_result.action_type, "chatter_alias_stored")
+        self.assertTrue(alias_result.success)
+        self.assertEqual(plan.action_type, "twitch_shoutout")
+        self.assertEqual(plan.target, "er_tito_xarly")
 
     def test_missing_target_asks_for_followup_without_executing(self):
         engine = make_engine()

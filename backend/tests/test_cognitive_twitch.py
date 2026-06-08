@@ -187,6 +187,27 @@ class CognitiveTwitchTests(unittest.TestCase):
         self.assertTrue(reply)
         self.assertLessEqual(len(reply), 220)
 
+    def test_response_synthesizer_rejects_dot_only_spontaneous_reply(self):
+        synth = ResponseSynthesizer(conversation_model=None)
+
+        reply = synth._safe_spontaneous_stream_reply(".", "fallback", payload={"specific_context_anchors": ["game"]})
+
+        self.assertEqual(reply, "")
+
+    def test_response_synthesizer_rejects_repeated_overused_motif(self):
+        synth = ResponseSynthesizer(conversation_model=None)
+
+        reply = synth._safe_spontaneous_stream_reply(
+            "Otro café antes de entrar, Leo.",
+            "fallback",
+            payload={
+                "specific_context_anchors": ["game"],
+                "recent_style_motifs": ["cafe"],
+            },
+        )
+
+        self.assertEqual(reply, "fallback")
+
     def test_spontaneous_prompt_includes_stream_context(self):
         model = CapturingModel("Mi senor, revisa recursos antes de avanzar.")
         event = InternalEvent(

@@ -284,7 +284,7 @@ class TwitchChatBot:
 
         if not has_mention and not has_pending_reply:
             print(
-                f"[HEBE][TWITCH][CHATBOT] ignored chat message without mention: {message!r}",
+                f"[HEBE][TWITCH][CHAT] response_skipped reason=no_mention username={username} message={message!r}",
                 flush=True,
             )
             return

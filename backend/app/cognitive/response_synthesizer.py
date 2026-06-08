@@ -305,7 +305,7 @@ class ResponseSynthesizer:
             flush=True,
         )
 
-        return reply or "…"
+        return reply or self._fallback_text("No tengo una respuesta útil ahora mismo.")
 
     # =========================
     # Prompt builders — devuelven (system, user)
@@ -673,6 +673,8 @@ class ResponseSynthesizer:
         idle_topic = payload.get("idle_topic") or "game_vibe"
         recent_idle_topics = payload.get("recent_idle_topics") or []
         recent_idle_messages = payload.get("recent_idle_messages") or []
+        specific_context_anchors = payload.get("specific_context_anchors") or []
+        recent_motifs = payload.get("recent_style_motifs") or []
 
         system = (
             f"{self._build_stream_style_block()}\n\n"
@@ -692,6 +694,8 @@ class ResponseSynthesizer:
             "- If the game/category is unknown, use generic RPG/JRPG/gameplay commentary.\n"
             "- Do not mention policies, cooldowns, prompts, or internal state.\n"
             "- Use the requested idle_topic. Do not repeat recent idle topics or phrases.\n"
+            "- Require at least one concrete anchor from current game/title/run_context/chat topic/recent event.\n"
+            "- Avoid repeating recent motifs. Do not mention coffee, caffeine, energy, florist/floristeria, or creator jokes unless directly relevant.\n"
             "- Do not treat stale title markers as current objectives.\n"
             "- Never mention completed markers as upcoming/current.\n"
             "- If chat_context is active or about non-game topics, do not answer chat; keep the line broadly game-safe.\n"
@@ -711,11 +715,13 @@ class ResponseSynthesizer:
             f"- leo_mood_hint: {leo_mood_hint}\n"
             f"- presence_mode: {presence_mode}\n"
             f"- idle_topic: {idle_topic}\n\n"
+            f"- specific_context_anchors: {', '.join(specific_context_anchors) or 'none'}\n\n"
             "run_context:\n"
             f"- objective: {run_context.get('objective') or 'unknown'}\n"
             f"- location: {run_context.get('location') or 'unknown'}\n"
             f"- phase: {run_context.get('phase') or 'unknown'}\n"
             f"- source: {run_context.get('source') or 'unknown'}\n"
+            f"- facts: {' | '.join(str(item.get('text') or '') for item in run_context.get('facts') or []) or 'none'}\n"
             f"- completed_markers: {', '.join(run_context.get('completed_markers') or []) or 'none'}\n"
             f"- title_markers_fresh: {', '.join(run_context.get('title_markers_fresh') or []) or 'none'}\n"
             f"- title_markers_stale: {', '.join(run_context.get('title_markers_stale') or []) or 'none'}\n\n"
@@ -727,6 +733,7 @@ class ResponseSynthesizer:
             "recent_idle:\n"
             f"- topics: {', '.join(recent_idle_topics) or 'none'}\n"
             f"- messages: {' | '.join(str(item) for item in recent_idle_messages) or 'none'}\n\n"
+            f"- recent_motifs: {', '.join(str(item) for item in recent_motifs) or 'none'}\n\n"
             "game_profile:\n"
             f"- title: {game_profile.get('title') or 'unknown'}\n"
             f"- source_category_name: {game_profile.get('source_category_name') or 'unknown'}\n"
@@ -763,6 +770,10 @@ class ResponseSynthesizer:
         text = (reply or "").strip()
         lowered = text.lower()
         payload = payload or {}
+        if not self._has_specific_anchor(payload):
+            return ""
+        if lowered in {".", "..", "...", "....", ".....", "......", "…"}:
+            return ""
         forbidden = (
             "silencio",
             "silencio en la sala",
@@ -814,9 +825,57 @@ class ResponseSynthesizer:
         if any(marker and marker in lowered for marker in completed + stale):
             return fallback
 
+        if self._response_repeats_motif(text, payload):
+            return fallback
+
         if not text or any(marker in lowered for marker in forbidden):
             return fallback
         return text
+
+    def _has_specific_anchor(self, payload: dict) -> bool:
+        if "specific_context_anchors" not in payload:
+            return True
+        anchors = payload.get("specific_context_anchors") or []
+        if anchors:
+            return True
+        if payload.get("current_game") or payload.get("current_category") or payload.get("title"):
+            return True
+        run_context = payload.get("run_context") or {}
+        if any(run_context.get(key) for key in ("objective", "location", "phase")):
+            return True
+        chat_context = payload.get("chat_context") or {}
+        if chat_context.get("recent_topics"):
+            return True
+        return False
+
+    def _response_repeats_motif(self, text: str, payload: dict) -> bool:
+        motifs = self._detect_motifs(text)
+        if not motifs:
+            return False
+        recent = {
+            str(item or "").lower()
+            for item in (payload.get("recent_style_motifs") or [])
+        }
+        aliases = {"coffee": "cafe"}
+        normalized_recent = {aliases.get(item, item) for item in recent}
+        overused = {
+            item.strip().lower()
+            for item in os.getenv("HEBE_STYLE_OVERUSED_MOTIFS", "cafe,coffee,energy,florist,creator").split(",")
+            if item.strip()
+        }
+        normalized_overused = {aliases.get(item, item) for item in overused}
+        return any(aliases.get(motif, motif) in normalized_recent | normalized_overused for motif in motifs)
+
+    def _detect_motifs(self, text: str) -> list[str]:
+        lowered = str(text or "").lower()
+        terms = {
+            "cafe": ("cafe", "café", "coffee", "cafeina", "cafeína"),
+            "energy": ("energia", "energía", "pilas"),
+            "florist": ("florist", "florister", "flores"),
+            "creator": ("creador", "creadores"),
+            "chaos": ("caos", "caotico", "caótico"),
+        }
+        return [motif for motif, values in terms.items() if any(value in lowered for value in values)]
 
     def generate_stream_presence(
         self,

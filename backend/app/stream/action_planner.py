@@ -6,6 +6,8 @@ from typing import Callable
 
 from app.cognitive.action_plan import ActionPlan
 from app.cognitive.input_event import InputEvent
+from app.cognitive.wake_name_resolver import WakeNameResolver
+from app.stream.intent_parser import StreamIntentParser
 
 
 def normalize_command_text(text: str) -> str:
@@ -21,49 +23,42 @@ class StreamActionPlanner:
         normalize_target: Callable[[str], str],
         build_shoutout_command: Callable[[str], str],
         stream_state_provider: Callable[[], object | None],
+        target_resolver: Callable[[str], object | None] | None = None,
     ):
         self.known_targets_provider = known_targets_provider
         self.normalize_target = normalize_target
         self.build_shoutout_command = build_shoutout_command
         self.stream_state_provider = stream_state_provider
+        self.target_resolver = target_resolver
+        self.intent_parser = StreamIntentParser()
+        self.wake_resolver = WakeNameResolver()
 
     def plan(self, input_event: InputEvent) -> ActionPlan | None:
         raw_text = self._strip_wakeword_preserve(input_event.normalized_text)
-        text = normalize_command_text(raw_text)
-        stt_ambient = self._plan_stt_ambient(text)
-        if stt_ambient is not None:
-            return stt_ambient
-        shoutout = self._plan_shoutout(text, raw_text, input_event)
-        if shoutout is not None:
-            return shoutout
+        candidates = self.intent_parser.parse(raw_text, raw_text=raw_text)
+        print(f"[HEBE][COG] intent_candidates={[candidate.intent for candidate in candidates]!r}", flush=True)
+        for candidate in candidates:
+            if candidate.intent in {"stream_ambient_stt_enabled", "stream_ambient_stt_disabled"}:
+                return self._plan_stt_ambient(candidate)
+            if candidate.intent == "twitch_shoutout":
+                return self._plan_shoutout(candidate, input_event)
         return None
 
-    def _plan_stt_ambient(self, text: str) -> ActionPlan | None:
-        if re.match(r"^(?:desactiva|apaga|pausa|quita)\s+(?:el\s+)?stt\s+ambiental(?:\s+(?:de|del|para)\s+stream)?$", text):
-            return ActionPlan(
-                action_type="stream_ambient_stt_disabled",
-                status="complete",
-                confidence=0.98,
-                reason="ok",
-                context_checks=self._stream_context_checks(),
-            )
-        if re.match(r"^(?:activa|enciende|reanuda|pon)\s+(?:el\s+)?stt\s+ambiental(?:\s+(?:de|del|para)\s+stream)?$", text):
-            return ActionPlan(
-                action_type="stream_ambient_stt_enabled",
-                status="complete",
-                confidence=0.98,
-                reason="ok",
-                context_checks=self._stream_context_checks(),
-            )
-        return None
+    def _plan_stt_ambient(self, candidate) -> ActionPlan:
+        return ActionPlan(
+            action_type=candidate.intent,
+            status="complete",
+            confidence=candidate.confidence,
+            reason=candidate.reason or "ok",
+            context_checks=self._stream_context_checks(),
+        )
 
-    def _plan_shoutout(self, text: str, raw_text: str, input_event: InputEvent) -> ActionPlan | None:
-        intent_confidence, target_raw = self._match_shoutout_intent(text, raw_text)
-        if intent_confidence <= 0:
-            return None
-
+    def _plan_shoutout(self, candidate, input_event: InputEvent) -> ActionPlan | None:
+        intent_confidence = float(candidate.confidence)
+        target_raw = (candidate.entities or {}).get("target_text") or None
         checks = self._stream_context_checks()
         if target_raw is None:
+            print("[HEBE][ENTITY] extracted={'target_text': None}", flush=True)
             return ActionPlan(
                 action_type="twitch_shoutout",
                 status="needs_confirmation",
@@ -75,7 +70,14 @@ class StreamActionPlanner:
                 slots={"target_raw": ""},
             )
 
+        print(f"[HEBE][ENTITY] extracted={{'target_text': {target_raw!r}}}", flush=True)
         target, target_confidence, candidates, reason = self._resolve_target(target_raw)
+        print(
+            "[HEBE][TARGET_RESOLVER] "
+            f"target_text={target_raw!r} resolved={target!r} "
+            f"confidence={target_confidence:.3f} reason={reason} candidates={candidates!r}",
+            flush=True,
+        )
         confidence = min(1.0, (intent_confidence * 0.55) + (target_confidence * 0.45))
         if reason == "ambiguous_target":
             return ActionPlan(
@@ -87,7 +89,7 @@ class StreamActionPlanner:
                 reason=reason,
                 candidates=candidates,
                 context_checks=checks,
-                slots={"target_raw": target_raw},
+                slots={"target_raw": target_raw, "target_text": target_raw, "resolved_username": target},
             )
         if not target:
             return ActionPlan(
@@ -98,7 +100,7 @@ class StreamActionPlanner:
                 reason=reason or "target_unclear",
                 candidates=candidates,
                 context_checks=checks,
-                slots={"target_raw": target_raw},
+                slots={"target_raw": target_raw, "target_text": target_raw, "resolved_username": target},
                 missing_slots=["target"],
             )
 
@@ -114,39 +116,13 @@ class StreamActionPlanner:
             reason="ok" if status == "complete" else "medium_confidence",
             candidates=candidates,
             context_checks=checks,
-            slots={"target_raw": target_raw},
+            slots={
+                "target_raw": target_raw,
+                "target_text": target_raw,
+                "resolved_username": target,
+                "requires_confirmation": status != "complete",
+            },
         )
-
-    def _match_shoutout_intent(self, text: str, raw_text: str) -> tuple[float, str | None]:
-        patterns = [
-            r"^(?:haz|hazle|dale|manda|pon)\s+(?:una?\s+)?(?:promo|promocion|so|shoutout)\s+(?:a\s+|al\s+)?(.+)$",
-            r"^(?:haz|hazle|dale)\s+(?:una?\s+)?(?:promo|so)\s*$",
-            r"^promociona\s+(?:a\s+)?(.+)$",
-            r"^recomienda\s+(?:a\s+)?(.+)$",
-            r"^shoutout\s+(?:to\s+|a\s+)?(.+)$",
-            r"^give\s+a\s+shoutout\s+to\s+(.+)$",
-            r"^so\s+(.+)$",
-        ]
-        raw_patterns = [
-            r"^(?:haz|hazle|dale|manda|pon)\s+(?:una?\s+)?(?:promo|promocion|so|shoutout)\s+(?:a\s+|al\s+)?(.+)$",
-            r"^(?:haz|hazle|dale)\s+(?:una?\s+)?(?:promo|so)\s*$",
-            r"^promociona\s+(?:a\s+)?(.+)$",
-            r"^recomienda\s+(?:a\s+)?(.+)$",
-            r"^shoutout\s+(?:to\s+|a\s+)?(.+)$",
-            r"^give\s+a\s+shoutout\s+to\s+(.+)$",
-            r"^so\s+(.+)$",
-        ]
-        for pattern, raw_pattern in zip(patterns, raw_patterns):
-            match = re.match(pattern, text, flags=re.IGNORECASE)
-            if not match:
-                continue
-            raw_match = re.match(raw_pattern, raw_text.strip(), flags=re.IGNORECASE)
-            if raw_match and raw_match.lastindex:
-                target = raw_match.group(1).strip()
-            else:
-                target = match.group(1).strip() if match.lastindex else None
-            return 0.95, target
-        return 0.0, None
 
     def _resolve_target(self, raw_target: str) -> tuple[str | None, float, list[str], str]:
         raw = str(raw_target or "").strip().lstrip("@")
@@ -167,6 +143,26 @@ class StreamActionPlanner:
             if target:
                 return self.normalize_target(target), 1.0, [target], "last_raider"
             return None, 0.0, [], "missing_target"
+
+        resolver = getattr(self, "target_resolver", None)
+        if callable(resolver):
+            resolved = resolver(raw)
+            if resolved is not None:
+                username = _get_resolution_value(resolved, "username")
+                confidence = float(_get_resolution_value(resolved, "confidence") or 0.0)
+                candidates = list(_get_resolution_value(resolved, "candidates") or [])
+                reason = str(_get_resolution_value(resolved, "reason") or "target_unclear")
+                if username:
+                    target = self.normalize_target(str(username))
+                    if reason == "ambiguous_target":
+                        return target, confidence, candidates or [target], "ambiguous_target"
+                    if confidence >= 0.82:
+                        return target, confidence, candidates or [target], reason
+                    if confidence >= 0.68:
+                        return target, confidence, candidates or [target], "medium_confidence"
+                elif reason == "missing_target":
+                    return None, confidence, candidates, reason
+
         normalized = self.normalize_target(raw)
         known = self._known_pairs()
         raw_key = _compact(raw)
@@ -220,7 +216,29 @@ class StreamActionPlanner:
         }
 
     def _strip_wakeword_preserve(self, text: str) -> str:
-        return re.sub(r"^\s*(?:hebe|ebe|eve|jebe|heve)[\s,;:.-]+", "", str(text or "").strip(), flags=re.IGNORECASE).strip()
+        original = str(text or "").strip()
+        resolution = self.wake_resolver.resolve(
+            raw_text=original,
+            normalized_text=original,
+            source="planner",
+            command_markers=self.intent_parser.shoutout_concepts | self.intent_parser.enable_concepts | self.intent_parser.disable_concepts,
+        )
+        if not resolution.matched_name:
+            return original
+        stripped = re.sub(
+            r"^\s*(?:hebe|ebe|eve|jebe|heve|e\.?\s*b\.?)[\s,;:.-]+",
+            "",
+            original,
+            flags=re.IGNORECASE,
+        ).strip()
+        if stripped == original:
+            stripped = re.sub(
+                r"[\s,;:.-]+(?:hebe|ebe|eve|jebe|heve|e\.?\s*b\.?)\s*$",
+                "",
+                original,
+                flags=re.IGNORECASE,
+            ).strip()
+        return stripped or original
 
 
 def _compact(value: str) -> str:
@@ -231,3 +249,11 @@ def _similar(left: str, right: str) -> float:
     if not left or not right:
         return 0.0
     return SequenceMatcher(None, left, right).ratio()
+
+
+def _get_resolution_value(resolved: object, key: str):
+    if resolved is None:
+        return None
+    if isinstance(resolved, dict):
+        return resolved.get(key)
+    return getattr(resolved, key, None)
