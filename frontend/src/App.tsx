@@ -76,6 +76,11 @@ type AudioInputDevice = {
 type VoiceCommandDebug = {
   raw_text?: string;
   normalized_text?: string;
+  detected_script?: string;
+  script?: string;
+  retry_attempted?: boolean;
+  retry_transcript?: string;
+  final_decision?: string;
   intent?: string;
   target?: string;
   confidence?: number;
@@ -323,6 +328,11 @@ export default function App() {
         setVoiceCommandDebug({
           raw_text: String(ev.data?.raw_text ?? ""),
           normalized_text: String(ev.data?.normalized_text ?? ""),
+          detected_script: ev.data?.detected_script ? String(ev.data.detected_script) : ev.data?.script ? String(ev.data.script) : "",
+          script: ev.data?.script ? String(ev.data.script) : "",
+          retry_attempted: typeof ev.data?.retry_attempted === "boolean" ? Boolean(ev.data.retry_attempted) : undefined,
+          retry_transcript: ev.data?.retry_transcript ? String(ev.data.retry_transcript) : "",
+          final_decision: ev.data?.final_decision ? String(ev.data.final_decision) : "",
           intent: ev.data?.intent ? String(ev.data.intent) : "",
           target: ev.data?.target ? String(ev.data.target) : "",
           confidence: typeof ev.data?.confidence === "number" ? Number(ev.data.confidence) : undefined,
@@ -1083,6 +1093,10 @@ function VoiceCommandDebugPanel({ debug }: { debug: VoiceCommandDebug | null }) 
       </div>
       <div className="voiceCommandGrid">
         <span>Raw</span><code>{debug.raw_text || "-"}</code>
+        <span>Script</span><code>{debug.detected_script || debug.script || "-"}</code>
+        <span>Retry</span><code>{typeof debug.retry_attempted === "boolean" ? (debug.retry_attempted ? "yes" : "no") : "-"}</code>
+        <span>Retry raw</span><code>{debug.retry_transcript || "-"}</code>
+        <span>Final</span><code>{debug.final_decision || status}</code>
         <span>Normalizado</span><code>{debug.normalized_text || "-"}</code>
         <span>Intent</span><code>{debug.intent || "-"}</code>
         <span>Target</span><code>{debug.target || "-"}</code>

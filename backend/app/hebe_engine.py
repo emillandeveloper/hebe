@@ -8,14 +8,16 @@ from zoneinfo import ZoneInfo
 
 from app.services.db_sqlite import (
     DB_PATH,
+    cleanup_stt_prompt_injection_rows,
     init_db,
     log_chat,
     seed_default_apps,
 )
 from app.services.vts_client import vts_hotkey
 from app.services.voice_command_recovery import TranscriptNormalizationResult, normalize_stt_transcript
+from app.services.stt_whisper import is_stt_prompt_injection
 from app.core.ui_bridge import emit
-from app.core.input_bus import submit_text_from_ui, get_ui_inbox, get_voice_inbox
+from app.core.input_bus import submit_text_from_ui, submit_text_from_voice, get_ui_inbox, get_voice_inbox
 from app.core.stt_worker import STTWorker
 from app.core.runtime import build_runtime, HebeRuntime
 
@@ -35,6 +37,7 @@ from app.cognitive.action_plan import ActionPlan
 from app.cognitive.wake_name_resolver import WakeNameResolver
 from app.cognitive.context_builder import ContextBuilder
 from app.cognitive.deliberation_service import DeliberationService
+from app.cognitive.local_app_planner import LocalAppActionPlanner
 from app.cognitive.plan_executor import PlanExecutor
 from app.cognitive.response_synthesizer import ResponseSynthesizer
 from app.cognitive.action_runtime import ActionRuntime
@@ -149,6 +152,7 @@ class HebeEngine:
         )
 
         self.action_runtime = ActionRuntime(self.runtime)
+        self.local_app_planner = LocalAppActionPlanner(self.wake_name_resolver)
 
         self.plan_executor = PlanExecutor(
             memory_store=self.memory_store,
@@ -303,6 +307,8 @@ class HebeEngine:
                 return
         stream.last_chat_activity_ts = now
         session_id = self._ensure_stream_memory_session_if_live(stream)
+        topic = self._classify_chat_topic(message)
+        linked_context = self._linked_run_context_for_chat_topic(stream, topic)
         stream_memory.record_chat_message(
             username=username,
             display_name=display_name,
@@ -312,7 +318,7 @@ class HebeEngine:
             is_direct_reply_to_hebe=False,
             is_bot=False,
             source="twitch_irc",
-            topic_hint=self._classify_chat_topic(message),
+            topic_hint=topic,
         )
         entry = {
             "username": str(username or "").strip(),
@@ -320,7 +326,10 @@ class HebeEngine:
             "text": message[:180],
             "ts": now,
             "channel": channel,
-            "topic": self._classify_chat_topic(message),
+            "topic": topic,
+            "category": "chat_topic",
+            "summary": self._summarize_chat_topic(username, display_name, message, topic),
+            "linked_to_recent_run_context": linked_context,
         }
         messages = recent_existing
         messages.append(entry)
@@ -338,6 +347,17 @@ class HebeEngine:
         stream.recent_chat_topics = topics[-12:]
         if topics:
             stream.recent_chat_summary = ", ".join(dict.fromkeys(topics[-5:]))
+        if topic != "general_chat":
+            users = sorted({
+                str(item.get("username") or "").strip()
+                for item in stream.recent_chat_messages
+                if item.get("topic") == topic and str(item.get("username") or "").strip()
+            })
+            print(
+                f"[HEBE][CHAT_CONTEXT] topic={topic} users={users!r} "
+                f"summary={entry['summary']!r}",
+                flush=True,
+            )
 
     def _is_chat_bot_user(self, username: str) -> bool:
         user = (username or "").strip().lower().lstrip("@")
@@ -520,6 +540,8 @@ class HebeEngine:
 
     def _classify_chat_topic(self, text: str) -> str:
         normalized = self._normalize_text(text)
+        if any(word in normalized for word in ("rng", "suerte", "azar", "random", "dados", "dado", "parchis")):
+            return "rng_dependency"
         if any(word in normalized for word in ("linux", "ram", "servidor", "server", "pc", "windows", "obs")):
             return "tech_pc"
         if any(word in normalized for word in ("ff9", "final fantasy", "level 1", "boss", "jefe", "lindblum", "ramuh")):
@@ -527,6 +549,29 @@ class HebeEngine:
         if any(word in normalized for word in ("hola", "buenas", "hello")):
             return "greeting"
         return "general_chat"
+
+    def _linked_run_context_for_chat_topic(self, stream, topic: str) -> str | None:
+        if topic == "general_chat":
+            return None
+        for fact in reversed(list(getattr(stream, "recent_run_context_facts", []) or [])):
+            category = str(fact.get("category") or fact.get("kind") or "")
+            if topic == category:
+                return category
+            if topic == "rng_dependency" and category in {"rng_dependency", "challenge_constraint"}:
+                return category
+        return None
+
+    def _summarize_chat_topic(self, username: str, display_name: str, message: str, topic: str) -> str:
+        name = str(display_name or username or "chat").strip()
+        if topic == "rng_dependency":
+            return f"{name} joked or commented about RNG, luck, or dice."
+        if topic == "tech_pc":
+            return f"{name} discussed PC/stream tech."
+        if topic == "game":
+            return f"{name} discussed the current game or run."
+        if topic == "greeting":
+            return f"{name} greeted the stream."
+        return str(message or "").strip()[:140]
 
     def _message_mentions_hebe(self, text: str) -> bool:
         normalized = self._normalize_text(text)
@@ -633,53 +678,35 @@ class HebeEngine:
 
         if resolution.wake_command or self._is_wake_concept_only(normalized):
             was_sleeping = bool(getattr(self.runtime.state, "hebe_sleeping", False))
-            print("[HEBE][WAKE] wake command detected", flush=True)
             self.runtime.state.hebe_sleeping = False
             self.runtime.state.mode = "active"
-            self._emit_audio_status()
-            if was_sleeping:
-                return CommandResult(
-                    action_type="wake_from_sleep",
-                    success=True,
-                    user_visible_summary="Hebe is awake and ready.",
-                    state_changes={"hebe_sleeping": False, "mode": "active"},
-                    constraints=["Do not claim the app restarted.", "Do not ask for clarification."],
-                    suggested_tone="short Hebe wake reply",
-                    fallback_text="Ya estoy despierta, Leo.",
-                    requires_model_response=True,
-                    metadata={"message_goal": "Tell Leo that Hebe is awake and ready."},
-                )
-            print("[HEBE][WAKE] already awake", flush=True)
+            fallback = "Despierta y contigo, Leo." if was_sleeping else "Ya estaba despierta, mi señor."
             return CommandResult(
-                action_type="already_awake",
+                action_type="wake_from_sleep" if was_sleeping else "already_awake",
                 success=True,
-                user_visible_summary="Hebe was already awake.",
+                user_visible_summary=fallback,
                 state_changes={"hebe_sleeping": False, "mode": "active"},
                 constraints=["Do not claim the app restarted.", "Do not ask for clarification."],
-                suggested_tone="short Hebe status reply",
-                fallback_text="Ya estaba despierta, mi señor.",
+                fallback_text=fallback,
                 requires_model_response=True,
-                metadata={"message_goal": "Tell Leo that Hebe is already awake."},
+                metadata={"message_goal": fallback},
             )
 
         if resolution.sleep_command or self._is_sleep_concept_only(normalized):
-            print("[HEBE][WAKE] sleep command detected", flush=True)
             self.runtime.state.hebe_sleeping = True
             self.runtime.state.mode = "sleep"
             stream = self._get_stream_state()
             if stream is not None:
                 stream.idle_spontaneity_enabled = False
-            self._emit_audio_status()
             return CommandResult(
                 action_type="sleep_mode",
                 success=True,
-                user_visible_summary="Hebe is going to sleep; idle spontaneity is paused.",
+                user_visible_summary="Hebe entered sleep mode.",
                 state_changes={"hebe_sleeping": True, "mode": "sleep", "idle_spontaneity_enabled": False},
-                constraints=["Do not claim the app is shutting down.", "Do not ask for clarification."],
-                suggested_tone="short Hebe sleep reply",
-                fallback_text="Me duermo, Leo. Si me necesitas, me despiertas.",
+                constraints=["Do not ask for clarification."],
+                fallback_text="Me quedo en espera, Leo.",
                 requires_model_response=True,
-                metadata={"message_goal": "Tell Leo Hebe is going to sleep and will ignore normal voice input until woken."},
+                metadata={"message_goal": "Tell Leo Hebe is going into sleep mode."},
             )
 
         return None
@@ -701,11 +728,11 @@ class HebeEngine:
             flush=True,
         )
 
-        wake_sleep = self._handle_wake_sleep_command(command)
-        if wake_sleep is not None:
-            print("[HEBE][COG] decision=command", flush=True)
-            text = self._synthesize_command_result(wake_sleep, input_text=command)
+        wake_result = self._handle_wake_sleep_command(command)
+        if wake_result is not None:
+            text = self._synthesize_command_result(wake_result, input_text=command)
             self._deliver_manual_reply(text, source=source)
+            print("[HEBE][COG] decision=command", flush=True)
             return "continue"
 
         if bool(getattr(self.runtime.state, "hebe_sleeping", False)):
@@ -713,7 +740,12 @@ class HebeEngine:
             print("[HEBE][COG] decision=rejected reason=hebe_sleeping", flush=True)
             return "continue"
 
-        print("[HEBE][WAKE] awake; routing input to cognition", flush=True)
+        local_app = self._plan_and_execute_local_app_action(command, source)
+        if local_app is not None:
+            text = self._synthesize_command_result(local_app, input_text=command)
+            self._deliver_manual_reply(text, source=source)
+            print("[HEBE][COG] decision=command", flush=True)
+            return "continue"
 
         manual = self._handle_pending_manual_intent(command)
         if manual is None:
@@ -721,7 +753,6 @@ class HebeEngine:
         if manual is None:
             manual = self._handle_stream_manual_command(command)
         if manual is not None:
-            print("[HEBE][COG] decision=command", flush=True)
             force_ui = bool(getattr(self, "_manual_reply_ui_only", False))
             self._manual_reply_ui_only = False
             if isinstance(manual, CommandResult):
@@ -730,9 +761,6 @@ class HebeEngine:
                 manual_text = str(manual)
             self._deliver_manual_reply(manual_text, source="ui" if force_ui else source)
             return "continue"
-
-        if source == "stt_voice":
-            print("[HEBE][COG] decision=conversation", flush=True)
 
         context = self.context_builder.build(
             state=self.runtime.state,
@@ -818,6 +846,9 @@ class HebeEngine:
                 print(f"[HEBE][COG] speak failed: {e!r}", flush=True)
 
         normalized = self._normalize_text(command)
+
+        if normalized in {"duerme", "modo espera", "modo de espera"}:
+            return "sleep"
 
         if normalized in {"apaga hebe", "detente", "stop engine"}:
             return "stop"
@@ -1083,8 +1114,6 @@ class HebeEngine:
         )
 
     def poll_stream_presence(self) -> None:
-        if bool(getattr(self.runtime.state, "hebe_sleeping", False)):
-            return
         now = time.time()
         if now - self._last_presence_poll_ts < self.presence_poll_interval_sec:
             return
@@ -1164,6 +1193,7 @@ class HebeEngine:
                 try:
                     from app.cognitive.memory.memory_store import init_memory_chunks_schema
                     init_memory_chunks_schema()
+                    cleanup_stt_prompt_injection_rows()
                 except Exception as _e:
                     print(f"[HEBE][MEMORY] init_memory_chunks_schema failed: {_e!r}", flush=True)
 
@@ -1204,12 +1234,10 @@ class HebeEngine:
                         "tts_enabled": bool(getattr(self.runtime.state, "tts_enabled", False)),
                         "stream_tts_enabled": bool(getattr(policies, "allow_tts_replies", False)),
                         "stt_enabled": bool(getattr(self.runtime, "stt_enabled", False)),
-                        "hebe_sleeping": bool(getattr(self.runtime.state, "hebe_sleeping", False)),
-                        "wake_required": bool(getattr(self.runtime.state, "hebe_sleeping", False)),
                     },
                 )
 
-                target = self.engine_loop
+                target = self.wakeword_loop if self.use_wakeword else self.engine_loop
                 kwargs = {"say_hello": self.say_hello}
 
                 self._thread = threading.Thread(
@@ -1220,7 +1248,7 @@ class HebeEngine:
                 self._thread.start()
 
                 self.runtime.state.is_running = True
-                self.runtime.state.mode = "sleep" if getattr(self.runtime.state, "hebe_sleeping", False) else "active"
+                self.runtime.state.mode = "wakeword" if self.use_wakeword else "active"
 
             except Exception as e:
                 emit("status", {"engine": "error", "stage": "boot", "error": str(e)})
@@ -1291,12 +1319,12 @@ class HebeEngine:
 
         return values[-120:]
 
-    def _normalize_stt_input(self, raw_text: str) -> TranscriptNormalizationResult:
+    def _normalize_stt_input(self, raw_text: str, *, debug_metadata: dict | None = None) -> TranscriptNormalizationResult:
         result = normalize_stt_transcript(raw_text, known_targets=self._known_voice_command_targets())
-        self._record_stt_normalization(result)
+        self._record_stt_normalization(result, debug_metadata=debug_metadata)
         return result
 
-    def _record_stt_normalization(self, result: TranscriptNormalizationResult) -> None:
+    def _record_stt_normalization(self, result: TranscriptNormalizationResult, *, debug_metadata: dict | None = None) -> None:
         print(f"[HEBE][STT][RAW] text={result.raw_text!r}", flush=True)
         print(
             "[HEBE][STT][NORMALIZED] "
@@ -1313,7 +1341,211 @@ class HebeEngine:
             stream.last_voice_command_target = None
             stream.last_voice_command_status = "normalized"
             stream.last_voice_command_confidence = float(result.confidence)
-        emit("voice.command", result.as_event())
+        event = result.as_event()
+        if debug_metadata:
+            event.update(debug_metadata)
+        emit("voice.command", event)
+
+    def _unsupported_stt_script(self, text: str) -> str | None:
+        allowed = {
+            part.strip().lower()
+            for part in os.getenv("HEBE_STT_ALLOWED_LANGUAGES", "es,en").split(",")
+            if part.strip()
+        }
+        if not allowed.issubset({"es", "en"}):
+            return None
+
+        value = str(text or "")
+        checks = [
+            ("japanese", r"[\u3040-\u30ff]"),
+            ("chinese", r"[\u3400-\u9fff]"),
+            ("cyrillic", r"[\u0400-\u04ff]"),
+            ("greek", r"[\u0370-\u03ff]"),
+            ("tamil", r"[\u0b80-\u0bff]"),
+            ("devanagari", r"[\u0900-\u097f]"),
+            ("sinhala", r"[\u0d80-\u0dff]"),
+            ("korean", r"[\uac00-\ud7af]"),
+            ("thai", r"[\u0e00-\u0e7f]"),
+            ("arabic", r"[\u0600-\u06ff]"),
+            ("hebrew", r"[\u0590-\u05ff]"),
+        ]
+        for name, pattern in checks:
+            if re.search(pattern, value):
+                return name
+        return None
+
+    def _emit_stt_rejection(
+        self,
+        raw_text: str,
+        *,
+        script: str,
+        reason: str,
+        retry_attempted: bool = False,
+        retry_transcript: str = "",
+    ) -> None:
+        safe_raw = "" if reason == "stt_prompt_injection" else str(raw_text or "")
+        log_suffix = "" if reason == "stt_prompt_injection" else f" raw={ascii(safe_raw)}"
+        print(f"[HEBE][STT][REJECTED] reason={reason} script={script}{log_suffix}", flush=True)
+        stream = self._get_stream_state()
+        if stream is not None:
+            stream.last_voice_raw_transcript = safe_raw
+            stream.last_voice_normalized_command = ""
+            stream.last_voice_command_status = "rejected"
+        emit(
+            "voice.command",
+            {
+                "raw_text": safe_raw,
+                "normalized_text": "",
+                "status": "rejected",
+                "reason": reason,
+                "script": script,
+                "detected_script": script,
+                "retry_attempted": bool(retry_attempted),
+                "retry_transcript": str(retry_transcript or ""),
+                "final_decision": "rejected",
+                "message": (
+                    "Raw STT rejected: unsupported language/script."
+                    if reason.startswith("unsupported_script")
+                    else "Raw STT rejected before cognition."
+                ),
+            },
+        )
+
+    def _reject_unsupported_stt_if_needed(self, raw_text: str) -> bool:
+        script = self._unsupported_stt_script(raw_text)
+        if not script:
+            return False
+        self._emit_stt_rejection(raw_text, script=script, reason="unsupported_script")
+        return True
+
+    def _retry_unsupported_stt_transcript(self, raw_text: str, *, script: str) -> dict:
+        stt = getattr(self.runtime, "stt", None)
+        if stt is None or not hasattr(stt, "retry_last_command_transcript"):
+            return {"attempted": False, "text": "", "speech_detected": False, "reason": "retry_unavailable"}
+        speech_detected = bool(getattr(stt, "last_speech_detected", False))
+        if not speech_detected:
+            return {"attempted": False, "text": "", "speech_detected": False, "reason": "no_speech_detected"}
+        language = os.getenv("HEBE_STT_COMMAND_LANGUAGE", "es").strip().lower() or "es"
+        print(f"[HEBE][STT][RETRY] reason=unsupported_script forcing_language={language}", flush=True)
+        try:
+            retry = stt.retry_last_command_transcript(language=language)
+        except Exception as exc:
+            print(f"[HEBE][STT][RETRY_RESULT] raw='' accepted=false error={exc!r}", flush=True)
+            return {"attempted": True, "text": "", "speech_detected": True, "error": repr(exc)}
+        if isinstance(retry, str):
+            retry = {"text": retry, "attempted": True, "speech_detected": True}
+        retry_text = str((retry or {}).get("text") or "").strip()
+        if is_stt_prompt_injection(retry_text):
+            print("[HEBE][STT][RETRY_RESULT] raw='<suppressed>' accepted=false reason=stt_prompt_injection", flush=True)
+            return {
+                **(retry or {}),
+                "attempted": bool((retry or {}).get("attempted", True)),
+                "text": "",
+                "accepted": False,
+                "prompt_injection": True,
+                "original_script": script,
+                "forcing_language": language,
+            }
+        accepted = bool(retry_text and not self._unsupported_stt_script(retry_text))
+        print(f"[HEBE][STT][RETRY_RESULT] raw={ascii(retry_text)} accepted={str(accepted).lower()}", flush=True)
+        return {
+            **(retry or {}),
+            "attempted": bool((retry or {}).get("attempted", True)),
+            "text": retry_text,
+            "accepted": accepted,
+            "original_script": script,
+            "forcing_language": language,
+        }
+
+    def _process_stt_voice_transcript(self, raw_voice_command: str, *, allow_wakeword_prompt: bool = False) -> str:
+        original_raw_text = str(raw_voice_command)
+        if is_stt_prompt_injection(original_raw_text):
+            self._emit_stt_rejection(
+                original_raw_text,
+                script="latin",
+                reason="stt_prompt_injection",
+            )
+            return "continue"
+        transcript_for_cognition = original_raw_text
+        retry_debug: dict = {
+            "detected_script": self._unsupported_stt_script(original_raw_text) or "latin",
+            "retry_attempted": False,
+            "retry_transcript": "",
+            "status": "accepted",
+            "final_decision": "accepted",
+        }
+        script = self._unsupported_stt_script(original_raw_text)
+        if script:
+            retry = self._retry_unsupported_stt_transcript(original_raw_text, script=script)
+            retry_attempted = bool(retry.get("attempted"))
+            retry_text = str(retry.get("text") or "").strip()
+            retry_debug.update(
+                {
+                    "detected_script": script,
+                    "retry_attempted": retry_attempted,
+                    "retry_transcript": retry_text,
+                    "forcing_language": retry.get("forcing_language") or os.getenv("HEBE_STT_COMMAND_LANGUAGE", "es"),
+                }
+            )
+            if bool(retry.get("prompt_injection")):
+                self._emit_stt_rejection(
+                    original_raw_text,
+                    script=script,
+                    reason="stt_prompt_injection",
+                    retry_attempted=retry_attempted,
+                    retry_transcript="",
+                )
+                return "continue"
+            if bool(retry.get("accepted")):
+                transcript_for_cognition = retry_text
+                retry_debug["final_decision"] = "accepted"
+            else:
+                reason = "unsupported_script_after_retry" if retry_attempted else "unsupported_script"
+                self._emit_stt_rejection(
+                    original_raw_text,
+                    script=script,
+                    reason=reason,
+                    retry_attempted=retry_attempted,
+                    retry_transcript=retry_text,
+                )
+                return "continue"
+
+        normalization = self._normalize_stt_input(transcript_for_cognition, debug_metadata=retry_debug)
+        command = normalization.normalized_text
+        if not command:
+            return "continue"
+        self._current_input_event = self._build_input_event(
+            source="stt_voice",
+            raw_text=original_raw_text,
+            normalized_text=command,
+            stt_metadata={**normalization.as_event(), **retry_debug, "accepted_transcript": transcript_for_cognition},
+        )
+        voice_type, mood_hint = self._classify_voice_event(command)
+        has_action_intent = self._input_event_has_action_intent(getattr(self, "_current_input_event", None))
+        is_direct_command = voice_type == "direct_command_to_hebe"
+        stream_enabled = self._is_stream_enabled()
+        if stream_enabled:
+            ambient_enabled = bool(getattr(self, "stream_ambient_stt_enabled", False))
+            if is_direct_command or ambient_enabled:
+                self._record_voice_event(command, voice_type, mood_hint)
+            if not is_direct_command and not self._stream_is_armed() and not has_action_intent:
+                self._log_stt_non_command_decision(command, "ambient_context_only", reason=voice_type)
+                self._current_input_event = None
+                return "continue"
+        elif not is_direct_command and not has_action_intent:
+            self._log_stt_non_command_decision(command, "rejected", reason="not_direct_command")
+            self._current_input_event = None
+            return "continue"
+        handled, stream_command = self._extract_stream_command(command)
+        if handled:
+            if not stream_command:
+                self._current_input_event = None
+                return "continue"
+            command = stream_command
+        res = self.handle_command(command, source="stt_voice")
+        print("[HEBE][COG] decision=command", flush=True)
+        self._current_input_event = None
+        return res
 
     def _build_input_event(
         self,
@@ -1333,7 +1565,12 @@ class HebeEngine:
         )
         print(
             "[HEBE][INPUT] "
-            f"source={event.source} raw={event.raw_text!r} normalized={event.normalized_text!r}",
+            f"source={event.source} raw={ascii(event.raw_text)} normalized={ascii(event.normalized_text)}",
+            flush=True,
+        )
+        print(
+            "[HEBE][NORMALIZE] "
+            f"normalized={ascii(event.normalized_text)}",
             flush=True,
         )
         return event
@@ -1342,88 +1579,152 @@ class HebeEngine:
         if event is None:
             return False
         try:
+            local_plan = self._get_local_app_planner().plan(
+                event,
+                is_awake=not bool(getattr(self.runtime.state, "hebe_sleeping", False)),
+            )
+            if local_plan is not None and local_plan.status in {"complete", "needs_confirmation"}:
+                return True
             plan = self._get_stream_action_planner().plan(event)
             return plan is not None
         except Exception as exc:
             print(f"[HEBE][ACTION_PLAN] probe failed: {exc!r}", flush=True)
             return False
 
-    def _process_stt_voice_transcript(self, raw_voice_command: str, *, allow_wakeword_prompt: bool = False) -> str:
-        script = self._unsupported_stt_script(raw_voice_command)
-        if script:
-            print(f"[HEBE][STT][REJECTED] reason=language_not_allowed script={script} text={raw_voice_command!r}", flush=True)
-            emit(
-                "voice.command",
-                {
-                    "raw_text": str(raw_voice_command or ""),
-                    "normalized_text": "",
-                    "status": "rejected",
-                    "reason": "language_not_allowed",
-                    "script": script,
-                    "message": "Raw STT rejected: unsupported language/script.",
-                },
-            )
-            return "continue"
-        normalization = self._normalize_stt_input(str(raw_voice_command))
-        command = normalization.normalized_text
-        self._current_input_event = self._build_input_event(
-            source="stt_voice",
-            raw_text=str(raw_voice_command),
-            normalized_text=command,
-            stt_metadata=normalization.as_event(),
+    def _get_local_app_planner(self) -> LocalAppActionPlanner:
+        planner = getattr(self, "local_app_planner", None)
+        if planner is None:
+            planner = LocalAppActionPlanner(getattr(self, "wake_name_resolver", None) or WakeNameResolver())
+            self.local_app_planner = planner
+        return planner
+
+    def _plan_and_execute_local_app_action(self, command: str, source: str) -> CommandResult | None:
+        normalized = self._normalize_text(command)
+        input_event = getattr(self, "_current_input_event", None) or self._build_input_event(
+            source="ui" if source in {"ui", "typed_ui"} else source,
+            raw_text=command,
+            normalized_text=normalized,
         )
-        voice_type, mood_hint = self._classify_voice_event(command)
-        has_action_intent = self._input_event_has_action_intent(getattr(self, "_current_input_event", None))
+        planner = self._get_local_app_planner()
+        plan = planner.plan(
+            input_event,
+            is_awake=not bool(getattr(self.runtime.state, "hebe_sleeping", False)),
+        )
+        if plan is None:
+            return None
+        if plan.status == "rejected" and plan.reason == "app_not_whitelisted":
+            print(
+                "[HEBE][ACTION_PLAN] "
+                f"action_type={plan.action_type} target={plan.target} status={plan.status} reason={plan.reason}",
+                flush=True,
+            )
+            return None
+
         print(
-            f"[HEBE][VOICE] type={voice_type} mood={mood_hint!r} text={command!r}",
+            "[HEBE][ACTION_PLAN] "
+            f"action_type={plan.action_type} target={plan.target} status={plan.status}",
             flush=True,
         )
+        emit("voice.command", {
+            "raw_text": input_event.raw_text,
+            "normalized_text": input_event.normalized_text,
+            "intent": plan.action_type,
+            "target": plan.target,
+            "confidence": round(float(plan.confidence), 3),
+            "status": plan.status,
+            "reason": plan.reason,
+            "source": input_event.source,
+            "final_decision": "accepted" if plan.status == "complete" else "rejected",
+        })
 
-        if allow_wakeword_prompt and any(keyword in command for keyword in WAKE_WORDS):
-            self.runtime.state.mode = "active"
-            vts_hotkey("HebeIdle")
-            self._deliver_voice_reply("Dime, Leo.")
-            self._current_input_event = None
-            return self.command_loop()
+        if plan.reason == "app_path_missing":
+            print(
+                "[HEBE][ACTION_EXECUTOR] "
+                "action_type=open_application success=false error_code=app_path_missing",
+                flush=True,
+            )
+            app_name = plan.slots.get("display_name") or plan.target or "la aplicacion"
+            return CommandResult(
+                action_type="open_application",
+                success=False,
+                user_visible_summary=(
+                    f"{app_name} is recognized but its executable path is not configured."
+                ),
+                state_changes={
+                    "app_id": plan.slots.get("app_id") or plan.target,
+                    "app_name": app_name,
+                    "error_code": "app_path_missing",
+                },
+                constraints=[
+                    "Do not ask for remote access.",
+                    "Do not give manual app-opening instructions.",
+                    "Ask Leo to configure HEBE_APP_OBS_PATH or the app registry path.",
+                ],
+                fallback_text=(
+                    f"Reconozco {app_name}, pero no tengo configurada su ruta ejecutable. "
+                    "Configura HEBE_APP_OBS_PATH o la ruta en el registro de apps."
+                ),
+                requires_model_response=True,
+                metadata={
+                    "action_plan": plan.as_log_dict(),
+                    "error_code": "app_path_missing",
+                    "app_id": plan.slots.get("app_id") or plan.target,
+                    "message_goal": (
+                        "Tell Leo that OBS is recognized but the executable path is not configured, "
+                        "and ask him to configure HEBE_APP_OBS_PATH or app registry path."
+                    ),
+                },
+            )
 
-        if voice_type == "direct_command_to_hebe" or has_action_intent:
-            self.runtime.state.mode = "active"
-            result = self.handle_command(command, source="stt_voice")
-            self._current_input_event = None
-            return result
-
-        if self._is_stream_enabled() and bool(getattr(self, "stream_ambient_stt_enabled", False)):
-            self._record_voice_event(command, voice_type, mood_hint)
-            self._log_stt_non_command_decision(command, "ambient_context_only", reason=voice_type)
-        else:
-            self._log_stt_non_command_decision(command, "rejected", reason="not_direct_command")
-        self._current_input_event = None
-        return "continue"
-
-    def _unsupported_stt_script(self, text: str) -> str | None:
-        allowed = {
-            part.strip().lower()
-            for part in os.getenv("HEBE_STT_ALLOWED_LANGUAGES", "es,en").split(",")
-            if part.strip()
-        }
-        if not allowed.issubset({"es", "en"}):
-            return None
-        checks = [
-            ("japanese", r"[\u3040-\u30ff]"),
-            ("cyrillic", r"[\u0400-\u04ff]"),
-            ("chinese", r"[\u3400-\u9fff]"),
-            ("devanagari", r"[\u0900-\u097f]"),
-            ("sinhala", r"[\u0d80-\u0dff]"),
-            ("korean", r"[\uac00-\ud7af]"),
-            ("thai", r"[\u0e00-\u0e7f]"),
-            ("arabic", r"[\u0600-\u06ff]"),
-            ("hebrew", r"[\u0590-\u05ff]"),
-        ]
-        value = str(text or "")
-        for name, pattern in checks:
-            if re.search(pattern, value):
-                return name
-        return None
+        print(
+            "[HEBE][ACTION_EXECUTOR] "
+            f"executing action_type={plan.action_type}",
+            flush=True,
+        )
+        action_result = self.action_runtime.execute(
+            "open_application",
+            {
+                "app_id": plan.slots.get("app_id") or plan.target,
+                "app_record": plan.slots.get("app_record"),
+            },
+        )
+        success = bool(getattr(action_result, "success", False))
+        payload = getattr(action_result, "data", {}) or {}
+        error_code = payload.get("error_code") or getattr(action_result, "error", None)
+        print(
+            "[HEBE][ACTION_EXECUTOR] "
+            f"action_type=open_application success={str(success).lower()}"
+            + (f" error_code={error_code}" if error_code else ""),
+            flush=True,
+        )
+        app_name = payload.get("app_name") or plan.slots.get("display_name") or plan.target or "la aplicacion"
+        fallback = f"Abriendo {app_name}." if success else f"Reconozco {app_name}, pero no he podido abrirla."
+        return CommandResult(
+            action_type="open_application",
+            success=success,
+            user_visible_summary=fallback,
+            state_changes={
+                "app_id": payload.get("app_id") or plan.slots.get("app_id") or plan.target,
+                "app_name": app_name,
+                "error_code": error_code,
+            },
+            constraints=[
+                "Do not ask for remote access.",
+                "Do not give manual app-opening instructions unless action_unavailable/manual_help_requested is present.",
+                "Do not ask whether to open it.",
+            ],
+            fallback_text=fallback,
+            requires_model_response=True,
+            metadata={
+                "action_plan": plan.as_log_dict(),
+                "error_code": error_code,
+                "message_goal": (
+                    f"Confirm that {app_name} is opening locally."
+                    if success
+                    else f"Tell Leo that {app_name} was recognized but could not be opened locally."
+                ),
+            },
+        )
 
     def _today_at(self, hhmm: str) -> datetime:
         hour, minute = [int(part) for part in hhmm.split(":", 1)]
@@ -1580,6 +1881,8 @@ class HebeEngine:
             self.ambient_context_extractor = extractor
         extraction = extractor.extract(text, event_type=event_type)
         if not extraction.useful:
+            stream.last_ambient_context_ignored_reason = extraction.reason
+            stream.last_ambient_context_ignored_ts = time.time()
             print(f"[HEBE][AMBIENT_CONTEXT] ignored reason={extraction.reason}", flush=True)
             return
         facts = list(getattr(stream, "recent_run_context_facts", []) or [])
@@ -1595,11 +1898,16 @@ class HebeEngine:
         if extraction.mood:
             stream.leo_mood_hint = extraction.mood
         self._apply_extracted_facts_to_stream(stream, extraction.facts)
-        print(f"[HEBE][AMBIENT_CONTEXT] extracted facts={extraction.facts!r}", flush=True)
-        print(
-            f"[HEBE][RUN_CONTEXT] updated source=stt_voice facts={len(extraction.facts)}",
-            flush=True,
-        )
+        for fact in extraction.facts:
+            category = fact.get("category") or fact.get("kind") or "unknown"
+            summary = fact.get("summary") or fact.get("text") or ""
+            confidence = float(fact.get("confidence", 0.0) or 0.0)
+            print(
+                f"[HEBE][AMBIENT_CONTEXT] extracted category={category} "
+                f"summary={summary!r} confidence={confidence:.2f}",
+                flush=True,
+            )
+            print(f"[HEBE][RUN_CONTEXT] updated source=stt_voice category={category}", flush=True)
 
     def _apply_extracted_facts_to_stream(self, stream, facts: list[dict]) -> None:
         for fact in facts:
@@ -1611,7 +1919,27 @@ class HebeEngine:
                 stream.current_run_objective = text[:120]
             elif kind == "location":
                 stream.current_run_location = text[:80]
-            elif kind in {"level_gap", "phase", "ambient_note", "game_relation"}:
+            elif kind in {
+                "level_gap",
+                "phase",
+                "ambient_note",
+                "game_relation",
+                "healing_item_effectiveness",
+                "healing_or_recovery",
+                "unexpected_attack",
+                "guide_strategy",
+                "enemy_mechanic",
+                "low_hp",
+                "combat_risk",
+                "rng_dependency",
+                "challenge_constraint",
+                "failure_or_death",
+                "resource_management",
+                "boss_or_area_difficulty",
+                "navigation_confusion",
+                "progress_marker",
+                "repeated_failure",
+            }:
                 stream.current_run_phase = text[:160]
 
     def _apply_ambient_voice_to_run_context(self, stream, text: str, event_type: str) -> None:
@@ -3283,7 +3611,7 @@ class HebeEngine:
                 source = "ui"
                 command = self._normalize_text(str(raw_ui_command))
                 self._current_input_event = self._build_input_event(
-                    source="typed_ui",
+                    source="ui",
                     raw_text=str(raw_ui_command),
                     normalized_text=command,
                 )
@@ -3295,15 +3623,11 @@ class HebeEngine:
                     voice_inbox = get_voice_inbox()
                     raw_voice_command = voice_inbox.get_nowait()
                     print(f"[HEBE] VOICE inbox -> {raw_voice_command!r}", flush=True)
-                    source = "stt_voice"
-                    normalization = self._normalize_stt_input(str(raw_voice_command))
-                    command = normalization.normalized_text
-                    self._current_input_event = self._build_input_event(
-                        source="stt_voice",
-                        raw_text=str(raw_voice_command),
-                        normalized_text=command,
-                        stt_metadata=normalization.as_event(),
-                    )
+                    res = self._process_stt_voice_transcript(str(raw_voice_command), allow_wakeword_prompt=True)
+                    self._current_input_event = None
+                    if res in ("sleep", "stop"):
+                        return res
+                    continue
                 except Empty:
                     pass
 

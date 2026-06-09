@@ -222,6 +222,7 @@ def init_db() -> None:
 
     conn.commit()
     conn.close()
+    cleanup_stt_prompt_injection_rows()
 
     try:
         from app.stream.memory import init_stream_memory_schema
@@ -229,6 +230,44 @@ def init_db() -> None:
         init_stream_memory_schema()
     except Exception as exc:
         print(f"[HEBE][STREAM_MEMORY] init failed: {exc!r}", flush=True)
+
+
+def _table_exists(cur: sqlite3.Cursor, table: str) -> bool:
+    cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name = ?", (table,))
+    return cur.fetchone() is not None
+
+
+def cleanup_stt_prompt_injection_rows() -> dict[str, int]:
+    """Remove already-persisted STT hotword prompt loops from chat/memory stores."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    deleted: dict[str, int] = {}
+    predicates = """
+        lower({column}) LIKE '%obs%stream%chat%promo%shoutout%'
+        OR lower({column}) LIKE 'hebe, ebe,%obs%twitch%promo%shoutout%'
+        OR lower({column}) LIKE '%obs, twitch, stream, chat, promo, shoutout%'
+    """
+
+    targets = [
+        ("chat_log", "text", "DELETE FROM chat_log WHERE role = 'user' AND (" + predicates.format(column="text") + ")"),
+        ("memories", "text", "DELETE FROM memories WHERE " + predicates.format(column="text")),
+        ("memory_facts", "source_text", "UPDATE memory_facts SET active = 0 WHERE " + predicates.format(column="source_text")),
+        ("memory_chunks", "text", "UPDATE memory_chunks SET active = 0 WHERE " + predicates.format(column="text")),
+    ]
+    for table, _column, sql in targets:
+        if not _table_exists(cur, table):
+            continue
+        try:
+            cur.execute(sql)
+            deleted[table] = int(cur.rowcount if cur.rowcount is not None and cur.rowcount >= 0 else 0)
+        except Exception as exc:
+            print(f"[HEBE][STT][CLEANUP] table={table} failed={exc!r}", flush=True)
+    conn.commit()
+    conn.close()
+    total = sum(deleted.values())
+    if total:
+        print(f"[HEBE][STT][CLEANUP] removed_prompt_injection_rows={deleted}", flush=True)
+    return deleted
 
 
 def get_recent_chat_turns(

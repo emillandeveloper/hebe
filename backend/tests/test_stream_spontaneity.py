@@ -219,6 +219,79 @@ class StreamSpontaneityTests(unittest.TestCase):
         self.assertIsNotNone(event)
         self.assertIn("game", event.payload["specific_context_anchors"])
 
+    def test_specificity_gate_uses_recent_run_context_fact(self):
+        now = 1_000_000.0
+        stream = self.make_stream(now=now, presence_mode="show")
+        stream.last_chat_activity_ts = now - 60 * 60
+        stream.recent_run_context_facts = [{
+            "id": "ambient:healing_item_effectiveness:1",
+            "kind": "healing_item_effectiveness",
+            "category": "healing_item_effectiveness",
+            "text": "Leo complained that a healing item barely restores enough HP.",
+            "summary": "Leo complained that a healing item barely restores enough HP.",
+            "confidence": 0.84,
+            "expires_at": now + 60,
+        }]
+        stream.run_context_updated_ts = now
+        service = StreamSpontaneityService(
+            config=StreamSpontaneityConfig(
+                show_silence_sec=5 * 60,
+                show_jitter_sec=0,
+                require_specific_context=True,
+            ),
+            now_fn=lambda: now,
+        )
+
+        event = service.build_due_event(stream)
+
+        self.assertIsNotNone(event)
+        self.assertIn("run_context", event.payload["specific_context_anchors"])
+        self.assertEqual(event.payload["idle_topic"], "resource_management")
+        self.assertEqual(event.payload["used_fact_id"], "ambient:healing_item_effectiveness:1")
+
+    def test_spontaneity_skips_when_only_weak_context_exists(self):
+        now = 1_000_000.0
+        stream = self.make_stream(now=now, presence_mode="show")
+        stream.last_chat_activity_ts = now - 60 * 60
+        stream.run_context_updated_ts = now
+        stream.recent_run_context_facts = [{
+            "id": "ambient:objective:1",
+            "kind": "objective",
+            "category": "objective",
+            "text": "Vamos a ver.",
+            "summary": "Vamos a ver.",
+            "confidence": 0.4,
+            "timestamp": now,
+            "expires_at": now + 60,
+        }]
+
+        readiness = self.make_service(now).evaluate(stream, now=now)
+
+        self.assertFalse(readiness["would_send"])
+        self.assertEqual(readiness["blocked_reason"], "no_high_quality_anchor")
+
+    def test_spontaneity_uses_high_quality_rng_anchor(self):
+        now = 1_000_000.0
+        stream = self.make_stream(now=now, presence_mode="show")
+        stream.last_chat_activity_ts = now - 60 * 60
+        stream.run_context_updated_ts = now
+        stream.recent_run_context_facts = [{
+            "id": "ambient:rng_dependency:1",
+            "kind": "rng_dependency",
+            "category": "rng_dependency",
+            "text": "Leo framed the current situation as dependent on RNG or luck.",
+            "summary": "Leo framed the current situation as dependent on RNG or luck.",
+            "confidence": 0.86,
+            "timestamp": now,
+            "expires_at": now + 60,
+        }]
+
+        event = self.make_service(now).build_due_event(stream)
+
+        self.assertIsNotNone(event)
+        self.assertEqual(event.payload["idle_topic"], "challenge_comment")
+        self.assertEqual(event.payload["used_fact_id"], "ambient:rng_dependency:1")
+
     def test_motif_cooldown_blocks_repeated_coffee(self):
         now = 1_000_000.0
         stream = self.make_stream(now=now, presence_mode="show")

@@ -489,15 +489,16 @@ class DeliberationService:
         return " ".join(cleaned.split())
 
     def _extract_open_app_target(self, text: str) -> str | None:
-        prefixes = ["abre ", "open "]
-
-        for prefix in prefixes:
-            if text.startswith(prefix):
-                candidate = text[len(prefix):].strip()
-
+        markers = {
+            "abre", "abrir", "inicia", "iniciar", "arranca", "arrancar",
+            "lanza", "lanzar", "ejecuta", "ejecutar", "open", "start", "launch", "run",
+        }
+        tokens = self._normalize_text(text).split()
+        for index, token in enumerate(tokens):
+            if token in markers:
+                candidate = " ".join(tokens[index + 1:]).strip()
                 if candidate:
                     return candidate
-
         return None
 
     def _plan_open_app(self, app_name: str) -> DeliberationResult:
@@ -507,7 +508,7 @@ class DeliberationService:
                     PlanStep(
                         type="action",
                         data={
-                            "name": "open_app",
+                            "name": "open_application",
                             "params": {"app_name": app_name},
                         },
                     ),
@@ -516,7 +517,7 @@ class DeliberationService:
                         data={"mode": "confirm_action"},
                     ),
                 ],
-                reasoning=f"User requested open_app for {app_name}",
+                reasoning=f"User requested open_application for {app_name}",
             )
         )
 

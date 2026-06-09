@@ -177,9 +177,11 @@ class CognitiveTwitchTests(unittest.TestCase):
             },
             created_at="2026-05-31T12:00:00Z",
         )
+        event.payload["specific_context_anchors"] = ["game"]
+        event.payload["current_category"] = "JRPG"
         context = SimpleNamespace(internal_event=event, input_text=None)
 
-        reply = ResponseSynthesizer(conversation_model=None)._handle_internal_event(
+        reply = ResponseSynthesizer(conversation_model=CapturingModel("La run pide mirar recursos antes del siguiente susto."))._handle_internal_event(
             context,
             execution=SimpleNamespace(),
         )
@@ -206,7 +208,7 @@ class CognitiveTwitchTests(unittest.TestCase):
             },
         )
 
-        self.assertEqual(reply, "fallback")
+        self.assertEqual(reply, "")
 
     def test_spontaneous_prompt_includes_stream_context(self):
         model = CapturingModel("Mi senor, revisa recursos antes de avanzar.")

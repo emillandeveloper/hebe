@@ -218,8 +218,15 @@ class StreamPresenceTests(unittest.TestCase):
             result = engine._process_stt_voice_transcript("これはテストです")
 
         self.assertEqual(result, "continue")
-        self.assertIn("[HEBE][STT][REJECTED] reason=language_not_allowed script=japanese", "\n".join(logs))
+        self.assertIn("[HEBE][STT][REJECTED] reason=unsupported_script script=japanese", "\n".join(logs))
         self.assertTrue(any(data.get("message") == "Raw STT rejected: unsupported language/script." for _, data in emitted))
+
+    def test_unsupported_script_detector_covers_non_latin_families(self):
+        engine = make_engine(StreamSessionState(enabled=True))
+
+        self.assertEqual(engine._unsupported_stt_script("привет тест"), "cyrillic")
+        self.assertEqual(engine._unsupported_stt_script("δοκιμή"), "greek")
+        self.assertEqual(engine._unsupported_stt_script("தமிழ்"), "tamil")
 
     def test_chat_message_without_mention_updates_activity_without_reply(self):
         engine = make_engine(StreamSessionState(enabled=True))
@@ -229,6 +236,29 @@ class StreamPresenceTests(unittest.TestCase):
         stream = engine.runtime.state.stream
         self.assertGreater(stream.last_chat_activity_ts, 0)
         self.assertEqual(len(stream.recent_chat_messages), 1)
+        self.assertEqual(engine.runtime.twitch.sent, [])
+
+    def test_chat_rng_topic_links_to_recent_run_context_without_reply(self):
+        stream = StreamSessionState(enabled=True)
+        now = time.time()
+        stream.recent_run_context_facts = [{
+            "id": "ambient:rng_dependency:1",
+            "kind": "rng_dependency",
+            "category": "rng_dependency",
+            "text": "Leo framed the current situation as dependent on RNG or luck.",
+            "summary": "Leo framed the current situation as dependent on RNG or luck.",
+            "confidence": 0.86,
+            "timestamp": now,
+            "expires_at": now + 600,
+        }]
+        engine = make_engine(stream)
+
+        engine.observe_twitch_chat_message("nuriiia___", "Nuria", "tan genial el RNG, como tirar dados en el parchis", "#chan")
+
+        entry = stream.recent_chat_messages[-1]
+        self.assertEqual(entry["topic"], "rng_dependency")
+        self.assertEqual(entry["linked_to_recent_run_context"], "rng_dependency")
+        self.assertIn("Nuria", entry["summary"])
         self.assertEqual(engine.runtime.twitch.sent, [])
 
     def test_bot_messages_do_not_count_as_chat_activity(self):

@@ -4,6 +4,7 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import os
 from typing import Optional
 
 from app.cognitive.memory_store import MemoryStore, Reminder
@@ -59,7 +60,9 @@ class SchedulerService:
             pending_count = len(self.memory_store.list_pending_reminders(limit=1000))
         except Exception:
             pending_count = -1
-        print(f"[HEBE][SCHEDULER] poll pending={pending_count} due={due_count}", flush=True)
+        verbose = os.getenv("HEBE_VERBOSE_SCHEDULER_LOGS", "false").strip().lower() in ("1", "true", "yes", "on")
+        if verbose or due_count > 0:
+            print(f"[HEBE][SCHEDULER] poll pending={pending_count} due={due_count}", flush=True)
 
         return events
 

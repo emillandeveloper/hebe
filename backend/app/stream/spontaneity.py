@@ -164,6 +164,10 @@ class StreamSpontaneityService:
         result["title_markers_stale"] = title_context["stale"]
         anchors = self._specific_context_anchors(stream, now, title_context=title_context)
         result["specific_context_anchors"] = anchors
+        if self._only_weak_recent_context(stream, now):
+            result["blocked_reason"] = "no_high_quality_anchor"
+            print("[HEBE][SPONTANEITY] skipped reason=no_high_quality_anchor", flush=True)
+            return result
         if self.config.require_specific_context and not anchors:
             result["blocked_reason"] = "no_specific_context"
             print("[HEBE][SPONTANEITY] skipped reason=no_specific_context", flush=True)
@@ -227,8 +231,17 @@ class StreamSpontaneityService:
             result["blocked_reason"] = "topic_recently_used"
             return result
         result["candidate_topic"] = topic
+        used_fact = self._recent_run_context_fact(stream, now)
+        used_fact_id = used_fact.get("id") if used_fact else None
+        if used_fact:
+            print(
+                "[HEBE][SPONTANEITY] "
+                f"selected_anchor category={used_fact.get('category') or used_fact.get('kind')} "
+                f"confidence={float(used_fact.get('confidence', 0.0) or 0.0):.2f}",
+                flush=True,
+            )
         print(f"[HEBE][SPONTANEITY] anchors={anchors}", flush=True)
-        print(f"[HEBE][SPONTANEITY] generated topic={topic}", flush=True)
+        print(f"[HEBE][SPONTANEITY] generated topic={topic} used_fact_id={used_fact_id}", flush=True)
 
         result["would_send"] = True
         result["blocked_reason"] = "ready"
@@ -286,9 +299,14 @@ class StreamSpontaneityService:
                 "updated_ts": getattr(stream, "run_context_updated_ts", 0.0),
                 "facts": [
                     {
+                        "id": item.get("id"),
                         "kind": item.get("kind"),
+                        "category": item.get("category"),
                         "text": item.get("text"),
+                        "summary": item.get("summary"),
                         "confidence": item.get("confidence"),
+                        "raw_text": item.get("raw_text"),
+                        "normalized_text": item.get("normalized_text"),
                     }
                     for item in list(getattr(stream, "recent_run_context_facts", []) or [])[-8:]
                     if item.get("text")
@@ -304,6 +322,7 @@ class StreamSpontaneityService:
                 "summary": chat_snapshot["summary"],
             },
             "specific_context_anchors": self._specific_context_anchors(stream, now, title_context=title_context, chat_snapshot=chat_snapshot),
+            "used_fact_id": (self._recent_run_context_fact(stream, now) or {}).get("id"),
             "recent_idle_topics": [item.get("topic") for item in recent_idle[-8:] if item.get("topic")],
             "recent_idle_messages": [item.get("text") for item in recent_idle[-5:] if item.get("text")],
             "recent_style_motifs": [
@@ -390,6 +409,14 @@ class StreamSpontaneityService:
         return {"fresh": fresh, "stale": stale}
 
     def _choose_topic(self, stream: StreamSessionState, now: float) -> str | None:
+        recent_fact = self._recent_run_context_fact(stream, now)
+        if recent_fact:
+            category_topic = self._topic_for_fact(recent_fact)
+            if category_topic:
+                recent = list(getattr(stream, "recent_idle_messages", []) or [])
+                if not recent or recent[-1].get("topic") != category_topic:
+                    return category_topic
+
         topics = [
             "challenge_comment",
             "jrpg_trope",
@@ -415,6 +442,89 @@ class StreamSpontaneityService:
         if not available:
             return None
         return available[0]
+
+    def _recent_run_context_fact(self, stream: StreamSessionState, now: float) -> dict | None:
+        facts = [
+            item for item in list(getattr(stream, "recent_run_context_facts", []) or [])
+            if item.get("text") and float(item.get("expires_at", 0.0) or 0.0) > now
+        ]
+        if not facts:
+            return None
+        high_quality = [fact for fact in facts if self._is_high_quality_fact(fact)]
+        if not high_quality:
+            return None
+        return sorted(
+            high_quality,
+            key=lambda fact: (float(fact.get("confidence", 0.0) or 0.0), float(fact.get("timestamp", 0.0) or 0.0)),
+        )[-1]
+
+    def _is_high_quality_fact(self, fact: dict) -> bool:
+        category = str(fact.get("category") or fact.get("kind") or "")
+        confidence = float(fact.get("confidence", 0.0) or 0.0)
+        high_categories = {
+            "combat_risk",
+            "rng_dependency",
+            "healing_or_recovery",
+            "enemy_mechanic",
+            "challenge_constraint",
+            "progress_marker",
+            "failure_or_death",
+            "level_gap",
+            "resource_management",
+            "boss_or_area_difficulty",
+            "guide_strategy",
+        }
+        weak_categories = {"phase", "objective", "ambient_note", "navigation_confusion"}
+        if category in weak_categories:
+            return confidence >= 0.82 and bool(self._specific_gameplay_terms(fact))
+        if category in high_categories and confidence >= 0.62:
+            return True
+        return bool(self._specific_gameplay_terms(fact)) and confidence >= 0.7
+
+    def _specific_gameplay_terms(self, fact: dict) -> set[str]:
+        text = " ".join(str(fact.get(key) or "") for key in ("text", "summary", "raw_text", "normalized_text")).lower()
+        terms = {
+            "hp", "vida", "counter", "contraataque", "autopocion", "autopotion",
+            "cura", "curarse", "rng", "suerte", "dados", "boss", "jefe",
+            "enemigo", "ataque", "level", "nivel", "desafio", "challenge",
+            "game over", "muerto", "matado", "recargar", "guardar",
+        }
+        return {term for term in terms if term in text}
+
+    def _only_weak_recent_context(self, stream: StreamSessionState, now: float) -> bool:
+        recent_facts = [
+            item for item in list(getattr(stream, "recent_run_context_facts", []) or [])
+            if float(item.get("expires_at", 0.0) or 0.0) > now
+        ]
+        if recent_facts and not any(self._is_high_quality_fact(item) for item in recent_facts):
+            return True
+        ignored_reason = str(getattr(stream, "last_ambient_context_ignored_reason", "") or "")
+        ignored_ts = float(getattr(stream, "last_ambient_context_ignored_ts", 0.0) or 0.0)
+        if ignored_reason == "generic_filler" and ignored_ts and now - ignored_ts <= self.config.max_context_age_sec and not recent_facts:
+            return True
+        return False
+
+    def _topic_for_fact(self, fact: dict) -> str | None:
+        category = str(fact.get("category") or fact.get("kind") or "")
+        mapping = {
+            "healing_item_effectiveness": "resource_management",
+            "healing_or_recovery": "resource_management",
+            "unexpected_attack": "strategy_without_spoilers",
+            "guide_strategy": "strategy_without_spoilers",
+            "enemy_mechanic": "strategy_without_spoilers",
+            "low_hp": "resource_management",
+            "combat_risk": "strategy_without_spoilers",
+            "rng_dependency": "challenge_comment",
+            "challenge_constraint": "challenge_comment",
+            "failure_or_death": "challenge_comment",
+            "resource_management": "resource_management",
+            "boss_or_area_difficulty": "challenge_comment",
+            "navigation_confusion": "exploration_comment",
+            "progress_marker": "game_vibe",
+            "repeated_failure": "challenge_comment",
+            "level_gap": "challenge_comment",
+        }
+        return mapping.get(category)
 
     def _specific_context_anchors(
         self,
@@ -442,7 +552,7 @@ class StreamSpontaneityService:
                 getattr(stream, "current_run_objective", None)
                 or getattr(stream, "current_run_location", None)
                 or getattr(stream, "current_run_phase", None)
-                or getattr(stream, "recent_run_context_facts", None)
+                or self._recent_run_context_fact(stream, now)
             ):
                 anchors.append("run_context")
         chat_snapshot = chat_snapshot or self._chat_activity_snapshot(stream, now)
@@ -493,7 +603,13 @@ class StreamSpontaneityService:
                 continue
             for item in reversed(recent):
                 item_motif = aliases.get(str(item.get("motif") or "").lower(), str(item.get("motif") or "").lower())
-                if item_motif == motif and now - float(item.get("timestamp", 0.0) or 0.0) < cooldown_min * 60:
+                if item_motif == motif:
+                    if now - float(item.get("timestamp", 0.0) or 0.0) < cooldown_min * 60 or cooldown_min <= 0:
+                        print(f"[HEBE][STYLE] motif_blocked motif={motif} reason=cooldown", flush=True)
+                        print(f"[HEBE][STYLE] recent_motifs={[entry.get('motif') for entry in recent[-12:]]}", flush=True)
+                        return motif
+                    print(f"[HEBE][STYLE] motif_blocked motif={motif} reason=same_stream", flush=True)
+                    print(f"[HEBE][STYLE] recent_motifs={[entry.get('motif') for entry in recent[-12:]]}", flush=True)
                     return motif
         return None
 

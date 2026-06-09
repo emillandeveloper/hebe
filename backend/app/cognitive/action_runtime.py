@@ -1,4 +1,4 @@
-from app.services.app_registry import resolve_candidates, register_app
+from app.services.app_registry import resolve_candidates, register_app, resolve_whitelisted_app
 from app.cognitive.models import ActionResult
 
 class ActionRuntime:
@@ -10,6 +10,8 @@ class ActionRuntime:
 
         if action_name == "open_app":
             return self._open_app(params)
+        if action_name == "open_application":
+            return self._open_application(params)
 
         if action_name == "close_window":
             return self._close_window(params)
@@ -57,6 +59,66 @@ class ActionRuntime:
             success=False,
             error=f"Failed opening app: {app_name}",
             data={"app_name": app_name},
+        )
+
+    def _open_application(self, params: dict) -> ActionResult:
+        app_id = str(params.get("app_id") or params.get("app_name") or "").strip()
+        app_record = params.get("app_record")
+        if not isinstance(app_record, dict):
+            app_record = resolve_whitelisted_app(app_id) if app_id else None
+        if not app_record:
+            return ActionResult(
+                success=False,
+                error="app_not_whitelisted",
+                data={"error_code": "app_not_whitelisted", "app_id": app_id},
+            )
+
+        app_id = str(app_record.get("app_id") or app_id).strip()
+        display_name = str(app_record.get("display_name") or app_record.get("name") or app_id).strip()
+        executable_path = str(app_record.get("executable_path") or app_record.get("command") or "").strip()
+        if not executable_path:
+            return ActionResult(
+                success=False,
+                error="app_path_missing",
+                data={
+                    "error_code": "app_path_missing",
+                    "app_id": app_id,
+                    "app_name": display_name,
+                    "app_record": app_record,
+                    "message_goal": (
+                        "Tell Leo that OBS is recognized but the executable path is not configured, "
+                        "and ask him to configure HEBE_APP_OBS_PATH or app registry path."
+                    ),
+                },
+            )
+
+        if not hasattr(self.runtime, "win") or not hasattr(self.runtime.win, "open_app"):
+            return ActionResult(
+                success=False,
+                error="runtime_win_open_app_missing",
+                data={
+                    "error_code": "action_unavailable",
+                    "app_id": app_id,
+                    "app_name": display_name,
+                    "app_record": app_record,
+                },
+            )
+
+        print(
+            "[HEBE][ACTION_EXECUTOR] "
+            f"action_type=open_application launching app_id={app_id} path={executable_path!r}",
+            flush=True,
+        )
+        ok = bool(self.runtime.win.open_app(app_record))
+        return ActionResult(
+            success=ok,
+            error=None if ok else "launch_failed",
+            data={
+                "error_code": None if ok else "launch_failed",
+                "app_id": app_id,
+                "app_name": display_name,
+                "app_record": app_record,
+            },
         )
 
     def _close_window(self, params: dict) -> ActionResult:

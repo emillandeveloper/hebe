@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 import sqlite3
 from pathlib import Path
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 
@@ -31,6 +33,99 @@ def _connect():
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     return conn
+
+
+@dataclass(frozen=True)
+class AppRegistryEntry:
+    app_id: str
+    display_name: str
+    aliases: tuple[str, ...] = field(default_factory=tuple)
+    executable_path: str = ""
+    working_directory: str | None = None
+    launch_args: tuple[str, ...] = field(default_factory=tuple)
+    enabled: bool = True
+    requires_confirmation: bool = False
+    created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    updated_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    source: str = "builtin"
+
+    def as_dict(self) -> dict[str, Any]:
+        command = self.executable_path
+        if self.launch_args:
+            command = " ".join([command, *self.launch_args]).strip()
+        return {
+            "app_id": self.app_id,
+            "display_name": self.display_name,
+            "aliases": list(self.aliases),
+            "executable_path": self.executable_path,
+            "working_directory": self.working_directory,
+            "launch_args": list(self.launch_args),
+            "enabled": self.enabled,
+            "requires_confirmation": self.requires_confirmation,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+            "source": self.source,
+            # Compatibility with the existing Windows launcher.
+            "name": self.display_name,
+            "command": command,
+            "process_name": Path(self.executable_path).name if self.executable_path else "",
+            "window_title": self.display_name,
+        }
+
+
+def _normalize_alias(value: str) -> str:
+    return " ".join(str(value or "").strip().lower().split())
+
+
+def _safe_builtin_registry() -> list[AppRegistryEntry]:
+    obs_env = (os.getenv("HEBE_APP_OBS_PATH") or "").strip()
+    default_obs = r"C:\Program Files\obs-studio\bin\64bit\obs64.exe"
+    obs_path = obs_env or (default_obs if Path(default_obs).exists() else "")
+    now = datetime.now(timezone.utc).isoformat()
+    return [
+        AppRegistryEntry(
+            app_id="obs",
+            display_name="OBS Studio",
+            aliases=("obs", "obs studio"),
+            executable_path=obs_path,
+            enabled=True,
+            requires_confirmation=False,
+            created_at=now,
+            updated_at=now,
+            source="env" if obs_env else "builtin",
+        )
+    ]
+
+
+def list_whitelisted_apps() -> list[dict[str, Any]]:
+    return [entry.as_dict() for entry in _safe_builtin_registry() if entry.enabled]
+
+
+def resolve_whitelisted_app(name: str) -> Optional[Dict[str, Any]]:
+    normalized = _normalize_alias(name)
+    if not normalized:
+        return None
+
+    for entry in _safe_builtin_registry():
+        if not entry.enabled:
+            continue
+        aliases = {_normalize_alias(entry.app_id), _normalize_alias(entry.display_name)}
+        aliases.update(_normalize_alias(alias) for alias in entry.aliases)
+        if normalized in aliases:
+            app = entry.as_dict()
+            print(
+                "[HEBE][APP_RESOLVER] "
+                f"target={normalized} resolved_app_id={entry.app_id} confidence=1.000",
+                flush=True,
+            )
+            return app
+
+    print(
+        "[HEBE][APP_RESOLVER] "
+        f"target={normalized} resolved_app_id=None confidence=0.000",
+        flush=True,
+    )
+    return None
 
 
 def _app_commands_table_exists(conn: sqlite3.Connection) -> bool:

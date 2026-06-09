@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import os
+import inspect
+import re
 import time
 from dataclasses import dataclass
 from typing import Callable, Optional, Tuple
@@ -9,6 +11,94 @@ from typing import Callable, Optional, Tuple
 import numpy as np
 import pyaudio
 from faster_whisper import WhisperModel
+
+
+DEFAULT_COMMAND_PROMPT_WORDS = [
+    "Hebe",
+    "Ebe",
+    "Eve",
+    "Leo",
+    "OBS",
+    "Twitch",
+    "stream",
+    "chat",
+    "promo",
+    "shoutout",
+    "SO",
+    "Nuria",
+    "Charlie",
+    "Xarly",
+    "Totodile",
+    "Jotun",
+    "Zwei",
+    "Persona",
+    "Final Fantasy",
+]
+
+_PROMPT_LOOP_WORDS = {"obs", "stream", "chat", "promo", "shoutout", "twitch", "so"}
+
+
+def _norm_prompt_token(value: str) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip()).strip(" ,.;")
+
+
+def build_stt_command_prompt(raw_prompt: str | None = None, *, max_chars: int | None = None, log: bool = True) -> str:
+    source = raw_prompt if raw_prompt is not None else ", ".join(DEFAULT_COMMAND_PROMPT_WORDS)
+    configured_max = int(os.getenv("HEBE_STT_COMMAND_PROMPT_MAX_CHARS", "180") or "180")
+    limit = max(40, int(max_chars or configured_max))
+    seen: set[str] = set()
+    words: list[str] = []
+    for piece in re.split(r"[,;\n]+", str(source or "")):
+        token = _norm_prompt_token(piece)
+        if not token:
+            continue
+        key = token.casefold()
+        if key in seen:
+            continue
+        candidate = ", ".join([*words, token]) + "."
+        if len(candidate) > limit:
+            break
+        seen.add(key)
+        words.append(token)
+    prompt = ", ".join(words).strip()
+    if prompt and not prompt.endswith("."):
+        prompt += "."
+    if log:
+        print(f"[HEBE][STT][PROMPT] built length={len(prompt)} words={len(words)} deduped=true", flush=True)
+    return prompt
+
+
+def is_stt_prompt_injection(text: str, *, command_prompt: str | None = None) -> bool:
+    value = str(text or "").strip()
+    if not value:
+        return False
+    normalized = re.sub(r"[^a-z0-9, ]+", " ", value.casefold())
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    prompt = build_stt_command_prompt(command_prompt, log=False)
+    prompt_norm = re.sub(r"[^a-z0-9, ]+", " ", prompt.casefold())
+    prompt_norm = re.sub(r"\s+", " ", prompt_norm).strip()
+    if prompt_norm and normalized == prompt_norm:
+        return True
+    if prompt_norm and len(normalized) >= 40 and normalized in prompt_norm:
+        return True
+
+    comma_parts = [_norm_prompt_token(part).casefold() for part in value.split(",")]
+    comma_parts = [part for part in comma_parts if part]
+    if len(comma_parts) >= 8:
+        promptish = [part for part in comma_parts if part in _PROMPT_LOOP_WORDS or part in {"hebe", "ebe", "eve", "leo"}]
+        if len(promptish) >= 6:
+            return True
+
+    tokens = re.findall(r"[a-z0-9]+", normalized)
+    if len(tokens) >= 10:
+        vocab_hits = [token for token in tokens if token in _PROMPT_LOOP_WORDS]
+        if len(vocab_hits) >= 6 and len(set(vocab_hits)) <= 5:
+            return True
+        for i in range(0, max(0, len(tokens) - 4)):
+            window = tokens[i : i + 5]
+            if window == ["obs", "stream", "chat", "promo", "shoutout"]:
+                return True
+    return False
 
 
 @dataclass
@@ -38,7 +128,12 @@ class STTConfig:
     silence_threshold: float = 0.01
     silence_rms_threshold: float = float(os.getenv("HEBE_STT_SILENCE_RMS_THRESHOLD", "0.003") or "0.003")
     silence_warning_after_seconds: float = float(os.getenv("HEBE_STT_SILENCE_WARNING_AFTER_SECONDS", "10") or "10")
-    silence_warning_rate_limit_seconds: float = float(os.getenv("HEBE_STT_SILENCE_WARNING_RATE_LIMIT_SECONDS", "60") or "60")
+    silence_warning_rate_limit_seconds: float = float(
+        os.getenv("HEBE_STT_SILENCE_LOG_COOLDOWN_SECONDS")
+        or os.getenv("HEBE_STT_SILENCE_WARNING_RATE_LIMIT_SECONDS", "60")
+        or "60"
+    )
+    verbose_device_logs: bool = os.getenv("HEBE_VERBOSE_STT_DEVICE_LOGS", "false").strip().lower() in ("1", "true", "yes", "on")
     max_device_open_retries: int = int(os.getenv("HEBE_STT_MAX_DEVICE_OPEN_RETRIES", "1") or "1")
     retry_backoff_seconds: float = float(os.getenv("HEBE_STT_RETRY_BACKOFF_SECONDS", "30") or "30")
     disable_on_device_open_failure: bool = os.getenv(
@@ -52,6 +147,67 @@ class STTConfig:
     model_size: str = os.getenv("HEBE_WHISPER_MODEL", "small")
     device: str = os.getenv("HEBE_WHISPER_DEVICE", "cpu")
     compute_type: str = os.getenv("HEBE_WHISPER_COMPUTE", "int8")
+    allowed_languages: tuple[str, ...] = tuple(
+        part.strip().lower()
+        for part in os.getenv("HEBE_STT_ALLOWED_LANGUAGES", "es,en").split(",")
+        if part.strip()
+    ) or ("es", "en")
+    default_language: str = os.getenv("HEBE_STT_DEFAULT_LANGUAGE", "es").strip().lower() or "es"
+    command_language: str = os.getenv("HEBE_STT_COMMAND_LANGUAGE", "es").strip().lower() or "es"
+    restrict_auto_language: bool = os.getenv("HEBE_STT_RESTRICT_AUTO_LANGUAGE", "true").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+    force_language_for_commands: bool = os.getenv("HEBE_STT_FORCE_LANGUAGE_FOR_COMMANDS", "true").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+    task: str = "transcribe"
+    command_beam_size: int = int(os.getenv("HEBE_STT_COMMAND_BEAM_SIZE", "5") or "5")
+    command_temperature: float = float(os.getenv("HEBE_STT_COMMAND_TEMPERATURE", "0") or "0")
+    command_prompt: str = os.getenv("HEBE_STT_COMMAND_PROMPT", ", ".join(DEFAULT_COMMAND_PROMPT_WORDS))
+    command_prompt_max_chars: int = int(os.getenv("HEBE_STT_COMMAND_PROMPT_MAX_CHARS", "180") or "180")
+
+    def __post_init__(self) -> None:
+        self.silence_warning_rate_limit_seconds = float(
+            os.getenv("HEBE_STT_SILENCE_LOG_COOLDOWN_SECONDS")
+            or os.getenv("HEBE_STT_SILENCE_WARNING_RATE_LIMIT_SECONDS", str(self.silence_warning_rate_limit_seconds))
+            or self.silence_warning_rate_limit_seconds
+        )
+        self.verbose_device_logs = os.getenv("HEBE_VERBOSE_STT_DEVICE_LOGS", str(self.verbose_device_logs)).strip().lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+        self.allowed_languages = tuple(
+            part.strip().lower()
+            for part in os.getenv("HEBE_STT_ALLOWED_LANGUAGES", ",".join(self.allowed_languages)).split(",")
+            if part.strip()
+        ) or ("es", "en")
+        self.default_language = os.getenv("HEBE_STT_DEFAULT_LANGUAGE", self.default_language).strip().lower() or "es"
+        self.command_language = os.getenv("HEBE_STT_COMMAND_LANGUAGE", self.command_language).strip().lower() or "es"
+        self.restrict_auto_language = os.getenv("HEBE_STT_RESTRICT_AUTO_LANGUAGE", str(self.restrict_auto_language)).strip().lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+        self.force_language_for_commands = os.getenv("HEBE_STT_FORCE_LANGUAGE_FOR_COMMANDS", str(self.force_language_for_commands)).strip().lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+        self.task = "transcribe"
+        self.command_prompt = build_stt_command_prompt(
+            os.getenv("HEBE_STT_COMMAND_PROMPT", self.command_prompt),
+            max_chars=self.command_prompt_max_chars,
+        )
 
 
 DEFAULT_BLACKLIST = [
@@ -81,6 +237,7 @@ class STTService:
         self.emit = emit
         self.log_chat = log_chat
         self.blacklist = blacklist or DEFAULT_BLACKLIST
+        self.cfg.command_prompt = build_stt_command_prompt(self.cfg.command_prompt, max_chars=self.cfg.command_prompt_max_chars)
         self._model: WhisperModel | None = None
         self.selected_input_device_id = str(self.cfg.input_device_index) if self.cfg.input_device_index is not None else ""
         self.selected_input_device_name = self.cfg.input_device_name or ""
@@ -99,6 +256,11 @@ class STTService:
         self.failed_input_ts = 0.0
         self._open_fail_counts: dict[str, int] = {}
         self._last_silence_warning_ts = 0.0
+        self.last_audio_np: np.ndarray | None = None
+        self.last_speech_detected = False
+        self.last_transcription_language: str | None = None
+        self.last_transcription_task = self.cfg.task
+        self.last_transcription_options: dict = {}
 
         self._silence_frames_needed = int(self.cfg.silence_end_seconds / (self.cfg.chunk / self.cfg.rate))
 
@@ -126,6 +288,119 @@ class STTService:
             except Exception:
                 pass
 
+    def _command_language(self) -> str | None:
+        if self.cfg.force_language_for_commands:
+            return self.cfg.command_language
+        if self.cfg.restrict_auto_language:
+            return self.cfg.default_language
+        return None
+
+    def _transcribe_audio(
+        self,
+        audio_np: np.ndarray,
+        *,
+        language: str | None = None,
+        command_mode: bool = True,
+        force_prompt: bool = True,
+    ) -> tuple[str, dict]:
+        self.init()
+        assert self._model is not None
+        selected_language = language
+        if selected_language is None and command_mode:
+            selected_language = self._command_language()
+
+        options = {
+            "language": selected_language,
+            "task": "transcribe",
+            "beam_size": max(1, int(self.cfg.command_beam_size if command_mode else 5)),
+            "vad_filter": True,
+        }
+        if command_mode:
+            options["temperature"] = float(self.cfg.command_temperature)
+            if force_prompt and self.cfg.command_prompt:
+                options["initial_prompt"] = self.cfg.command_prompt
+                options["hotwords"] = self.cfg.command_prompt
+
+        try:
+            supported = set(inspect.signature(self._model.transcribe).parameters)
+            options = {key: value for key, value in options.items() if key in supported}
+        except Exception:
+            options.pop("hotwords", None)
+
+        self.last_transcription_language = selected_language
+        self.last_transcription_task = "transcribe"
+        self.last_transcription_options = dict(options)
+        print(
+            "[HEBE][STT][TRANSCRIBE] "
+            f"using initial_prompt={str(bool(options.get('initial_prompt'))).lower()} "
+            f"language={selected_language!r} task='transcribe' command_mode={command_mode}",
+            flush=True,
+        )
+        segments, info = self._model.transcribe(audio_np, **options)
+        text = "".join(seg.text for seg in segments).strip()
+        detected_language = getattr(info, "language", None)
+        return text, {
+            "language": selected_language,
+            "detected_language": detected_language,
+            "task": "transcribe",
+            "command_mode": command_mode,
+            "options": dict(options),
+        }
+
+    def retry_last_command_transcript(self, *, language: str | None = None) -> dict:
+        if self.last_audio_np is None or not self.last_speech_detected:
+            return {
+                "text": "",
+                "speech_detected": bool(self.last_speech_detected),
+                "language": language or self.cfg.command_language,
+                "task": "transcribe",
+                "attempted": False,
+                "reason": "no_recent_speech_audio",
+            }
+        text, metadata = self._transcribe_audio(
+            self.last_audio_np,
+            language=language or self.cfg.command_language,
+            command_mode=True,
+            force_prompt=True,
+        )
+        return {
+            "text": text,
+            "speech_detected": True,
+            "attempted": True,
+            **metadata,
+        }
+
+    def _publish_transcript_or_reject(self, text: str, metadata: dict | None = None) -> str:
+        texto = str(text or "").strip()
+        if is_stt_prompt_injection(texto, command_prompt=self.cfg.command_prompt):
+            print("[HEBE][STT][REJECTED] reason=stt_prompt_injection", flush=True)
+            self._emit(
+                "voice.command",
+                {
+                    "raw_text": "",
+                    "normalized_text": "",
+                    "status": "rejected",
+                    "reason": "stt_prompt_injection",
+                    "retry_attempted": False,
+                    "final_decision": "rejected",
+                },
+            )
+            self._emit("status", {"stt": "listening"})
+            self._emit("stt.partial", {"text": ""})
+            return ""
+
+        if self._is_blacklisted(texto):
+            self._emit("status", {"stt": "listening"})
+            self._emit("stt.partial", {"text": ""})
+            return ""
+
+        if texto:
+            self._emit("stt.final", {"text": texto, **(metadata or {})})
+            self._emit("chat.user", {"text": texto})
+            if self.log_chat:
+                self.log_chat("user", texto, source="voice")
+        return texto
+
     def clear_device_error(self) -> dict:
         self.status = "idle"
         self.failed_input_signature = ""
@@ -147,7 +422,7 @@ class STTService:
 
         devices = _list_audio_devices_with_instance(p)
         default_device = next((d for d in devices if d.get("is_default_input")), None)
-        if default_device:
+        if default_device and self.cfg.verbose_device_logs:
             print(f"[HEBE][STT][DEVICE] default input={default_device.get('display_label')}", flush=True)
 
         selected: dict | None = None
@@ -196,11 +471,12 @@ class STTService:
         self._remember_selected_device(selected)
         self.last_input_device_error = None
 
-        print(
-            f"[HEBE][STT][DEVICE] selected input={selected.get('display_label')} "
-            f"reason={reason}",
-            flush=True,
-        )
+        if self.cfg.verbose_device_logs:
+            print(
+                f"[HEBE][STT][DEVICE] selected input={selected.get('display_label')} "
+                f"reason={reason}",
+                flush=True,
+            )
 
         return device_index
 
@@ -291,12 +567,13 @@ class STTService:
         last_exc: Exception | None = None
         for rate, ch in attempts:
             try:
-                print(
-                    f"[HEBE][STT][DEVICE] opening input index={device_index} "
-                    f"name={device.get('name')} rate={rate} channels={ch} block={self.cfg.chunk} "
-                    f"engine=whisper/{self.cfg.model_size}",
-                    flush=True,
-                )
+                if self.cfg.verbose_device_logs:
+                    print(
+                        f"[HEBE][STT][DEVICE] opening input index={device_index} "
+                        f"name={device.get('name')} rate={rate} channels={ch} block={self.cfg.chunk} "
+                        f"engine=whisper/{self.cfg.model_size}",
+                        flush=True,
+                    )
                 stream = p.open(
                     format=pyaudio.paInt16,
                     channels=ch,
@@ -305,7 +582,8 @@ class STTService:
                     input_device_index=device_index,
                     frames_per_buffer=self.cfg.chunk,
                 )
-                print("[HEBE][STT][DEVICE] input stream opened successfully", flush=True)
+                if self.cfg.verbose_device_logs:
+                    print("[HEBE][STT][DEVICE] input stream opened successfully", flush=True)
                 self.selected_input_sample_rate = rate
                 self.selected_input_channels = ch
                 return stream, rate, ch
@@ -462,31 +740,17 @@ class STTService:
         audio_bytes = b"".join(frames)
         audio_np = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
         max_abs = float(np.max(np.abs(audio_np))) if len(audio_np) > 0 else 0.0
+        self.last_audio_np = audio_np
+        self.last_speech_detected = bool(max_abs >= self.cfg.silence_threshold)
 
         if max_abs < self.cfg.silence_threshold:
             self._emit("status", {"stt": "listening"})
             self._emit("stt.partial", {"text": ""})
             return ""
 
-        segments, _info = self._model.transcribe(
-            audio_np,
-            language=None,
-            beam_size=5,
-            vad_filter=True,
-        )
+        texto, metadata = self._transcribe_audio(audio_np, command_mode=True, force_prompt=True)
 
-        texto = "".join(seg.text for seg in segments).strip()
-
-        if self._is_blacklisted(texto):
-            self._emit("status", {"stt": "listening"})
-            self._emit("stt.partial", {"text": ""})
-            return ""
-
-        if texto:
-            self._emit("stt.final", {"text": texto})
-            self._emit("chat.user", {"text": texto})
-            if self.log_chat:
-                self.log_chat("user", texto, source="voice")
+        texto = self._publish_transcript_or_reject(texto, metadata)
 
         self._emit("status", {"stt": "listening"})
         self._emit("stt.partial", {"text": ""})

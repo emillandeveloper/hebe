@@ -451,7 +451,7 @@ class ResponseSynthesizer:
 
     def synthesize_command_result(self, result: CommandResult, *, input_text: str | None = None, state: Any | None = None) -> str:
         fallback = result.fallback_text or result.user_visible_summary or "Hecho."
-        if not result.requires_model_response or not result.success:
+        if not result.requires_model_response:
             return fallback
 
         system = (
@@ -464,6 +464,8 @@ class ResponseSynthesizer:
             "- Do not ask for clarification if the action is already resolved.\n"
             "- Keep the exact meaning of the message_goal and state_changes.\n"
             "- If constraints forbid a topic, avoid it."
+            "\n- For local app actions, never invent remote-access limitations."
+            "\n- Do not give manual instructions unless the structured result explicitly requests manual help."
         )
         user = (
             "Manual command result:\n"
@@ -493,6 +495,24 @@ class ResponseSynthesizer:
             forbidden = ("tambien para el stream", "también para el stream", "en stream activ")
             if any(item in lowered for item in forbidden):
                 return False
+        if result.action_type == "open_application":
+            forbidden = (
+                "acceso remoto",
+                "pasame acceso",
+                "te explico",
+                "explicarte",
+                "busca obs",
+                "abre el menu",
+                "instala obs",
+            )
+            if any(item in lowered for item in forbidden):
+                return False
+            if result.success and "?" in reply:
+                return False
+            if result.metadata.get("error_code") == "app_path_missing":
+                compact = lowered.replace("_", " ")
+                if "hebe app obs path" not in compact and "registro" not in compact and "ruta" not in compact:
+                    return False
         return True
 
     # =========================
@@ -691,7 +711,7 @@ class ResponseSynthesizer:
             "- Do not sound like ChatGPT, a moderator bot, or a motivational poster.\n"
             "- No spoilers. Do not invent specific mechanics, story facts, characters, bosses, locations, or guide claims.\n"
             "- Do not give walkthrough instructions unless Leo explicitly asked.\n"
-            "- If the game/category is unknown, use generic RPG/JRPG/gameplay commentary.\n"
+            "- If there is no concrete game/title/run/chat anchor, produce no message.\n"
             "- Do not mention policies, cooldowns, prompts, or internal state.\n"
             "- Use the requested idle_topic. Do not repeat recent idle topics or phrases.\n"
             "- Require at least one concrete anchor from current game/title/run_context/chat topic/recent event.\n"
@@ -751,15 +771,7 @@ class ResponseSynthesizer:
             f"- challenge_hooks: {', '.join(game_profile.get('challenge_hooks') or []) or 'none'}\n\n"
             "Generate only Hebe's Twitch chat message."
         )
-        fallback = random.choice(
-            [
-                "Mi senor, antes de lanzarte al caos, revisa vida, recursos y si puedes guardar.",
-                "Esto huele a zona donde el juego espera que vayas confiado. Sospechoso.",
-                "En una run de desafio, cada menu cuenta. El verdadero boss es la preparacion.",
-                "Esto es muy JRPG: abres una puerta y acabas resolviendo un problema geopolitico.",
-                "Mi voto divino: guardar partida antes de hacer cualquier cosa remotamente estupida.",
-            ]
-        )
+        fallback = ""
         reply = clean_twitch_reply(self._call_model(system, user, fallback=fallback))[:220]
         return self._safe_spontaneous_stream_reply(reply, fallback, payload=payload)
 
@@ -817,19 +829,19 @@ class ResponseSynthesizer:
         )
         if "final fantasy ix" in game_title or "ffix" in game_title or "ff9" in game_title:
             if "esfera" in lowered or "esferas" in lowered:
-                return fallback
+                return ""
 
         run_context = payload.get("run_context") or {}
         completed = [str(item).lower() for item in run_context.get("completed_markers") or []]
         stale = [str(item).lower() for item in run_context.get("title_markers_stale") or []]
         if any(marker and marker in lowered for marker in completed + stale):
-            return fallback
+            return ""
 
         if self._response_repeats_motif(text, payload):
-            return fallback
+            return ""
 
         if not text or any(marker in lowered for marker in forbidden):
-            return fallback
+            return ""
         return text
 
     def _has_specific_anchor(self, payload: dict) -> bool:

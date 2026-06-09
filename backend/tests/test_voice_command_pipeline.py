@@ -1,8 +1,10 @@
+import os
 import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from app.cognitive.input_event import InputEvent
+from app.cognitive.action_runtime import ActionRuntime
 from app.core.state import HebeState
 from app.hebe_engine import HebeEngine
 from app.integrations.twitch.chat_cache import TwitchChatCache
@@ -48,8 +50,33 @@ class FakeTwitch:
 
 
 class FakeSynth:
+    def __init__(self):
+        self.results = []
+
     def synthesize_command_result(self, result, **kwargs):
-        return f"modelo:{result.action_type}:{result.state_changes.get('target', '')}"
+        self.results.append((result, kwargs))
+        return f"modelo:{result.action_type}:{result.state_changes.get('target', result.state_changes.get('app_id', ''))}"
+
+
+class FakeWin:
+    def __init__(self, ok=True):
+        self.ok = ok
+        self.opened = []
+
+    def open_app(self, app):
+        self.opened.append(app)
+        return self.ok
+
+
+class RetrySTT:
+    def __init__(self, retry_text, *, speech_detected=True):
+        self.last_speech_detected = speech_detected
+        self.retry_text = retry_text
+        self.calls = []
+
+    def retry_last_command_transcript(self, *, language=None):
+        self.calls.append({"language": language})
+        return {"text": self.retry_text, "attempted": True, "speech_detected": self.last_speech_detected}
 
 
 def make_engine(chatters=None, *, live=True):
@@ -67,8 +94,11 @@ def make_engine(chatters=None, *, live=True):
         twitch=FakeTwitch(),
         twitch_chat_bot=None,
         speak=Mock(),
+        stt=None,
+        win=FakeWin(),
     )
     engine.response_synthesizer = FakeSynth()
+    engine.action_runtime = ActionRuntime(engine.runtime)
     engine.voice_command_confirm_ambiguous = True
     engine.shoutout_cooldown_seconds = 120
     engine.shoutout_allow_bots = False
@@ -103,6 +133,99 @@ class VoiceCommandPipelineTests(unittest.TestCase):
         self.assertEqual(result.normalized_text, "hebe haz promo a nuria")
         self.assertTrue(result.metadata["normalization_only"])
         self.assertFalse(hasattr(result, "action_type"))
+
+    def test_ui_hebe_abre_obs_creates_open_application_action_plan(self):
+        engine = make_engine()
+        delivered = []
+        engine._deliver_manual_reply = lambda text, *, source: delivered.append((source, text))
+
+        with patch.dict(os.environ, {"HEBE_APP_OBS_PATH": r"C:\Tools\OBS\obs64.exe"}):
+            result = engine.cognitive_flow("hebe abre obs", source="ui")
+
+        self.assertEqual(result, "continue")
+        self.assertEqual(engine.runtime.win.opened[0]["app_id"], "obs")
+        self.assertEqual(delivered, [("ui", "modelo:open_application:obs")])
+        synth_result = engine.response_synthesizer.results[-1][0]
+        self.assertEqual(synth_result.action_type, "open_application")
+        self.assertTrue(synth_result.success)
+
+    def test_ui_abre_obs_creates_open_application_when_awake_and_whitelisted(self):
+        engine = make_engine()
+        delivered = []
+        engine._deliver_manual_reply = lambda text, *, source: delivered.append((source, text))
+
+        with patch.dict(os.environ, {"HEBE_APP_OBS_PATH": r"C:\Tools\OBS\obs64.exe"}):
+            result = engine.cognitive_flow("abre obs", source="ui")
+
+        self.assertEqual(result, "continue")
+        self.assertEqual(engine.runtime.win.opened[0]["app_id"], "obs")
+        self.assertEqual(delivered, [("ui", "modelo:open_application:obs")])
+
+    def test_stt_hebe_abre_obs_uses_same_open_application_pipeline(self):
+        engine = make_engine()
+        delivered = []
+        engine._deliver_manual_reply = lambda text, *, source: delivered.append((source, text))
+
+        with patch.dict(os.environ, {"HEBE_APP_OBS_PATH": r"C:\Tools\OBS\obs64.exe"}):
+            result = engine._process_stt_voice_transcript("Hebe abre OBS")
+
+        self.assertEqual(result, "continue")
+        self.assertEqual(engine.runtime.win.opened[0]["app_id"], "obs")
+        self.assertEqual(delivered, [("stt_voice", "modelo:open_application:obs")])
+
+    def test_obs_path_missing_returns_structured_action_result_not_generic_advice(self):
+        engine = make_engine()
+        delivered = []
+        engine._deliver_manual_reply = lambda text, *, source: delivered.append((source, text))
+
+        with patch.dict(os.environ, {"HEBE_APP_OBS_PATH": ""}, clear=False), \
+             patch("pathlib.Path.exists", lambda self: False):
+            result = engine.cognitive_flow("hebe abre obs", source="ui")
+
+        self.assertEqual(result, "continue")
+        self.assertEqual(engine.runtime.win.opened, [])
+        synth_result = engine.response_synthesizer.results[-1][0]
+        self.assertEqual(synth_result.action_type, "open_application")
+        self.assertFalse(synth_result.success)
+        self.assertEqual(synth_result.metadata["error_code"], "app_path_missing")
+        self.assertIn("HEBE_APP_OBS_PATH", synth_result.fallback_text)
+
+    def test_unknown_app_does_not_execute_or_call_command_synth(self):
+        engine = make_engine()
+
+        result = engine._plan_and_execute_local_app_action("hebe abre paint raro", "ui")
+
+        self.assertIsNone(result)
+        self.assertEqual(engine.runtime.win.opened, [])
+        self.assertEqual(engine.response_synthesizer.results, [])
+
+    def test_non_whitelisted_app_does_not_execute_even_with_command_words(self):
+        engine = make_engine()
+
+        with patch.dict(os.environ, {"HEBE_APP_OBS_PATH": r"C:\Tools\OBS\obs64.exe"}):
+            result = engine._plan_and_execute_local_app_action("abre calculadora", "ui")
+
+        self.assertIsNone(result)
+        self.assertEqual(engine.runtime.win.opened, [])
+
+    def test_model_is_not_called_before_open_application_action_plan(self):
+        class GuardSynth(FakeSynth):
+            def synthesize_command_result(self, result, **kwargs):
+                self.results.append((result, kwargs))
+                assert result.action_type == "open_application"
+                assert result.state_changes.get("app_id")
+                return "ok"
+
+        engine = make_engine()
+        engine.response_synthesizer = GuardSynth()
+        delivered = []
+        engine._deliver_manual_reply = lambda text, *, source: delivered.append((source, text))
+
+        with patch.dict(os.environ, {"HEBE_APP_OBS_PATH": r"C:\Tools\OBS\obs64.exe"}):
+            result = engine.cognitive_flow("hebe inicia obs", source="ui")
+
+        self.assertEqual(result, "continue")
+        self.assertEqual(delivered, [("ui", "ok")])
 
     def test_planner_detects_generic_shoutout_phrasings(self):
         engine = make_engine()
@@ -303,6 +426,123 @@ class VoiceCommandPipelineTests(unittest.TestCase):
         self.assertIn("[HEBE][ACTION_PLAN] action_type=stream_ambient_stt_disabled", joined)
         self.assertIn("[HEBE][ACTION_EXECUTOR] success=true", joined)
         self.assertIn("[HEBE][RESPONSE_SYNTH]", joined)
+
+    def test_unsupported_script_transcript_does_not_enter_cognition_without_retry_audio(self):
+        engine = make_engine(["nuria"])
+        handled = []
+        engine.handle_command = lambda command, source="voice": handled.append((source, command)) or "continue"
+        logs = []
+
+        with patch("builtins.print", lambda *args, **kwargs: logs.append(" ".join(str(arg) for arg in args))):
+            result = engine._process_stt_voice_transcript("यब आबरे अबे यशे")
+
+        self.assertEqual(result, "continue")
+        self.assertEqual(handled, [])
+        self.assertIn("reason=unsupported_script script=devanagari", "\n".join(logs))
+
+    def test_repeated_hotword_prompt_transcript_is_rejected_before_input_event(self):
+        engine = make_engine(["nuria"])
+        bad = "Hebe, Ebe, OBS, Twitch, chat, promo, shoutout, OBS, stream, chat, promo, shoutout"
+        handled = []
+        emitted = []
+        engine.handle_command = lambda command, source="voice": handled.append((source, command)) or "continue"
+
+        with patch("app.hebe_engine.emit", lambda event_type, data=None: emitted.append((event_type, data or {}))):
+            result = engine._process_stt_voice_transcript(bad)
+
+        self.assertEqual(result, "continue")
+        self.assertEqual(handled, [])
+        self.assertIsNone(engine._current_input_event)
+        rejected = [data for event_type, data in emitted if event_type == "voice.command" and data.get("status") == "rejected"]
+        self.assertTrue(rejected)
+        self.assertEqual(rejected[-1]["reason"], "stt_prompt_injection")
+        self.assertEqual(rejected[-1]["raw_text"], "")
+        self.assertNotIn("OBS, Twitch", str(rejected[-1]))
+
+    def test_unsupported_script_retries_forced_spanish_and_routes_valid_latin_result(self):
+        engine = make_engine(["nuria"])
+        engine.runtime.stt = RetrySTT("Hebe abre OBS")
+        routed = []
+        engine.handle_command = lambda command, source="voice": routed.append((source, command, engine._current_input_event)) or "continue"
+        emitted = []
+        logs = []
+
+        with patch("builtins.print", lambda *args, **kwargs: logs.append(" ".join(str(arg) for arg in args))), \
+             patch("app.hebe_engine.emit", lambda event_type, data=None: emitted.append((event_type, data or {}))):
+            result = engine._process_stt_voice_transcript("यब आबरे अबे यशे")
+
+        joined = "\n".join(logs)
+        self.assertEqual(result, "continue")
+        self.assertEqual(engine.runtime.stt.calls, [{"language": "es"}])
+        self.assertEqual(routed[0][0], "stt_voice")
+        self.assertEqual(routed[0][1], "abre obs")
+        self.assertEqual(routed[0][2].raw_text, "यब आबरे अबे यशे")
+        self.assertEqual(routed[0][2].normalized_text, "hebe abre obs")
+        self.assertIn("[HEBE][STT][RETRY] reason=unsupported_script forcing_language=es", joined)
+        self.assertIn("[HEBE][STT][RETRY_RESULT] raw='Hebe abre OBS' accepted=true", joined)
+        debug_events = [data for event_type, data in emitted if event_type == "voice.command"]
+        self.assertTrue(any(data.get("retry_attempted") is True and data.get("retry_transcript") == "Hebe abre OBS" for data in debug_events))
+        self.assertTrue(any(data.get("final_decision") == "accepted" for data in debug_events))
+
+    def test_unsupported_script_retry_prompt_injection_is_rejected_without_visible_prompt(self):
+        engine = make_engine(["nuria"])
+        engine.runtime.stt = RetrySTT("Hebe, Ebe, OBS, Twitch, chat, promo, shoutout, OBS, stream, chat, promo, shoutout")
+        handled = []
+        emitted = []
+        engine.handle_command = lambda command, source="voice": handled.append((source, command)) or "continue"
+
+        with patch("app.hebe_engine.emit", lambda event_type, data=None: emitted.append((event_type, data or {}))):
+            result = engine._process_stt_voice_transcript("यब आबरे अबे यशे")
+
+        self.assertEqual(result, "continue")
+        self.assertEqual(handled, [])
+        rejected = [data for event_type, data in emitted if event_type == "voice.command" and data.get("status") == "rejected"]
+        self.assertTrue(rejected)
+        self.assertEqual(rejected[-1]["reason"], "stt_prompt_injection")
+        self.assertEqual(rejected[-1]["raw_text"], "")
+        self.assertEqual(rejected[-1]["retry_transcript"], "")
+
+    def test_unsupported_script_retry_still_unsupported_is_rejected(self):
+        engine = make_engine(["nuria"])
+        engine.runtime.stt = RetrySTT("यब आबरे अबे यशे")
+        handled = []
+        engine.handle_command = lambda command, source="voice": handled.append((source, command)) or "continue"
+        emitted = []
+        logs = []
+
+        with patch("builtins.print", lambda *args, **kwargs: logs.append(" ".join(str(arg) for arg in args))), \
+             patch("app.hebe_engine.emit", lambda event_type, data=None: emitted.append((event_type, data or {}))):
+            result = engine._process_stt_voice_transcript("यब आबरे अबे यशे")
+
+        self.assertEqual(result, "continue")
+        self.assertEqual(handled, [])
+        self.assertIn("reason=unsupported_script_after_retry script=devanagari", "\n".join(logs))
+        rejected = [data for event_type, data in emitted if event_type == "voice.command" and data.get("status") == "rejected"]
+        self.assertTrue(rejected)
+        self.assertEqual(rejected[-1]["reason"], "unsupported_script_after_retry")
+        self.assertTrue(rejected[-1]["retry_attempted"])
+        self.assertEqual(rejected[-1]["retry_transcript"], "यब आबरे अबे यशे")
+
+    def test_retry_valid_eve_transcript_is_handled_by_wake_resolver(self):
+        engine = make_engine(["nuria"])
+        engine.runtime.stt = RetrySTT("Eve despierta")
+        delivered = []
+        engine._deliver_manual_reply = lambda text, *, source: delivered.append((source, text))
+
+        result = engine._process_stt_voice_transcript("यब आबरे अबे यशे")
+
+        self.assertEqual(result, "continue")
+        self.assertEqual(delivered, [("stt_voice", "modelo:already_awake:")])
+
+    def test_retry_route_does_not_add_command_specific_execution_hardcoding(self):
+        engine = make_engine(["nuria"])
+        engine.runtime.stt = RetrySTT("Hebe abre OBS")
+        captured = []
+        engine.handle_command = lambda command, source="voice": captured.append(command) or "continue"
+
+        engine._process_stt_voice_transcript("यब आबरे अबे यशे")
+
+        self.assertEqual(captured, ["abre obs"])
 
     def test_stt_worker_transcript_process_helper_logs_rejected_decision(self):
         engine = make_engine(["nuria"])
