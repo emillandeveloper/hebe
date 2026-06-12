@@ -122,6 +122,32 @@ class CognitiveTwitchTests(unittest.TestCase):
 
         self.assertEqual(len(received), 1)
 
+    def test_twitch_esquirola_reply_is_short_in_character(self):
+        synth = ResponseSynthesizer(conversation_model=CapturingModel("alguien tiene que recordarles que no son el centro del universo."))
+
+        reply = synth._generate_twitch_chat_react({
+            "user_login": "viewer",
+            "display_name": "Viewer",
+            "message_text": "hebe la esquirola",
+            "recent_chat": [],
+        })
+
+        self.assertEqual(reply, "esquirola no, superviviente sindical del caos.")
+        self.assertLessEqual(len(reply.split()), 10)
+
+    def test_twitch_sexual_or_aggressive_mention_deflects_without_escalation(self):
+        synth = ResponseSynthesizer(conversation_model=CapturingModel("vete a la mierda con esa imagen sexual explicita y larga."))
+
+        reply = synth._generate_twitch_chat_react({
+            "user_login": "viewer",
+            "display_name": "Viewer",
+            "message_text": "hebe puta",
+            "recent_chat": [],
+        })
+
+        self.assertIn("bonito vocabulario", reply)
+        self.assertLessEqual(len(reply.split()), 10)
+
     def test_twitch_service_shoutout_uses_configurable_template(self):
         chat = CapturingChatClient()
         twitch = TwitchService(chat_client=chat, shoutout_command_template="!promo {username}")

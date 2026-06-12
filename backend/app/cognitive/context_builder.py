@@ -48,6 +48,7 @@ class BuiltContext:
     inject_memory: bool = True
     context_policy: dict[str, Any] = field(default_factory=dict)
     resolved_entities: list[dict[str, Any]] = field(default_factory=list)
+    response_frame: dict[str, Any] = field(default_factory=dict)
 
 
 class ContextBuilder:

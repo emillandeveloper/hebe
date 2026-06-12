@@ -35,7 +35,28 @@ DEFAULT_COMMAND_PROMPT_WORDS = [
     "Final Fantasy",
 ]
 
-_PROMPT_LOOP_WORDS = {"obs", "stream", "chat", "promo", "shoutout", "twitch", "so"}
+_PROMPT_LOOP_WORDS = {
+    "hebe",
+    "ebe",
+    "eve",
+    "leo",
+    "obs",
+    "stream",
+    "chat",
+    "promo",
+    "shoutout",
+    "twitch",
+    "so",
+    "nuria",
+    "charlie",
+    "xarly",
+    "totodile",
+    "jotun",
+    "zwei",
+    "persona",
+    "final",
+    "fantasy",
+}
 
 
 def _norm_prompt_token(value: str) -> str:
@@ -82,17 +103,32 @@ def is_stt_prompt_injection(text: str, *, command_prompt: str | None = None) -> 
     if prompt_norm and len(normalized) >= 40 and normalized in prompt_norm:
         return True
 
+    return is_stt_prompt_hotword_list(value)
+
+
+def is_stt_prompt_hotword_list(text: str) -> bool:
+    value = str(text or "").strip()
+    if not value:
+        return False
+    normalized = re.sub(r"[^a-z0-9, ]+", " ", value.casefold())
+    normalized = re.sub(r"\s+", " ", normalized).strip()
     comma_parts = [_norm_prompt_token(part).casefold() for part in value.split(",")]
     comma_parts = [part for part in comma_parts if part]
-    if len(comma_parts) >= 8:
-        promptish = [part for part in comma_parts if part in _PROMPT_LOOP_WORDS or part in {"hebe", "ebe", "eve", "leo"}]
-        if len(promptish) >= 6:
+    if len(comma_parts) >= 4:
+        promptish = []
+        for part in comma_parts:
+            part_tokens = re.findall(r"[a-z0-9]+", part)
+            if part in _PROMPT_LOOP_WORDS or (
+                part_tokens and all(token in _PROMPT_LOOP_WORDS for token in part_tokens)
+            ):
+                promptish.append(part)
+        if len(promptish) >= 4 and len(promptish) / max(1, len(comma_parts)) >= 0.75:
             return True
 
     tokens = re.findall(r"[a-z0-9]+", normalized)
-    if len(tokens) >= 10:
+    if len(tokens) >= 5:
         vocab_hits = [token for token in tokens if token in _PROMPT_LOOP_WORDS]
-        if len(vocab_hits) >= 6 and len(set(vocab_hits)) <= 5:
+        if len(vocab_hits) >= 5 and len(vocab_hits) / max(1, len(tokens)) >= 0.75:
             return True
         for i in range(0, max(0, len(tokens) - 4)):
             window = tokens[i : i + 5]
@@ -171,6 +207,26 @@ class STTConfig:
     command_temperature: float = float(os.getenv("HEBE_STT_COMMAND_TEMPERATURE", "0") or "0")
     command_prompt: str = os.getenv("HEBE_STT_COMMAND_PROMPT", ", ".join(DEFAULT_COMMAND_PROMPT_WORDS))
     command_prompt_max_chars: int = int(os.getenv("HEBE_STT_COMMAND_PROMPT_MAX_CHARS", "180") or "180")
+    command_prompt_enabled: bool = os.getenv("HEBE_STT_COMMAND_PROMPT_ENABLED", "true").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+    log_rejected_raw: bool = os.getenv("HEBE_STT_LOG_REJECTED_RAW", "false").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+    auto_disable_prompt_on_echo: bool = os.getenv("HEBE_STT_AUTO_DISABLE_PROMPT_ON_ECHO", "true").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+    prompt_echo_window_seconds: float = float(os.getenv("HEBE_STT_PROMPT_ECHO_WINDOW_SECONDS", "300") or "300")
+    prompt_echo_disable_threshold: int = int(os.getenv("HEBE_STT_PROMPT_ECHO_DISABLE_THRESHOLD", "2") or "2")
 
     def __post_init__(self) -> None:
         self.silence_warning_rate_limit_seconds = float(
@@ -203,6 +259,22 @@ class STTConfig:
             "yes",
             "on",
         )
+        self.command_prompt_enabled = os.getenv("HEBE_STT_COMMAND_PROMPT_ENABLED", str(self.command_prompt_enabled)).strip().lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+        self.log_rejected_raw = os.getenv("HEBE_STT_LOG_REJECTED_RAW", str(self.log_rejected_raw)).strip().lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+        self.auto_disable_prompt_on_echo = os.getenv(
+            "HEBE_STT_AUTO_DISABLE_PROMPT_ON_ECHO",
+            str(self.auto_disable_prompt_on_echo),
+        ).strip().lower() in ("1", "true", "yes", "on")
         self.task = "transcribe"
         self.command_prompt = build_stt_command_prompt(
             os.getenv("HEBE_STT_COMMAND_PROMPT", self.command_prompt),
@@ -261,6 +333,8 @@ class STTService:
         self.last_transcription_language: str | None = None
         self.last_transcription_task = self.cfg.task
         self.last_transcription_options: dict = {}
+        self.last_rejected_stt: dict = {}
+        self._prompt_echo_rejection_ts: list[float] = []
 
         self._silence_frames_needed = int(self.cfg.silence_end_seconds / (self.cfg.chunk / self.cfg.rate))
 
@@ -317,7 +391,7 @@ class STTService:
         }
         if command_mode:
             options["temperature"] = float(self.cfg.command_temperature)
-            if force_prompt and self.cfg.command_prompt:
+            if force_prompt and self.cfg.command_prompt and self.cfg.command_prompt_enabled:
                 options["initial_prompt"] = self.cfg.command_prompt
                 options["hotwords"] = self.cfg.command_prompt
 
@@ -370,22 +444,54 @@ class STTService:
             **metadata,
         }
 
+    def disable_command_prompt_for_session(self) -> bool:
+        if not self.cfg.command_prompt_enabled:
+            return False
+        self.cfg.command_prompt_enabled = False
+        print("[HEBE][STT][PROMPT] auto_disabled reason=repeated_prompt_echo", flush=True)
+        return True
+
+    def _record_prompt_echo_rejection(self) -> None:
+        if not self.cfg.auto_disable_prompt_on_echo:
+            return
+        now = time.time()
+        window = max(1.0, float(self.cfg.prompt_echo_window_seconds or 300))
+        self._prompt_echo_rejection_ts = [
+            ts for ts in self._prompt_echo_rejection_ts
+            if now - float(ts or 0.0) <= window
+        ]
+        self._prompt_echo_rejection_ts.append(now)
+        if len(self._prompt_echo_rejection_ts) >= max(1, int(self.cfg.prompt_echo_disable_threshold or 2)):
+            self.disable_command_prompt_for_session()
+
     def _publish_transcript_or_reject(self, text: str, metadata: dict | None = None) -> str:
         texto = str(text or "").strip()
-        if is_stt_prompt_injection(texto, command_prompt=self.cfg.command_prompt):
-            print("[HEBE][STT][REJECTED] reason=stt_prompt_injection", flush=True)
+        hotword_list = is_stt_prompt_hotword_list(texto)
+        if hotword_list or is_stt_prompt_injection(texto, command_prompt=self.cfg.command_prompt):
+            reason = "stt_prompt_echo_or_hotword_list" if hotword_list else "stt_prompt_injection"
+            if hotword_list and self.cfg.log_rejected_raw:
+                print(f"[HEBE][STT][RAW] text={ascii(texto)}", flush=True)
+            print(f"[HEBE][STT][REJECTED] reason={reason}", flush=True)
+            if reason == "stt_prompt_echo_or_hotword_list":
+                self._record_prompt_echo_rejection()
+            self.last_rejected_stt = {
+                "raw_text": texto if hotword_list else "",
+                "status": "rejected",
+                "reason": reason,
+                "ts": time.time(),
+            }
             self._emit(
                 "voice.command",
                 {
-                    "raw_text": "",
+                    "raw_text": texto if hotword_list else "",
                     "normalized_text": "",
                     "status": "rejected",
-                    "reason": "stt_prompt_injection",
+                    "reason": reason,
                     "retry_attempted": False,
                     "final_decision": "rejected",
                 },
             )
-            self._emit("status", {"stt": "listening"})
+            self._emit("status", {"stt": "listening", "last_rejected_stt": self.last_rejected_stt})
             self._emit("stt.partial", {"text": ""})
             return ""
 
@@ -396,9 +502,6 @@ class STTService:
 
         if texto:
             self._emit("stt.final", {"text": texto, **(metadata or {})})
-            self._emit("chat.user", {"text": texto})
-            if self.log_chat:
-                self.log_chat("user", texto, source="voice")
         return texto
 
     def clear_device_error(self) -> dict:

@@ -198,9 +198,9 @@ class StreamSpontaneityTests(unittest.TestCase):
         readiness = service.evaluate(stream, now=now)
 
         self.assertFalse(readiness["would_send"])
-        self.assertEqual(readiness["blocked_reason"], "no_specific_context")
+        self.assertEqual(readiness["blocked_reason"], "no_session_primer_or_run_context")
 
-    def test_specificity_gate_allows_current_game_anchor(self):
+    def test_specificity_gate_blocks_current_game_without_primer_or_run_context(self):
         now = 1_000_000.0
         stream = self.make_stream(now=now, presence_mode="show")
         stream.current_category = "Zwei!!: The Arges Adventure"
@@ -216,8 +216,8 @@ class StreamSpontaneityTests(unittest.TestCase):
 
         event = service.build_due_event(stream)
 
-        self.assertIsNotNone(event)
-        self.assertIn("game", event.payload["specific_context_anchors"])
+        self.assertIsNone(event)
+        self.assertEqual(stream.last_stream_spontaneity_blocked_reason, "no_session_primer_or_run_context")
 
     def test_specificity_gate_uses_recent_run_context_fact(self):
         now = 1_000_000.0

@@ -208,7 +208,10 @@ class TTSControlTests(unittest.TestCase):
             engine._deliver_voice_reply("Texto visible.")
 
         engine.runtime.speak.assert_not_called()
-        emit.assert_called_with("chat.assistant", {"text": "Texto visible."})
+        emit.assert_called_with(
+            "chat.assistant",
+            {"text": "Texto visible.", "source": "direct_stt", "output_target": "local_ui"},
+        )
 
     def test_stream_tts_off_command_keeps_text_chat(self):
         engine = make_engine(tts_enabled=True)

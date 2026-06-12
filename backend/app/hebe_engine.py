@@ -3,6 +3,7 @@ import re
 import time
 import threading
 from queue import Empty
+from difflib import SequenceMatcher
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -34,6 +35,14 @@ from app.cognitive.scheduler import InternalEvent
 from app.cognitive.command_result import CommandResult
 from app.cognitive.input_event import InputEvent
 from app.cognitive.action_plan import ActionPlan
+from app.cognitive.stream_companion_flow import (
+    ContextRelevance,
+    ConversationStateResolver,
+    InputClassifier,
+    KnowledgePolicyResolver,
+    ResponseDecisionResolver,
+    ResponseFrame,
+)
 from app.cognitive.wake_name_resolver import WakeNameResolver
 from app.cognitive.context_builder import ContextBuilder
 from app.cognitive.deliberation_service import DeliberationService
@@ -43,15 +52,23 @@ from app.cognitive.response_synthesizer import ResponseSynthesizer
 from app.cognitive.action_runtime import ActionRuntime
 from app.cognitive.memory.memory_extractor import MemoryExtractor
 from app.stream.context_sync import StreamContextSyncService
+from app.stream.game_knowledge import GameKnowledgeConfig, GameKnowledgeResolver
 from app.stream.game_profiles import GameProfileStore
 from app.stream.game_research import GameKnowledgeResearchConfig, GameKnowledgeResearchService
 from app.stream import memory as stream_memory
 from app.stream.ambient_context import AmbientContextExtractor
 from app.stream.action_planner import StreamActionPlanner
+from app.stream import session_primer
 from app.stream.spontaneity import StreamSpontaneityConfig, StreamSpontaneityService
 
 WAKE_WORDS = ["hebe despierta", "eve despierta", "jebe despierta"]
 STREAM_WAKE_ALIASES = {"hebe", "ebe", "eve", "heve", "jebe"}
+OUTPUT_TARGET_LOCAL_UI = "local_ui"
+OUTPUT_TARGET_LOCAL_TTS = "local_tts"
+OUTPUT_TARGET_STREAM_TTS = "stream_tts"
+OUTPUT_TARGET_TWITCH_CHAT = "twitch_chat"
+OUTPUT_TARGET_TWITCH_COMMAND = "twitch_command"
+OUTPUT_TARGET_SILENT_CONTEXT_UPDATE = "silent_context_update"
 
 t0 = time.time()
 
@@ -167,6 +184,11 @@ class HebeEngine:
             store=self.game_profiles,
             config=GameKnowledgeResearchConfig.from_env(),
         )
+        self.game_knowledge = GameKnowledgeResolver(
+            profile_store=self.game_profiles,
+            research_service=self.game_research,
+            config=GameKnowledgeConfig.from_env(),
+        )
         self._last_game_research_category = None
         self.stream_spontaneity = StreamSpontaneityService(
             game_profiles=self.game_profiles,
@@ -192,6 +214,10 @@ class HebeEngine:
         self.memory_extractor = MemoryExtractor(
             intent_model=getattr(self.runtime, "intent_llm", None),
         )
+        self.input_classifier = InputClassifier()
+        self.conversation_state_resolver = ConversationStateResolver()
+        self.knowledge_policy_resolver = KnowledgePolicyResolver()
+        self.response_decision_resolver = ResponseDecisionResolver()
         self.stream_ambient_stt_enabled = os.getenv(
             "HEBE_STREAM_AMBIENT_STT_ENABLED",
             "false",
@@ -245,6 +271,24 @@ class HebeEngine:
             "HEBE_VOICE_COMMAND_CONFIRM_AMBIGUOUS",
             "true",
         ).strip().lower() in ("1", "true", "yes", "on")
+        self.stt_ignore_while_tts_speaking = os.getenv(
+            "HEBE_STT_IGNORE_WHILE_TTS_SPEAKING",
+            "true",
+        ).strip().lower() in ("1", "true", "yes", "on")
+        self.stt_tts_echo_window_seconds = float(os.getenv("HEBE_STT_TTS_ECHO_WINDOW_SECONDS", "10") or 10)
+        self.stt_tts_echo_similarity_threshold = float(os.getenv("HEBE_STT_TTS_ECHO_SIMILARITY_THRESHOLD", "0.82") or 0.82)
+        self.stt_log_rejected_raw = os.getenv("HEBE_STT_LOG_REJECTED_RAW", "false").strip().lower() in ("1", "true", "yes", "on")
+        self.stt_auto_disable_prompt_on_echo = os.getenv("HEBE_STT_AUTO_DISABLE_PROMPT_ON_ECHO", "true").strip().lower() in ("1", "true", "yes", "on")
+        self.stt_prompt_echo_window_seconds = float(os.getenv("HEBE_STT_PROMPT_ECHO_WINDOW_SECONDS", "300") or 300)
+        self.stt_prompt_echo_disable_threshold = int(os.getenv("HEBE_STT_PROMPT_ECHO_DISABLE_THRESHOLD", "2") or 2)
+        self.pending_conversation_ttl_seconds = float(os.getenv("HEBE_PENDING_CONVERSATION_TTL_SECONDS", "120") or 120)
+        self.pending_conversation_max_followups = int(os.getenv("HEBE_PENDING_CONVERSATION_MAX_FOLLOWUPS", "1") or 1)
+        self.stt_duplicate_window_seconds = float(os.getenv("HEBE_STT_DUPLICATE_WINDOW_SECONDS", "8") or 8)
+        self.stt_duplicate_similarity_threshold = float(os.getenv("HEBE_STT_DUPLICATE_SIMILARITY_THRESHOLD", "0.92") or 0.92)
+        self._recent_tts_texts: list[dict] = []
+        self._recent_stt_transcripts: list[dict] = []
+        self._stt_prompt_echo_rejection_ts: list[float] = []
+        self._stt_visible_transcripts: set[str] = set()
         self.stream_action_planner = self._build_stream_action_planner()
         self._current_input_event: InputEvent | None = None
 
@@ -287,6 +331,24 @@ class HebeEngine:
             return
 
         print(f"[HEBE][TWITCH][CHAT] observed username={username} message={message!r}", flush=True)
+        chat_event = InputEvent(
+            source="twitch_chat",
+            raw_text=message,
+            normalized_text=self._normalize_text(message),
+            username=username,
+            is_stream_context=True,
+        )
+        chat_classification = self._get_input_classifier().classify(
+            chat_event,
+            addressed_to_hebe=self._message_mentions_hebe(message),
+            valid=True,
+        )
+        self._log_input_classification(chat_classification)
+        self._declare_output_route(
+            input_type="twitch_chat_observe",
+            targets=[OUTPUT_TARGET_SILENT_CONTEXT_UPDATE],
+            reason="chat_context_update",
+        )
         twitch = getattr(self.runtime, "twitch", None)
         remember = getattr(twitch, "remember_chat_message", None)
         if callable(remember):
@@ -309,17 +371,20 @@ class HebeEngine:
         session_id = self._ensure_stream_memory_session_if_live(stream)
         topic = self._classify_chat_topic(message)
         linked_context = self._linked_run_context_for_chat_topic(stream, topic)
-        stream_memory.record_chat_message(
-            username=username,
-            display_name=display_name,
-            message_text=message,
-            stream_session_id=session_id,
-            is_mention_to_hebe=self._message_mentions_hebe(message),
-            is_direct_reply_to_hebe=False,
-            is_bot=False,
-            source="twitch_irc",
-            topic_hint=topic,
-        )
+        try:
+            stream_memory.record_chat_message(
+                username=username,
+                display_name=display_name,
+                message_text=message,
+                stream_session_id=session_id,
+                is_mention_to_hebe=self._message_mentions_hebe(message),
+                is_direct_reply_to_hebe=False,
+                is_bot=False,
+                source="twitch_irc",
+                topic_hint=topic,
+            )
+        except Exception as exc:
+            print(f"[HEBE][STREAM_MEMORY] chat_message failed: {exc!r}", flush=True)
         entry = {
             "username": str(username or "").strip(),
             "display_name": str(display_name or username or "").strip(),
@@ -509,6 +574,11 @@ class HebeEngine:
                 ok = bool(twitch and twitch.send_message(command))
             if not ok:
                 raise RuntimeError("Twitch shoutout command returned false")
+            self._declare_output_route(
+                input_type="direct_stt" if source == "stt_voice" else source,
+                targets=[OUTPUT_TARGET_TWITCH_COMMAND],
+                reason="action_plan_twitch_shoutout",
+            )
             if stream is not None:
                 stream.last_shoutout_target = normalized
                 stream.last_shoutout_ts = now
@@ -593,6 +663,37 @@ class HebeEngine:
             return stream_memory.ensure_active_stream_session(stream, source="engine")
         except Exception as exc:
             print(f"[HEBE][STREAM_MEMORY] ensure session failed: {exc!r}", flush=True)
+            return None
+
+    def _record_stream_event_safe(self, event_type: str, payload: dict | None = None, *, stream=None) -> None:
+        try:
+            stream_memory.record_stream_event(event_type, payload or {}, stream=stream)
+        except Exception as exc:
+            print(f"[HEBE][STREAM_MEMORY] record event failed event_type={event_type!r}: {exc!r}", flush=True)
+
+    def _observe_stream_presence_safe(
+        self,
+        username: str,
+        display_name: str,
+        *,
+        stream_session_id: int | None = None,
+        source: str = "event",
+    ) -> None:
+        try:
+            stream_memory.observe_presence(
+                username,
+                display_name,
+                stream_session_id=stream_session_id,
+                source=source,
+            )
+        except Exception as exc:
+            print(f"[HEBE][STREAM_MEMORY] observe presence failed source={source!r}: {exc!r}", flush=True)
+
+    def _close_stream_memory_session_safe(self, stream, *, reason: str) -> object | None:
+        try:
+            return stream_memory.close_active_stream_session(stream, reason=reason)
+        except Exception as exc:
+            print(f"[HEBE][STREAM_MEMORY] close session failed reason={reason!r}: {exc!r}", flush=True)
             return None
 
     def _chat_activity_snapshot(self, stream=None, *, now: float | None = None) -> dict:
@@ -762,11 +863,67 @@ class HebeEngine:
             self._deliver_manual_reply(manual_text, source="ui" if force_ui else source)
             return "continue"
 
+        if source == "stt_voice":
+            event = getattr(self, "_current_input_event", None)
+            metadata = getattr(event, "stt_metadata", None)
+            if not isinstance(metadata, dict) or not metadata.get("jarvis_allowed"):
+                print("[HEBE][JARVIS][BLOCKED] reason=stt_not_direct", flush=True)
+                return "continue"
+
+        cognitive_followup = False
+        if source in {"ui", "stt_voice"} and self._pending_conversation_matches(source=source, text=command):
+            self._consume_pending_conversation_turn()
+            cognitive_followup = True
+            print("[HEBE][COG] decision=conversation_followup", flush=True)
+
+        input_event = getattr(self, "_current_input_event", None)
+        if input_event is None:
+            input_event = self._build_input_event(
+                source="ui" if source == "ui" else source,
+                raw_text=command,
+                normalized_text=self._normalize_text(command),
+            )
+            self._current_input_event = input_event
+        metadata = getattr(input_event, "stt_metadata", None)
+        frame_payload = (metadata or {}).get("response_frame") if isinstance(metadata, dict) else None
+        if isinstance(frame_payload, dict):
+            response_frame_payload = frame_payload
+        else:
+            classification = self._get_input_classifier().classify(
+                input_event,
+                addressed_to_hebe=source in {"ui", "typed_ui"},
+                has_action_intent=False,
+                pending_followup=cognitive_followup,
+                valid=True,
+            )
+            self._log_input_classification(classification)
+            conversation_state = self._get_conversation_state_resolver().from_pending_turn(
+                self._get_pending_conversation_turn(),
+                matched=cognitive_followup,
+                reason="cognitive_flow_followup" if cognitive_followup else "direct_or_typed_input",
+            )
+            self._log_conversation_state(conversation_state)
+            response_decision = self._get_response_decision_resolver().decide(
+                classification=classification,
+                conversation_state=conversation_state,
+                relevance=ContextRelevance(useful=False, category="none", reason="not_ambient"),
+                output_targets=self._output_targets_for_input_type(classification.input_type),
+            )
+            self._log_knowledge_resolution()
+            self._log_response_decision(response_decision)
+            response_frame_payload = self._build_response_frame(
+                event=input_event,
+                classification=classification,
+                conversation_state=conversation_state,
+                response_decision=response_decision,
+            ).as_dict()
+
         context = self.context_builder.build(
             state=self.runtime.state,
             input_text=command,
             internal_event=None,
         )
+        context.response_frame = response_frame_payload
 
         print(
             "[HEBE][COG] context pending="
@@ -825,8 +982,14 @@ class HebeEngine:
         )
 
         if source == "ui" and reply_text:
+            self._declare_output_route(
+                input_type="ui_typed_input",
+                targets=[OUTPUT_TARGET_LOCAL_UI],
+                reason="typed_input_reply",
+            )
             log_chat("assistant", reply_text, source="ui")
-            emit("chat.assistant", {"text": reply_text})
+            emit("chat.assistant", {"text": reply_text, "source": "ui", "output_target": OUTPUT_TARGET_LOCAL_UI})
+            self._record_assistant_reply_for_conversation(reply_text, source=source, synthesizer=getattr(self, "response_synthesizer", None))
 
         if reply_text and self._should_extract_memory(source=source, execution=execution):
             try:
@@ -842,6 +1005,7 @@ class HebeEngine:
             try:
                 if source != "ui":
                     self._deliver_voice_reply(reply_text)
+                    self._record_assistant_reply_for_conversation(reply_text, source=source, synthesizer=getattr(self, "response_synthesizer", None))
             except Exception as e:
                 print(f"[HEBE][COG] speak failed: {e!r}", flush=True)
 
@@ -868,6 +1032,56 @@ class HebeEngine:
             input_text=None,
             internal_event=event,
         )
+        event_type = str(getattr(event, "event_type", "") or "")
+        payload = getattr(event, "payload", {}) or {}
+        if event_type == "twitch_chat_react":
+            raw_text = str((payload or {}).get("message_text") or "")
+            event_source = "twitch_chat"
+            addressed = True
+        elif event_type == "twitch_idle_prompt":
+            raw_text = ""
+            event_source = "scheduler/spontaneity"
+            addressed = False
+        elif event_type.startswith("twitch_"):
+            raw_text = ""
+            event_source = "twitch_event"
+            addressed = False
+        else:
+            raw_text = ""
+            event_source = "system/tool_result"
+            addressed = False
+        input_event = InputEvent(
+            source=event_source,
+            raw_text=raw_text,
+            normalized_text=self._normalize_text(raw_text),
+            is_stream_context=event_type.startswith("twitch_"),
+        )
+        classification = self._get_input_classifier().classify(
+            input_event,
+            addressed_to_hebe=addressed,
+            valid=True,
+        )
+        self._log_input_classification(classification)
+        conversation_state = self._get_conversation_state_resolver().from_pending_turn(
+            None,
+            matched=False,
+            reason="stream_event_no_private_pending",
+        )
+        self._log_conversation_state(conversation_state)
+        response_decision = self._get_response_decision_resolver().decide(
+            classification=classification,
+            conversation_state=conversation_state,
+            relevance=ContextRelevance(useful=False, category="none", reason="event"),
+            output_targets=self._output_targets_for_input_type(classification.input_type, event_type=event_type),
+        )
+        self._log_knowledge_resolution()
+        self._log_response_decision(response_decision)
+        context.response_frame = self._build_response_frame(
+            event=input_event,
+            classification=classification,
+            conversation_state=conversation_state,
+            response_decision=response_decision,
+        ).as_dict()
 
         deliberation = self.deliberation_service.deliberate(context)
         execution = self.plan_executor.execute(deliberation.plan)
@@ -921,7 +1135,7 @@ class HebeEngine:
             stream.recent_idle_messages = []
             self._auto_enable_stream_if_live(stream, source="stream_online_event")
             self._ensure_stream_memory_session_if_live(stream)
-            stream_memory.record_stream_event("stream_online", payload, stream=stream)
+            self._record_stream_event_safe("stream_online", payload, stream=stream)
             self.poll_stream_context(force=True, require_enabled=False)
             print("[HEBE][STREAM_CONTEXT] stream_online event handled", flush=True)
             return
@@ -935,8 +1149,8 @@ class HebeEngine:
             stream.idle_prompts_sent_stream = 0
             if isinstance(getattr(stream, "cooldowns", None), dict):
                 stream.cooldowns.pop(getattr(self.stream_spontaneity.config, "cooldown_key", "stream_idle_prompt_next_ts"), None)
-            stream_memory.record_stream_event("stream_offline", payload, stream=stream)
-            stream_memory.close_active_stream_session(stream, reason="stream_offline_event")
+            self._record_stream_event_safe("stream_offline", payload, stream=stream)
+            self._close_stream_memory_session_safe(stream, reason="stream_offline_event")
             print("[HEBE][STREAM_CONTEXT] stream_offline event handled", flush=True)
 
     def _auto_enable_stream_if_live(self, stream, *, source: str) -> bool:
@@ -979,8 +1193,8 @@ class HebeEngine:
                 "viewer_count": viewers,
                 "ts": time.time(),
             }
-            stream_memory.record_stream_event("twitch_raid", payload, stream=stream)
-            stream_memory.observe_presence(
+            self._record_stream_event_safe("twitch_raid", payload, stream=stream)
+            self._observe_stream_presence_safe(
                 payload.get("user_login") or username,
                 username,
                 stream_session_id=getattr(stream, "active_stream_session_id", None),
@@ -1080,6 +1294,8 @@ class HebeEngine:
         ok = bool(service.sync(stream))
         if ok:
             is_live = bool(getattr(stream, "is_live", False))
+            if not is_live:
+                self._restore_user_today_game_override(stream)
             if is_live and (not was_known or not was_live):
                 stream.last_stream_live_transition = "online"
                 stream.last_stream_live_transition_ts = now
@@ -1090,10 +1306,35 @@ class HebeEngine:
                 self._auto_enable_stream_if_live(stream, source="context_sync")
                 self._ensure_stream_memory_session_if_live(stream)
             elif was_live:
-                stream_memory.close_active_stream_session(stream, reason="context_sync_offline")
+                self._close_stream_memory_session_safe(stream, reason="context_sync_offline")
             self._maybe_research_game_after_context_sync(stream)
         print(f"[HEBE][STREAM_CONTEXT] refresh result success={ok}", flush=True)
         return ok
+
+    def _mark_today_game_override(self, stream, game: str) -> None:
+        stream.user_today_game_override = str(game or "").strip()
+        stream.user_today_game_override_ts = time.time()
+        stream.stream_context_override_reason = "user_today_game_override"
+        stream.stream_context_overridden = True
+        print(
+            "[HEBE][STREAM_CONTEXT] stale_or_overridden=true reason=user_today_game_override "
+            f"game={stream.user_today_game_override!r}",
+            flush=True,
+        )
+
+    def _restore_user_today_game_override(self, stream) -> None:
+        game = str(getattr(stream, "user_today_game_override", "") or "").strip()
+        if not game:
+            return
+        changed = (getattr(stream, "current_game", None) != game) or (getattr(stream, "current_category", None) != game)
+        stream.current_game = game
+        stream.current_category = game
+        if changed:
+            print(
+                "[HEBE][STREAM_CONTEXT] stale_or_overridden=true reason=user_today_game_override "
+                f"restored_game={game!r}",
+                flush=True,
+            )
 
     def _maybe_research_game_after_context_sync(self, stream) -> None:
         service = getattr(self, "game_research", None)
@@ -1356,6 +1597,8 @@ class HebeEngine:
             return None
 
         value = str(text or "")
+        if "à¤" in value or "à¥" in value:
+            return "devanagari"
         checks = [
             ("japanese", r"[\u3040-\u30ff]"),
             ("chinese", r"[\u3400-\u9fff]"),
@@ -1382,34 +1625,384 @@ class HebeEngine:
         reason: str,
         retry_attempted: bool = False,
         retry_transcript: str = "",
+        details: dict | None = None,
     ) -> None:
         safe_raw = "" if reason == "stt_prompt_injection" else str(raw_text or "")
-        log_suffix = "" if reason == "stt_prompt_injection" else f" raw={ascii(safe_raw)}"
-        print(f"[HEBE][STT][REJECTED] reason={reason} script={script}{log_suffix}", flush=True)
+        log_raw = bool(getattr(self, "stt_log_rejected_raw", False))
+        log_suffix = f" raw={ascii(safe_raw)}" if log_raw and safe_raw else ""
+        detail_text = ""
+        if details:
+            detail_text = " " + " ".join(f"{key}={value}" for key, value in details.items())
+        print(f"[HEBE][STT][REJECTED] reason={reason} script={script}{log_suffix}{detail_text}", flush=True)
+        if reason == "stt_prompt_echo_or_hotword_list":
+            self._record_stt_prompt_echo_rejection()
         stream = self._get_stream_state()
         if stream is not None:
             stream.last_voice_raw_transcript = safe_raw
             stream.last_voice_normalized_command = ""
             stream.last_voice_command_status = "rejected"
-        emit(
-            "voice.command",
-            {
-                "raw_text": safe_raw,
-                "normalized_text": "",
-                "status": "rejected",
-                "reason": reason,
-                "script": script,
-                "detected_script": script,
-                "retry_attempted": bool(retry_attempted),
-                "retry_transcript": str(retry_transcript or ""),
-                "final_decision": "rejected",
-                "message": (
-                    "Raw STT rejected: unsupported language/script."
-                    if reason.startswith("unsupported_script")
-                    else "Raw STT rejected before cognition."
-                ),
-            },
+        event = {
+            "raw_text": safe_raw,
+            "normalized_text": "",
+            "status": "rejected",
+            "reason": reason,
+            "script": script,
+            "detected_script": script,
+            "retry_attempted": bool(retry_attempted),
+            "retry_transcript": str(retry_transcript or ""),
+            "final_decision": "rejected",
+            "message": (
+                "Raw STT rejected: unsupported language/script."
+                if reason.startswith("unsupported_script")
+                else "Raw STT rejected before cognition."
+            ),
+        }
+        if details:
+            event.update(details)
+        emit("voice.command", event)
+        emit("status", {"last_rejected_stt": event})
+
+    def _record_stt_prompt_echo_rejection(self) -> None:
+        if not bool(getattr(self, "stt_auto_disable_prompt_on_echo", True)):
+            return
+        now = time.time()
+        window = max(1.0, float(getattr(self, "stt_prompt_echo_window_seconds", 300) or 300))
+        recent = [
+            ts for ts in list(getattr(self, "_stt_prompt_echo_rejection_ts", []) or [])
+            if now - float(ts or 0.0) <= window
+        ]
+        recent.append(now)
+        self._stt_prompt_echo_rejection_ts = recent
+        threshold = max(1, int(getattr(self, "stt_prompt_echo_disable_threshold", 2) or 2))
+        if len(recent) < threshold:
+            return
+        stt = getattr(getattr(self, "runtime", None), "stt", None)
+        disabled = False
+        service_logs_disable = bool(stt is not None and hasattr(stt, "cfg"))
+        disable = getattr(stt, "disable_command_prompt_for_session", None)
+        if callable(disable):
+            disabled = bool(disable())
+        elif stt is not None and hasattr(stt, "cfg"):
+            cfg = getattr(stt, "cfg")
+            if getattr(cfg, "command_prompt_enabled", True):
+                cfg.command_prompt_enabled = False
+                disabled = True
+        if disabled and not service_logs_disable:
+            print("[HEBE][STT][PROMPT] auto_disabled reason=repeated_prompt_echo", flush=True)
+
+    def _stt_prompt_echo_metrics(self, text: str) -> dict:
+        normalized = self._normalize_stt_metric_text(text)
+        tokens = re.findall(r"[a-z0-9]+", normalized)
+        hotwords = {
+            "hebe", "ebe", "eve", "heve", "jebe", "leo", "obs", "twitch", "stream",
+            "chat", "promo", "shoutout", "so", "zwei", "persona", "final", "fantasy",
+        }
+        known_target_tokens = set()
+        try:
+            for target in self._known_voice_command_targets():
+                target_norm = re.sub(r"[^a-z0-9]+", " ", str(target or "").lower())
+                known_target_tokens.update(re.findall(r"[a-z0-9]+", target_norm))
+        except Exception:
+            known_target_tokens = set()
+        list_tokens = hotwords | known_target_tokens
+        action_tokens = {
+            "abre", "abrir", "inicia", "pon", "haz", "dale", "manda", "activa",
+            "desactiva", "apaga", "enciende", "guarda", "dime", "cuentame",
+            "explica", "como", "cual", "que", "donde", "cuando", "por", "quiero",
+            "puedes", "ayuda", "necesito", "despierta", "duerme",
+        }
+        hotword_hits = [token for token in tokens if token in list_tokens]
+        content_hits = [token for token in tokens if token not in list_tokens]
+        comma_parts = [
+            self._normalize_stt_metric_text(part)
+            for part in re.split(r"[,;\n]+", str(text or ""))
+            if self._normalize_stt_metric_text(part)
+        ]
+        comma_hotword_parts = [
+            part for part in comma_parts
+            if all(token in list_tokens for token in re.findall(r"[a-z0-9]+", part))
+        ]
+        hotword_ratio = len(hotword_hits) / max(1, len(tokens))
+        comma_hotword_ratio = len(comma_hotword_parts) / max(1, len(comma_parts))
+        has_action_or_question = bool(set(tokens) & action_tokens) or "?" in str(text or "")
+        repeated_vocab = len(tokens) >= 3 and len(set(tokens)) <= max(2, len(tokens) - 2)
+        looks_like_list = len(comma_parts) >= 3 and comma_hotword_ratio >= 0.75
+        rejected = (
+            bool(tokens)
+            and len(hotword_hits) >= 3
+            and not has_action_or_question
+            and (
+                looks_like_list
+                or hotword_ratio >= 0.75
+                or (repeated_vocab and hotword_ratio >= 0.6)
+                or (len(content_hits) <= 1 and len(hotword_hits) >= 4)
+            )
         )
+        return {
+            "rejected": rejected,
+            "overlap": round(hotword_ratio, 3),
+            "hotword_ratio": round(hotword_ratio, 3),
+            "hotword_count": len(hotword_hits),
+            "token_count": len(tokens),
+            "comma_hotword_ratio": round(comma_hotword_ratio, 3),
+        }
+
+    def _normalize_stt_metric_text(self, text: str) -> str:
+        value = str(text or "").lower()
+        value = (
+            value.replace("Ã¡", "a").replace("Ã©", "e").replace("Ã­", "i")
+            .replace("Ã³", "o").replace("Ãº", "u").replace("Ã±", "n")
+        )
+        value = re.sub(r"[^a-z0-9]+", " ", value)
+        return " ".join(value.split())
+
+    def _reject_stt_prompt_echo_if_needed(self, raw_text: str, *, retry_attempted: bool = False, retry_transcript: str = "") -> bool:
+        metrics = self._stt_prompt_echo_metrics(raw_text)
+        if not metrics.get("rejected"):
+            return False
+        self._emit_stt_rejection(
+            raw_text,
+            script=self._unsupported_stt_script(raw_text) or "latin",
+            reason="stt_prompt_echo_or_hotword_list",
+            retry_attempted=retry_attempted,
+            retry_transcript=retry_transcript,
+            details={key: value for key, value in metrics.items() if key != "rejected"},
+        )
+        return True
+
+    def _normalize_for_echo_match(self, text: str) -> str:
+        cleaned = "".join(ch if ch.isalnum() or ch.isspace() else " " for ch in (text or "").strip().lower())
+        return " ".join(cleaned.split())
+
+    def _remember_tts_text(self, text: str) -> None:
+        value = str(text or "").strip()
+        if not value:
+            return
+        recent = list(getattr(self, "_recent_tts_texts", []) or [])
+        now = time.time()
+        window = float(getattr(self, "stt_tts_echo_window_seconds", 10) or 10)
+        recent = [item for item in recent if now - float(item.get("ts", 0.0) or 0.0) <= window]
+        recent.append({"text": value, "normalized": self._normalize_for_echo_match(value), "ts": now})
+        self._recent_tts_texts = recent[-8:]
+
+    def _stt_self_tts_echo_metrics(self, text: str) -> dict:
+        now = time.time()
+        window = float(getattr(self, "stt_tts_echo_window_seconds", 10) or 10)
+        threshold = float(getattr(self, "stt_tts_echo_similarity_threshold", 0.82) or 0.82)
+        normalized = self._normalize_for_echo_match(text)
+        best = 0.0
+        for item in list(getattr(self, "_recent_tts_texts", []) or []):
+            if now - float(item.get("ts", 0.0) or 0.0) > window:
+                continue
+            candidate = str(item.get("normalized") or self._normalize_for_echo_match(item.get("text") or ""))
+            if not normalized or not candidate:
+                continue
+            best = max(best, SequenceMatcher(None, normalized, candidate).ratio())
+        tts = getattr(getattr(self, "runtime", None), "tts", None)
+        speaking = bool(getattr(tts, "is_speaking", False))
+        ignore_while_speaking = bool(getattr(self, "stt_ignore_while_tts_speaking", True))
+        return {
+            "rejected": (best >= threshold) or (ignore_while_speaking and speaking),
+            "similarity": round(best, 3),
+            "threshold": threshold,
+            "tts_speaking": speaking,
+        }
+
+    def _reject_self_tts_echo_if_needed(self, raw_text: str) -> bool:
+        metrics = self._stt_self_tts_echo_metrics(raw_text)
+        if not metrics.get("rejected"):
+            return False
+        self._emit_stt_rejection(
+            raw_text,
+            script=self._unsupported_stt_script(raw_text) or "latin",
+            reason="self_tts_echo",
+            details={key: value for key, value in metrics.items() if key != "rejected"},
+        )
+        return True
+
+    def _stt_has_meaningful_conversation_content(self, raw_text: str, normalized_text: str) -> bool:
+        raw = str(raw_text or "")
+        normalized = self._normalize_text(normalized_text)
+        tokens = normalized.split()
+        if not tokens or normalized in {".", "eh", "mmm", "um", "hebe", "ebe", "eve", "jebe", "heve"}:
+            return False
+        if self._stt_prompt_echo_metrics(raw_text).get("rejected"):
+            return False
+        without_names = [token for token in tokens if token not in {"hebe", "ebe", "eve", "jebe", "heve"}]
+        if not without_names:
+            return False
+        meaningful_markers = {
+            "como", "estas", "estás", "que", "qué", "cual", "cuál", "donde", "dónde",
+            "cuando", "cuándo", "puedes", "quiero", "necesito", "ayuda", "dime",
+            "cuenta", "explica", "abre", "haz", "pon", "activa", "desactiva",
+            "despierta", "duerme",
+        }
+        return "?" in raw or bool(set(tokens) & meaningful_markers) or len(without_names) >= 3
+
+    def _publish_accepted_stt_user_input(self, text: str) -> None:
+        value = str(text or "").strip()
+        if not value:
+            return
+        seen = getattr(self, "_stt_visible_transcripts", None)
+        if seen is None:
+            seen = set()
+            self._stt_visible_transcripts = seen
+        if value in seen:
+            return
+        seen.add(value)
+        if len(seen) > 20:
+            self._stt_visible_transcripts = set(list(seen)[-10:])
+        try:
+            log_chat("user", value, source="stt_voice")
+        except Exception as exc:
+            print(f"[HEBE][CHAT_LOG] stt user log failed: {exc!r}", flush=True)
+        emit("chat.user", {"text": value, "source": "stt_voice"})
+
+    def _assistant_reply_opens_conversation_turn(self, text: str) -> tuple[bool, str]:
+        value = str(text or "").strip()
+        if not value or "?" not in value and "¿" not in value:
+            return False, ""
+        normalized = self._normalize_for_echo_match(value)
+        casual_markers = {
+            "tu que tal", "tú qué tal", "como estas", "como estás", "que tal",
+            "todo bien", "como vas", "como lo llevas",
+        }
+        clarification_markers = {
+            "a quien", "a quién", "te refieres", "local o stream", "lo hago",
+            "quieres que", "confirmas", "cual", "cuál",
+        }
+        if any(marker in normalized for marker in clarification_markers):
+            return True, "clarification"
+        if any(marker in normalized for marker in casual_markers):
+            return True, "casual_answer"
+        if re.search(r"\b(?:quieres|puedes|dime|confirmas|hago|refieres)\b", normalized):
+            return True, "clarification"
+        return True, "casual_answer"
+
+    def _record_assistant_reply_for_conversation(self, text: str, *, source: str = "assistant", synthesizer=None) -> None:
+        local_sources = {"ui", "voice", "stt_voice"}
+        if source not in local_sources:
+            print("[HEBE][CONVERSATION] pending_turn_not_created reason=stream_event_or_spontaneous", flush=True)
+            return
+        opens = bool(getattr(synthesizer, "last_opens_conversation_turn", False)) if synthesizer is not None else False
+        expected_type = str(getattr(synthesizer, "last_expected_reply_type", "") or "") if synthesizer is not None else ""
+        if not opens:
+            print("[HEBE][CONVERSATION] pending_turn_not_created reason=no_synthesizer_marker", flush=True)
+            return
+        if not expected_type:
+            _, expected_type = self._assistant_reply_opens_conversation_turn(text)
+        if not opens:
+            return
+        now = time.time()
+        legacy_ttl = float(getattr(self, "pending_conversation_ttl_seconds", 45) or 45)
+        has_legacy_override = abs(legacy_ttl - 45.0) > 0.001
+        ttl_by_type = {
+            "casual_answer": float(os.getenv("HEBE_PENDING_CASUAL_TTL_SECONDS", str(legacy_ttl if has_legacy_override else 40)) or 40),
+            "clarification": float(os.getenv("HEBE_PENDING_CLARIFICATION_TTL_SECONDS", str(legacy_ttl if has_legacy_override else 55)) or 55),
+            "action_confirmation": float(os.getenv("HEBE_PENDING_ACTION_CONFIRMATION_TTL_SECONDS", str(legacy_ttl if has_legacy_override else 60)) or 60),
+        }
+        ttl = ttl_by_type.get(expected_type, legacy_ttl)
+        turn = {
+            "expected_type": expected_type,
+            "previous_assistant_message_id": f"assistant-{int(now * 1000)}",
+            "previous_assistant_message": str(text or "").strip(),
+            "created_at": now,
+            "expires_at": now + ttl,
+            "source": "assistant_question",
+            "allowed_sources": ["stt_voice", "ui"],
+            "allow_without_wakeword": True,
+            "status": "pending",
+            "followups_used": 0,
+            "max_followups": int(getattr(self, "pending_conversation_max_followups", 1) or 1),
+            "reply_source": source,
+        }
+        setattr(self.runtime.state, "pending_conversation_turn", turn)
+        print(
+            "[HEBE][CONVERSATION] pending_turn_created reason=direct_question source=local "
+            f"expected_type={expected_type} ttl={int(ttl)}s",
+            flush=True,
+        )
+
+    def _get_pending_conversation_turn(self) -> dict | None:
+        turn = getattr(self.runtime.state, "pending_conversation_turn", None)
+        if not isinstance(turn, dict) or turn.get("status") != "pending":
+            return None
+        now = time.time()
+        if now > float(turn.get("expires_at", 0.0) or 0.0):
+            turn["status"] = "expired"
+            setattr(self.runtime.state, "pending_conversation_turn", turn)
+            print("[HEBE][CONVERSATION] pending_turn expired", flush=True)
+            return None
+        return turn
+
+    def _pending_conversation_matches(self, *, source: str, text: str | None = None, event_type: str | None = None) -> bool:
+        turn = self._get_pending_conversation_turn()
+        if not turn:
+            return False
+        allowed = set(turn.get("allowed_sources") or ["stt_voice", "ui"])
+        if source not in allowed:
+            return False
+        if source == "stt_voice":
+            normalized = self._normalize_stt_metric_text(text or "")
+            if not normalized or normalized in {"mmm", "um", "eh", "vale", "ok"}:
+                return False
+            ambient_types = {
+                "victory", "objective_update", "location_update",
+                "gameplay_failure", "boss_attempt", "grinding", "exploration",
+                "menu/equipment", "frustration", "laughter/joke",
+            }
+            expected = str(turn.get("expected_type") or "")
+            if expected != "casual_answer" and event_type in ambient_types:
+                return False
+            if self._looks_like_stream_ambient_comment(normalized):
+                return False
+        print(f"[HEBE][CONVERSATION] pending_turn matched source={source}", flush=True)
+        return True
+
+    def _looks_like_stream_ambient_comment(self, normalized: str) -> bool:
+        text = str(normalized or "")
+        if not text:
+            return True
+        if re.search(r"\b(?:jaja+|lol|xd)\b", text):
+            return True
+        ambient_markers = (
+            "me han pillado", "no es nada personal", "esta contestando a cosas",
+            "está contestando a cosas", "no no no", "donde estan", "donde están",
+            "que hago en", "qué hago en", "esto sigue peor", "no es nada",
+        )
+        return any(marker in text for marker in ambient_markers)
+
+    def _consume_pending_conversation_turn(self) -> None:
+        turn = self._get_pending_conversation_turn()
+        if not turn:
+            return
+        used = int(turn.get("followups_used", 0) or 0) + 1
+        turn["followups_used"] = used
+        if used >= int(turn.get("max_followups", 1) or 1):
+            turn["status"] = "consumed"
+        setattr(self.runtime.state, "pending_conversation_turn", turn)
+
+    def _is_duplicate_recent_stt(self, raw_text: str) -> tuple[bool, float]:
+        normalized = self._normalize_for_echo_match(raw_text)
+        if not normalized:
+            return False, 0.0
+        now = time.time()
+        window = float(getattr(self, "stt_duplicate_window_seconds", 8) or 8)
+        threshold = float(getattr(self, "stt_duplicate_similarity_threshold", 0.92) or 0.92)
+        recent = [
+            item for item in list(getattr(self, "_recent_stt_transcripts", []) or [])
+            if now - float(item.get("ts", 0.0) or 0.0) <= window
+        ]
+        self._recent_stt_transcripts = recent
+        best = 0.0
+        for item in recent:
+            candidate = str(item.get("normalized") or "")
+            best = max(best, SequenceMatcher(None, normalized, candidate).ratio())
+        if best >= threshold:
+            return True, best
+        recent.append({"raw_text": str(raw_text or ""), "normalized": normalized, "ts": now})
+        self._recent_stt_transcripts = recent[-10:]
+        return False, best
 
     def _reject_unsupported_stt_if_needed(self, raw_text: str) -> bool:
         script = self._unsupported_stt_script(raw_text)
@@ -1459,13 +2052,6 @@ class HebeEngine:
 
     def _process_stt_voice_transcript(self, raw_voice_command: str, *, allow_wakeword_prompt: bool = False) -> str:
         original_raw_text = str(raw_voice_command)
-        if is_stt_prompt_injection(original_raw_text):
-            self._emit_stt_rejection(
-                original_raw_text,
-                script="latin",
-                reason="stt_prompt_injection",
-            )
-            return "continue"
         transcript_for_cognition = original_raw_text
         retry_debug: dict = {
             "detected_script": self._unsupported_stt_script(original_raw_text) or "latin",
@@ -1475,7 +2061,28 @@ class HebeEngine:
             "final_decision": "accepted",
         }
         script = self._unsupported_stt_script(original_raw_text)
-        if script:
+        if not script:
+            if self._reject_self_tts_echo_if_needed(original_raw_text):
+                return "continue"
+            if self._reject_stt_prompt_echo_if_needed(original_raw_text):
+                return "continue"
+            if is_stt_prompt_injection(original_raw_text):
+                self._emit_stt_rejection(
+                    original_raw_text,
+                    script="latin",
+                    reason="stt_prompt_injection",
+                )
+                return "continue"
+            duplicate, similarity = self._is_duplicate_recent_stt(original_raw_text)
+            if duplicate:
+                self._emit_stt_rejection(
+                    original_raw_text,
+                    script="latin",
+                    reason="duplicate_recent_transcript",
+                    details={"similarity": round(similarity, 3)},
+                )
+                return "continue"
+        else:
             retry = self._retry_unsupported_stt_transcript(original_raw_text, script=script)
             retry_attempted = bool(retry.get("attempted"))
             retry_text = str(retry.get("text") or "").strip()
@@ -1491,7 +2098,7 @@ class HebeEngine:
                 self._emit_stt_rejection(
                     original_raw_text,
                     script=script,
-                    reason="stt_prompt_injection",
+                    reason="stt_prompt_echo_or_hotword_list",
                     retry_attempted=retry_attempted,
                     retry_transcript="",
                 )
@@ -1499,6 +2106,25 @@ class HebeEngine:
             if bool(retry.get("accepted")):
                 transcript_for_cognition = retry_text
                 retry_debug["final_decision"] = "accepted"
+                if self._reject_self_tts_echo_if_needed(transcript_for_cognition):
+                    return "continue"
+                if self._reject_stt_prompt_echo_if_needed(
+                    transcript_for_cognition,
+                    retry_attempted=retry_attempted,
+                    retry_transcript=retry_text,
+                ):
+                    return "continue"
+                duplicate, similarity = self._is_duplicate_recent_stt(transcript_for_cognition)
+                if duplicate:
+                    self._emit_stt_rejection(
+                        original_raw_text,
+                        script=script,
+                        reason="duplicate_recent_transcript",
+                        retry_attempted=retry_attempted,
+                        retry_transcript=retry_text,
+                        details={"similarity": round(similarity, 3)},
+                    )
+                    return "continue"
             else:
                 reason = "unsupported_script_after_retry" if retry_attempted else "unsupported_script"
                 self._emit_stt_rejection(
@@ -1523,27 +2149,129 @@ class HebeEngine:
         voice_type, mood_hint = self._classify_voice_event(command)
         has_action_intent = self._input_event_has_action_intent(getattr(self, "_current_input_event", None))
         is_direct_command = voice_type == "direct_command_to_hebe"
+        relevance = ContextRelevance(useful=False, category="none", confidence=0.0, reason="not_evaluated")
+        pending_followup = (
+            not has_action_intent
+            and not is_direct_command
+            and self._stt_has_meaningful_conversation_content(transcript_for_cognition, command)
+            and self._pending_conversation_matches(source="stt_voice", text=command, event_type=voice_type)
+        )
+        pending_turn_for_frame = self._get_pending_conversation_turn()
+        conversation_state = self._get_conversation_state_resolver().from_pending_turn(
+            pending_turn_for_frame,
+            matched=bool(pending_followup),
+            reason="active_conversation_state" if pending_followup else "no_matching_active_conversation",
+        )
+        self._log_conversation_state(conversation_state)
+        classification = self._get_input_classifier().classify(
+            self._current_input_event,
+            voice_event_type=voice_type,
+            addressed_to_hebe=is_direct_command,
+            has_action_intent=has_action_intent,
+            pending_followup=pending_followup,
+            valid=True,
+        )
+        self._log_input_classification(classification)
+        if is_direct_command and not has_action_intent and not self._stt_has_meaningful_conversation_content(
+            transcript_for_cognition,
+            command,
+        ):
+            self._emit_stt_rejection(
+                original_raw_text,
+                script="latin",
+                reason="no_user_intent",
+                details={"voice_type": voice_type},
+            )
+            self._current_input_event = None
+            return "continue"
         stream_enabled = self._is_stream_enabled()
-        if stream_enabled:
-            ambient_enabled = bool(getattr(self, "stream_ambient_stt_enabled", False))
-            if is_direct_command or ambient_enabled:
-                self._record_voice_event(command, voice_type, mood_hint)
+        if pending_followup:
+            self._current_input_event.stt_metadata["message_type"] = "conversation_followup"
+            self._current_input_event.stt_metadata["conversation_followup"] = True
+            self._current_input_event.stt_metadata["jarvis_allowed"] = True
+            self._consume_pending_conversation_turn()
+            print("[HEBE][COG] decision=conversation_followup", flush=True)
+        elif stream_enabled:
+            if is_direct_command or not pending_followup:
+                relevance = self._record_voice_event(command, voice_type, mood_hint)
             if not is_direct_command and not self._stream_is_armed() and not has_action_intent:
-                self._log_stt_non_command_decision(command, "ambient_context_only", reason=voice_type)
+                print("[HEBE][STT_GATE] ambient_only reason=no_wake_no_valid_pending", flush=True)
+                output_targets = self._output_targets_for_input_type(classification.input_type)
+                response_decision = self._get_response_decision_resolver().decide(
+                    classification=classification,
+                    conversation_state=conversation_state,
+                    relevance=relevance,
+                    output_targets=output_targets,
+                )
+                self._log_knowledge_resolution()
+                self._log_response_decision(response_decision)
+                self._build_response_frame(
+                    event=self._current_input_event,
+                    classification=classification,
+                    conversation_state=conversation_state,
+                    response_decision=response_decision,
+                )
+                self._declare_output_route(
+                    input_type="ambient_stt",
+                    targets=response_decision.output_target,
+                    reason=response_decision.reason,
+                )
+                decision_name = "ambient_context_updated" if relevance.useful else "ambient_ignored_low_value"
+                self._log_stt_non_command_decision(command, decision_name, reason=voice_type)
                 self._current_input_event = None
                 return "continue"
         elif not is_direct_command and not has_action_intent:
-            self._log_stt_non_command_decision(command, "rejected", reason="not_direct_command")
+            print("[HEBE][JARVIS][BLOCKED] reason=stt_not_direct", flush=True)
+            output_targets = self._output_targets_for_input_type(classification.input_type)
+            response_decision = self._get_response_decision_resolver().decide(
+                classification=classification,
+                conversation_state=conversation_state,
+                relevance=relevance,
+                output_targets=output_targets,
+            )
+            self._log_response_decision(response_decision)
+            self._declare_output_route(
+                input_type="ambient_stt",
+                targets=response_decision.output_target,
+                reason=response_decision.reason,
+            )
+            self._log_stt_non_command_decision(command, "ambient_ignored_low_value", reason="not_direct_command")
             self._current_input_event = None
             return "continue"
-        handled, stream_command = self._extract_stream_command(command)
-        if handled:
-            if not stream_command:
-                self._current_input_event = None
-                return "continue"
-            command = stream_command
+        if not pending_followup:
+            handled, stream_command = self._extract_stream_command(command)
+            if handled:
+                if not stream_command:
+                    self._current_input_event = None
+                    return "continue"
+                command = stream_command
+        if self._current_input_event is not None:
+            self._current_input_event.stt_metadata["jarvis_allowed"] = bool(is_direct_command or pending_followup or has_action_intent)
+        targets = [OUTPUT_TARGET_LOCAL_UI]
+        if self._local_tts_output_enabled():
+            targets.append(OUTPUT_TARGET_STREAM_TTS if self._is_stream_enabled() else OUTPUT_TARGET_LOCAL_TTS)
+        response_decision = self._get_response_decision_resolver().decide(
+            classification=classification,
+            conversation_state=conversation_state,
+            relevance=relevance,
+            output_targets=targets,
+        )
+        self._log_knowledge_resolution()
+        self._log_response_decision(response_decision)
+        self._build_response_frame(
+            event=self._current_input_event,
+            classification=classification,
+            conversation_state=conversation_state,
+            response_decision=response_decision,
+        )
+        self._declare_output_route(
+            input_type="direct_stt" if not pending_followup else "direct_stt_followup",
+            targets=response_decision.output_target,
+            reason=response_decision.reason,
+        )
+        self._publish_accepted_stt_user_input(transcript_for_cognition)
         res = self.handle_command(command, source="stt_voice")
-        print("[HEBE][COG] decision=command", flush=True)
+        print("[HEBE][COG] decision=conversation_followup" if pending_followup else "[HEBE][COG] decision=command", flush=True)
         self._current_input_event = None
         return res
 
@@ -1734,6 +2462,168 @@ class HebeEngine:
     def _get_stream_state(self):
         return getattr(self.runtime.state, "stream", None)
 
+    def _declare_output_route(
+        self,
+        *,
+        input_type: str,
+        targets: list[str] | tuple[str, ...] | set[str],
+        reason: str = "",
+        event_type: str | None = None,
+    ) -> None:
+        clean_targets = [str(target) for target in targets if str(target or "").strip()]
+        target_text = "+".join(clean_targets) if clean_targets else "none"
+        suffix = ""
+        if event_type:
+            suffix += f" event_type={event_type}"
+        if reason:
+            suffix += f" reason={reason}"
+        print(
+            f"[HEBE][ROUTING] input_type={input_type} output_target={target_text}{suffix}",
+            flush=True,
+        )
+
+    def _get_input_classifier(self) -> InputClassifier:
+        classifier = getattr(self, "input_classifier", None)
+        if classifier is None:
+            classifier = InputClassifier()
+            self.input_classifier = classifier
+        return classifier
+
+    def _get_conversation_state_resolver(self) -> ConversationStateResolver:
+        resolver = getattr(self, "conversation_state_resolver", None)
+        if resolver is None:
+            resolver = ConversationStateResolver()
+            self.conversation_state_resolver = resolver
+        return resolver
+
+    def _get_knowledge_policy_resolver(self) -> KnowledgePolicyResolver:
+        resolver = getattr(self, "knowledge_policy_resolver", None)
+        if resolver is None:
+            resolver = KnowledgePolicyResolver()
+            self.knowledge_policy_resolver = resolver
+        return resolver
+
+    def _get_response_decision_resolver(self) -> ResponseDecisionResolver:
+        resolver = getattr(self, "response_decision_resolver", None)
+        if resolver is None:
+            resolver = ResponseDecisionResolver()
+            self.response_decision_resolver = resolver
+        return resolver
+
+    def _output_targets_for_input_type(self, input_type: str, *, event_type: str | None = None) -> list[str]:
+        if input_type in {"ambient_stream_context", "twitch_chat_observed"}:
+            return [OUTPUT_TARGET_SILENT_CONTEXT_UPDATE]
+        if input_type in {"direct_to_hebe", "explicit_command", "explicit_question", "active_conversation_followup"}:
+            targets = [OUTPUT_TARGET_LOCAL_UI]
+            if self._local_tts_output_enabled():
+                targets.append(OUTPUT_TARGET_STREAM_TTS if self._is_stream_enabled() else OUTPUT_TARGET_LOCAL_TTS)
+            return targets
+        if input_type == "twitch_chat_mention":
+            targets = [OUTPUT_TARGET_TWITCH_CHAT]
+            if self._stream_tts_output_enabled_for_event(event_type or "twitch_chat_react"):
+                targets.append(OUTPUT_TARGET_STREAM_TTS)
+            return targets
+        if input_type == "system_event":
+            if event_type == "twitch_idle_prompt":
+                targets = [OUTPUT_TARGET_STREAM_TTS] if self._stream_tts_output_enabled_for_event(event_type) else [OUTPUT_TARGET_LOCAL_UI]
+                return targets
+            return [OUTPUT_TARGET_LOCAL_UI]
+        return ["none"]
+
+    def _build_response_frame(
+        self,
+        *,
+        event: InputEvent | None,
+        classification,
+        conversation_state,
+        response_decision,
+        action_plan: ActionPlan | None = None,
+    ) -> ResponseFrame:
+        stream = self._get_stream_state()
+        session_context = {}
+        if stream is not None:
+            session_context = {
+                "current_objective": getattr(stream, "current_run_objective", None),
+                "current_location": getattr(stream, "current_run_location", None),
+                "current_phase": getattr(stream, "current_run_phase", None),
+                "recent_facts_count": len(getattr(stream, "recent_run_context_facts", []) or []),
+            }
+        frame = ResponseFrame(
+            input_type=classification.input_type,
+            source=classification.source,
+            current_game=str(getattr(stream, "current_game", None) or getattr(stream, "current_category", None) or ""),
+            current_session_context={key: value for key, value in session_context.items() if value},
+            conversation_state=conversation_state,
+            intent=getattr(action_plan, "action_type", "") if action_plan is not None else "",
+            action_plan=action_plan.as_log_dict() if action_plan is not None and hasattr(action_plan, "as_log_dict") else None,
+            output_target=list(response_decision.output_target),
+            allow_question=bool(response_decision.allow_question),
+            max_questions=int(response_decision.max_questions),
+            max_sentences=int(response_decision.max_sentences),
+            should_reply=bool(response_decision.should_reply),
+            forbidden_patterns=[
+                "assistant_action_offer_without_action_plan",
+                "engagement_bait_question",
+                "customer_support_closing",
+            ],
+        )
+        if event is not None:
+            event.stt_metadata["input_type"] = classification.input_type
+            event.stt_metadata["response_frame"] = frame.as_dict()
+        return frame
+
+    def _log_input_classification(self, classification) -> None:
+        print(
+            "[HEBE][INPUT_CLASSIFY] "
+            f"source={classification.source} input_type={classification.input_type} "
+            f"confidence={classification.confidence:.2f} reason={classification.reason}",
+            flush=True,
+        )
+
+    def _log_conversation_state(self, state) -> None:
+        print(
+            "[HEBE][CONVERSATION_STATE] "
+            f"active={str(bool(state.active)).lower()} matched={str(bool(state.matched)).lower()} "
+            f"expected_reply_type={state.expected_reply_type!r} reason={state.reason}",
+            flush=True,
+        )
+
+    def _log_knowledge_resolution(self) -> None:
+        knowledge = self._get_knowledge_policy_resolver().resolve(
+            stream=self._get_stream_state(),
+            profile_store=getattr(self, "game_profiles", None),
+        )
+        print(
+            "[HEBE][KNOWLEDGE] "
+            f"game={knowledge.game!r} profile_found={str(knowledge.profile_found).lower()} "
+            f"lookup_used={str(knowledge.lookup_used).lower()} confidence={knowledge.confidence} "
+            f"provenance={knowledge.provenance}",
+            flush=True,
+        )
+
+    def _log_response_decision(self, decision) -> None:
+        print(
+            "[HEBE][RESPONSE_DECISION] "
+            f"should_reply={str(bool(decision.should_reply)).lower()} reason={decision.reason}",
+            flush=True,
+        )
+
+    def _stream_tts_output_enabled_for_event(self, event_type: str | None = None) -> bool:
+        if not bool(getattr(self.runtime.state, "tts_enabled", False)):
+            return False
+        stream = self._get_stream_state()
+        policies = getattr(stream, "policies", None) if stream else None
+        if event_type == "twitch_idle_prompt":
+            return bool(policies and getattr(policies, "allow_tts_idle_prompts", False))
+        if event_type == "twitch_raid":
+            return bool(policies and getattr(policies, "allow_tts_raid_thanks", True))
+        if event_type and event_type.startswith("twitch_") and event_type != "twitch_chat_react":
+            return bool(policies and getattr(policies, "allow_tts_event_replies", True))
+        return bool(policies and getattr(policies, "allow_tts_replies", False))
+
+    def _local_tts_output_enabled(self) -> bool:
+        return bool(getattr(self.runtime.state, "tts_enabled", False))
+
     def _is_stream_enabled(self) -> bool:
         stream = self._get_stream_state()
         return bool(stream and getattr(stream, "enabled", False))
@@ -1862,19 +2752,21 @@ class HebeEngine:
         suffix = f" reason={reason}" if reason else ""
         print(f"[HEBE][COG] decision={decision}{suffix}", flush=True)
 
-    def _record_voice_event(self, text: str, event_type: str, mood_hint: str | None) -> None:
+    def _record_voice_event(self, text: str, event_type: str, mood_hint: str | None) -> ContextRelevance:
         stream = self._get_stream_state()
         if not stream:
-            return
+            relevance = ContextRelevance(useful=False, category="none", confidence=0.0, reason="no_stream_state")
+            self._log_context_relevance(relevance)
+            return relevance
         stream.last_voice_event = event_type
         stream.last_voice_event_ts = time.time()
         stream.last_voice_summary = self._summarize_voice_event(text, event_type)
         if mood_hint:
             stream.leo_mood_hint = mood_hint
         self._apply_ambient_voice_to_run_context(stream, text, event_type)
-        self._extract_and_store_ambient_context(stream, text, event_type)
+        return self._extract_and_store_ambient_context(stream, text, event_type)
 
-    def _extract_and_store_ambient_context(self, stream, text: str, event_type: str) -> None:
+    def _extract_and_store_ambient_context(self, stream, text: str, event_type: str) -> ContextRelevance:
         extractor = getattr(self, "ambient_context_extractor", None)
         if extractor is None:
             extractor = AmbientContextExtractor()
@@ -1883,8 +2775,10 @@ class HebeEngine:
         if not extraction.useful:
             stream.last_ambient_context_ignored_reason = extraction.reason
             stream.last_ambient_context_ignored_ts = time.time()
+            relevance = ContextRelevance(useful=False, category="none", confidence=0.0, reason=extraction.reason)
+            self._log_context_relevance(relevance)
             print(f"[HEBE][AMBIENT_CONTEXT] ignored reason={extraction.reason}", flush=True)
-            return
+            return relevance
         facts = list(getattr(stream, "recent_run_context_facts", []) or [])
         now = time.time()
         facts = [
@@ -1898,6 +2792,20 @@ class HebeEngine:
         if extraction.mood:
             stream.leo_mood_hint = extraction.mood
         self._apply_extracted_facts_to_stream(stream, extraction.facts)
+        top_fact = max(extraction.facts, key=lambda fact: float(fact.get("confidence", 0.0) or 0.0), default={})
+        relevance = ContextRelevance(
+            useful=True,
+            category=str(top_fact.get("category") or top_fact.get("kind") or "ambient_note"),
+            confidence=float(top_fact.get("confidence", 0.0) or 0.0),
+            reason=extraction.reason,
+            facts=list(extraction.facts),
+        )
+        self._log_context_relevance(relevance)
+        print(
+            "[HEBE][SESSION_CONTEXT] "
+            f"updated=true category={relevance.category} source=leo_stt confidence={relevance.confidence:.2f}",
+            flush=True,
+        )
         for fact in extraction.facts:
             category = fact.get("category") or fact.get("kind") or "unknown"
             summary = fact.get("summary") or fact.get("text") or ""
@@ -1908,6 +2816,15 @@ class HebeEngine:
                 flush=True,
             )
             print(f"[HEBE][RUN_CONTEXT] updated source=stt_voice category={category}", flush=True)
+        return relevance
+
+    def _log_context_relevance(self, relevance: ContextRelevance) -> None:
+        print(
+            "[HEBE][CONTEXT_RELEVANCE] "
+            f"useful={str(bool(relevance.useful)).lower()} category={relevance.category} "
+            f"confidence={float(relevance.confidence):.2f} reason={relevance.reason}",
+            flush=True,
+        )
 
     def _apply_extracted_facts_to_stream(self, stream, facts: list[dict]) -> None:
         for fact in facts:
@@ -2024,9 +2941,21 @@ class HebeEngine:
         if preview_result is not None:
             return preview_result
 
+        invalidation_result = self._handle_game_fact_invalidation(raw_command, normalized, stream)
+        if invalidation_result is not None:
+            return invalidation_result
+
+        knowledge_result = self._handle_game_knowledge_query(raw_command, normalized, stream)
+        if knowledge_result is not None:
+            return knowledge_result
+
         action_result = self._plan_and_execute_stream_action(raw_command, normalized, stream)
         if action_result is not None:
             return action_result
+
+        primer_result = self._handle_stream_session_primer_command(raw_command, normalized, stream, command_result)
+        if primer_result is not None:
+            return primer_result
 
         run_reply = self._handle_run_context_command(raw_command, normalized, stream)
         if run_reply is not None:
@@ -2121,7 +3050,7 @@ class HebeEngine:
             return f"En el ultimo stream, {target}: {summary.get('summary_text') or 'sin resumen suficiente'}"
 
         chatter_match = re.match(r"^(?:que sabes de|qué sabes de)\s+(.+)$", normalized)
-        if chatter_match and "este juego" not in normalized:
+        if chatter_match and "este juego" not in normalized and not self._looks_like_game_knowledge_target(chatter_match.group(1)):
             return stream_memory.format_chatter_profile_reply(chatter_match.group(1).strip())
 
         chatter_match = re.match(r"^(?:cuando fue la ultima vez que hablo|cuándo fue la última vez que habló)\s+(.+)$", normalized)
@@ -2346,6 +3275,130 @@ class HebeEngine:
 
         return None
 
+    def _handle_game_knowledge_query(self, raw_command: str, normalized: str, stream) -> CommandResult | None:
+        match = re.match(
+            r"^(?:que sabes de|quÃ© sabes de|que sabes sobre|quÃ© sabes sobre|dime que sabes de|dime quÃ© sabes de)\s+(.+)$",
+            normalized,
+        )
+        if not match:
+            return None
+        target = match.group(1).strip()
+        if target and not self._looks_like_game_knowledge_target(target):
+            return None
+        raw_target = re.sub(
+            r"^\s*(?:que sabes de|quÃ© sabes de|que sabes sobre|quÃ© sabes sobre|dime que sabes de|dime quÃ© sabes de)\s+",
+            "",
+            str(raw_command or ""),
+            flags=re.IGNORECASE,
+        ).strip()
+        resolver = getattr(self, "game_knowledge", None)
+        if resolver is None:
+            resolver = GameKnowledgeResolver(
+                profile_store=getattr(self, "game_profiles", None),
+                research_service=getattr(self, "game_research", None),
+                config=GameKnowledgeConfig.from_env(),
+            )
+            self.game_knowledge = resolver
+        result = resolver.resolve(game=raw_target or target, stream=stream)
+        print(
+            "[HEBE][GAME_KNOWLEDGE] "
+            f"game={result.game_title!r} mode={result.response_mode} "
+            f"profile_source={result.profile_source} web_reason={result.web_lookup_reason}",
+            flush=True,
+        )
+        event = getattr(self, "_current_input_event", None)
+        if event is not None:
+            metadata = getattr(event, "stt_metadata", None)
+            if isinstance(metadata, dict):
+                metadata["block_memory_extraction"] = True
+                metadata["block_memory_extraction_reason"] = "game_knowledge_query"
+        return CommandResult(
+            action_type="game_knowledge_query",
+            success=True,
+            user_visible_summary=result.fallback_text,
+            state_changes=result.to_state_changes(),
+            constraints=[
+                "Answer in Spanish.",
+                "Separate personal stream memory from public spoiler-safe game knowledge.",
+                "Do not invent session progress, locations, characters, bosses, or future story facts.",
+                "Mention when personal run memory is missing.",
+                "Do not ask for clarification.",
+            ],
+            suggested_tone="concise Hebe game-knowledge answer",
+            fallback_text=result.fallback_text,
+            requires_model_response=True,
+            metadata={
+                "message_goal": (
+                    f"Answer what Hebe knows about {result.game_title}. "
+                    f"Use response_mode={result.response_mode}; include spoiler-safe public profile if present, "
+                    "and clearly say when personal stream memory is missing."
+                ),
+                "game_knowledge": result.to_state_changes(),
+            },
+        )
+
+    def _handle_game_fact_invalidation(self, raw_command: str, normalized: str, stream) -> CommandResult | None:
+        match = re.match(
+            r"^no\s+(?:hay|existe)\s+(?:ningun|ningÃºn|ninguna|un|una)?\s*([a-z0-9][a-z0-9'\- ]{1,40}?)\s+en\s+(.+)$",
+            normalized,
+        )
+        if not match:
+            return None
+        term = self._title_case_game(match.group(1).strip())
+        game = self._title_case_game(self._strip_stream_primer_filler(match.group(2).strip()))
+        if game in {"Este Juego", "El Juego"} and stream is not None:
+            game = getattr(stream, "current_game", None) or getattr(stream, "current_category", None) or game
+        changed = session_primer.invalidate_game_session_term(game, term, source="user_correction")
+        event = getattr(self, "_current_input_event", None)
+        if event is not None and isinstance(getattr(event, "stt_metadata", None), dict):
+            event.stt_metadata["block_memory_extraction"] = True
+            event.stt_metadata["block_memory_extraction_reason"] = "user_correction_invalidated_wrong_fact"
+        return CommandResult(
+            action_type="game_fact_invalidated",
+            success=True,
+            user_visible_summary=f"Invalidated stored references to {term} for {game}.",
+            state_changes={"game": game, "term": term, "invalidated_rows": changed},
+            constraints=[
+                "Answer in Spanish.",
+                "Confirm the correction without claiming any new game facts.",
+                "Do not ask for clarification.",
+            ],
+            suggested_tone="short Hebe correction acknowledgement",
+            fallback_text=(
+                f"Vale, borro esa pista: {term} no queda como referencia de {game}."
+                if changed
+                else f"Vale, tomo la correccion: no tratare {term} como referencia de {game}."
+            ),
+            requires_model_response=True,
+            metadata={"message_goal": f"Confirm Leo's correction that {term} is not a valid stored fact for {game}."},
+        )
+
+    def _looks_like_game_knowledge_target(self, target: str | None) -> bool:
+        text = str(target or "").strip()
+        if not text:
+            return True
+        if self._normalize_text(text) in {"este juego", "el juego"}:
+            return True
+        store = getattr(self, "game_profiles", None)
+        if store is not None:
+            try:
+                return store.has_specific_profile(current_category=text, current_game=text, current_title=text)
+            except Exception:
+                pass
+        words = set(self._normalize_text(text).split())
+        game_terms = {
+            "game", "juego", "persona", "royal", "final", "fantasy", "ff9", "ffix",
+            "baldur", "gate", "retro", "elden", "souls", "zelda", "mario", "metroid",
+            "yakuza", "dragon", "quest",
+        }
+        if words & game_terms:
+            return True
+        stream = self._get_stream_state()
+        if stream is not None:
+            current = self._normalize_text(getattr(stream, "current_game", None) or getattr(stream, "current_category", None) or "")
+            return bool(current and self._normalize_text(text) == current)
+        return False
+
     def _handle_chatter_alias_command(self, raw_command: str, normalized: str) -> CommandResult | None:
         match = re.match(r"^(?:recuerda que\s+)?(.+?)\s+es\s+(@?[A-Za-z0-9_]{3,25})$", str(raw_command or "").strip(), flags=re.IGNORECASE)
         if not match:
@@ -2421,9 +3474,61 @@ class HebeEngine:
         })
         if plan.action_type == "twitch_shoutout":
             return self._execute_twitch_shoutout_plan(plan, stream)
+        if plan.action_type == "stream_chat_message":
+            return self._execute_stream_chat_message_plan(plan)
         if plan.action_type in {"stream_ambient_stt_enabled", "stream_ambient_stt_disabled"}:
             return self._execute_stream_ambient_stt_plan(plan)
         return None
+
+    def _execute_stream_chat_message_plan(self, plan: ActionPlan) -> CommandResult:
+        message = str((plan.slots or {}).get("message") or "").strip()
+        if plan.status != "complete" or not message:
+            return CommandResult(
+                action_type="stream_chat_message_clarify",
+                success=False,
+                user_visible_summary="Missing Twitch chat message.",
+                state_changes={},
+                constraints=["Ask one concise follow-up question.", "Do not claim a Twitch message was sent."],
+                fallback_text="¿Qué digo en el chat?",
+                requires_model_response=False,
+                metadata={"action_plan": plan.as_log_dict(), "message_goal": "Ask Leo what message should be sent to Twitch chat."},
+            )
+        twitch = getattr(self.runtime, "twitch", None)
+        send = getattr(twitch, "send_message", None)
+        ok = False
+        if callable(send):
+            try:
+                ok = bool(send(message))
+            except Exception as exc:
+                print(f"[HEBE][ACTION_EXECUTOR] action_type=stream_chat_message success=false error={exc!r}", flush=True)
+        self._declare_output_route(
+            input_type="direct_stt",
+            targets=[OUTPUT_TARGET_TWITCH_CHAT],
+            reason="action_plan_twitch_chat_message",
+        )
+        if ok:
+            print("[HEBE][ACTION_EXECUTOR] success=true action_type=stream_chat_message", flush=True)
+            return CommandResult(
+                action_type="stream_chat_message",
+                success=True,
+                user_visible_summary="Twitch chat message sent.",
+                state_changes={"action_type": "stream_chat_message", "target": "twitch_chat", "message": message},
+                constraints=["Do not ask for clarification.", "Do not add extra content beyond confirming the chat message was sent."],
+                suggested_tone="short Hebe stream-control reply",
+                fallback_text="Enviado al chat.",
+                requires_model_response=True,
+                metadata={"action_plan": plan.as_log_dict(), "message_goal": "Confirm to Leo that the Twitch chat message was sent."},
+            )
+        return CommandResult(
+            action_type="stream_chat_message",
+            success=False,
+            user_visible_summary="Twitch chat message failed.",
+            state_changes={"action_type": "stream_chat_message", "target": "twitch_chat", "message": message},
+            constraints=["Do not claim the chat message was sent."],
+            fallback_text="No he podido escribirlo en el chat.",
+            requires_model_response=False,
+            metadata={"action_plan": plan.as_log_dict(), "message_goal": "Tell Leo the Twitch chat message could not be sent."},
+        )
 
     def _execute_stream_ambient_stt_plan(self, plan: ActionPlan) -> CommandResult:
         enabled = plan.action_type == "stream_ambient_stt_enabled"
@@ -2598,6 +3703,223 @@ class HebeEngine:
             return build(normalized)
         template = os.getenv("HEBE_SHOUTOUT_COMMAND_TEMPLATE", "!so {username}") or "!so {username}"
         return template.format(username=normalized)
+
+    def _handle_stream_session_primer_command(self, raw_command: str, normalized: str, stream, command_result) -> CommandResult | None:
+        now_dt = datetime.now(ZoneInfo(os.getenv("HEBE_STREAM_TIMEZONE", "Europe/Madrid")))
+        today_weekday = session_primer.weekday_key_for(now_dt)
+
+        schedule_query = normalized in {
+            "que toca hoy", "qué toca hoy", "que hay hoy", "qué hay hoy", "stream de hoy",
+        }
+        prepare_today = normalized in {
+            "prepara el stream de hoy", "prepara stream de hoy", "preparar stream",
+            "preparar hoy", "prepara hoy",
+        }
+        title_today = normalized in {
+            "sugiere titulo para hoy", "sugiere título para hoy", "titulo para hoy",
+            "título para hoy", "dame titulo para hoy", "dame título para hoy",
+            "sugiere otro titulo", "sugiere otro título",
+        }
+
+        prepare_match = re.match(r"^prepara\s+(.+)$", normalized)
+        explicit_prepare_game = ""
+        if prepare_match and not prepare_today and "stream" not in normalized:
+            explicit_prepare_game = self._strip_stream_primer_filler(prepare_match.group(1))
+
+        title_match = re.match(r"^(?:dame\s+)?(?:\d+\s+)?(?:titulos?|títulos?)\s+para\s+(.+)$", normalized)
+        explicit_title_game = self._strip_stream_primer_filler(title_match.group(1)) if title_match else ""
+
+        schedule_game_match = re.match(r"^(?:no\s+)?(?:hoy toca|cambia el juego de hoy a)\s+(.+?)(?:\s+(?:hebe|ebe|eve|jebe))?$", normalized)
+        if schedule_game_match:
+            game = self._title_case_game(self._strip_stream_primer_filler(schedule_game_match.group(1)))
+            schedule = session_primer.update_schedule_for_weekday(today_weekday, game)
+            primer = session_primer.build_stream_session_primer(game=game, dt=now_dt)
+            session_primer.apply_primer_to_stream(stream, primer)
+            self._mark_today_game_override(stream, game)
+            return command_result(
+                "set_today_stream_game",
+                self._format_stream_schedule_reply(primer),
+                state_changes={
+                    "schedule": schedule,
+                    "primer": primer.to_dict(),
+                    "current_game": game,
+                    "source": "stt_voice",
+                    "confidence": "high",
+                },
+                message_goal="Tell Leo today's scheduled stream game was updated and summarize the prepared primer.",
+            )
+
+        title_set_match = re.match(r"^(?:el titulo de hoy sera|el título de hoy será|titulo de hoy sera|título de hoy será)\s+(.+)$", normalized)
+        if title_set_match:
+            title = str(raw_command or "").strip()
+            title = re.sub(
+                r"^\s*(?:el titulo de hoy sera|el título de hoy será|titulo de hoy sera|título de hoy será)\s+",
+                "",
+                title,
+                flags=re.IGNORECASE,
+            ).strip()
+            stream.current_stream_title = title
+            stream.title_context_markers = [title]
+            stream.title_context_updated_ts = time.time()
+            return command_result(
+                "stream_title_saved",
+                f"Guardado como título de hoy: {title}",
+                state_changes={"stream_title": title},
+                message_goal="Confirm today's stream title was saved.",
+            )
+
+        note_result = self._handle_game_session_note_command(raw_command, normalized, now_dt)
+        if note_result is not None:
+            primer = session_primer.build_stream_session_primer(game=note_result.get("game"), dt=now_dt)
+            session_primer.apply_primer_to_stream(stream, primer)
+            return command_result(
+                "game_session_note_saved",
+                self._format_stream_primer_reply(primer),
+                state_changes={"game_session": note_result, "primer": primer.to_dict()},
+                message_goal="Confirm the game session note was saved and summarize the next stream primer.",
+            )
+
+        if schedule_query:
+            primer = session_primer.build_stream_session_primer(dt=now_dt)
+            return command_result(
+                "stream_schedule_lookup",
+                self._format_stream_schedule_reply(primer),
+                state_changes={"primer": primer.to_dict()},
+                message_goal="Answer what is scheduled today using the stream schedule.",
+            )
+
+        if prepare_today or explicit_prepare_game:
+            primer = session_primer.build_stream_session_primer(
+                game=self._title_case_game(explicit_prepare_game) if explicit_prepare_game else None,
+                dt=now_dt,
+            )
+            session_primer.apply_primer_to_stream(stream, primer)
+            return command_result(
+                "stream_session_primer_created",
+                self._format_stream_primer_reply(primer),
+                state_changes={"primer": primer.to_dict()},
+                message_goal="Summarize today's stream session primer, including schedule, last session, starting point, safe context, title suggestion, and missing info.",
+            )
+
+        if title_today or explicit_title_game:
+            primer = session_primer.build_stream_session_primer(
+                game=self._title_case_game(explicit_title_game) if explicit_title_game else None,
+                dt=now_dt,
+            )
+            return command_result(
+                "stream_title_suggestions",
+                self._format_title_suggestions_reply(primer),
+                state_changes={"primer": primer.to_dict(), "title_suggestions": primer.title_suggestions},
+                message_goal="Suggest English stream titles in Leo's standard [ENG/ESP] format.",
+            )
+
+        if normalized in {"no uses spoilers", "sin spoilers", "no spoilers"}:
+            setattr(stream, "spoiler_policy", "no_spoilers")
+            return command_result(
+                "stream_spoiler_policy_updated",
+                "Vale, hoy sin spoilers. Usaré solo contexto guardado y confirmado.",
+                state_changes={"spoiler_policy": "no_spoilers"},
+                message_goal="Confirm no-spoiler policy is active for stream context.",
+            )
+
+        return None
+
+    def _strip_stream_primer_filler(self, value: str) -> str:
+        text = str(value or "").strip()
+        text = re.sub(r"^(?:el|la|los|las|juego|stream)\s+", "", text).strip()
+        return text
+
+    def _title_case_game(self, value: str) -> str:
+        raw = str(value or "").strip()
+        key = re.sub(r"[^a-z0-9]+", " ", raw.casefold()).strip()
+        known = {
+            "persona 5": "Persona 5 Royal",
+            "persona 5 royal": "Persona 5 Royal",
+            "p5r": "Persona 5 Royal",
+            "final fantasy ix": "FINAL FANTASY IX",
+            "ff9": "FINAL FANTASY IX",
+            "baldur s gate 3": "Baldur's Gate 3",
+            "baldurs gate 3": "Baldur's Gate 3",
+        }
+        return known.get(key, raw.title())
+
+    def _handle_game_session_note_command(self, raw_command: str, normalized: str, now_dt: datetime) -> dict | None:
+        game = ""
+        text = ""
+        start_summary = ""
+        end_summary = ""
+        next_time_plan = ""
+        current_location = ""
+        current_objective = ""
+
+        match = re.match(r"^guarda que en\s+(.+?)\s+terminamos\s+(.+)$", normalized)
+        if match:
+            game = self._title_case_game(match.group(1))
+            text = match.group(2).strip()
+            end_summary = text
+            current_location = text
+        if not match:
+            match = re.match(r"^(?:proxima|próxima) vez en\s+(.+?)\s+toca\s+(.+)$", normalized)
+            if match:
+                game = self._title_case_game(match.group(1))
+                text = match.group(2).strip()
+                next_time_plan = text
+                current_objective = text
+        if not match:
+            generic = re.match(r"^guarda que empezamos\s+(.+)$", normalized)
+            if generic:
+                stream = self._get_stream_state()
+                game = getattr(stream, "current_game", None) or (session_primer.get_schedule_for_date(now_dt) or {}).get("game") or ""
+                text = generic.group(1).strip()
+                start_summary = text
+                current_location = text
+            else:
+                generic = re.match(r"^guarda que terminamos\s+(.+)$", normalized)
+                if generic:
+                    stream = self._get_stream_state()
+                    game = getattr(stream, "current_game", None) or (session_primer.get_schedule_for_date(now_dt) or {}).get("game") or ""
+                    text = generic.group(1).strip()
+                    end_summary = text
+                    current_location = text
+        if not game or not text:
+            return None
+        return session_primer.save_game_session_note(
+            game,
+            stream_date=now_dt.date().isoformat(),
+            start_summary=start_summary,
+            end_summary=end_summary,
+            current_location=current_location,
+            current_objective=current_objective,
+            next_time_plan=next_time_plan,
+            spoiler_policy="no_spoilers",
+            source="manual_command",
+        )
+
+    def _format_stream_schedule_reply(self, primer: session_primer.StreamSessionPrimer) -> str:
+        return (
+            f"Hoy ({primer.weekday}, {primer.local_now[:10]}) toca {primer.game}"
+            + (f" — {primer.playthrough_type}" if primer.playthrough_type else "")
+            + (f". Slot: {primer.slot_name}." if primer.slot_name else ".")
+        )
+
+    def _format_title_suggestions_reply(self, primer: session_primer.StreamSessionPrimer) -> str:
+        lines = [f"Títulos sugeridos para {primer.game}:"]
+        lines.extend(f"* {title}" for title in primer.title_suggestions)
+        return "\n".join(lines)
+
+    def _format_stream_primer_reply(self, primer: session_primer.StreamSessionPrimer) -> str:
+        missing = ", ".join(primer.missing_info) if primer.missing_info else "ninguna"
+        title = primer.title_suggestions[0] if primer.title_suggestions else "sin título sugerido"
+        return (
+            f"Primer de stream para {primer.game} ({primer.playthrough_type}).\n"
+            f"* Hoy: {primer.weekday}, {primer.local_now[:10]} ({primer.timezone})\n"
+            f"* Slot: {primer.slot_name or 'sin slot'}\n"
+            f"* Última sesión: {primer.last_session_summary or 'memoria incompleta'}\n"
+            f"* Inicio/objetivo: {primer.starting_point or primer.likely_objective or 'por confirmar'}\n"
+            f"* Contexto seguro: {'; '.join(primer.safe_context_for_spontaneity) or 'por confirmar'}\n"
+            f"* Título: {title}\n"
+            f"* Falta: {missing}"
+        )
 
     def _handle_run_context_command(self, raw_command: str, normalized: str, stream) -> str | None:
         now = time.time()
@@ -3514,11 +4836,33 @@ class HebeEngine:
         if source not in {"ui", "voice", "stt_voice"}:
             return False
 
+        event = getattr(self, "_current_input_event", None)
+        metadata = getattr(event, "stt_metadata", None)
+        normalized = self._normalize_text(getattr(event, "normalized_text", "") or "")
+        if source == "stt_voice" and (not isinstance(metadata, dict) or not metadata.get("jarvis_allowed")):
+            print("[HEBE][MEMORY_EXTRACT] blocked reason=uncertain_stt", flush=True)
+            return False
+        if isinstance(metadata, dict) and metadata.get("block_memory_extraction"):
+            print(
+                "[HEBE][MEMORY_EXTRACT] blocked "
+                f"reason={metadata.get('block_memory_extraction_reason') or 'model_invented_or_unconfirmed'}",
+                flush=True,
+            )
+            return False
+        if re.match(r"^(?:que sabes de|quÃ© sabes de|que sabes sobre|quÃ© sabes sobre)\s+", normalized):
+            print("[HEBE][MEMORY_EXTRACT] blocked reason=model_invented_or_unconfirmed", flush=True)
+            return False
+
         reply_step = execution.first_result_of_type("reply") if execution else None
         if not reply_step:
             return False
 
-        return reply_step.data.get("mode") == "chat"
+        if reply_step.data.get("mode") != "chat":
+            return False
+        if not re.match(r"^(?:recuerda|guarda|acuerdate|acuérdate)\b", normalized):
+            print("[HEBE][MEMORY_EXTRACT] blocked reason=no_explicit_memory_request", flush=True)
+            return False
+        return True
 
     def _deliver_twitch_reply(self, text: str, *, event_type: str | None = None, payload: dict | None = None) -> None:
         """
@@ -3527,6 +4871,17 @@ class HebeEngine:
         """
         twitch = getattr(self.runtime, "twitch", None)
         stream = getattr(self.runtime.state, "stream", None)
+        is_spontaneous = event_type == "twitch_idle_prompt"
+        tts_allowed = self._stream_tts_output_enabled_for_event(event_type)
+        targets = [OUTPUT_TARGET_STREAM_TTS if tts_allowed else OUTPUT_TARGET_LOCAL_UI] if is_spontaneous else [OUTPUT_TARGET_TWITCH_CHAT]
+        if not is_spontaneous and tts_allowed:
+            targets.append(OUTPUT_TARGET_STREAM_TTS)
+        self._declare_output_route(
+            input_type="spontaneity" if is_spontaneous else "twitch_mention_or_event",
+            targets=targets,
+            event_type=event_type,
+            reason="stream_event_reply",
+        )
         if stream is not None:
             stream.last_hebe_stream_speak_ts = time.time()
             if event_type == "twitch_idle_prompt":
@@ -3534,7 +4889,9 @@ class HebeEngine:
                 service = getattr(self, "stream_spontaneity", None)
                 if service is not None:
                     service.record_idle_message(stream, text, topic=topic)
-        if twitch is not None and twitch.is_available():
+        if is_spontaneous:
+            emit("chat.assistant", {"text": text, "source": "spontaneity", "output_target": OUTPUT_TARGET_LOCAL_UI})
+        elif twitch is not None and twitch.is_available():
             try:
                 twitch.send_message(text)
             except Exception as e:
@@ -3542,33 +4899,44 @@ class HebeEngine:
         else:
             print("[HEBE][EVENT][TWITCH] service not available, dropping chat reply", flush=True)
 
-        policies = getattr(stream, "policies", None) if stream else None
         if not getattr(self.runtime.state, "tts_enabled", False):
             print("[HEBE][TTS] skipped reason=global_disabled", flush=True)
             return
-        allow_tts = bool(policies and getattr(policies, "allow_tts_replies", False))
-        if event_type == "twitch_idle_prompt":
-            allow_tts = bool(policies and getattr(policies, "allow_tts_idle_prompts", False))
-        elif event_type == "twitch_raid":
-            allow_tts = bool(policies and getattr(policies, "allow_tts_raid_thanks", True))
-        elif event_type and event_type.startswith("twitch_") and event_type != "twitch_chat_react":
-            allow_tts = bool(policies and getattr(policies, "allow_tts_event_replies", True))
-        if not allow_tts:
+        if not tts_allowed:
             print("[HEBE][TTS] skipped reason=stream_tts_disabled", flush=True)
             return
-        self._deliver_voice_reply(text)
+        self._deliver_voice_reply(text, output_target=OUTPUT_TARGET_STREAM_TTS, emit_ui=False, declare_route=False)
 
 
-    def _deliver_voice_reply(self, text: str) -> None:
+    def _deliver_voice_reply(
+        self,
+        text: str,
+        *,
+        output_target: str = OUTPUT_TARGET_LOCAL_TTS,
+        emit_ui: bool = True,
+        input_type: str = "direct_stt",
+        declare_route: bool = True,
+    ) -> None:
         if not text:
             return
+        if declare_route:
+            targets = [OUTPUT_TARGET_LOCAL_UI] if emit_ui else []
+            if self._local_tts_output_enabled():
+                targets.append(output_target)
+            self._declare_output_route(
+                input_type=input_type,
+                targets=targets or [OUTPUT_TARGET_LOCAL_UI],
+                reason="voice_reply",
+            )
+        if emit_ui:
+            emit("chat.assistant", {"text": text, "source": input_type, "output_target": OUTPUT_TARGET_LOCAL_UI})
         if not getattr(self.runtime.state, "tts_enabled", False):
-            emit("chat.assistant", {"text": text})
             print("[HEBE][TTS] skipped reason=global_disabled", flush=True)
             return
         try:
             safe_text = str(text or "").replace('"', '\\"')
-            print(f"[HEBE][TTS] speaking text=\"{safe_text}\"", flush=True)
+            print(f"[HEBE][TTS] speaking output_target={output_target} text=\"{safe_text}\"", flush=True)
+            self._remember_tts_text(text)
             self.runtime.speak(text)
         except Exception as e:
             safe_error = str(e).replace('"', '\\"')
@@ -3576,11 +4944,32 @@ class HebeEngine:
 
     def _deliver_manual_reply(self, text: str, *, source: str) -> None:
         if source == "ui":
+            self._declare_output_route(
+                input_type="ui_typed_input",
+                targets=[OUTPUT_TARGET_LOCAL_UI],
+                reason="typed_input_reply",
+            )
             log_chat("assistant", text, source="ui")
-            emit("chat.assistant", {"text": text})
+            emit("chat.assistant", {"text": text, "source": "ui", "output_target": OUTPUT_TARGET_LOCAL_UI})
+            self._record_assistant_reply_for_conversation(text, source=source)
             return
 
-        self._deliver_voice_reply(text)
+        targets = [OUTPUT_TARGET_LOCAL_UI]
+        voice_target = OUTPUT_TARGET_STREAM_TTS if self._is_stream_enabled() else OUTPUT_TARGET_LOCAL_TTS
+        if self._local_tts_output_enabled():
+            targets.append(voice_target)
+        self._declare_output_route(
+            input_type="direct_stt" if source == "stt_voice" else source,
+            targets=targets,
+            reason="direct_reply",
+        )
+        self._deliver_voice_reply(
+            text,
+            output_target=voice_target,
+            input_type="direct_stt" if source == "stt_voice" else source,
+            declare_route=False,
+        )
+        self._record_assistant_reply_for_conversation(text, source=source)
 
     def handle_command(self, command: str, source: str = "voice") -> str:
         print(f"[HEBE] handle_command source={source} text={command!r}", flush=True)
@@ -3648,6 +5037,11 @@ class HebeEngine:
                         flush=True,
                     )
                     if voice_type != "direct_command_to_hebe" and not self._stream_is_armed() and not has_action_intent:
+                        self._declare_output_route(
+                            input_type="ambient_stt",
+                            targets=[OUTPUT_TARGET_SILENT_CONTEXT_UPDATE],
+                            reason=voice_type,
+                        )
                         self._log_stt_non_command_decision(
                             command,
                             "ambient_context_only",

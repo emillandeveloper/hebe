@@ -95,7 +95,50 @@ class STTLanguageForcingTests(unittest.TestCase):
         self.assertEqual(result, "")
         self.assertEqual(logged, [])
         self.assertFalse(any(event_type in {"stt.final", "chat.user"} for event_type, _ in emitted))
-        self.assertTrue(any(data.get("reason") == "stt_prompt_injection" for event_type, data in emitted if event_type == "voice.command"))
+        self.assertTrue(any(data.get("reason") == "stt_prompt_echo_or_hotword_list" for event_type, data in emitted if event_type == "voice.command"))
+
+    def test_rejected_prompt_echo_raw_is_hidden_from_normal_logs_by_default(self):
+        emitted = []
+        logs = []
+        service = STTService(
+            config=STTConfig(),
+            emit=lambda event_type, data=None: emitted.append((event_type, data or {})),
+        )
+
+        with patch("builtins.print", lambda *args, **kwargs: logs.append(" ".join(str(arg) for arg in args))):
+            result = service._publish_transcript_or_reject("Hebe, Ebe, Zwei, Persona, Final Fantasy.", {"language": "es"})
+
+        joined = "\n".join(logs)
+        self.assertEqual(result, "")
+        self.assertIn("[HEBE][STT][REJECTED] reason=stt_prompt_echo_or_hotword_list", joined)
+        self.assertNotIn("[HEBE][STT][RAW]", joined)
+        self.assertTrue(any(data.get("raw_text") for event_type, data in emitted if event_type == "voice.command"))
+        self.assertFalse(any(event_type == "stt.final" for event_type, _ in emitted))
+
+    def test_repeated_prompt_echo_disables_initial_prompt_for_session(self):
+        emitted = []
+        logs = []
+        cfg = STTConfig()
+        cfg.prompt_echo_window_seconds = 300
+        cfg.prompt_echo_disable_threshold = 2
+        cfg.auto_disable_prompt_on_echo = True
+        service = STTService(
+            config=cfg,
+            emit=lambda event_type, data=None: emitted.append((event_type, data or {})),
+        )
+        model = FakeWhisperModel("Hebe abre OBS")
+        service._model = model
+
+        with patch("builtins.print", lambda *args, **kwargs: logs.append(" ".join(str(arg) for arg in args))):
+            service._publish_transcript_or_reject("Hebe, Ebe, Zwei, Persona, Final Fantasy.", {"language": "es"})
+            service._publish_transcript_or_reject("Xarly, Xarly, Zwei, Totodile.", {"language": "es"})
+            service._transcribe_audio(np.zeros(1600, dtype=np.float32), command_mode=True)
+
+        self.assertFalse(service.cfg.command_prompt_enabled)
+        self.assertIn("[HEBE][STT][PROMPT] auto_disabled reason=repeated_prompt_echo", "\n".join(logs))
+        self.assertIsNone(model.calls[-1]["initial_prompt"])
+        self.assertIsNone(model.calls[-1]["hotwords"])
+        self.assertTrue(any(data.get("last_rejected_stt") for event_type, data in emitted if event_type == "status"))
 
     def test_restricted_auto_language_does_not_leave_language_unset(self):
         cfg = STTConfig()

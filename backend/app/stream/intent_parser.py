@@ -16,6 +16,8 @@ class StreamIntentParser:
     """Small semantic parser for stream commands using concepts, not sentence lists."""
 
     shoutout_concepts = {"promo", "promocion", "promociona", "promocionar", "shoutout", "so", "recomienda"}
+    chat_message_concepts = {"di", "dile", "avisa", "cuenta", "escribe", "manda", "send", "tell", "say"}
+    chat_targets = {"chat", "directo", "stream"}
     ambient_concepts = {"stt", "ambiental", "ambiente"}
     enable_concepts = {"activa", "enciende", "reanuda", "pon", "enable", "resume", "on"}
     disable_concepts = {"desactiva", "apaga", "pausa", "quita", "disable", "pause", "off"}
@@ -32,6 +34,9 @@ class StreamIntentParser:
         shoutout = self._parse_shoutout(normalized, raw)
         if shoutout:
             candidates.append(shoutout)
+        chat_message = self._parse_chat_message(normalized, raw)
+        if chat_message:
+            candidates.append(chat_message)
         return candidates
 
     def _parse_ambient_stt(self, normalized: str) -> StreamIntentCandidate | None:
@@ -72,6 +77,47 @@ class StreamIntentParser:
         if len(tail) > 1:
             cleaned = [token for token in tail if token not in self.filler]
             return self._raw_tail_after_token(raw_text, cleaned) or " ".join(cleaned).strip()
+        return ""
+
+    def _parse_chat_message(self, normalized: str, raw_text: str) -> StreamIntentCandidate | None:
+        tokens = normalized.split()
+        token_set = set(tokens)
+        if not tokens or not (token_set & self.chat_targets) or not (token_set & self.chat_message_concepts):
+            return None
+        message = self._extract_chat_message(tokens, raw_text)
+        return StreamIntentCandidate(
+            "stream_chat_message",
+            0.9 if message else 0.78,
+            entities={"message": message},
+            reason="chat_message_concept",
+        )
+
+    def _extract_chat_message(self, tokens: list[str], raw_text: str) -> str:
+        normalized = " ".join(tokens)
+        split_markers = (" que ", ":", " - ")
+        raw = str(raw_text or "").strip()
+        raw_lower = self.normalize(raw)
+        for marker in split_markers:
+            if marker.strip() in {":", "-"} and marker in raw:
+                tail = raw.split(marker, 1)[1].strip()
+                if tail:
+                    return tail
+            marker_norm = marker.strip()
+            if marker_norm and f" {marker_norm} " in f" {normalized} ":
+                tail_norm = normalized.split(f" {marker_norm} ", 1)[1].strip()
+                if raw and tail_norm:
+                    raw_tokens = raw.split()
+                    for idx, token in enumerate(raw_tokens):
+                        if self.normalize(" ".join(raw_tokens[idx:])).startswith(tail_norm):
+                            return " ".join(raw_tokens[idx:]).strip(" ,.;:")
+                    return tail_norm
+        if "chat" in tokens:
+            idx = tokens.index("chat")
+            tail = tokens[idx + 1 :]
+            while tail and tail[0] in {"que", "de", "al", "a"}:
+                tail = tail[1:]
+            if tail:
+                return self._raw_tail_after_token(raw, tail) or " ".join(tail).strip()
         return ""
 
     def _raw_tail_after_token(self, raw_text: str, normalized_tail: list[str]) -> str:

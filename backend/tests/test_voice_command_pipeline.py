@@ -1,10 +1,13 @@
-import os
+﻿import os
 import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from app.cognitive.input_event import InputEvent
 from app.cognitive.action_runtime import ActionRuntime
+from app.cognitive.models import DeliberationResult, ExecutionResult, Plan, PlanStep, StepExecutionResult
+from app.cognitive.response_synthesizer import ResponseSynthesizer
+from app.cognitive.wake_name_resolver import WakeNameResolver
 from app.core.state import HebeState
 from app.hebe_engine import HebeEngine
 from app.integrations.twitch.chat_cache import TwitchChatCache
@@ -31,6 +34,10 @@ class FakeTwitch:
 
     def build_shoutout_command(self, username):
         return self.shoutout_command_template.format(username=self.normalize_twitch_username(username))
+
+    def send_message(self, text):
+        self.sent.append(text)
+        return True
 
     def shoutout(self, username):
         self.sent.append(self.build_shoutout_command(username))
@@ -79,6 +86,53 @@ class RetrySTT:
         return {"text": self.retry_text, "attempted": True, "speech_detected": self.last_speech_detected}
 
 
+class FakeContextBuilder:
+    def __init__(self):
+        self.inputs = []
+
+    def build(self, state, input_text=None, internal_event=None):
+        self.inputs.append(input_text)
+        return SimpleNamespace(
+            input_text=input_text,
+            internal_event=internal_event,
+            state_snapshot={},
+            relevant_facts=[],
+            relevant_chunks=[],
+            conversation_history=[],
+            message_type="small_talk",
+            context_policy={"memory": "limited"},
+            resolved_entities=[],
+        )
+
+
+class FakeDeliberationService:
+    def deliberate(self, context):
+        return DeliberationResult(
+            plan=Plan(
+                steps=[PlanStep(type="reply", data={"mode": "chat"})],
+                reasoning="Fallback chat",
+            )
+        )
+
+
+class FakePlanExecutor:
+    def execute(self, plan):
+        return ExecutionResult([StepExecutionResult(step_type="reply", success=True, data={"mode": "chat"})])
+
+
+class FixedResponseSynth:
+    def __init__(self, reply):
+        self.reply = reply
+        self.calls = []
+
+    def synthesize(self, **kwargs):
+        self.calls.append(kwargs)
+        return self.reply
+
+    def synthesize_command_result(self, result, **kwargs):
+        return f"modelo:{result.action_type}:{result.state_changes.get('target', result.state_changes.get('app_id', ''))}"
+
+
 def make_engine(chatters=None, *, live=True):
     stream = StreamSessionState(enabled=True, presence_mode="reactive")
     stream.is_live = live
@@ -107,6 +161,10 @@ def make_engine(chatters=None, *, live=True):
     engine._current_input_event = None
     engine.stream_action_planner = engine._build_stream_action_planner()
     return engine
+
+
+def pending_marker(expected="casual_answer"):
+    return SimpleNamespace(last_opens_conversation_turn=True, last_expected_reply_type=expected)
 
 
 class VoiceCommandPipelineTests(unittest.TestCase):
@@ -434,7 +492,7 @@ class VoiceCommandPipelineTests(unittest.TestCase):
         logs = []
 
         with patch("builtins.print", lambda *args, **kwargs: logs.append(" ".join(str(arg) for arg in args))):
-            result = engine._process_stt_voice_transcript("यब आबरे अबे यशे")
+            result = engine._process_stt_voice_transcript("à¤¯à¤¬ à¤†à¤¬à¤°à¥‡ à¤…à¤¬à¥‡ à¤¯à¤¶à¥‡")
 
         self.assertEqual(result, "continue")
         self.assertEqual(handled, [])
@@ -442,22 +500,485 @@ class VoiceCommandPipelineTests(unittest.TestCase):
 
     def test_repeated_hotword_prompt_transcript_is_rejected_before_input_event(self):
         engine = make_engine(["nuria"])
-        bad = "Hebe, Ebe, OBS, Twitch, chat, promo, shoutout, OBS, stream, chat, promo, shoutout"
+        bad = "Hebe, Ebe, Ebe, Zwei, Persona, Final Fantasy."
         handled = []
         emitted = []
         engine.handle_command = lambda command, source="voice": handled.append((source, command)) or "continue"
 
-        with patch("app.hebe_engine.emit", lambda event_type, data=None: emitted.append((event_type, data or {}))):
+        with patch("app.hebe_engine.emit", lambda event_type, data=None: emitted.append((event_type, data or {}))), \
+             patch("app.hebe_engine.log_chat") as log_chat_mock:
             result = engine._process_stt_voice_transcript(bad)
 
         self.assertEqual(result, "continue")
         self.assertEqual(handled, [])
         self.assertIsNone(engine._current_input_event)
+        log_chat_mock.assert_not_called()
         rejected = [data for event_type, data in emitted if event_type == "voice.command" and data.get("status") == "rejected"]
         self.assertTrue(rejected)
-        self.assertEqual(rejected[-1]["reason"], "stt_prompt_injection")
-        self.assertEqual(rejected[-1]["raw_text"], "")
-        self.assertNotIn("OBS, Twitch", str(rejected[-1]))
+        self.assertEqual(rejected[-1]["reason"], "stt_prompt_echo_or_hotword_list")
+        self.assertEqual(rejected[-1]["raw_text"], bad)
+        self.assertFalse(any(event_type == "chat.user" for event_type, _ in emitted))
+
+    def test_known_name_prompt_list_transcript_is_rejected_before_cognition(self):
+        engine = make_engine(["xarly", "totodile", "charlie", "zwei"])
+        bad = "Hebe, Ebe, Xarly, Totodile, Charlie, Zwei, Persona, Final Fantasy."
+        handled = []
+        emitted = []
+        engine.handle_command = lambda command, source="voice": handled.append((source, command)) or "continue"
+
+        with patch("app.hebe_engine.emit", lambda event_type, data=None: emitted.append((event_type, data or {}))), \
+             patch("app.hebe_engine.log_chat") as log_chat_mock:
+            result = engine._process_stt_voice_transcript(bad)
+
+        self.assertEqual(result, "continue")
+        self.assertEqual(handled, [])
+        self.assertIsNone(engine._current_input_event)
+        log_chat_mock.assert_not_called()
+        rejected = [data for event_type, data in emitted if event_type == "voice.command" and data.get("status") == "rejected"]
+        self.assertTrue(rejected)
+        self.assertEqual(rejected[-1]["reason"], "stt_prompt_echo_or_hotword_list")
+        self.assertFalse(any(event_type == "chat.user" for event_type, _ in emitted))
+
+    def test_rejected_stt_artifact_never_enters_main_conversation_or_cognition(self):
+        engine = make_engine(["xarly", "totodile", "charlie", "zwei"])
+        bad = "Xarly, Xarly, Zwei, Totodile..."
+        handled = []
+        emitted = []
+        logs = []
+        delivered = []
+        engine.handle_command = lambda command, source="voice": handled.append((source, command)) or "continue"
+        engine._deliver_voice_reply = lambda text: delivered.append(text)
+        engine.stt_log_rejected_raw = False
+
+        with patch("builtins.print", lambda *args, **kwargs: logs.append(" ".join(str(arg) for arg in args))), \
+             patch("app.hebe_engine.emit", lambda event_type, data=None: emitted.append((event_type, data or {}))), \
+             patch("app.hebe_engine.log_chat") as log_chat_mock:
+            result = engine._process_stt_voice_transcript(bad)
+
+        joined = "\n".join(logs)
+        self.assertEqual(result, "continue")
+        self.assertEqual(handled, [])
+        self.assertEqual(delivered, [])
+        self.assertIsNone(engine._current_input_event)
+        log_chat_mock.assert_not_called()
+        self.assertIn("[HEBE][STT][REJECTED] reason=stt_prompt_echo_or_hotword_list", joined)
+        self.assertNotIn("[HEBE][STT][RAW]", joined)
+        self.assertNotIn("[HEBE][INPUT]", joined)
+        self.assertNotIn("[HEBE][COG]", joined)
+        self.assertNotIn("[HEBE][JARVIS][CHAT]", joined)
+        self.assertFalse(any(event_type == "chat.user" for event_type, _ in emitted))
+        self.assertTrue(any(event_type == "voice.command" and data.get("status") == "rejected" for event_type, data in emitted))
+
+    def test_repeated_engine_prompt_echo_disables_stt_prompt_for_session(self):
+        class PromptSwitch:
+            def __init__(self):
+                self.disabled = 0
+
+            def disable_command_prompt_for_session(self):
+                self.disabled += 1
+                return True
+
+        engine = make_engine(["xarly", "totodile", "zwei"])
+        engine.runtime.stt = PromptSwitch()
+        engine.stt_prompt_echo_window_seconds = 300
+        engine.stt_prompt_echo_disable_threshold = 2
+        engine.stt_auto_disable_prompt_on_echo = True
+        logs = []
+
+        with patch("builtins.print", lambda *args, **kwargs: logs.append(" ".join(str(arg) for arg in args))), \
+             patch("app.hebe_engine.emit"), \
+             patch("app.hebe_engine.log_chat"):
+            first = engine._process_stt_voice_transcript("Xarly, Xarly, Zwei, Totodile...")
+            second = engine._process_stt_voice_transcript("Hebe, Ebe, Xarly, Totodile, Persona, Final Fantasy.")
+
+        self.assertEqual(first, "continue")
+        self.assertEqual(second, "continue")
+        self.assertEqual(engine.runtime.stt.disabled, 1)
+        self.assertIn("[HEBE][STT][PROMPT] auto_disabled reason=repeated_prompt_echo", "\n".join(logs))
+
+    def test_hotword_only_transcript_does_not_trigger_chat_fallback_or_memory(self):
+        engine = make_engine(["nuria"])
+        bad = "Hebe, Ebe, Ebe, Zwei, Persona, Final Fantasy."
+        engine.memory_extractor = Mock()
+        handled = []
+        emitted = []
+        logs = []
+        engine.handle_command = lambda command, source="voice": handled.append((source, command)) or "continue"
+
+        with patch("builtins.print", lambda *args, **kwargs: logs.append(" ".join(str(arg) for arg in args))), \
+             patch("app.hebe_engine.emit", lambda event_type, data=None: emitted.append((event_type, data or {}))):
+            result = engine._process_stt_voice_transcript(bad)
+
+        joined = "\n".join(logs)
+        self.assertEqual(result, "continue")
+        self.assertEqual(handled, [])
+        engine.memory_extractor.extract_and_store.assert_not_called()
+        self.assertNotIn("[HEBE][INPUT]", joined)
+        self.assertNotIn("[HEBE][COG] incoming", joined)
+        self.assertNotIn("[HEBE][JARVIS][CHAT]", joined)
+        self.assertFalse(any(event_type == "chat.user" for event_type, _ in emitted))
+
+    def test_recent_tts_text_heard_by_stt_is_rejected_as_self_echo(self):
+        engine = make_engine(["nuria"])
+        engine.stt_tts_echo_window_seconds = 10
+        engine.stt_tts_echo_similarity_threshold = 0.82
+        engine._remember_tts_text("Ya estoy aquÃ­, Leo.")
+        handled = []
+        emitted = []
+        engine.handle_command = lambda command, source="voice": handled.append((source, command)) or "continue"
+
+        with patch("app.hebe_engine.emit", lambda event_type, data=None: emitted.append((event_type, data or {}))):
+            result = engine._process_stt_voice_transcript("Ya estoy aquÃ­, Leo.")
+
+        self.assertEqual(result, "continue")
+        self.assertEqual(handled, [])
+        rejected = [data for event_type, data in emitted if event_type == "voice.command" and data.get("status") == "rejected"]
+        self.assertTrue(rejected)
+        self.assertEqual(rejected[-1]["reason"], "self_tts_echo")
+        self.assertGreaterEqual(rejected[-1]["similarity"], 0.82)
+        self.assertFalse(any(event_type == "chat.user" for event_type, _ in emitted))
+
+    def test_stt_is_ignored_while_tts_is_speaking_when_enabled(self):
+        engine = make_engine(["nuria"])
+        engine.runtime.tts = SimpleNamespace(is_speaking=True)
+        engine.stt_ignore_while_tts_speaking = True
+        handled = []
+        emitted = []
+        engine.handle_command = lambda command, source="voice": handled.append((source, command)) or "continue"
+
+        with patch("app.hebe_engine.emit", lambda event_type, data=None: emitted.append((event_type, data or {}))):
+            result = engine._process_stt_voice_transcript("Hebe, cÃ³mo estÃ¡s?")
+
+        self.assertEqual(result, "continue")
+        self.assertEqual(handled, [])
+        rejected = [data for event_type, data in emitted if event_type == "voice.command" and data.get("status") == "rejected"]
+        self.assertTrue(rejected)
+        self.assertEqual(rejected[-1]["reason"], "self_tts_echo")
+        self.assertTrue(rejected[-1]["tts_speaking"])
+
+    def test_valid_stt_question_still_enters_cognition_and_user_bubble(self):
+        engine = make_engine(["nuria"])
+        engine.runtime.state.stream.enabled = False
+        handled = []
+        emitted = []
+        engine.handle_command = lambda command, source="voice": handled.append((source, command)) or "continue"
+
+        with patch("app.hebe_engine.emit", lambda event_type, data=None: emitted.append((event_type, data or {}))), \
+             patch("app.hebe_engine.log_chat") as log_chat_mock:
+            result = engine._process_stt_voice_transcript("Hebe, como estas?")
+
+        self.assertEqual(result, "continue")
+        self.assertEqual(handled, [("stt_voice", "hebe como estas")])
+        log_chat_mock.assert_called_once()
+        self.assertTrue(any(event_type == "chat.user" and data.get("text") == "Hebe, como estas?" for event_type, data in emitted))
+
+    def test_hola_eve_como_estas_is_addressed_to_hebe(self):
+        resolver = WakeNameResolver()
+
+        result = resolver.resolve(
+            raw_text="Hola, Eve, como estas?",
+            normalized_text="hola eve como estas",
+            source="stt_voice",
+            command_markers={"abre", "haz", "pon"},
+        )
+
+        self.assertTrue(result.addressed_to_hebe)
+        self.assertEqual(result.matched_name, "eve")
+        self.assertEqual(result.reason, "phonetic_alias")
+        self.assertGreaterEqual(result.confidence, 0.78)
+
+    def test_assistant_question_creates_pending_conversation_turn(self):
+        engine = make_engine(["nuria"])
+        engine.pending_conversation_ttl_seconds = 120
+
+        engine._record_assistant_reply_for_conversation("AquÃ­ sobreviviendo. Â¿tÃº quÃ© tal?", source="stt_voice", synthesizer=pending_marker())
+
+        turn = engine.runtime.state.pending_conversation_turn
+        self.assertEqual(turn["source"], "assistant_question")
+        self.assertEqual(turn["expected_type"], "casual_answer")
+        self.assertEqual(turn["allowed_sources"], ["stt_voice", "ui"])
+        self.assertFalse(turn.get("requires_wakeword", False))
+
+    def test_stt_followup_after_assistant_question_enters_conversation_without_wakeword(self):
+        engine = make_engine(["nuria"])
+        engine.runtime.state.stream.enabled = False
+        engine.context_builder = FakeContextBuilder()
+        engine.deliberation_service = FakeDeliberationService()
+        engine.plan_executor = FakePlanExecutor()
+        engine.response_synthesizer = FixedResponseSynth("Eso me vale, Leo.")
+        engine.memory_extractor = Mock()
+        delivered = []
+        emitted = []
+        logs = []
+        engine._deliver_voice_reply = lambda text: delivered.append(text)
+        engine._record_assistant_reply_for_conversation("Â¿tÃº quÃ© tal?", source="stt_voice", synthesizer=pending_marker())
+
+        with patch("builtins.print", lambda *args, **kwargs: logs.append(" ".join(str(arg) for arg in args))), \
+             patch("app.hebe_engine.emit", lambda event_type, data=None: emitted.append((event_type, data or {}))), \
+             patch("app.hebe_engine.log_chat"):
+            result = engine._process_stt_voice_transcript("Yo bien, sorprendido por tu respuesta.")
+
+        joined = "\n".join(logs)
+        self.assertEqual(result, "continue")
+        self.assertEqual(delivered, ["Eso me vale, Leo."])
+        self.assertEqual(engine.context_builder.inputs, ["yo bien sorprendido por tu respuesta"])
+        self.assertIn("[HEBE][CONVERSATION] pending_turn matched source=stt_voice", joined)
+        self.assertIn("[HEBE][COG] decision=conversation_followup", joined)
+        self.assertNotIn("reason=not_direct_command", joined)
+        self.assertTrue(any(event_type == "chat.user" for event_type, _ in emitted))
+
+    def test_pending_conversation_does_not_capture_filler_mumble(self):
+        engine = make_engine(["nuria"])
+        engine.runtime.state.stream.enabled = False
+        engine.context_builder = FakeContextBuilder()
+        engine.deliberation_service = FakeDeliberationService()
+        engine.plan_executor = FakePlanExecutor()
+        engine.response_synthesizer = FixedResponseSynth("No deberia sonar.")
+        engine.memory_extractor = Mock()
+        delivered = []
+        emitted = []
+        logs = []
+        engine._deliver_voice_reply = lambda text: delivered.append(text)
+        engine._record_assistant_reply_for_conversation("Â¿Quieres que responda al chat o genero una lÃ­nea?", source="stt_voice", synthesizer=pending_marker("clarification"))
+
+        with patch("builtins.print", lambda *args, **kwargs: logs.append(" ".join(str(arg) for arg in args))), \
+             patch("app.hebe_engine.emit", lambda event_type, data=None: emitted.append((event_type, data or {}))), \
+             patch("app.hebe_engine.log_chat"):
+            result = engine._process_stt_voice_transcript("Mmm...")
+
+        joined = "\n".join(logs)
+        self.assertEqual(result, "continue")
+        self.assertEqual(delivered, [])
+        self.assertEqual(engine.context_builder.inputs, [])
+        self.assertNotIn("decision=conversation_followup", joined)
+        self.assertFalse(any(event_type == "chat.user" for event_type, _ in emitted))
+
+    def test_ambient_stt_without_wakeword_does_not_enter_jarvis_chat(self):
+        engine = make_engine(["ciber"])
+        engine.runtime.state.stream.enabled = True
+        engine.context_builder = FakeContextBuilder()
+        engine.deliberation_service = FakeDeliberationService()
+        engine.plan_executor = FakePlanExecutor()
+        engine.response_synthesizer = FixedResponseSynth("No deberia sonar.")
+        delivered = []
+        emitted = []
+        logs = []
+        engine._deliver_voice_reply = lambda text: delivered.append(text)
+
+        with patch("builtins.print", lambda *args, **kwargs: logs.append(" ".join(str(arg) for arg in args))), \
+             patch("app.hebe_engine.emit", lambda event_type, data=None: emitted.append((event_type, data or {}))), \
+             patch("app.hebe_engine.log_chat"):
+            result = engine._process_stt_voice_transcript("10 no es nada personal, Ciber")
+
+        joined = "\n".join(logs)
+        self.assertEqual(result, "continue")
+        self.assertEqual(delivered, [])
+        self.assertEqual(engine.context_builder.inputs, [])
+        self.assertIn("[HEBE][STT_GATE] ambient_only reason=no_wake_no_valid_pending", joined)
+        self.assertIn("input_type=ambient_stt output_target=silent_context_update", joined)
+        self.assertNotIn("[HEBE][JARVIS][CHAT]", joined)
+        self.assertFalse(any(event_type == "chat.user" for event_type, _ in emitted))
+
+    def test_ambient_progress_updates_session_context_without_reply(self):
+        engine = make_engine(["nuria"])
+        engine.runtime.state.stream.enabled = True
+        engine.context_builder = FakeContextBuilder()
+        delivered = []
+        emitted = []
+        logs = []
+        engine._deliver_voice_reply = lambda text: delivered.append(text)
+
+        with patch("builtins.print", lambda *args, **kwargs: logs.append(" ".join(str(arg) for arg in args))), \
+             patch("app.hebe_engine.emit", lambda event_type, data=None: emitted.append((event_type, data or {}))), \
+             patch("app.hebe_engine.log_chat"):
+            result = engine._process_stt_voice_transcript("Ahora toca salir de la ciudad vieja")
+
+        joined = "\n".join(logs)
+        self.assertEqual(result, "continue")
+        self.assertEqual(delivered, [])
+        self.assertEqual(engine.context_builder.inputs, [])
+        self.assertEqual(engine.runtime.state.stream.current_run_objective, "ahora toca salir de la ciudad vieja")
+        self.assertIn("[HEBE][INPUT_CLASSIFY] source=stt_voice input_type=ambient_stream_context", joined)
+        self.assertIn("[HEBE][CONTEXT_RELEVANCE] useful=true", joined)
+        self.assertIn("[HEBE][SESSION_CONTEXT] updated=true", joined)
+        self.assertIn("[HEBE][RESPONSE_DECISION] should_reply=false reason=no_context_only", joined)
+        self.assertFalse(any(event_type == "chat.user" for event_type, _ in emitted))
+
+    def test_unknown_game_terms_are_stored_as_leo_context_without_invention(self):
+        engine = make_engine(["nuria"])
+        engine.runtime.state.stream.enabled = True
+        logs = []
+
+        with patch("builtins.print", lambda *args, **kwargs: logs.append(" ".join(str(arg) for arg in args))), \
+             patch("app.hebe_engine.emit"), \
+             patch("app.hebe_engine.log_chat"):
+            result = engine._process_stt_voice_transcript("Hemos pasado el palacio raro de Kamoshida")
+
+        self.assertEqual(result, "continue")
+        facts = engine.runtime.state.stream.recent_run_context_facts
+        self.assertTrue(any("kamoshida" in str(fact.get("raw_text") or "").lower() for fact in facts))
+        self.assertNotIn("chapter", "\n".join(logs).lower())
+
+    def test_direct_stt_declares_local_targets_and_does_not_post_to_twitch_chat(self):
+        engine = make_engine(["nuria"])
+        engine.runtime.state.tts_enabled = True
+        engine.handle_command = lambda command, source="voice": "continue"
+        logs = []
+
+        with patch("builtins.print", lambda *args, **kwargs: logs.append(" ".join(str(arg) for arg in args))), \
+             patch("app.hebe_engine.emit"), \
+             patch("app.hebe_engine.log_chat"):
+            result = engine._process_stt_voice_transcript("Hebe, que sabes de Persona 5 Royal?")
+
+        joined = "\n".join(logs)
+        self.assertEqual(result, "continue")
+        self.assertEqual(engine.runtime.twitch.sent, [])
+        self.assertIn("input_type=direct_stt output_target=local_ui+stream_tts", joined)
+        self.assertIn("[HEBE][INPUT_CLASSIFY] source=stt_voice input_type=explicit_question", joined)
+        self.assertIn("[HEBE][RESPONSE_DECISION] should_reply=true reason=direct_question", joined)
+
+    def test_direct_stt_can_post_to_twitch_only_via_stream_chat_action_plan(self):
+        engine = make_engine(["nuria"])
+        engine.runtime.state.tts_enabled = False
+        delivered = []
+        logs = []
+        engine._deliver_manual_reply = lambda text, *, source: delivered.append((source, text))
+
+        with patch("builtins.print", lambda *args, **kwargs: logs.append(" ".join(str(arg) for arg in args))), \
+             patch("app.hebe_engine.log_chat"):
+            result = engine._process_stt_voice_transcript("Hebe, dile al chat que vuelvo en 5 minutos")
+
+        joined = "\n".join(logs)
+        self.assertEqual(result, "continue")
+        self.assertEqual(engine.runtime.twitch.sent, ["vuelvo en 5 minutos"])
+        self.assertIn("[HEBE][ACTION_PLAN] action_type=stream_chat_message target=twitch_chat", joined)
+        self.assertIn("output_target=twitch_chat", joined)
+        self.assertEqual(delivered, [("stt_voice", "modelo:stream_chat_message:twitch_chat")])
+
+    def test_spontaneity_reply_is_voice_first_and_not_twitch_chat(self):
+        engine = make_engine(["nuria"])
+        engine.runtime.state.tts_enabled = True
+        engine.runtime.state.stream.policies.allow_tts_idle_prompts = True
+        emitted = []
+        logs = []
+
+        with patch("builtins.print", lambda *args, **kwargs: logs.append(" ".join(str(arg) for arg in args))), \
+             patch("app.hebe_engine.emit", lambda event_type, data=None: emitted.append((event_type, data or {}))):
+            engine._deliver_twitch_reply(
+                "Mira recursos antes de avanzar.",
+                event_type="twitch_idle_prompt",
+                payload={"idle_topic": "resource_management"},
+            )
+
+        joined = "\n".join(logs)
+        self.assertEqual(engine.runtime.twitch.sent, [])
+        engine.runtime.speak.assert_called_once_with("Mira recursos antes de avanzar.")
+        self.assertIn("input_type=spontaneity output_target=stream_tts", joined)
+        self.assertTrue(any(
+            event_type == "chat.assistant"
+            and data.get("source") == "spontaneity"
+            and data.get("output_target") == "local_ui"
+            for event_type, data in emitted
+        ))
+
+    def test_twitch_mention_reply_posts_to_twitch_chat_and_no_private_pending_turn(self):
+        engine = make_engine(["nuria"])
+        engine.runtime.state.tts_enabled = False
+        logs = []
+
+        with patch("builtins.print", lambda *args, **kwargs: logs.append(" ".join(str(arg) for arg in args))), \
+             patch("app.hebe_engine.emit"):
+            engine._deliver_twitch_reply("Corta y al pie.", event_type="twitch_chat_react", payload={})
+            engine._record_assistant_reply_for_conversation("¿tú qué tal?", source="twitch_chat_react", synthesizer=pending_marker())
+
+        self.assertEqual(engine.runtime.twitch.sent, ["Corta y al pie."])
+        self.assertFalse(hasattr(engine.runtime.state, "pending_conversation_turn"))
+        self.assertIn("input_type=twitch_mention_or_event output_target=twitch_chat", "\n".join(logs))
+
+    def test_ambient_game_commentary_does_not_enter_jarvis_unless_addressed(self):
+        engine = make_engine(["nuria"])
+        engine.runtime.state.stream.enabled = True
+        engine.context_builder = FakeContextBuilder()
+        delivered = []
+        logs = []
+        engine._deliver_voice_reply = lambda text: delivered.append(text)
+
+        with patch("builtins.print", lambda *args, **kwargs: logs.append(" ".join(str(arg) for arg in args))), \
+             patch("app.hebe_engine.emit"), \
+             patch("app.hebe_engine.log_chat"):
+            result = engine._process_stt_voice_transcript("me han pillado eso como si se les creyo")
+
+        self.assertEqual(result, "continue")
+        self.assertEqual(delivered, [])
+        self.assertEqual(engine.context_builder.inputs, [])
+        self.assertIn("[HEBE][STT_GATE] ambient_only reason=no_wake_no_valid_pending", "\n".join(logs))
+
+    def test_pending_turn_not_created_for_twitch_source(self):
+        engine = make_engine(["nuria"])
+
+        engine._record_assistant_reply_for_conversation("¿tú qué tal?", source="twitch_chat_react", synthesizer=pending_marker())
+
+        self.assertFalse(hasattr(engine.runtime.state, "pending_conversation_turn"))
+
+    def test_pending_conversation_expires_after_ttl(self):
+        engine = make_engine(["nuria"])
+        engine.pending_conversation_ttl_seconds = 1
+
+        with patch("time.time", return_value=1000.0):
+            engine._record_assistant_reply_for_conversation("Â¿tÃº quÃ© tal?", source="stt_voice", synthesizer=pending_marker())
+        with patch("time.time", return_value=1002.0):
+            self.assertFalse(engine._pending_conversation_matches(source="stt_voice"))
+
+        self.assertEqual(engine.runtime.state.pending_conversation_turn["status"], "expired")
+
+    def test_unrelated_action_during_pending_conversation_still_uses_action_flow(self):
+        engine = make_engine(["nuria"])
+        delivered = []
+        engine._deliver_manual_reply = lambda text, *, source: delivered.append((source, text))
+        engine._record_assistant_reply_for_conversation("Â¿tÃº quÃ© tal?", source="stt_voice", synthesizer=pending_marker())
+
+        with patch.dict(os.environ, {"HEBE_APP_OBS_PATH": r"C:\Tools\OBS\obs64.exe"}), \
+             patch("app.hebe_engine.log_chat"):
+            result = engine._process_stt_voice_transcript("Hebe abre OBS")
+
+        self.assertEqual(result, "continue")
+        self.assertEqual(engine.runtime.win.opened[0]["app_id"], "obs")
+        self.assertEqual(delivered, [("stt_voice", "modelo:open_application:obs")])
+
+    def test_duplicate_stt_followup_is_processed_only_once(self):
+        engine = make_engine(["nuria"])
+        engine.runtime.state.stream.enabled = False
+        engine.context_builder = FakeContextBuilder()
+        engine.deliberation_service = FakeDeliberationService()
+        engine.plan_executor = FakePlanExecutor()
+        engine.response_synthesizer = FixedResponseSynth("Te sigo.")
+        engine.memory_extractor = Mock()
+        emitted = []
+        engine._deliver_voice_reply = lambda text: None
+        engine._record_assistant_reply_for_conversation("Â¿tÃº quÃ© tal?", source="stt_voice", synthesizer=pending_marker())
+
+        with patch("app.hebe_engine.emit", lambda event_type, data=None: emitted.append((event_type, data or {}))), \
+             patch("app.hebe_engine.log_chat"):
+            first = engine._process_stt_voice_transcript("Yo bien, sorprendido por tu respuesta.")
+            second = engine._process_stt_voice_transcript("Yo bien sorprendido por tu respuesta.")
+
+        self.assertEqual(first, "continue")
+        self.assertEqual(second, "continue")
+        self.assertEqual(engine.context_builder.inputs, ["yo bien sorprendido por tu respuesta"])
+        rejected = [data for event_type, data in emitted if event_type == "voice.command" and data.get("status") == "rejected"]
+        self.assertEqual(rejected[-1]["reason"], "duplicate_recent_transcript")
+
+    def test_response_tone_guard_removes_hostile_direct_insult_greeting(self):
+        ctx = SimpleNamespace(message_type="small_talk")
+        synth = ResponseSynthesizer(conversation_model=None)
+
+        guarded = synth._guard_hostile_direct_insult_greeting(
+            "Hija de puta, aquÃ­ sobreviviendo. Â¿tÃº quÃ© tal, jefe?",
+            ctx,
+        )
+
+        self.assertNotIn("Hija de puta", guarded)
+        self.assertIn("aquÃ­ sobreviviendo", guarded)
 
     def test_unsupported_script_retries_forced_spanish_and_routes_valid_latin_result(self):
         engine = make_engine(["nuria"])
@@ -469,14 +990,14 @@ class VoiceCommandPipelineTests(unittest.TestCase):
 
         with patch("builtins.print", lambda *args, **kwargs: logs.append(" ".join(str(arg) for arg in args))), \
              patch("app.hebe_engine.emit", lambda event_type, data=None: emitted.append((event_type, data or {}))):
-            result = engine._process_stt_voice_transcript("यब आबरे अबे यशे")
+            result = engine._process_stt_voice_transcript("à¤¯à¤¬ à¤†à¤¬à¤°à¥‡ à¤…à¤¬à¥‡ à¤¯à¤¶à¥‡")
 
         joined = "\n".join(logs)
         self.assertEqual(result, "continue")
         self.assertEqual(engine.runtime.stt.calls, [{"language": "es"}])
         self.assertEqual(routed[0][0], "stt_voice")
         self.assertEqual(routed[0][1], "abre obs")
-        self.assertEqual(routed[0][2].raw_text, "यब आबरे अबे यशे")
+        self.assertEqual(routed[0][2].raw_text, "à¤¯à¤¬ à¤†à¤¬à¤°à¥‡ à¤…à¤¬à¥‡ à¤¯à¤¶à¥‡")
         self.assertEqual(routed[0][2].normalized_text, "hebe abre obs")
         self.assertIn("[HEBE][STT][RETRY] reason=unsupported_script forcing_language=es", joined)
         self.assertIn("[HEBE][STT][RETRY_RESULT] raw='Hebe abre OBS' accepted=true", joined)
@@ -492,19 +1013,19 @@ class VoiceCommandPipelineTests(unittest.TestCase):
         engine.handle_command = lambda command, source="voice": handled.append((source, command)) or "continue"
 
         with patch("app.hebe_engine.emit", lambda event_type, data=None: emitted.append((event_type, data or {}))):
-            result = engine._process_stt_voice_transcript("यब आबरे अबे यशे")
+            result = engine._process_stt_voice_transcript("à¤¯à¤¬ à¤†à¤¬à¤°à¥‡ à¤…à¤¬à¥‡ à¤¯à¤¶à¥‡")
 
         self.assertEqual(result, "continue")
         self.assertEqual(handled, [])
         rejected = [data for event_type, data in emitted if event_type == "voice.command" and data.get("status") == "rejected"]
         self.assertTrue(rejected)
-        self.assertEqual(rejected[-1]["reason"], "stt_prompt_injection")
-        self.assertEqual(rejected[-1]["raw_text"], "")
+        self.assertEqual(rejected[-1]["reason"], "stt_prompt_echo_or_hotword_list")
+        self.assertEqual(rejected[-1]["raw_text"], "à¤¯à¤¬ à¤†à¤¬à¤°à¥‡ à¤…à¤¬à¥‡ à¤¯à¤¶à¥‡")
         self.assertEqual(rejected[-1]["retry_transcript"], "")
 
     def test_unsupported_script_retry_still_unsupported_is_rejected(self):
         engine = make_engine(["nuria"])
-        engine.runtime.stt = RetrySTT("यब आबरे अबे यशे")
+        engine.runtime.stt = RetrySTT("à¤¯à¤¬ à¤†à¤¬à¤°à¥‡ à¤…à¤¬à¥‡ à¤¯à¤¶à¥‡")
         handled = []
         engine.handle_command = lambda command, source="voice": handled.append((source, command)) or "continue"
         emitted = []
@@ -512,7 +1033,7 @@ class VoiceCommandPipelineTests(unittest.TestCase):
 
         with patch("builtins.print", lambda *args, **kwargs: logs.append(" ".join(str(arg) for arg in args))), \
              patch("app.hebe_engine.emit", lambda event_type, data=None: emitted.append((event_type, data or {}))):
-            result = engine._process_stt_voice_transcript("यब आबरे अबे यशे")
+            result = engine._process_stt_voice_transcript("à¤¯à¤¬ à¤†à¤¬à¤°à¥‡ à¤…à¤¬à¥‡ à¤¯à¤¶à¥‡")
 
         self.assertEqual(result, "continue")
         self.assertEqual(handled, [])
@@ -521,7 +1042,7 @@ class VoiceCommandPipelineTests(unittest.TestCase):
         self.assertTrue(rejected)
         self.assertEqual(rejected[-1]["reason"], "unsupported_script_after_retry")
         self.assertTrue(rejected[-1]["retry_attempted"])
-        self.assertEqual(rejected[-1]["retry_transcript"], "यब आबरे अबे यशे")
+        self.assertEqual(rejected[-1]["retry_transcript"], "à¤¯à¤¬ à¤†à¤¬à¤°à¥‡ à¤…à¤¬à¥‡ à¤¯à¤¶à¥‡")
 
     def test_retry_valid_eve_transcript_is_handled_by_wake_resolver(self):
         engine = make_engine(["nuria"])
@@ -529,7 +1050,7 @@ class VoiceCommandPipelineTests(unittest.TestCase):
         delivered = []
         engine._deliver_manual_reply = lambda text, *, source: delivered.append((source, text))
 
-        result = engine._process_stt_voice_transcript("यब आबरे अबे यशे")
+        result = engine._process_stt_voice_transcript("à¤¯à¤¬ à¤†à¤¬à¤°à¥‡ à¤…à¤¬à¥‡ à¤¯à¤¶à¥‡")
 
         self.assertEqual(result, "continue")
         self.assertEqual(delivered, [("stt_voice", "modelo:already_awake:")])
@@ -540,7 +1061,7 @@ class VoiceCommandPipelineTests(unittest.TestCase):
         captured = []
         engine.handle_command = lambda command, source="voice": captured.append(command) or "continue"
 
-        engine._process_stt_voice_transcript("यब आबरे अबे यशे")
+        engine._process_stt_voice_transcript("à¤¯à¤¬ à¤†à¤¬à¤°à¥‡ à¤…à¤¬à¥‡ à¤¯à¤¶à¥‡")
 
         self.assertEqual(captured, ["abre obs"])
 
@@ -557,7 +1078,9 @@ class VoiceCommandPipelineTests(unittest.TestCase):
         self.assertEqual(result, "continue")
         self.assertIn("[HEBE][INPUT] source=stt_voice raw='Estoy hablando solo'", joined)
         self.assertIn("[HEBE][COG] incoming source='stt_voice'", joined)
-        self.assertIn("[HEBE][COG] decision=rejected reason=not_direct_command", joined)
+        self.assertIn("[HEBE][INPUT_CLASSIFY] source=stt_voice input_type=ambient_stream_context", joined)
+        self.assertIn("[HEBE][RESPONSE_DECISION] should_reply=false reason=no_ignore", joined)
+        self.assertIn("[HEBE][COG] decision=ambient_ignored_low_value reason=not_direct_command", joined)
 
     def test_stt_shoutout_without_wakeword_still_has_action_intent(self):
         engine = make_engine(["nuria"])
@@ -639,3 +1162,5 @@ class VoiceCommandPipelineTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+

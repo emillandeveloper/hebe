@@ -42,6 +42,8 @@ class StreamActionPlanner:
                 return self._plan_stt_ambient(candidate)
             if candidate.intent == "twitch_shoutout":
                 return self._plan_shoutout(candidate, input_event)
+            if candidate.intent == "stream_chat_message":
+                return self._plan_chat_message(candidate)
         return None
 
     def _plan_stt_ambient(self, candidate) -> ActionPlan:
@@ -122,6 +124,31 @@ class StreamActionPlanner:
                 "resolved_username": target,
                 "requires_confirmation": status != "complete",
             },
+        )
+
+    def _plan_chat_message(self, candidate) -> ActionPlan:
+        message = str((candidate.entities or {}).get("message") or "").strip()
+        checks = self._stream_context_checks()
+        if not message:
+            return ActionPlan(
+                action_type="stream_chat_message",
+                status="needs_confirmation",
+                confidence=float(candidate.confidence),
+                requires_stream=True,
+                reason="missing_message",
+                missing_slots=["message"],
+                context_checks=checks,
+                slots={"message": ""},
+            )
+        return ActionPlan(
+            action_type="stream_chat_message",
+            status="complete",
+            confidence=float(candidate.confidence),
+            target="twitch_chat",
+            requires_stream=True,
+            reason="ok",
+            context_checks=checks,
+            slots={"message": message},
         )
 
     def _resolve_target(self, raw_target: str) -> tuple[str | None, float, list[str], str]:

@@ -1,4 +1,6 @@
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from app.cognitive.command_result import CommandResult
 from app.cognitive.response_synthesizer import ResponseSynthesizer
@@ -12,6 +14,18 @@ class FakeModel:
     def chat(self, messages, **kwargs):
         self.calls.append((messages, kwargs))
         return self.text
+
+
+class SequenceModel:
+    def __init__(self, texts):
+        self.texts = list(texts)
+        self.calls = []
+
+    def chat(self, messages, **kwargs):
+        self.calls.append((messages, kwargs))
+        if self.texts:
+            return self.texts.pop(0)
+        return ""
 
 
 class CommandResultSynthesisTests(unittest.TestCase):
@@ -98,6 +112,142 @@ class CommandResultSynthesisTests(unittest.TestCase):
         reply = synth.synthesize_command_result(result, input_text="hebe abre obs")
 
         self.assertEqual(reply, "Abriendo OBS Studio.")
+
+    def test_assistant_like_save_publish_offer_uses_fallback(self):
+        model = FakeModel("Perfecto, tomo nota. Te lo guardo. Quieres que lo publique en stream?")
+        synth = ResponseSynthesizer(conversation_model=model)
+        result = CommandResult(
+            action_type="stream_context_note",
+            success=True,
+            user_visible_summary="Context noted.",
+            state_changes={"ok": True},
+            fallback_text="Vale, queda hecho.",
+            requires_model_response=True,
+            metadata={"message_goal": "Confirm briefly."},
+        )
+
+        reply = synth.synthesize_command_result(result, input_text="ok")
+
+        self.assertEqual(reply, result.fallback_text)
+
+    def test_style_guard_blocks_creator_and_helper_phrases(self):
+        synth = ResponseSynthesizer(conversation_model=None)
+
+        reply = synth._guard_style("Tomo nota, tú mandas creador. ¿Quieres que lo guarde?", fallback="Corto y claro.")
+
+        self.assertEqual(reply, "Corto y claro.")
+
+    def test_style_guard_trims_bad_final_assistant_offer(self):
+        synth = ResponseSynthesizer(conversation_model=None)
+        bad = (
+            "Me alegro, guapo. A ver si tanta confianza te sirve para algo util hoy. "
+            "Que quieres que haga o comente ahora?"
+        )
+        logs = []
+
+        with patch("builtins.print", lambda *args, **kwargs: logs.append(" ".join(str(arg) for arg in args))):
+            reply = synth._guard_style(bad)
+
+        self.assertEqual(reply, "Me alegro, guapo. A ver si tanta confianza te sirve para algo util hoy.")
+        self.assertNotIn("Eso son", reply)
+        self.assertIn("action=trimmed", "\n".join(logs))
+
+    def test_style_guard_regenerates_when_trim_cannot_save_reply(self):
+        model = SequenceModel(["Me alegro, guapo. Hoy vienes subido, pero con gracia."])
+        synth = ResponseSynthesizer(conversation_model=model)
+        logs = []
+
+        with patch("builtins.print", lambda *args, **kwargs: logs.append(" ".join(str(arg) for arg in args))):
+            reply = synth._guard_style("Quieres que haga algo ahora?", source_text="estoy contento")
+
+        self.assertEqual(reply, "Me alegro, guapo. Hoy vienes subido, pero con gracia.")
+        self.assertEqual(len(model.calls), 1)
+        self.assertIn("action=regenerated", "\n".join(logs))
+        self.assertNotIn("Eso sonÃ³ raro hasta para mÃ­, jefe", reply)
+
+    def test_style_guard_minimal_stt_fallback_is_neutral_and_warns_on_repeat(self):
+        synth = ResponseSynthesizer(conversation_model=None)
+        ctx = SimpleNamespace(source="stt_voice", input_text="ruido")
+        logs = []
+
+        with patch("builtins.print", lambda *args, **kwargs: logs.append(" ".join(str(arg) for arg in args))):
+            first = synth._guard_style("Tomo nota.", context=ctx, allow_minimal_fallback=True)
+            second = synth._guard_style("Tomo nota.", context=ctx, allow_minimal_fallback=True)
+
+        self.assertEqual(first, "No te he entendido bien.")
+        self.assertEqual(second, "No te he entendido bien.")
+        joined = "\n".join(logs)
+        self.assertIn("action=minimal_fallback", joined)
+        self.assertIn("[HEBE][STYLE_GUARD][WARN] repeated_fallback_detected", joined)
+        self.assertNotIn("Eso sonÃ³ raro hasta para mÃ­, jefe", first + second)
+
+    def test_style_guard_does_not_use_hardcoded_personality_fallback(self):
+        synth = ResponseSynthesizer(conversation_model=None)
+
+        reply = synth._guard_style(
+            "Tomo nota.",
+            fallback="Eso sonÃ³ raro hasta para mÃ­, jefe.",
+        )
+
+        self.assertEqual(reply, "")
+
+    def test_action_offer_phrase_requires_structured_action_permission(self):
+        synth = ResponseSynthesizer(conversation_model=None)
+
+        blocked = synth._guard_style("Lo publico en stream.")
+        allowed = synth._guard_style("Lo publico en stream.", allow_action_offers=True)
+
+        self.assertEqual(blocked, "")
+        self.assertEqual(allowed, "Lo publico en stream.")
+
+    def test_style_guard_trims_default_followup_question_from_mood_reply(self):
+        synth = ResponseSynthesizer(conversation_model=None)
+        ctx = SimpleNamespace(message_type="small_talk", input_text="Estoy bastante contento.")
+        reply = synth._guard_style(
+            "Me alegro, jefe. Que dure la racha. Â¿Contento por quÃ©?",
+            context=ctx,
+        )
+
+        self.assertEqual(reply, "Me alegro, jefe. Que dure la racha.")
+
+    def test_style_guard_regenerates_single_question_into_statement(self):
+        model = SequenceModel(["Me alegro, jefe. Que dure la racha."])
+        synth = ResponseSynthesizer(conversation_model=model)
+        ctx = SimpleNamespace(message_type="small_talk", input_text="Estoy bastante contento.")
+
+        reply = synth._guard_style("Contento por que?", context=ctx)
+
+        self.assertEqual(reply, "Me alegro, jefe. Que dure la racha.")
+        self.assertEqual(len(model.calls), 1)
+
+    def test_style_guard_allows_question_when_explicitly_requested(self):
+        synth = ResponseSynthesizer(conversation_model=None)
+        ctx = SimpleNamespace(message_type="clarification", input_text="Hebe, haz SO")
+
+        reply = synth._guard_style("A quien le hago el SO?", context=ctx)
+
+        self.assertEqual(reply, "A quien le hago el SO?")
+
+    def test_style_guard_blocks_repeated_tu_que_tal_loop(self):
+        model = SequenceModel(["AquÃ­ seguimos, Leo. Sin incendios nuevos."])
+        synth = ResponseSynthesizer(conversation_model=model)
+        ctx = SimpleNamespace(message_type="small_talk", input_text="Estoy bastante contento.")
+
+        reply = synth._guard_style("Me alegro, jefe. Tu que tal?", context=ctx)
+
+        self.assertEqual(reply, "Me alegro, jefe.")
+        self.assertNotIn("que tal", reply.casefold())
+
+    def test_style_guard_trims_customer_support_choice_from_tired_reply(self):
+        synth = ResponseSynthesizer(conversation_model=None)
+        ctx = SimpleNamespace(message_type="small_talk", input_text="Estoy cansado.")
+
+        reply = synth._guard_style(
+            "Normal. Hoy vienes con la barra de energia en rojo. Quieres que te recomiende descansar?",
+            context=ctx,
+        )
+
+        self.assertEqual(reply, "Normal. Hoy vienes con la barra de energia en rojo.")
 
 
 if __name__ == "__main__":

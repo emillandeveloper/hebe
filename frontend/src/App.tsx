@@ -795,6 +795,11 @@ function QuickControlToolbar({ disabled, onCommand }: { disabled: boolean; onCom
     {
       title: "Stream",
       items: [
+        ["Prep", "Preparar hoy", "Hebe, prepara el stream de hoy"],
+        ["Title", "Título", "Hebe, sugiere título para hoy"],
+        ["Start", "Guardar inicio", "Hebe, guarda que empezamos por confirmar"],
+        ["End", "Guardar final", "Hebe, guarda que terminamos por confirmar"],
+        ["View", "Ver sesión", "Hebe, prepara el stream de hoy"],
         ["ðŸ”„", "Actualizar contexto", "Hebe, actualiza contexto de stream"],
         ["ðŸ“¡", "Estado stream", "Hebe, quÃ© contexto de stream tienes"],
         ["ðŸ§ ", "Contexto partida", "Hebe, quÃ© contexto de partida tienes"],
@@ -905,6 +910,11 @@ function LiveControlToolbar({
     {
       title: "STREAM",
       items: [
+        { icon: "Prep", label: "Preparar", command: "Hebe, prepara el stream de hoy", featured: true },
+        { icon: "Title", label: "Título", command: "Hebe, sugiere título para hoy", featured: true },
+        { icon: "Start", label: "Inicio", command: "Hebe, guarda que empezamos por confirmar" },
+        { icon: "End", label: "Final", command: "Hebe, guarda que terminamos por confirmar" },
+        { icon: "View", label: "Sesión", command: "Hebe, prepara el stream de hoy" },
         { icon: "ðŸ”„", label: "Contexto", command: "Hebe, actualiza contexto de stream", featured: true },
         { icon: "ðŸ“¡", label: "Estado", command: "Hebe, quÃ© contexto de stream tienes", featured: true },
         { icon: "ðŸ§ ", label: "Partida", command: "Hebe, quÃ© contexto de partida tienes", featured: true },

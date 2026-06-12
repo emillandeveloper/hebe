@@ -44,10 +44,17 @@ class WakeNameResolver:
         has_wake = any(token in self.wake_concepts for token in stripped_tokens)
         has_sleep = any(token in self.sleep_concepts for token in stripped_tokens)
         has_command_context = self._has_command_context(stripped_tokens, command_markers)
+        has_assistant_question_context = self._has_assistant_question_context(stripped_tokens)
 
         if matched_name:
             confidence = name_score
-            if matched_name == "eve" and not (has_wake or has_sleep or has_command_context or is_sleeping):
+            if matched_name == "eve" and not (
+                has_wake
+                or has_sleep
+                or has_command_context
+                or has_assistant_question_context
+                or is_sleeping
+            ):
                 return WakeNameResolution(
                     addressed_to_hebe=False,
                     matched_name=matched_name,
@@ -62,7 +69,13 @@ class WakeNameResolver:
                 matched_name=matched_name,
                 stripped_text=stripped,
                 confidence=confidence,
-                reason="name_with_command_context" if has_command_context else "name_match",
+                reason=(
+                    "name_with_command_context"
+                    if has_command_context
+                    else "phonetic_alias"
+                    if matched_name == "eve" and has_assistant_question_context
+                    else "name_match"
+                ),
             )
 
         if is_sleeping:
@@ -85,11 +98,9 @@ class WakeNameResolver:
     def _find_name(self, tokens: list[str]) -> tuple[int | None, str | None, float]:
         if not tokens:
             return None, None, 0.0
-        candidates = [(0, tokens[0])]
+        candidates = [(index, token) for index, token in enumerate(tokens)]
         if len(tokens) >= 2:
-            candidates.append((0, f"{tokens[0]} {tokens[1]}"))
-        if len(tokens) > 1:
-            candidates.append((len(tokens) - 1, tokens[-1]))
+            candidates.extend((index, f"{tokens[index]} {tokens[index + 1]}") for index in range(len(tokens) - 1))
         best: tuple[int | None, str | None, float] = (None, None, 0.0)
         for index, token in candidates:
             compact = token.replace(" ", "")
@@ -111,12 +122,25 @@ class WakeNameResolver:
                 values = values[1:]
         elif name_index == len(values) - 1:
             values = values[:-1]
+        elif 0 <= name_index < len(values):
+            if name_index + 1 < len(values) and f"{values[name_index]}{values[name_index + 1]}" == "eb":
+                values = values[:name_index] + values[name_index + 2 :]
+            else:
+                values = values[:name_index] + values[name_index + 1 :]
         return " ".join(values).strip()
 
     def _has_command_context(self, tokens: list[str], command_markers: Iterable[str] | None) -> bool:
         markers = {self._normalize(item) for item in (command_markers or []) if str(item or "").strip()}
         marker_tokens = {part for marker in markers for part in marker.split()}
         return bool(set(tokens) & marker_tokens)
+
+    def _has_assistant_question_context(self, tokens: list[str]) -> bool:
+        if not tokens:
+            return False
+        values = set(tokens)
+        greeting = bool(values & {"hola", "buenas", "hey", "oye"})
+        question = bool(values & {"como", "que", "q", "estas", "tal", "puedes", "quieres", "haces"})
+        return greeting and question
 
     def _normalize(self, text: str) -> str:
         value = str(text or "").lower()

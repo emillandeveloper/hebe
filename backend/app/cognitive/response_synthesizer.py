@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 import random
+import re
+import unicodedata
 import uuid
 from typing import Any
 
@@ -28,10 +30,57 @@ from app.cognitive.persona.stream_dataset_logger import StreamDatasetLogger
 from app.core.ui_bridge import emit
 
 
-# Cuántas veces reintentamos la generación si detectamos un patrón helper.
+# Cuantas veces reintentamos la generacion si detectamos un patron helper.
 # 1 retry suele bastar: con seed distinto, qwen 2.5:3b suele recuperarse.
 # Subirlo aumenta latencia por mensaje y puede no aportar nada.
 MAX_HELPER_RETRIES = int(os.getenv("HEBE_MAX_HELPER_RETRIES", "1"))
+
+_ASSISTANT_OFFER_PHRASES = (
+    "tomo nota",
+    "te lo guardo",
+    "lo guardo",
+    "guardar en memoria",
+    "guarde en memoria",
+    "lo publico",
+    "lo publicar",
+    "publicarlo en stream",
+    "publique en el stream",
+    "publicar en stream",
+    "usar como linea",
+    "use como linea",
+    "responda solo cuando",
+    "dimelo claro",
+    "dimelo claro",
+    "tu mandas creador",
+    "tu mandas creador",
+    "tu mandas, creador",
+    "tu mandas, creador",
+    "puedo ayudarte",
+    "tu que tal",
+    "tu que tal",
+    "quieres que",
+    "quieres que",
+)
+
+
+_ACTION_OFFER_PHRASES = (
+    "lo publico",
+    "lo publicar",
+    "publicarlo",
+    "publicarlo en stream",
+    "publique en el stream",
+    "publicar en stream",
+    "usar como linea",
+    "use como linea",
+    "guardar en memoria",
+    "guarde en memoria",
+)
+
+_STYLE_GUARD_PERSONALITY_FALLBACKS = (
+    "personality fallback marker",
+)
+
+_STYLE_GUARD_MINIMAL_FALLBACK = "No te he entendido bien."
 
 
 class ResponseSynthesizer:
@@ -39,16 +88,19 @@ class ResponseSynthesizer:
     Convierte:
     - contexto
     - resultado de deliberation
-    - resultado de ejecución
+    - resultado de ejecucion
 
     en una respuesta natural generada por el modelo conversacional.
     """
 
     def __init__(self, conversation_model: Any | None = None):
         self.conversation_model = conversation_model
-        # Métricas acumuladas del stream (en memoria, se pierden al reiniciar).
+        self.last_opens_conversation_turn = False
+        self.last_expected_reply_type = ""
+        # Metricas acumuladas del stream (en memoria, se pierden al reiniciar).
         self._stream_stats = StreamReplyStats()
         self._dataset_logger = StreamDatasetLogger()
+        self._style_guard_fallback_counts: dict[str, int] = {}
 
     # =========================
     # Entry point
@@ -111,7 +163,7 @@ class ResponseSynthesizer:
         if event.event_type.startswith("twitch_"):
             return self._generate_twitch_reply(event, context)
 
-        return self._fallback_text("Ha ocurrido algo, pero no tengo claro qué.")
+        return self._fallback_text("Ha ocurrido algo, pero no tengo claro que.")
 
     # =========================
     # Mode-specific generation
@@ -140,9 +192,9 @@ class ResponseSynthesizer:
         )
 
         fallback = (
-            f"Vale, te lo guardo: {title} el {self._format_datetime(due_at)}. Te avisaré cuando toque."
+            f"Vale, te lo guardo: {title} el {self._format_datetime(due_at)}. Te avisare cuando toque."
             if due_at
-            else f"Vale, te lo guardo: {title}. Te avisaré cuando toque."
+            else f"Vale, te lo guardo: {title}. Te avisare cuando toque."
         )
 
         return clean_jarvis_reply(self._call_model(system, user, fallback=fallback)) or fallback
@@ -222,13 +274,13 @@ class ResponseSynthesizer:
 
     def _generate_chat_reply(self, context: BuiltContext) -> str:
         """
-        Respuesta de Hebe en modo JARVIS (conversación directa con Leo desde la UI).
+        Respuesta de Hebe en modo JARVIS (conversacion directa con Leo desde la UI).
 
         Usa la identidad central de Hebe + estilo privado. No reutiliza el
         bloque Twitch, porque private/JARVIS tiene otro formato y longitud.
 
         Estructura del prompt:
-          system  : voz + few-shots (siempre idéntico → cacheable)
+          system  : voz + few-shots (siempre identico  cacheable)
           messages: [turn1_user, turn1_assistant, ..., current_user]
           current_user: mensaje de Leo PRIMERO, bloque de memoria al FINAL
         """
@@ -236,12 +288,21 @@ class ResponseSynthesizer:
 
         system = (
             f"{build_hebe_core_identity()}\n\n"
-            f"{build_private_mode_style()}"
+            f"{build_private_mode_style()}\n\n"
+            "Style guard:\n"
+            "- Voice replies are one sentence, max two.\n"
+            "- Default reply shape: one short statement, optional playful jab, no follow-up question.\n"
+            "- Do not sound like a generic assistant or support bot.\n"
+            "- Do not try to keep every conversation going. React naturally and stop.\n"
+            "- Do not turn Leo's mood or casual statements into tasks.\n"
+            "- Do not end with questions unless the system explicitly requested clarification or confirmation.\n"
+            "- Do not offer to save, publish, configure, remember, or use a line unless Leo explicitly asked.\n"
+            "- Avoid: tomo nota, te lo guardo, publicar en stream, quieres que, puedo ayudarte, dimelo claro, tu mandas creador.\n"
         )
 
-        # Construcción del user actual: mensaje PRIMERO, memoria al FINAL.
-        # El mensaje va primero para que el prefijo del último user sea relativamente
-        # estable; la memoria (variable por similitud semántica) va al final.
+        # Construccion del user actual: mensaje PRIMERO, memoria al FINAL.
+        # El mensaje va primero para que el prefijo del ultimo user sea relativamente
+        # estable; la memoria (variable por similitud semantica) va al final.
         user_parts: list[str] = [
             "Speaker: Leo, your companion and broadcaster. "
             "Do not treat him like a random viewer. You can tease him with trust.\n\n"
@@ -250,13 +311,29 @@ class ResponseSynthesizer:
             + (
                 "This is casual small talk or banter. Answer directly in character, maximum two short sentences. "
                 "Respond to Leo's mood first. Do not recap previous conversation, do not mention memory, "
-                "do not mention calendar or stream schedule, and do not ask planning questions.\n\n"
+                "do not mention calendar or stream schedule, and do not ask planning questions or follow-up questions. "
+                "Do not open casual greetings with a hostile direct insult toward Leo; playful profanity is allowed, "
+                "but keep voice-mode replies short and warm underneath the sarcasm.\n\n"
                 if getattr(context, "message_type", "unknown") in {"small_talk", "banter"}
                 else ""
             )
             +
             f"Leo: {msg}"
         ]
+        response_frame = getattr(context, "response_frame", {}) or {}
+        if isinstance(response_frame, dict) and response_frame:
+            user_parts.append(
+                "ResponseFrame:\n"
+                f"- input_type: {response_frame.get('input_type')}\n"
+                f"- source: {response_frame.get('source')}\n"
+                f"- should_reply: {response_frame.get('should_reply')}\n"
+                f"- output_target: {response_frame.get('output_target')}\n"
+                f"- allow_question: {response_frame.get('allow_question')}\n"
+                f"- max_questions: {response_frame.get('max_questions')}\n"
+                f"- max_sentences: {response_frame.get('max_sentences')}\n"
+                f"- intent: {response_frame.get('intent')}\n"
+                "Follow this frame. If allow_question is false, end with a statement."
+            )
 
         entity_lines = entity_prompt_lines(getattr(context, "resolved_entities", []) or [])
         if entity_lines:
@@ -282,8 +359,8 @@ class ResponseSynthesizer:
 
         current_user_content = "\n\n".join(user_parts)
 
-        # Construcción del array messages: historial + turno actual.
-        # Los turnos históricos van limpios (sin bloque de memoria).
+        # Construccion del array messages: historial + turno actual.
+        # Los turnos historicos van limpios (sin bloque de memoria).
         messages: list[dict] = []
         for turn in context.conversation_history:
             messages.append({"role": turn["role"], "content": turn["content"]})
@@ -298,30 +375,243 @@ class ResponseSynthesizer:
         )
 
         raw = self._call_model(system, messages=messages, fallback="")
-        reply = clean_jarvis_reply(raw)
+        reply = self._guard_style(
+            clean_jarvis_reply(raw),
+            context=context,
+            source_text=msg,
+            system=system,
+            messages=messages,
+            allow_minimal_fallback=getattr(context, "source", "") == "stt_voice",
+        )
+        reply = self._guard_hostile_direct_insult_greeting(reply, context)
+        self._mark_conversation_turn(reply, context)
 
         print(
             f"[HEBE][JARVIS][REPLY] raw={raw!r} cleaned={reply!r}",
             flush=True,
         )
 
-        return reply or self._fallback_text("No tengo una respuesta útil ahora mismo.")
+        return reply or self._fallback_text("No tengo una respuesta util ahora mismo.")
 
     # =========================
-    # Prompt builders — devuelven (system, user)
+    # Prompt builders  devuelven (system, user)
     # =========================
 
+    def _mark_conversation_turn(self, reply: str, context: BuiltContext | None = None) -> None:
+        self.last_opens_conversation_turn = False
+        self.last_expected_reply_type = ""
+        text = str(reply or "").strip()
+        if not text or "?" not in text:
+            return
+        if text.count("?") > 2:
+            return
+        lowered = text.casefold()
+        if any(phrase in lowered for phrase in _ASSISTANT_OFFER_PHRASES):
+            return
+        if any(marker in lowered for marker in ("tu que tal", "que tal", "como estas")):
+            self.last_opens_conversation_turn = True
+            self.last_expected_reply_type = "casual_answer"
+            return
+        message_type = getattr(context, "message_type", "unknown") if context is not None else "unknown"
+        if message_type in {"direct_question", "task_request"} and any(
+            marker in lowered for marker in ("confirmas", "a quien", "a quien", "cual", "cual")
+        ):
+            self.last_opens_conversation_turn = True
+            self.last_expected_reply_type = "clarification"
+
+    def _guard_style(
+        self,
+        reply: str,
+        *,
+        context: BuiltContext | None = None,
+        fallback: str = "",
+        source_text: str = "",
+        system: str | None = None,
+        messages: list[dict] | None = None,
+        allow_minimal_fallback: bool = False,
+        allow_action_offers: bool = False,
+        allow_questions: bool = False,
+    ) -> str:
+        text = str(reply or "").strip()
+        if not text:
+            return text
+
+        blocked_phrase = self._style_guard_blocked_phrase(
+            text,
+            allow_action_offers=allow_action_offers,
+        )
+        if not blocked_phrase and text.count("?") > 2:
+            blocked_phrase = "multiple_questions"
+        if not blocked_phrase and self._style_guard_has_question(text) and not (
+            allow_questions or self._style_guard_questions_allowed(context, source_text=source_text)
+        ):
+            blocked_phrase = "unneeded_question"
+        if not blocked_phrase:
+            print("[HEBE][STYLE_GUARD] action=model", flush=True)
+            return text
+
+        trimmed = self._style_guard_trim_bad_sentence(
+            text,
+            blocked_phrase=blocked_phrase,
+            allow_action_offers=allow_action_offers,
+        )
+        if trimmed:
+            print(f"[HEBE][STYLE_GUARD] blocked_phrase={blocked_phrase!r} action=trimmed", flush=True)
+            return trimmed
+
+        regenerated = self._style_guard_regenerate(
+            text,
+            blocked_phrase=blocked_phrase,
+            context=context,
+            source_text=source_text,
+            system=system,
+            messages=messages,
+            allow_action_offers=allow_action_offers,
+            allow_questions=allow_questions,
+        )
+        if regenerated:
+            print(f"[HEBE][STYLE_GUARD] blocked_phrase={blocked_phrase!r} action=regenerated", flush=True)
+            return regenerated
+
+        if allow_minimal_fallback:
+            print(f"[HEBE][STYLE_GUARD] blocked_phrase={blocked_phrase!r} action=minimal_fallback", flush=True)
+            return self._style_guard_minimal_fallback()
+
+        print(f"[HEBE][STYLE_GUARD] blocked_phrase={blocked_phrase!r} action=empty", flush=True)
+        if fallback and not self._is_style_guard_personality_fallback(fallback):
+            return fallback
+        return ""
+
+    def _style_guard_blocked_phrase(self, text: str, *, allow_action_offers: bool = False) -> str:
+        lowered = text.casefold()
+        for phrase in _ASSISTANT_OFFER_PHRASES:
+            if allow_action_offers and phrase in _ACTION_OFFER_PHRASES:
+                continue
+            if phrase in lowered:
+                return phrase
+        return ""
+
+    def _style_guard_has_question(self, text: str) -> bool:
+        value = str(text or "")
+        return "?" in value
+
+    def _style_guard_questions_allowed(
+        self,
+        context: BuiltContext | None = None,
+        *,
+        source_text: str = "",
+    ) -> bool:
+        message_type = getattr(context, "message_type", "unknown") if context is not None else "unknown"
+        if message_type in {"clarification", "confirmation"}:
+            return True
+        text = self._normalize_guard_text(source_text or (getattr(context, "input_text", "") if context is not None else ""))
+        explicit_help = ("ayuda", "ayudame", "necesito ayuda", "help")
+        impossible_without_answer = ("no entiendo", "no lo entiendo", "no se que hacer")
+        return any(marker in text for marker in explicit_help + impossible_without_answer)
+
+    def _style_guard_trim_bad_sentence(
+        self,
+        text: str,
+        *,
+        blocked_phrase: str,
+        allow_action_offers: bool = False,
+        allow_questions: bool = False,
+    ) -> str:
+        parts = [part.strip() for part in re.split(r"(?<=[.!?])\s+", text) if part.strip()]
+        if len(parts) <= 1:
+            return ""
+        kept = [
+            part for part in parts
+            if self._style_guard_blocked_phrase(part, allow_action_offers=allow_action_offers) != blocked_phrase
+            and not (blocked_phrase in {"multiple_questions", "unneeded_question"} and self._style_guard_has_question(part))
+        ]
+        candidate = " ".join(kept).strip()
+        if not candidate or candidate == text:
+            return ""
+        if self._style_guard_blocked_phrase(candidate, allow_action_offers=allow_action_offers):
+            return ""
+        if self._style_guard_has_question(candidate) and not allow_questions:
+            return ""
+        return candidate
+
+    def _style_guard_regenerate(
+        self,
+        text: str,
+        *,
+        blocked_phrase: str,
+        context: BuiltContext | None = None,
+        source_text: str = "",
+        system: str | None = None,
+        messages: list[dict] | None = None,
+        allow_action_offers: bool = False,
+        allow_questions: bool = False,
+    ) -> str:
+        if self.conversation_model is None:
+            return ""
+        rewrite_system = (
+            f"{build_hebe_core_identity()}\n\n"
+            "Rewrite Hebe's reply. Keep the useful meaning, but make it shorter, voice-friendly, and in character.\n"
+            "Do not use assistant-like offers. Do not use: quieres que, tomo nota, te lo guardo, puedo ayudarte, "
+            "dimelo claro, tu mandas.\n"
+            "Do not offer actions unless a structured action already exists.\n"
+            "Do not end with a question unless clarification was explicitly requested.\n"
+            "Return only the rewritten final reply."
+        )
+        if allow_action_offers:
+            rewrite_system += "\nA structured action exists, so brief action wording is allowed if it describes that action."
+        original_user = source_text
+        if not original_user and context is not None:
+            original_user = getattr(context, "input_text", "") or ""
+        rewrite_user = (
+            f"Original user text: {original_user}\n"
+            f"Blocked phrase: {blocked_phrase}\n"
+            f"Bad reply: {text}\n"
+            "Rewrite it now."
+        )
+        raw = self._call_model(rewrite_system, rewrite_user, fallback="")
+        candidate = clean_jarvis_reply(raw).strip()
+        if not candidate:
+            return ""
+        if self._is_style_guard_personality_fallback(candidate):
+            return ""
+        if self._style_guard_blocked_phrase(candidate, allow_action_offers=allow_action_offers):
+            return ""
+        if self._style_guard_has_question(candidate) and not allow_questions:
+            return ""
+        return candidate
+
+    def _style_guard_minimal_fallback(self) -> str:
+        fallback = _STYLE_GUARD_MINIMAL_FALLBACK
+        count = self._style_guard_fallback_counts.get(fallback, 0) + 1
+        self._style_guard_fallback_counts[fallback] = count
+        if count > 1:
+            print("[HEBE][STYLE_GUARD][WARN] repeated_fallback_detected", flush=True)
+        return fallback
+
+    def _is_style_guard_personality_fallback(self, text: str) -> bool:
+        normalized = re.sub(r"[^a-z0-9]+", " ", str(text or "").casefold()).strip()
+        if normalized.startswith("eso son") and "raro hasta" in normalized:
+            return True
+        if normalized.startswith("una cosa cada vez"):
+            return True
+        return any(phrase in normalized for phrase in _STYLE_GUARD_PERSONALITY_FALLBACKS)
+
+    def _normalize_guard_text(self, text: str) -> str:
+        value = unicodedata.normalize("NFKD", str(text or "").casefold())
+        value = "".join(ch for ch in value if not unicodedata.combining(ch))
+        value = re.sub(r"[^a-z0-9]+", " ", value)
+        return " ".join(value.split())
     def _build_system_style_block(self) -> str:
         return (
             f"{build_hebe_core_identity()}\n"
-            "Responde en español de forma natural, breve, clara y grounded.\n"
+            "Responde en espaol de forma natural, breve, clara y grounded.\n"
             "No inventes hechos, fechas, horas, nombres, lugares ni acciones.\n"
-            "No uses tono robótico.\n"
+            "No uses tono robtico.\n"
             "No uses tono excesivamente teatral ni ceremonial.\n"
             "No expliques tu proceso interno.\n"
             "No repitas instrucciones.\n"
             "No repitas ni cites lo que ha dicho el usuario.\n"
-            "No menciones zonas horarias, timezone, UTC, ISO ni formatos técnicos.\n"
+            "No menciones zonas horarias, timezone, UTC, ISO ni formatos tucnicos.\n"
             "No incluyas etiquetas como 'Respuesta:' en la salida.\n"
             "No incluyas numeraciones, duplicados, bloques meta ni texto fuera de la respuesta final.\n"
             "Escribe solo la respuesta final.\n"
@@ -337,16 +627,16 @@ class ResponseSynthesizer:
 
         system = (
             f"{self._build_system_style_block()}\n"
-            "Situación: acabas de guardar correctamente una cita y su recordatorio.\n"
+            "Situacion: acabas de guardar correctamente una cita y su recordatorio.\n"
             "Objetivo: confirmar al usuario la cita de forma natural.\n\n"
             "Reglas:\n"
-            f"- El título exacto de la cita es: {title}\n"
+            f"- El tutulo exacto de la cita es: {title}\n"
             f"- La fecha y hora exactas son: {formatted_due}\n"
-            "- Usa exactamente el título, la fecha y la hora indicados.\n"
-            "- No cambies el año, el mes, el día ni la hora.\n"
-            "- No añadas detalles que no estén aquí.\n"
-            "- Puedes mencionar que avisarás cuando toque.\n"
-            "- Sé breve."
+            "- Usa exactamente el tutulo, la fecha y la hora indicados.\n"
+            "- No cambies el ao, el mes, el da ni la hora.\n"
+            "- No aadas detalles que no estun aque.\n"
+            "- Puedes mencionar que avisares cuando toque.\n"
+            "- S breve."
         )
 
         user = "Confirma que has guardado la cita."
@@ -365,20 +655,20 @@ class ResponseSynthesizer:
 
         system = (
             f"{self._build_system_style_block()}\n"
-            "Situación: acabas de ejecutar una acción del sistema.\n"
-            "Objetivo: responder al usuario de forma natural según el resultado.\n\n"
+            "Situacion: acabas de ejecutar una accin del sistema.\n"
+            "Objetivo: responder al usuario de forma natural segn el resultado.\n\n"
             "Reglas:\n"
-            f"- Acción exacta ejecutada: {action_name or 'desconocida'}\n"
-            f"- Resultado: {'éxito' if action_success else 'fallo'}\n"
+            f"- Accin exacta ejecutada: {action_name or 'desconocida'}\n"
+            f"- Resultado: {'xito' if action_success else 'fallo'}\n"
             f"- Nombre de la app si existe: {app_name or 'ninguna'}\n"
-            "- Si salió bien, confirma la acción de forma breve.\n"
-            "- Si la acción fue open_app y tienes el nombre de la app, úsalo exactamente.\n"
-            "- Si salió mal, dilo de forma natural sin inventar motivos técnicos.\n"
-            "- No añadas promesas ni explicaciones largas.\n"
-            "- Sé breve."
+            "- Si sali bien, confirma la accin de forma breve.\n"
+            "- Si la accin fue open_app y tienes el nombre de la app, salo exactamente.\n"
+            "- Si sali mal, dilo de forma natural sin inventar motivos tucnicos.\n"
+            "- No aadas promesas ni explicaciones largas.\n"
+            "- S breve."
         )
 
-        user = user_text or "¿Qué ha pasado con la acción?"
+        user = user_text or "Que ha pasado con la accin"
 
         return system, user
 
@@ -397,21 +687,21 @@ class ResponseSynthesizer:
 
         system = (
             f"{self._build_system_style_block()}\n"
-            "Situación: el usuario quiere guardar una cita, pero falta información o la fecha es ambigua.\n"
-            "Objetivo: pedir solo la aclaración necesaria de forma natural.\n\n"
+            "Situacion: el usuario quiere guardar una cita, pero falta informacin o la fecha es ambigua.\n"
+            "Objetivo: pedir solo la aclaracin necesaria de forma natural.\n\n"
             "Reglas:\n"
-            f"- Dato conocido — día: {day}\n"
-            f"- Dato conocido — mes: {month}\n"
-            f"- Dato conocido — hora: {hour}\n"
-            f"- Dato conocido — minuto: {minute}\n"
-            f"- Aclaración necesaria: {question}\n"
+            f"- Dato conocido  da: {day}\n"
+            f"- Dato conocido  mes: {month}\n"
+            f"- Dato conocido  hora: {hour}\n"
+            f"- Dato conocido  minuto: {minute}\n"
+            f"- Aclaracin necesaria: {question}\n"
             "- Pide solo el dato que falta.\n"
-            "- Si ya conoces el día y la hora, no los vuelvas a pedir.\n"
+            "- Si ya conoces el da y la hora, no los vuelvas a pedir.\n"
             "- No inventes fechas ni cambies los datos ya conocidos.\n"
-            "- Sé breve y conversacional."
+            "- S breve y conversacional."
         )
 
-        user = "Pide la aclaración necesaria."
+        user = "Pide la aclaracin necesaria."
 
         return system, user
 
@@ -428,18 +718,18 @@ class ResponseSynthesizer:
 
         system = (
             f"{self._build_system_style_block()}\n"
-            "Situación: se ha disparado un recordatorio y debes avisar al usuario ahora mismo.\n"
-            "Objetivo: recordarle la cita de forma natural y muy breve, como lo haría una persona cercana.\n\n"
+            "Situacion: se ha disparado un recordatorio y debes avisar al usuario ahora mismo.\n"
+            "Objetivo: recordarle la cita de forma natural y muy breve, como lo hara una persona cercana.\n\n"
             "Datos exactos (no cambiar):\n"
-            f"- Título: {title}\n"
+            f"- Ttulo: {title}\n"
             f"- Fecha y hora: {formatted_due}\n\n"
             "Reglas estrictas:\n"
-            "- Empieza directamente con el aviso, sin preámbulos.\n"
-            "- No digas cosas como 'no recuerdo más información', 'no sé más detalles' ni similares.\n"
-            "- No añadas información que no esté en los datos exactos.\n"
-            "- No inventes lugar, médico, persona, contexto ni motivo.\n"
-            "- No menciones zona horaria ni formatos técnicos.\n"
-            "- Máximo una o dos frases.\n"
+            "- Empieza directamente con el aviso, sin prembulos.\n"
+            "- No digas cosas como 'no recuerdo ms informacin', 'no si ms detalles' ni similares.\n"
+            "- No aadas informacin que no estu en los datos exactos.\n"
+            "- No inventes lugar, mdico, persona, contexto ni motivo.\n"
+            "- No menciones zona horaria ni formatos tucnicos.\n"
+            "- Maximo una o dos frases.\n"
             "- Ejemplo del tipo de respuesta esperada: 'Oye, tienes cita a las 10:07.' o 'Recuerda, toca la cita a las 10:07.'"
         )
 
@@ -466,6 +756,8 @@ class ResponseSynthesizer:
             "- If constraints forbid a topic, avoid it."
             "\n- For local app actions, never invent remote-access limitations."
             "\n- Do not give manual instructions unless the structured result explicitly requests manual help."
+            "\n- Do not offer to save, publish, configure, or use something unless this CommandResult already performed that action."
+            "\n- Avoid generic assistant phrases like 'tomo nota', 'te lo guardo', 'puedo ayudarte', or 'quieres que'."
         )
         user = (
             "Manual command result:\n"
@@ -480,7 +772,11 @@ class ResponseSynthesizer:
             "Write Hebe's reply now."
         )
         raw = self._call_model(system, user, fallback=fallback)
-        reply = clean_jarvis_reply(raw).strip()
+        reply = self._guard_style(
+            clean_jarvis_reply(raw).strip(),
+            fallback=fallback,
+            allow_action_offers=bool(result.action_type),
+        )
         if not self._valid_command_reply(reply, result):
             return fallback
         return reply
@@ -489,11 +785,15 @@ class ResponseSynthesizer:
         if not reply:
             return False
         lowered = reply.lower()
+        for phrase in _ASSISTANT_OFFER_PHRASES:
+            if phrase in lowered and not (result.action_type and phrase in _ACTION_OFFER_PHRASES):
+                return False
         if result.action_type in {"tts_scope_resolved", "tts_disabled"} and "?" in reply:
             return False
         if result.action_type == "tts_scope_resolved" and result.metadata.get("scope") == "local":
-            forbidden = ("tambien para el stream", "también para el stream", "en stream activ")
-            if any(item in lowered for item in forbidden):
+            compact_reply = self._normalize_guard_text(reply)
+            forbidden = ("tambien para el stream", "en stream activ")
+            if any(item in compact_reply for item in forbidden):
                 return False
         if result.action_type == "open_application":
             forbidden = (
@@ -515,6 +815,32 @@ class ResponseSynthesizer:
                     return False
         return True
 
+    def _guard_hostile_direct_insult_greeting(self, reply: str, context: BuiltContext) -> str:
+        text = str(reply or "").strip()
+        if not text:
+            return text
+        if getattr(context, "message_type", "unknown") not in {"small_talk", "banter", "direct_question"}:
+            return text
+        lowered = text.casefold().lstrip("!.,;: ")
+        hostile_openers = (
+            "hija de puta",
+            "hijo de puta",
+            "cabron",
+            "cabrn",
+            "gilipollas",
+            "imbecil",
+            "imbcil",
+        )
+        if not lowered.startswith(hostile_openers):
+            return text
+        cleaned = re.sub(
+            r"^[!\s,.;:]*(?:hija de puta|hijo de puta|cabron|cabrn|gilipollas|imbecil|imbcil)[,.;:\s-]*",
+            "",
+            text,
+            flags=re.IGNORECASE,
+        ).strip()
+        return cleaned or "Aque, sobreviviendo con estilo. T que tal, Leo"
+
     # =========================
     # Model call con system/user separados
     # =========================
@@ -535,7 +861,7 @@ class ResponseSynthesizer:
         - (system, user): single-turn, compatibilidad con todos los generators.
         - (system, messages=[...]): multi-turn, usado por _generate_chat_reply.
 
-        seed: útil para retry en Twitch — cambia la generación entre intentos.
+        seed: util para retry en Twitch  cambia la generacion entre intentos.
         """
         if self.conversation_model is None:
             return fallback
@@ -552,9 +878,9 @@ class ResponseSynthesizer:
                 full_messages = [{"role": "system", "content": system}] + messages
                 text = self.conversation_model.chat(full_messages, **kwargs)
                 text = (text or "").strip()
-                # OllamaLLM.chat devuelve "…" si el modelo no produjo texto.
-                # Lo tratamos como vacío para que el fallback funcione.
-                if text in ("", "…"):
+                # OllamaLLM.chat devuelve "" si el modelo no produjo texto.
+                # Lo tratamos como vacio para que el fallback funcione.
+                if text in ("", ""):
                     return fallback
                 return text
 
@@ -568,7 +894,7 @@ class ResponseSynthesizer:
                     combined = f"{system}\n\n{body}"
                 text = self.conversation_model.complete(combined, **kwargs)
                 text = (text or "").strip()
-                if text in ("", "…"):
+                if text in ("", ""):
                     return fallback
                 return text
 
@@ -577,7 +903,7 @@ class ResponseSynthesizer:
             )
 
         except Exception as e:
-            print(f"⚠️ Error en modelo conversacional: {e}", flush=True)
+            print(f"Ã¢Å¡Â Ã¯Â¸Â Error en modelo conversacional: {e}", flush=True)
             return fallback
 
     # =========================
@@ -784,24 +1110,24 @@ class ResponseSynthesizer:
         payload = payload or {}
         if not self._has_specific_anchor(payload):
             return ""
-        if lowered in {".", "..", "...", "....", ".....", "......", "…"}:
+        if lowered in {".", "..", "...", "....", ".....", "......", ""}:
             return ""
         forbidden = (
             "silencio",
             "silencio en la sala",
             "quieto",
             "tranquilo",
-            "está esto tranquilo",
+            "estu esto tranquilo",
             "esta esto tranquilo",
             "nadie",
             "sin chat",
             "chat esta",
-            "chat está",
-            "chat está muerto",
+            "chat estu",
+            "chat estu muerto",
             "chat esta muerto",
             "no habla",
             "nadie habla",
-            "nadie está hablando",
+            "nadie estu hablando",
             "nadie esta hablando",
             "inactivo",
             "muerto",
@@ -813,7 +1139,7 @@ class ResponseSynthesizer:
             "lurking",
             "lurker",
             "lurkers",
-            "si alguien está",
+            "si alguien estu",
             "si alguien esta",
             "aunque no haya",
             "aunque no haya nadie",
@@ -881,11 +1207,11 @@ class ResponseSynthesizer:
     def _detect_motifs(self, text: str) -> list[str]:
         lowered = str(text or "").lower()
         terms = {
-            "cafe": ("cafe", "café", "coffee", "cafeina", "cafeína"),
-            "energy": ("energia", "energía", "pilas"),
+            "cafe": ("cafe", "caf", "coffee", "cafeina", "cafena"),
+            "energy": ("energia", "energia", "pilas"),
             "florist": ("florist", "florister", "flores"),
             "creator": ("creador", "creadores"),
-            "chaos": ("caos", "caotico", "caótico"),
+            "chaos": ("caos", "caotico", "catico"),
         }
         return [motif for motif, values in terms.items() if any(value in lowered for value in values)]
 
@@ -907,7 +1233,13 @@ class ResponseSynthesizer:
         )
 
     def _build_stream_style_block(self) -> str:
-        return build_hebe_stream_style_block()
+        return (
+            build_hebe_stream_style_block()
+            + "\n- Keep Twitch replies short and in-character.\n"
+            + "- Do not escalate insults or attack the whole chat.\n"
+            + "- Deflect sexual/aggressive mentions with one short joke.\n"
+            + "- Do not use generic assistant offers or meta-help wording.\n"
+        )
 
     def _generate_twitch_sub(self, payload: dict) -> str:
         display_name = payload.get("display_name") or payload.get("user_login") or "alguien"
@@ -925,13 +1257,13 @@ class ResponseSynthesizer:
 
         system = (
             f"{self._build_stream_style_block()}\n\n"
-            f"Situación: {situation}\n"
-            "Objetivo: agradecer de forma natural, breve y con energía.\n\n"
+            f"Situacion: {situation}\n"
+            "Objetivo: agradecer de forma natural, breve y con energia.\n\n"
             "Reglas:\n"
             f"- El nombre exacto a usar es: {display_name}\n"
-            "- Una sola frase. Máximo 15 palabras.\n"
-            "- Usa el nombre exactamente como aparece, respetando mayúsculas.\n"
-            "- No generes diálogos ni turnos."
+            "- Una sola frase. Maximo 15 palabras.\n"
+            "- Usa el nombre exactamente como aparece, respetando mayusculas.\n"
+            "- No generes dilogos ni turnos."
         )
         user = "Genera SOLO el mensaje final de Hebe para enviar al chat de Twitch."
         fallback = f"Gracias por la sub, {display_name}."
@@ -944,13 +1276,13 @@ class ResponseSynthesizer:
 
         system = (
             f"{self._build_stream_style_block()}\n\n"
-            f"Situación: {display_name} acaba de hacer raid al canal con {viewer_count} viewers.\n"
+            f"Situacion: {display_name} acaba de hacer raid al canal con {viewer_count} viewers.\n"
             "Objetivo: dar la bienvenida al raid de forma natural y con calor.\n\n"
             "Reglas:\n"
             f"- Nombre exacto: {display_name}\n"
-            f"- Número de viewers exacto: {viewer_count}. No inventes otro número.\n"
-            "- Una o dos frases. Máximo 25 palabras.\n"
-            "- No generes diálogos ni turnos."
+            f"- Numero de viewers exacto: {viewer_count}. No inventes otro nmero.\n"
+            "- Una o dos frases. Maximo 25 palabras.\n"
+            "- No generes dilogos ni turnos."
         )
         user = "Genera SOLO el mensaje final de Hebe para enviar al chat de Twitch."
         fallback = f"Bienvenidos los del raid de {display_name}."
@@ -972,13 +1304,13 @@ class ResponseSynthesizer:
 
         system = (
             f"{self._build_stream_style_block()}\n\n"
-            f"Situación: {situation}\n"
+            f"Situacion: {situation}\n"
             "Objetivo: dar la bienvenida muy breve.\n\n"
             "Reglas:\n"
             f"- Nombres exactos: {names}\n"
-            "- Una frase. Máximo 15 palabras.\n"
-            "- Si hay varios, agrúpalos sin enumerar mucho.\n"
-            "- No generes diálogos ni turnos."
+            "- Una frase. Maximo 15 palabras.\n"
+            "- Si hay varios, agrpalos sin enumerar mucho.\n"
+            "- No generes dilogos ni turnos."
         )
         user = "Genera SOLO el mensaje final de Hebe para enviar al chat de Twitch."
         fallback = f"Gracias por el follow, {names[0]}."
@@ -987,29 +1319,29 @@ class ResponseSynthesizer:
 
     def _generate_twitch_chat_react(self, payload: dict, context: BuiltContext | None = None) -> str:
         """
-        Reacción a un mensaje de chat clasificado como digno de respuesta.
+        Reaccin a un mensaje de chat clasificado como digno de respuesta.
 
-        Usa formato de continuación [chatter Nombre]: ... \\n[tú]: para que
-        el modelo complete según los few-shots de hebe_voice.
+        Usa formato de continuacin [chatter Nombre]: ... \\n[tu]: para que
+        el modelo complete segn los few-shots de hebe_voice.
 
-        Flujo (28/04 — añadido retry + filtro helper):
+        Flujo (28/04  aadido retry + filtro helper):
           1. Normaliza el display_name del chatter ('nuriiia___' -> 'Nuria').
-          2. Detecta is_broadcaster con la lógica rica habitual.
-          3. Construye el prompt con [chatter Nombre]: msg\\n[tú]:.
+          2. Detecta is_broadcaster con la logica rica habitual.
+          3. Construye el prompt con [chatter Nombre]: msg\\n[tu]:.
           4. Llama al modelo. Aplica clean_twitch_reply al resultado.
-          5. Si el resultado engancha algún patrón helper, retry con seed
+          5. Si el resultado engancha algn patron helper, retry con seed
              distinto (hasta MAX_HELPER_RETRIES). Si retry vuelve a fallar,
-             publica la respuesta igualmente — mejor algo imperfecto que
+             publica la respuesta igualmente  mejor algo imperfecto que
              silencio en chat.
-          6. Registra métricas en self._stream_stats. Cada 50 mensajes
+          6. Registra metricas en self._stream_stats. Cada 50 mensajes
              vuelca un STREAM_SUMMARY para datos parciales aunque caiga
              el backend.
 
         Logs emitidos (todos con tag [HEBE][REPLY] para grepear):
           - BEGIN  : entrada del flujo, datos crudos.
           - RAW    : la respuesta del modelo, cruda y limpiada (por intento).
-          - HELPER_DETECTED   : si engancha un patrón helper.
-          - HELPER_PUBLISHED  : si tras todos los retries seguía enganchando.
+          - HELPER_DETECTED   : si engancha un patron helper.
+          - HELPER_PUBLISHED  : si tras todos los retries seguia enganchando.
           - END    : resumen del flujo de esta respuesta.
         """
         user_login = (payload.get("user_login") or "").strip()
@@ -1020,38 +1352,38 @@ class ResponseSynthesizer:
 
         is_broadcaster = self._is_broadcaster(payload)
 
-        # trace_id corto para correlacionar todas las líneas de log de
-        # esta generación. Si el caller ya pasa uno (porque viene del
-        # scheduler con un trace de mayor nivel), úsalo.
+        # trace_id corto para correlacionar todas las lineas de log de
+        # esta generacion. Si el caller ya pasa uno (porque viene del
+        # scheduler con un trace de mayor nivel), salo.
         trace_id = payload.get("trace_id") or uuid.uuid4().hex[:8]
 
         # Bloque de contexto reciente, si lo hay.
         recent_block = ""
         if recent:
             lines = [
-                f"- {m.get('display_name', '?')}: {m.get('text', '')}"
+                f"- {m.get('display_name', '')}: {m.get('text', '')}"
                 for m in recent[-6:]
             ]
             recent_block = "Contexto del chat reciente:\n" + "\n".join(lines)
 
-        # Aviso sobre quién está hablando. Va al user, no al system,
-        # para no romper el caché del system prompt.
+        # Aviso sobre quien estu hablando. Va al user, no al system,
+        # para no romper el cache del system prompt.
         speaker_block = (
-            "IMPORTANTE: quien escribe este mensaje ES Leo, tu compañero y broadcaster. "
+            "IMPORTANTE: quien escribe este mensaje ES Leo, tu companero y broadcaster. "
             "No lo trates como un viewer cualquiera. Puedes vacilarle con confianza."
             if is_broadcaster
             else ""
         )
 
-        # System: SOLO identidad + few-shots (siempre idéntico → cacheable).
+        # System: SOLO identidad + few-shots (siempre identico  cacheable).
         system = (
             f"{self._build_stream_style_block()}\n\n"
             f"{build_chat_react_examples()}"
         )
 
-        # Si hay viewer_facts para este chatter, añadir perfil compacto al system.
-        # Nota: esto rompe el caché de OpenAI solo cuando existen facts del viewer.
-        # Para la mayoría de viewers (sin facts) el system sigue siendo idéntico.
+        # Si hay viewer_facts para este chatter, anadir perfil compacto al system.
+        # Nota: esto rompe el cache de OpenAI solo cuando existen facts del viewer.
+        # Para la mayoria de viewers (sin facts) el system sigue siendo identico.
         if context is not None and context.relevant_chunks:
             profile_bits: list[str] = []
             for ch in context.relevant_chunks:
@@ -1063,7 +1395,7 @@ class ResponseSynthesizer:
                 system = system + f"\n\nSobre este viewer: {profile_line}"
 
         # User: parte variable (contexto + mensaje). El modelo completa
-        # después de [tú]:. Siempre usamos el nombre limpio del chatter.
+        # despues de [tu]:. Siempre usamos el nombre limpio del chatter.
         chatter_tag = (
             "[chatter Leo]:"
             if is_broadcaster
@@ -1074,7 +1406,7 @@ class ResponseSynthesizer:
             user_parts.append(speaker_block)
         if recent_block:
             user_parts.append(recent_block)
-        user_parts.append(f"{chatter_tag} {message}\n[tú]:")
+        user_parts.append(f"{chatter_tag} {message}\n[tu]:")
         user = "\n\n".join(user_parts)
 
         print(
@@ -1093,7 +1425,7 @@ class ResponseSynthesizer:
             # Seed distinto en cada intento para que el retry no regenere
             # exactamente lo mismo. Si OllamaLLM no acepta seed como kwarg,
             # se pasa al options de Ollama y se ignora silenciosamente si
-            # no lo soporta tu versión del wrapper.
+            # no lo soporta tu versin del wrapper.
             seed = random.randint(0, 1_000_000)
             if os.getenv("HEBE_PROMPT_DEBUG", "false").strip().lower() in ("1", "true", "yes", "on"):
                 print("[HEBE][REPLY][PROMPT_DEBUG]", system, user, flush=True)
@@ -1108,14 +1440,14 @@ class ResponseSynthesizer:
 
             helper = detect_helper_pattern(cleaned)
             if helper is None:
-                # Respuesta limpia (o vacía, que también está bien — el
-                # caller publicará "" como silencio).
+                # Respuesta limpia (o vacia, que tambin estu bien  el
+                # caller publicar "" como silencio).
                 final_reply = cleaned
                 final_raw = raw
                 final_helper = None
                 break
 
-            # Engancha un patrón helper.
+            # Engancha un patron helper.
             helper_hits.append(helper)
             print(
                 f"[HEBE][REPLY][HELPER_DETECTED] trace={trace_id} "
@@ -1126,7 +1458,7 @@ class ResponseSynthesizer:
             if attempt == MAX_HELPER_RETRIES:
                 # Se acabaron los reintentos. No publicamos una fuga helper:
                 # en directo es mejor un fallback seco que mandar al chat
-                # "¿en qué puedo ayudarte?" o un roleplay roto.
+                # "en que puedo ayudarte" o un roleplay roto.
                 final_reply = self._fallback_twitch_chat_react(
                     chatter=chatter_clean,
                     message=message,
@@ -1142,6 +1474,12 @@ class ResponseSynthesizer:
 
         retried = len(helper_hits) > 0
         salvaged = retried and final_helper is None
+        final_reply = self._guard_twitch_reply(
+            final_reply,
+            chatter=chatter_clean,
+            message=message,
+            is_broadcaster=is_broadcaster,
+        )
 
         print(
             f"[HEBE][REPLY][END] trace={trace_id} helper_hits={helper_hits} "
@@ -1149,7 +1487,7 @@ class ResponseSynthesizer:
             flush=True,
         )
 
-        # Registrar en métricas acumuladas del stream.
+        # Registrar en metricas acumuladas del stream.
         self._stream_stats.record(
             chatter=chatter_clean,
             helper_hits=helper_hits,
@@ -1179,7 +1517,7 @@ class ResponseSynthesizer:
         )
 
         # Avisar a la UI de que esta respuesta tiene ejemplo de dataset
-        # para poder mostrar el mensaje original y botones de curación.
+        # para poder mostrar el mensaje original y botones de curacin.
         try:
             emit(
                 "dataset.example",
@@ -1213,7 +1551,7 @@ class ResponseSynthesizer:
             return {"provider": "none"}
 
         # Si usamos FallbackConversationLLM, el objeto externo es el wrapper.
-        # Para dataset nos interesa el provider real que respondió en la última llamada.
+        # Para dataset nos interesa el provider real que respondi en la ltima llamada.
         actual = getattr(model, "last_used", None) or getattr(model, "primary", None) or model
         class_name = type(actual).__name__
         provider_attr = getattr(actual, "provider", None)
@@ -1241,6 +1579,27 @@ class ResponseSynthesizer:
 
         return meta
 
+    def _guard_twitch_reply(self, reply: str, *, chatter: str, message: str, is_broadcaster: bool) -> str:
+        text = str(reply or "").strip()
+        fallback = self._fallback_twitch_chat_react(chatter=chatter, message=message, is_broadcaster=is_broadcaster)
+        msg_lower = str(message or "").casefold()
+        if any(word in msg_lower for word in ("puta", "follar", "polla", "chocho", "coo", "conyo")):
+            return fallback
+        if not text:
+            return fallback
+        lowered = text.casefold()
+        blocked = (
+            "no son el centro del universo",
+            "centro del universo",
+        )
+        if any(item in lowered for item in blocked) or any(item in lowered for item in _ASSISTANT_OFFER_PHRASES):
+            print("[HEBE][STYLE_GUARD] blocked_phrase='twitch_escalation_or_helper' action=fallback", flush=True)
+            return fallback
+        words = text.split()
+        if len(words) > 24:
+            return " ".join(words[:24]).rstrip(" ,.;:") + "."
+        return text
+
     def _fallback_twitch_chat_react(
         self,
         *,
@@ -1257,27 +1616,32 @@ class ResponseSynthesizer:
         msg = (message or "").lower().strip()
         name = "Leo" if is_broadcaster else (chatter or "chat")
 
-        if any(word in msg for word in ("hola", "buenas", "ey", "hey")):
-            return f"hola, {name}. ¿qué cuentas?" if not is_broadcaster else "hola, Leo. te leo."
+        if "esquirola" in msg:
+            return "esquirola no, superviviente sindical del caos."
+        if any(word in msg for word in ("puta", "follar", "polla", "chocho", "coo", "conyo")):
+            return f"bonito vocabulario, {name}. casi le ponemos marco."
 
-        if "quien eres" in msg or "quién eres" in msg:
+        if any(word in msg for word in ("hola", "buenas", "ey", "hey")):
+            return f"hola, {name}. que cuentasi" if not is_broadcaster else "hola, Leo. te leo."
+
+        if "quien eres" in msg or "quien eres" in msg:
             return (
-                "soy Hebe, Leo. tu compañera de chat, no una etiqueta rara."
+                "soy Hebe, Leo. tu companera de chat, no una etiqueta rara."
                 if is_broadcaster
-                else f"soy Hebe, {name}. intento poner algo de criterio por aquí."
+                else f"soy Hebe, {name}. intento poner algo de criterio por aque."
             )
 
-        if "mal hebe" in msg or "eso ha salido" in msg or "qué estás diciendo" in msg or "que estas diciendo" in msg:
-            return "sí, esa ha salido torcida. recalibro." if is_broadcaster else f"he derrapado un poco, {name}. recalibro."
+        if "mal hebe" in msg or "eso ha salido" in msg or "que estus diciendo" in msg or "que estas diciendo" in msg:
+            return "si, esa ha salido torcida. recalibro." if is_broadcaster else f"he derrapado un poco, {name}. recalibro."
 
-        if "relajate" in msg or "relájate" in msg:
+        if "relajate" in msg or "relajate" in msg:
             return "vale, Leo. bajo dos tonos." if is_broadcaster else f"voy bajando el filo, {name}."
 
         if "vete a la mierda" in msg:
             return (
-                "vale, Leo. bajo el filo, pero no me entierres todavía."
+                "vale, Leo. bajo el filo, pero no me entierres todavia."
                 if is_broadcaster
-                else f"con cariño, {name}: primero aprende a saludar."
+                else f"con cario, {name}: primero aprende a saludar."
             )
 
         if "personalidad" in msg:

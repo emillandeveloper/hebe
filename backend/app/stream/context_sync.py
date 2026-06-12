@@ -123,12 +123,20 @@ class StreamContextSyncService:
         title = data.get("title")
         category = data.get("game_name")
         tags = data.get("tags")
+        offline_manual_game = str(getattr(stream, "user_today_game_override", "") or "").strip()
 
         if title is not None and not getattr(stream, "is_live", False):
             stream.current_stream_title = str(title or "").strip() or None
         if category is not None and not getattr(stream, "is_live", False):
-            stream.current_category = str(category or "").strip() or None
-            stream.current_game = stream.current_category
+            if offline_manual_game:
+                stream.current_category = offline_manual_game
+                stream.current_game = offline_manual_game
+                stream.stream_context_overridden = True
+                stream.stream_context_override_reason = "user_today_game_override"
+                print("[HEBE][STREAM_CONTEXT] stale_or_overridden=true reason=user_today_game_override", flush=True)
+            else:
+                stream.current_category = str(category or "").strip() or None
+                stream.current_game = stream.current_category
         if isinstance(tags, list) and (tags or not getattr(stream, "is_live", False)):
             stream.current_tags = [str(tag) for tag in tags if str(tag or "").strip()]
 
@@ -156,15 +164,24 @@ class StreamContextSyncService:
             "eng", "esp", "retro", "weekend", "challenge", "playthrough", "first",
             "level", "final", "fantasy", "episode", "stream", "streaming", "then",
             "know", "bye", "soooo", "food", "leveling", "the", "and", "for", "you",
+            "will", "we", "beat", "it",
         }
+        ignored_hits: list[str] = []
         markers: list[str] = []
         for match in re.finditer(r"\b[A-Z][A-Za-z0-9'!-]{2,}(?:\s+[A-Z][A-Za-z0-9'!-]{2,}){0,2}\b", text):
             value = match.group(0).strip(" -|:.,")
             words = [w.lower().strip("'!-") for w in value.split()]
             if not words or all(w in ignored or w in category_words for w in words):
+                ignored_hits.extend([w for w in words if w in ignored])
                 continue
             if value not in markers:
                 markers.append(value)
+        if ignored_hits:
+            deduped = []
+            for item in ignored_hits:
+                if item not in deduped:
+                    deduped.append(item)
+            print(f"[HEBE][TITLE_PARSE] ignored_terms={deduped!r}", flush=True)
         return markers[:8]
 
     def _mark_error(self, stream: StreamSessionState, error: str, now: float) -> None:

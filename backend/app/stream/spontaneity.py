@@ -164,6 +164,10 @@ class StreamSpontaneityService:
         result["title_markers_stale"] = title_context["stale"]
         anchors = self._specific_context_anchors(stream, now, title_context=title_context)
         result["specific_context_anchors"] = anchors
+        if self.config.require_specific_context and self._missing_primer_and_run_context(stream, now, title_context=title_context):
+            result["blocked_reason"] = "no_session_primer_or_run_context"
+            print("[HEBE][SPONTANEITY] skipped reason=no_session_primer_or_run_context", flush=True)
+            return result
         if self._only_weak_recent_context(stream, now):
             result["blocked_reason"] = "no_high_quality_anchor"
             print("[HEBE][SPONTANEITY] skipped reason=no_high_quality_anchor", flush=True)
@@ -288,6 +292,7 @@ class StreamSpontaneityService:
             "stream_slot": getattr(stream, "current_stream_slot", None),
             "language_mode": getattr(stream, "language_mode", None),
             "spoiler_policy": getattr(stream, "spoiler_policy", "no_spoilers"),
+            "session_primer": getattr(stream, "session_primer", None),
             "last_voice_event": getattr(stream, "last_voice_event", None),
             "last_voice_summary": getattr(stream, "last_voice_summary", None),
             "leo_mood_hint": getattr(stream, "leo_mood_hint", None),
@@ -546,6 +551,8 @@ class StreamSpontaneityService:
             anchors.append("playthrough_type")
         if getattr(stream, "current_challenge", None):
             anchors.append("challenge")
+        if getattr(stream, "session_primer", None):
+            anchors.append("session_primer")
         run_updated = float(getattr(stream, "run_context_updated_ts", 0.0) or 0.0)
         if run_updated and now - run_updated <= 45 * 60:
             if (
@@ -564,6 +571,18 @@ class StreamSpontaneityService:
         if getattr(stream, "last_raid_event", None):
             anchors.append("recent_event")
         return list(dict.fromkeys(anchors))
+
+    def _missing_primer_and_run_context(self, stream: StreamSessionState, now: float, *, title_context: dict | None = None) -> bool:
+        if getattr(stream, "session_primer", None):
+            return False
+        title_context = title_context or self._title_marker_context(stream, now)
+        if title_context.get("fresh"):
+            return False
+        if getattr(stream, "current_run_objective", None) or getattr(stream, "current_run_location", None) or getattr(stream, "current_run_phase", None):
+            return False
+        if self._recent_run_context_fact(stream, now):
+            return False
+        return True
 
     def _record_style_motifs(self, stream: StreamSessionState, text: str, *, now: float) -> None:
         motifs = self.detect_style_motifs(text)
