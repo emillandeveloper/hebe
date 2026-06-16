@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from difflib import SequenceMatcher
 import re
 from typing import Iterable
 
@@ -12,6 +11,7 @@ class WakeNameResolution:
     wake_command: bool = False
     sleep_command: bool = False
     matched_name: str | None = None
+    canonical: str | None = None
     stripped_text: str = ""
     confidence: float = 0.0
     reason: str = "no_match"
@@ -20,7 +20,8 @@ class WakeNameResolution:
 class WakeNameResolver:
     """Resolve whether a transcript is addressing Hebe without phrase tables."""
 
-    canonical_names = ("hebe", "ebe", "eve", "eb", "e b", "jebe", "heve")
+    canonical_target = "hebe"
+    canonical_names = ("hebe", "ebe", "eve", "heve", "ebi", "heb", "eb", "e b", "jebe")
     wake_concepts = {"despierta", "levanta", "wake", "awake"}
     sleep_concepts = {"duerme", "descansa", "dormir", "sleep", "espera", "standby"}
 
@@ -44,7 +45,8 @@ class WakeNameResolver:
         has_wake = any(token in self.wake_concepts for token in stripped_tokens)
         has_sleep = any(token in self.sleep_concepts for token in stripped_tokens)
         has_command_context = self._has_command_context(stripped_tokens, command_markers)
-        has_assistant_question_context = self._has_assistant_question_context(stripped_tokens)
+        has_direct_context = self._has_direct_context(stripped_tokens)
+        is_vocative = name_index in {0, len(tokens) - 1}
 
         if matched_name:
             confidence = name_score
@@ -52,12 +54,14 @@ class WakeNameResolver:
                 has_wake
                 or has_sleep
                 or has_command_context
-                or has_assistant_question_context
+                or has_direct_context
+                or is_vocative
                 or is_sleeping
             ):
                 return WakeNameResolution(
                     addressed_to_hebe=False,
                     matched_name=matched_name,
+                    canonical=self.canonical_target,
                     stripped_text=stripped,
                     confidence=min(confidence, 0.45),
                     reason="weak_eve_context",
@@ -67,13 +71,14 @@ class WakeNameResolver:
                 wake_command=has_wake,
                 sleep_command=has_sleep,
                 matched_name=matched_name,
+                canonical=self.canonical_target,
                 stripped_text=stripped,
                 confidence=confidence,
                 reason=(
                     "name_with_command_context"
                     if has_command_context
-                    else "phonetic_alias"
-                    if matched_name == "eve" and has_assistant_question_context
+                    else "stt_alias_vocative"
+                    if matched_name in {"eve", "ebe", "heve", "ebi", "heb"} and (has_direct_context or is_vocative)
                     else "name_match"
                 ),
             )
@@ -106,7 +111,7 @@ class WakeNameResolver:
             compact = token.replace(" ", "")
             for name in self.canonical_names:
                 name_compact = name.replace(" ", "")
-                score = 1.0 if compact == name_compact else SequenceMatcher(None, compact, name_compact).ratio()
+                score = 1.0 if compact == name_compact else 0.0
                 if score > best[2] and score >= 0.78:
                     best = (index, name_compact, score)
         return best
@@ -134,13 +139,14 @@ class WakeNameResolver:
         marker_tokens = {part for marker in markers for part in marker.split()}
         return bool(set(tokens) & marker_tokens)
 
-    def _has_assistant_question_context(self, tokens: list[str]) -> bool:
+    def _has_direct_context(self, tokens: list[str]) -> bool:
         if not tokens:
             return False
         values = set(tokens)
-        greeting = bool(values & {"hola", "buenas", "hey", "oye"})
-        question = bool(values & {"como", "que", "q", "estas", "tal", "puedes", "quieres", "haces"})
-        return greeting and question
+        question = bool(values & {"como", "que", "q", "cuando", "donde", "cual", "estas", "tal", "puedes", "quieres", "haces", "toca"})
+        command = bool(values & {"di", "dilo", "responde", "habla", "manda", "envia", "pon", "haz", "abre", "activa", "desactiva", "prepara", "mira"})
+        small_talk = bool(values & {"hola", "buenas", "hey", "oye", "lista", "listo", "gracias"})
+        return question or command or small_talk
 
     def _normalize(self, text: str) -> str:
         value = str(text or "").lower()

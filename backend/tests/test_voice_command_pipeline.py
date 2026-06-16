@@ -146,7 +146,7 @@ def make_engine(chatters=None, *, live=True):
     engine.runtime = SimpleNamespace(
         state=SimpleNamespace(stream=stream, hebe_sleeping=False, mode="active", pending_clarification=None),
         twitch=FakeTwitch(),
-        twitch_chat_bot=None,
+        twitch_chat_bot=SimpleNamespace(is_connected=True),
         speak=Mock(),
         stt=None,
         win=FakeWin(),
@@ -159,6 +159,7 @@ def make_engine(chatters=None, *, live=True):
     engine.shoutout_blocked_users = {"hebenifelheim", "jotunbot", "streamelements", "nightbot"}
     engine._manual_reply_ui_only = False
     engine._current_input_event = None
+    engine.spontaneous_twitch_chat_enabled = False
     engine.stream_action_planner = engine._build_stream_action_planner()
     return engine
 
@@ -672,6 +673,31 @@ class VoiceCommandPipelineTests(unittest.TestCase):
         log_chat_mock.assert_called_once()
         self.assertTrue(any(event_type == "chat.user" and data.get("text") == "Hebe, como estas?" for event_type, data in emitted))
 
+    def test_eve_stt_question_enters_direct_cognition_and_stays_local(self):
+        engine = make_engine(["nuria"])
+        engine.runtime.state.stream.enabled = True
+        engine.runtime.state.tts_enabled = True
+        engine.context_builder = FakeContextBuilder()
+        engine.deliberation_service = FakeDeliberationService()
+        engine.plan_executor = FakePlanExecutor()
+        engine.response_synthesizer = FixedResponseSynth("Hoy toca seguir la run.")
+        engine.memory_extractor = Mock()
+        delivered = []
+        logs = []
+        engine._deliver_voice_reply = lambda text, **kwargs: delivered.append((text, kwargs))
+
+        with patch("builtins.print", lambda *args, **kwargs: logs.append(" ".join(str(arg) for arg in args))), \
+             patch("app.hebe_engine.emit"), \
+             patch("app.hebe_engine.log_chat"):
+            result = engine._process_stt_voice_transcript("Eve, que toca hoy?")
+
+        joined = "\n".join(logs)
+        self.assertEqual(result, "continue")
+        self.assertEqual(delivered[0][0], "modelo:stream_schedule_lookup:")
+        self.assertIn("[HEBE][RESPONSE_DECISION] should_reply=true reason=direct_question", joined)
+        self.assertIn("input_type=direct_stt output_target=local_ui+stream_tts", joined)
+        self.assertNotIn("output_target=twitch_chat", joined)
+
     def test_hola_eve_como_estas_is_addressed_to_hebe(self):
         resolver = WakeNameResolver()
 
@@ -684,7 +710,8 @@ class VoiceCommandPipelineTests(unittest.TestCase):
 
         self.assertTrue(result.addressed_to_hebe)
         self.assertEqual(result.matched_name, "eve")
-        self.assertEqual(result.reason, "phonetic_alias")
+        self.assertEqual(result.canonical, "hebe")
+        self.assertEqual(result.reason, "stt_alias_vocative")
         self.assertGreaterEqual(result.confidence, 0.78)
 
     def test_assistant_question_creates_pending_conversation_turn(self):
@@ -855,7 +882,7 @@ class VoiceCommandPipelineTests(unittest.TestCase):
         self.assertIn("output_target=twitch_chat", joined)
         self.assertEqual(delivered, [("stt_voice", "modelo:stream_chat_message:twitch_chat")])
 
-    def test_spontaneity_reply_is_voice_first_and_not_twitch_chat(self):
+    def test_spontaneity_reply_is_voice_first_when_twitch_chat_disabled(self):
         engine = make_engine(["nuria"])
         engine.runtime.state.tts_enabled = True
         engine.runtime.state.stream.policies.allow_tts_idle_prompts = True
@@ -874,12 +901,41 @@ class VoiceCommandPipelineTests(unittest.TestCase):
         self.assertEqual(engine.runtime.twitch.sent, [])
         engine.runtime.speak.assert_called_once_with("Mira recursos antes de avanzar.")
         self.assertIn("input_type=spontaneity output_target=stream_tts", joined)
+        self.assertIn("skipped reason=twitch_spontaneous_disabled", joined)
         self.assertTrue(any(
             event_type == "chat.assistant"
             and data.get("source") == "spontaneity"
             and data.get("output_target") == "local_ui"
             for event_type, data in emitted
         ))
+
+    def test_spontaneity_reply_posts_to_twitch_chat_when_enabled_and_anchored(self):
+        engine = make_engine(["nuria"])
+        engine.spontaneous_twitch_chat_enabled = True
+        engine.runtime.state.tts_enabled = True
+        engine.runtime.state.stream.last_spontaneous_twitch_chat_ts = 0.0
+        emitted = []
+        logs = []
+
+        with patch("builtins.print", lambda *args, **kwargs: logs.append(" ".join(str(arg) for arg in args))), \
+             patch("app.hebe_engine.emit", lambda event_type, data=None: emitted.append((event_type, data or {}))):
+            engine._deliver_twitch_reply(
+                "Mira recursos antes de avanzar.",
+                event_type="twitch_idle_prompt",
+                payload={
+                    "idle_topic": "resource_management",
+                    "specific_context_anchors": ["run_context"],
+                    "used_fact_id": "fact-1",
+                },
+            )
+
+        joined = "\n".join(logs)
+        self.assertEqual(engine.runtime.twitch.sent, ["Mira recursos antes de avanzar."])
+        engine.runtime.speak.assert_not_called()
+        self.assertIn("input_type=spontaneity output_target=twitch_chat", joined)
+        self.assertIn("reason=spontaneous_twitch_enabled", joined)
+        self.assertIn("[HEBE][TWITCH][CHATBOT] send_message reason=spontaneity", joined)
+        self.assertFalse(any(event_type == "chat.assistant" for event_type, _ in emitted))
 
     def test_twitch_mention_reply_posts_to_twitch_chat_and_no_private_pending_turn(self):
         engine = make_engine(["nuria"])

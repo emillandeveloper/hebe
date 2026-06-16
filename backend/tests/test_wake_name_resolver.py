@@ -20,6 +20,10 @@ class WakeNameResolverTests(unittest.TestCase):
         cases = [
             ("Hebe despierta", "hebe", "despierta"),
             ("Ebe pon STT ambiental", "ebe", "pon stt ambiental"),
+            ("Eve, que toca hoy?", "eve", "que toca hoy"),
+            ("lista para darlo todo, Eve", "eve", "lista para darlo todo"),
+            ("Ebi responde", "ebi", "responde"),
+            ("Heb habla por Twitch", "heb", "habla por twitch"),
             ("E.B. duerme", "eb", "duerme"),
             ("EB haz promo a Totodile", "eb", "haz promo a totodile"),
         ]
@@ -29,16 +33,31 @@ class WakeNameResolverTests(unittest.TestCase):
                 result = self.resolve(text)
                 self.assertTrue(result.addressed_to_hebe)
                 self.assertEqual(result.matched_name, matched_name)
+                self.assertEqual(result.canonical, "hebe")
                 self.assertEqual(result.stripped_text, stripped)
 
-    def test_eve_needs_command_context_when_awake(self):
-        weak = self.resolve("Eve mira esto")
-        strong = self.resolve("Eve despierta")
+    def test_eve_is_direct_when_vocative_or_command_shaped(self):
+        vocative = self.resolve("Eve mira esto")
+        command = self.resolve("Eve despierta")
 
-        self.assertFalse(weak.addressed_to_hebe)
-        self.assertEqual(weak.reason, "weak_eve_context")
-        self.assertTrue(strong.addressed_to_hebe)
-        self.assertTrue(strong.wake_command)
+        self.assertTrue(vocative.addressed_to_hebe)
+        self.assertEqual(vocative.reason, "stt_alias_vocative")
+        self.assertTrue(command.addressed_to_hebe)
+        self.assertTrue(command.wake_command)
+
+    def test_se_ve_does_not_false_wake(self):
+        for text in ("como se ve", "no se ve", "se ve bien"):
+            with self.subTest(text=text):
+                result = self.resolve(text)
+                self.assertFalse(result.addressed_to_hebe)
+
+    def test_eve_needs_direct_context_when_not_vocative(self):
+        weak = self.resolve("Eve mira esto")
+        middle = self.resolve("esto Eve no tiene forma directa")
+
+        self.assertTrue(weak.addressed_to_hebe)
+        self.assertFalse(middle.addressed_to_hebe)
+        self.assertEqual(middle.reason, "weak_eve_context")
 
 
 if __name__ == "__main__":

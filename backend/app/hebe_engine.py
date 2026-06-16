@@ -62,7 +62,7 @@ from app.stream import session_primer
 from app.stream.spontaneity import StreamSpontaneityConfig, StreamSpontaneityService
 
 WAKE_WORDS = ["hebe despierta", "eve despierta", "jebe despierta"]
-STREAM_WAKE_ALIASES = {"hebe", "ebe", "eve", "heve", "jebe"}
+STREAM_WAKE_ALIASES = {"hebe", "ebe", "eve", "heve", "ebi", "heb", "jebe"}
 OUTPUT_TARGET_LOCAL_UI = "local_ui"
 OUTPUT_TARGET_LOCAL_TTS = "local_tts"
 OUTPUT_TARGET_STREAM_TTS = "stream_tts"
@@ -236,6 +236,10 @@ class HebeEngine:
         self.idle_suppress_when_chat_active = os.getenv(
             "HEBE_IDLE_SUPPRESS_WHEN_CHAT_ACTIVE",
             "true",
+        ).strip().lower() in ("1", "true", "yes", "on")
+        self.spontaneous_twitch_chat_enabled = os.getenv(
+            "HEBE_SPONTANEOUS_TWITCH_CHAT_ENABLED",
+            "false",
         ).strip().lower() in ("1", "true", "yes", "on")
 
         # Feature flag inicial
@@ -772,10 +776,20 @@ class HebeEngine:
             f"wake_command={resolution.wake_command} "
             f"sleep_command={resolution.sleep_command} "
             f"matched_name={resolution.matched_name!r} "
+            f"canonical={getattr(resolution, 'canonical', None)!r} "
             f"confidence={resolution.confidence:.3f} "
             f"reason={resolution.reason}",
             flush=True,
         )
+        if resolution.addressed_to_hebe and resolution.matched_name and getattr(resolution, "canonical", None):
+            print(
+                "[HEBE][WAKE_RESOLVER] "
+                f"matched_alias={resolution.matched_name!r} "
+                f"canonical={resolution.canonical!r} "
+                "addressed_to_hebe=true "
+                f"reason={resolution.reason}",
+                flush=True,
+            )
 
         if resolution.wake_command or self._is_wake_concept_only(normalized):
             was_sleeping = bool(getattr(self.runtime.state, "hebe_sleeping", False))
@@ -1105,6 +1119,11 @@ class HebeEngine:
         if event.event_type == "twitch_idle_prompt":
             stream = self._get_stream_state()
             service = getattr(self, "stream_spontaneity", None)
+            print(
+                "[HEBE][SPONTANEITY] "
+                f"candidate=true anchor={(getattr(event, 'payload', {}) or {}).get('used_fact_id') or (getattr(event, 'payload', {}) or {}).get('idle_topic') or (getattr(event, 'payload', {}) or {}).get('specific_context_anchors')}",
+                flush=True,
+            )
             if service is not None:
                 if service.is_too_similar_to_recent(stream, reply_text):
                     print("[HEBE][SPONTANEITY] skipped reason=too_similar_to_recent", flush=True)
@@ -2525,6 +2544,8 @@ class HebeEngine:
             return targets
         if input_type == "system_event":
             if event_type == "twitch_idle_prompt":
+                if self._spontaneous_twitch_chat_enabled():
+                    return [OUTPUT_TARGET_TWITCH_CHAT]
                 targets = [OUTPUT_TARGET_STREAM_TTS] if self._stream_tts_output_enabled_for_event(event_type) else [OUTPUT_TARGET_LOCAL_UI]
                 return targets
             return [OUTPUT_TARGET_LOCAL_UI]
@@ -2621,6 +2642,77 @@ class HebeEngine:
             return bool(policies and getattr(policies, "allow_tts_event_replies", True))
         return bool(policies and getattr(policies, "allow_tts_replies", False))
 
+    def _spontaneous_twitch_chat_enabled(self) -> bool:
+        configured = getattr(self, "spontaneous_twitch_chat_enabled", None)
+        if configured is None:
+            configured = os.getenv("HEBE_SPONTANEOUS_TWITCH_CHAT_ENABLED", "false").strip().lower() in (
+                "1",
+                "true",
+                "yes",
+                "on",
+            )
+            self.spontaneous_twitch_chat_enabled = configured
+        return bool(configured)
+
+    def _twitch_chatbot_connected(self) -> bool:
+        bot = getattr(self.runtime, "twitch_chat_bot", None)
+        connected = getattr(bot, "is_connected", False)
+        if callable(connected):
+            try:
+                return bool(connected())
+            except Exception:
+                return False
+        return bool(connected)
+
+    def _spontaneous_twitch_chat_delivery_allowed(self, text: str, payload: dict | None = None) -> tuple[bool, str]:
+        if not self._spontaneous_twitch_chat_enabled():
+            return False, "twitch_spontaneous_disabled"
+        stream = self._get_stream_state()
+        if not stream or not getattr(stream, "is_live", False):
+            return False, "stream_not_live"
+        twitch = getattr(self.runtime, "twitch", None)
+        is_available = getattr(twitch, "is_available", None)
+        if twitch is None or (callable(is_available) and not is_available()):
+            return False, "twitch_unavailable"
+        if not self._twitch_chatbot_connected():
+            return False, "twitch_chatbot_disconnected"
+
+        payload = payload or {}
+        anchors = list(payload.get("specific_context_anchors") or [])
+        if not anchors:
+            return False, "no_high_quality_anchor"
+
+        now = time.time()
+        chat_snapshot = self._chat_activity_snapshot(stream, now=now)
+        min_cooldown = 10 * 60 if chat_snapshot.get("active") else 5 * 60
+        last_sent = float(getattr(stream, "last_spontaneous_twitch_chat_ts", 0.0) or 0.0)
+        if last_sent and now - last_sent < min_cooldown:
+            return False, "spontaneous_twitch_cooldown"
+
+        anchor_key = str(payload.get("used_fact_id") or payload.get("idle_topic") or "|".join(anchors)).strip()
+        used_anchors = set(getattr(stream, "spontaneous_twitch_used_anchor_keys", set()) or set())
+        if anchor_key and anchor_key in used_anchors:
+            return False, "anchor_already_used"
+
+        clean_text = str(text or "").strip()
+        if not clean_text:
+            return False, "empty_message"
+        if "\n" in clean_text:
+            return False, "multi_line_message"
+        return True, "spontaneous_twitch_enabled"
+
+    def _record_spontaneous_twitch_chat_sent(self, text: str, payload: dict | None = None) -> None:
+        stream = self._get_stream_state()
+        if not stream:
+            return
+        payload = payload or {}
+        stream.last_spontaneous_twitch_chat_ts = time.time()
+        anchor_key = str(payload.get("used_fact_id") or payload.get("idle_topic") or "|".join(payload.get("specific_context_anchors") or [])).strip()
+        if anchor_key:
+            used_anchors = set(getattr(stream, "spontaneous_twitch_used_anchor_keys", set()) or set())
+            used_anchors.add(anchor_key)
+            stream.spontaneous_twitch_used_anchor_keys = used_anchors
+
     def _local_tts_output_enabled(self) -> bool:
         return bool(getattr(self.runtime.state, "tts_enabled", False))
 
@@ -2712,7 +2804,7 @@ class HebeEngine:
         if not normalized:
             return "unknown", None
         words = set(normalized.split())
-        if words.intersection({"hebe", "ebe", "eve", "jebe", "heve"}) or normalized.startswith(("prepara stream", "activa modo stream", "desactiva modo stream")):
+        if words.intersection(STREAM_WAKE_ALIASES) or normalized.startswith(("prepara stream", "activa modo stream", "desactiva modo stream")):
             return "direct_command_to_hebe", None
         if normalized.startswith(("ya hemos pasado ", "hemos pasado ")):
             return "completed_marker", None
@@ -4873,14 +4965,27 @@ class HebeEngine:
         stream = getattr(self.runtime.state, "stream", None)
         is_spontaneous = event_type == "twitch_idle_prompt"
         tts_allowed = self._stream_tts_output_enabled_for_event(event_type)
-        targets = [OUTPUT_TARGET_STREAM_TTS if tts_allowed else OUTPUT_TARGET_LOCAL_UI] if is_spontaneous else [OUTPUT_TARGET_TWITCH_CHAT]
+        spontaneous_chat_allowed = False
+        spontaneous_chat_reason = ""
+        if is_spontaneous:
+            spontaneous_chat_allowed, spontaneous_chat_reason = self._spontaneous_twitch_chat_delivery_allowed(text, payload)
+            if spontaneous_chat_allowed:
+                targets = [OUTPUT_TARGET_TWITCH_CHAT]
+            else:
+                if spontaneous_chat_reason == "twitch_spontaneous_disabled":
+                    print("[HEBE][SPONTANEITY] skipped reason=twitch_spontaneous_disabled", flush=True)
+                else:
+                    print(f"[HEBE][SPONTANEITY] skipped reason={spontaneous_chat_reason}", flush=True)
+                targets = [OUTPUT_TARGET_STREAM_TTS if tts_allowed else OUTPUT_TARGET_LOCAL_UI]
+        else:
+            targets = [OUTPUT_TARGET_TWITCH_CHAT]
         if not is_spontaneous and tts_allowed:
             targets.append(OUTPUT_TARGET_STREAM_TTS)
         self._declare_output_route(
             input_type="spontaneity" if is_spontaneous else "twitch_mention_or_event",
             targets=targets,
             event_type=event_type,
-            reason="stream_event_reply",
+            reason=spontaneous_chat_reason or "stream_event_reply",
         )
         if stream is not None:
             stream.last_hebe_stream_speak_ts = time.time()
@@ -4890,7 +4995,15 @@ class HebeEngine:
                 if service is not None:
                     service.record_idle_message(stream, text, topic=topic)
         if is_spontaneous:
-            emit("chat.assistant", {"text": text, "source": "spontaneity", "output_target": OUTPUT_TARGET_LOCAL_UI})
+            if spontaneous_chat_allowed and twitch is not None and twitch.is_available():
+                try:
+                    print("[HEBE][TWITCH][CHATBOT] send_message reason=spontaneity", flush=True)
+                    twitch.send_message(str(text or "").strip())
+                    self._record_spontaneous_twitch_chat_sent(text, payload)
+                except Exception as e:
+                    print(f"[HEBE][EVENT][TWITCH] send_message failed: {e!r}", flush=True)
+            else:
+                emit("chat.assistant", {"text": text, "source": "spontaneity", "output_target": OUTPUT_TARGET_LOCAL_UI})
         elif twitch is not None and twitch.is_available():
             try:
                 twitch.send_message(text)
@@ -4901,6 +5014,9 @@ class HebeEngine:
 
         if not getattr(self.runtime.state, "tts_enabled", False):
             print("[HEBE][TTS] skipped reason=global_disabled", flush=True)
+            return
+        if is_spontaneous and spontaneous_chat_allowed:
+            print("[HEBE][TTS] skipped reason=spontaneous_twitch_chat", flush=True)
             return
         if not tts_allowed:
             print("[HEBE][TTS] skipped reason=stream_tts_disabled", flush=True)
