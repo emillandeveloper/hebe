@@ -71,6 +71,7 @@ type AudioInputDevice = {
   default_sample_rate?: number;
   display_label?: string;
   signature?: string;
+  host_api_warning?: string;
 };
 
 type VoiceCommandDebug = {
@@ -88,7 +89,35 @@ type VoiceCommandDebug = {
   reason?: string;
 };
 
+type DevBackendStatus = {
+  devEnabled?: boolean;
+  running?: boolean;
+  pid?: number | null;
+  uptimeMs?: number;
+  lastRestartTime?: string | null;
+  lastError?: string;
+  status?: string;
+  ok?: boolean;
+  error?: string;
+};
+
+type HebeDevBridge = {
+  enabled: boolean;
+  reloadUi?: () => Promise<DevBackendStatus>;
+  restartBackend?: () => Promise<DevBackendStatus>;
+  fullReset?: () => Promise<DevBackendStatus>;
+  getBackendStatus?: () => Promise<DevBackendStatus>;
+  onBackendStatus?: (callback: (status: DevBackendStatus) => void) => () => void;
+};
+
+declare global {
+  interface Window {
+    hebeDev?: HebeDevBridge;
+  }
+}
+
 const LS_KEY = "hebe.ui.settings.v1";
+const FULL_RESET_PENDING_KEY = "hebe.dev.fullResetPending";
 
 function readSettings(): { volume: number; speed: number; lang: LangMode } {
   try {
@@ -117,6 +146,8 @@ export default function App() {
   const [engineReady, setEngineReady] = useState<boolean>(false);
   const [hebeSleeping, setHebeSleeping] = useState<boolean>(false);
   const [wakeRequired, setWakeRequired] = useState<boolean>(false);
+  const [wakeLoopAlive, setWakeLoopAlive] = useState<boolean | null>(null);
+  const [wakeLoopError, setWakeLoopError] = useState<string>("");
 
   const [ttsState, setTtsState] = useState<"idle" | "speaking">("idle");
   const [ttsEnabled, setTtsEnabled] = useState<boolean | null>(null);
@@ -135,6 +166,11 @@ export default function App() {
   const [micTestResult, setMicTestResult] = useState<any>(null);
   const [micError, setMicError] = useState<string>("");
   const [voiceCommandDebug, setVoiceCommandDebug] = useState<VoiceCommandDebug | null>(null);
+  const [devStatus, setDevStatus] = useState<DevBackendStatus>(() => ({
+    devEnabled: Boolean(window.hebeDev?.enabled),
+    status: "unknown",
+  }));
+  const [devBusy, setDevBusy] = useState<"" | "reload" | "restart" | "full">("");
 
   const [messages, setMessages] = useState<ChatMsg[]>(() => ([]));
   const [logs, setLogs] = useState<{ id: string; ev: HebeEvent }[]>([]);
@@ -288,6 +324,8 @@ export default function App() {
         if (typeof ev.data?.tts_enabled === "boolean") setTtsEnabled(ev.data.tts_enabled);
         if (typeof ev.data?.hebe_sleeping === "boolean") setHebeSleeping(ev.data.hebe_sleeping);
         if (typeof ev.data?.wake_required === "boolean") setWakeRequired(ev.data.wake_required);
+        if (typeof ev.data?.wake_loop_alive === "boolean") setWakeLoopAlive(ev.data.wake_loop_alive);
+        if (typeof ev.data?.wake_loop_error === "string") setWakeLoopError(ev.data.wake_loop_error);
         if (typeof ev.data?.stt_enabled === "boolean") setSttStatus(ev.data.stt_enabled ? "listening" : "off");
         if (typeof ev.data?.stt === "string") setSttStatus(ev.data.stt);
         if (typeof ev.data?.last_stt_error === "string" && ev.data.last_stt_error) setMicError(ev.data.last_stt_error);
@@ -419,6 +457,45 @@ export default function App() {
     setTimeout(ensureScrollBottom, 0);
   }
 
+  async function refreshDevStatus() {
+    const bridge = window.hebeDev;
+    if (!bridge?.enabled || !bridge.getBackendStatus) return;
+    try {
+      setDevStatus(await bridge.getBackendStatus());
+    } catch (error) {
+      setDevStatus((prev) => ({ ...prev, status: "failed", lastError: error instanceof Error ? error.message : String(error) }));
+    }
+  }
+
+  async function runDevAction(action: "reload" | "restart" | "full") {
+    const bridge = window.hebeDev;
+    if (!bridge?.enabled) return;
+    setDevBusy(action);
+    try {
+      if (action === "reload") {
+        await bridge.reloadUi?.();
+        return;
+      }
+      if (action === "full") {
+        sessionStorage.setItem(FULL_RESET_PENDING_KEY, "1");
+        const result = await bridge.fullReset?.();
+        if (result) setDevStatus(result);
+        if (result && result.ok === false) sessionStorage.removeItem(FULL_RESET_PENDING_KEY);
+        return;
+      }
+      const result = await bridge.restartBackend?.();
+      if (result) setDevStatus(result);
+      if (result?.ok) {
+        clientRef.current?.disconnect();
+        clientRef.current?.connect();
+      }
+    } catch (error) {
+      setDevStatus((prev) => ({ ...prev, status: "failed", lastError: error instanceof Error ? error.message : String(error) }));
+    } finally {
+      if (action !== "reload" && action !== "full") setDevBusy("");
+    }
+  }
+
   useEffect(() => {
     const client = new WSClient({
       url: wsUrl,
@@ -430,6 +507,31 @@ export default function App() {
     return () => client.disconnect();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    const bridge = window.hebeDev;
+    if (!bridge?.enabled) return;
+    refreshDevStatus();
+    const unsubscribe = bridge.onBackendStatus?.((status) => setDevStatus(status));
+    const timer = window.setInterval(refreshDevStatus, 2000);
+    return () => {
+      unsubscribe?.();
+      window.clearInterval(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    if (!connected || !sessionStorage.getItem(FULL_RESET_PENDING_KEY)) return;
+    sessionStorage.removeItem(FULL_RESET_PENDING_KEY);
+    pushLog({ type: "backend.log", data: { raw: "[HEBE][DEV] websocket reconnected", category: "backend" }, ts: Date.now()/1000 });
+    console.log("[HEBE][DEV] websocket reconnected");
+    sendText("Hebe, actualiza contexto de stream");
+    refreshMicDevices();
+    fetch(`${apiBase}/debug/memory`).catch(() => undefined);
+    pushLog({ type: "backend.log", data: { raw: "[HEBE][DEV] full_reset complete", category: "backend" }, ts: Date.now()/1000 });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [connected]);
 
   useEffect(() => {
     const s = { volume, speed, lang };
@@ -714,6 +816,17 @@ export default function App() {
                 <button className="btn" onClick={() => sendCommand("stop_speaking")} title="Corta el audio en reproducción">🔇 Stop Speaking</button>
               </div>
 
+              {window.hebeDev?.enabled && (
+                <DevControlPanel
+                  status={devStatus}
+                  websocketConnected={connected}
+                  busy={devBusy}
+                  onReloadUi={() => runDevAction("reload")}
+                  onRestartBackend={() => runDevAction("restart")}
+                  onFullReset={() => runDevAction("full")}
+                />
+              )}
+
               <div className="card">
                 <div className="cardTitle">Voz</div>
 
@@ -765,6 +878,8 @@ export default function App() {
                   <StatusLine label="Conexion" value={connected ? "OK" : "OFF"} tone={connected ? "ok" : "bad"} />
                   <StatusLine label="Hebe" value={hebeSleeping ? "dormida" : engineReady ? "despierta" : "arrancando"} tone={hebeSleeping ? "idle" : engineReady ? "ok" : "warn"} />
                   <StatusLine label="Wake required" value={wakeRequired ? "yes" : "no"} tone={wakeRequired ? "warn" : "ok"} />
+                  <StatusLine label="Wake/STT loop" value={wakeLoopAlive === false ? "crashed" : wakeLoopAlive === true ? "alive" : "unknown"} tone={wakeLoopAlive === false ? "bad" : wakeLoopAlive === true ? "ok" : "warn"} />
+                  {wakeLoopAlive === false && wakeLoopError && <div className="micError">Wake/STT loop crashed: {wakeLoopError}</div>}
                   <StatusLine label="TTS" value={ttsEnabled === false ? "off" : ttsState} tone={ttsState === "speaking" ? "warn" : ttsEnabled === false ? "idle" : "ok"} />
                   <StatusLine label="STT" value={sttStatus} tone={sttStatus === "recording" || sttStatus === "listening" ? "warn" : sttStatus === "off" ? "idle" : "ok"} />
                   <StatusLine label="Stream" value="ver Estado" tone="idle" />
@@ -787,6 +902,65 @@ export default function App() {
       </div>
     </div>
   );
+}
+
+function DevControlPanel({
+  status,
+  websocketConnected,
+  busy,
+  onReloadUi,
+  onRestartBackend,
+  onFullReset,
+}: {
+  status: DevBackendStatus;
+  websocketConnected: boolean;
+  busy: "" | "reload" | "restart" | "full";
+  onReloadUi: () => void;
+  onRestartBackend: () => void;
+  onFullReset: () => void;
+}) {
+  const state = status.status || "unknown";
+  const failed = state === "failed" || Boolean(status.lastError || status.error);
+  const tone = failed ? "bad" : state === "healthy" ? "ok" : state === "restarting" || state === "starting" || state === "stopping" ? "warn" : "idle";
+  return (
+    <div className="card devCard">
+      <div className="cardTitle row">
+        <span>Dev</span>
+        <span className={`devState ${tone}`}>{state}</span>
+      </div>
+      <div className="devButtons">
+        <button className="btn compact" disabled={Boolean(busy)} onClick={onReloadUi}>Reload UI</button>
+        <button className="btn compact" disabled={Boolean(busy)} onClick={onRestartBackend}>{busy === "restart" ? "Restarting..." : "Restart Backend"}</button>
+        <button className="btn compact danger" disabled={Boolean(busy)} onClick={onFullReset}>{busy === "full" ? "Resetting..." : "Full Dev Reset"}</button>
+      </div>
+      <div className="statusList devStatusList">
+        <StatusLine label="Backend" value={status.running ? "yes" : "no"} tone={status.running ? "ok" : "bad"} />
+        <StatusLine label="PID" value={status.pid ? String(status.pid) : "-"} tone={status.pid ? "ok" : "idle"} />
+        <StatusLine label="Uptime" value={formatDuration(status.uptimeMs || 0)} tone={status.running ? "ok" : "idle"} />
+        <StatusLine label="Restart" value={formatRestartTime(status.lastRestartTime)} tone={status.lastRestartTime ? "ok" : "idle"} />
+        <StatusLine label="WebSocket" value={websocketConnected ? "yes" : "no"} tone={websocketConnected ? "ok" : "bad"} />
+      </div>
+      {(status.lastError || status.error) && <div className="devError mono">{status.lastError || status.error}</div>}
+    </div>
+  );
+}
+
+function formatDuration(ms: number) {
+  if (!ms) return "0s";
+  const seconds = Math.max(0, Math.floor(ms / 1000));
+  const minutes = Math.floor(seconds / 60);
+  const rest = seconds % 60;
+  if (minutes <= 0) return `${rest}s`;
+  const hours = Math.floor(minutes / 60);
+  if (hours <= 0) return `${minutes}m ${rest}s`;
+  return `${hours}h ${minutes % 60}m`;
+}
+
+function formatRestartTime(value?: string | null) {
+  if (!value) return "never";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }
 
 function QuickControlToolbar({ disabled, onCommand }: { disabled: boolean; onCommand: (command: string) => void }) {

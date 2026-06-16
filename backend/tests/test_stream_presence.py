@@ -177,6 +177,23 @@ class StreamPresenceTests(unittest.TestCase):
         self.assertEqual(event_type, "direct_command_to_hebe")
         self.assertIsNone(mood)
 
+    def test_performance_profile_replaces_frozen_spontaneity_config(self):
+        stream = StreamSessionState(enabled=True)
+        stream.current_game = "Baldur's Gate 3"
+        engine = make_engine(stream)
+
+        engine._apply_stream_performance_profile()
+
+        self.assertGreaterEqual(engine.stream_spontaneity.config.global_stream_cooldown_sec, 10 * 60)
+
+    def test_direct_voice_tts_uses_stream_target_when_live(self):
+        stream = StreamSessionState(enabled=False)
+        stream.is_live = True
+        stream.live_status_known = True
+        engine = make_engine(stream)
+
+        self.assertEqual(engine._direct_voice_tts_target(), "stream_tts")
+
     def test_ambient_voice_without_wakeword_does_not_become_command(self):
         engine = make_engine(StreamSessionState(enabled=True))
 

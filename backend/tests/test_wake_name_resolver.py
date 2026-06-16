@@ -59,6 +59,21 @@ class WakeNameResolverTests(unittest.TestCase):
         self.assertFalse(middle.addressed_to_hebe)
         self.assertEqual(middle.reason, "weak_eve_context")
 
+    def test_direct_question_aliases_address_hebe(self):
+        cases = [
+            "Hebe, me escuchas?",
+            "Ebe, me escuchas?",
+            "Eve, me escuchas?",
+            "Me escuchas, Ebe?",
+            "Que tal estas, Eve?",
+        ]
+
+        for text in cases:
+            with self.subTest(text=text):
+                result = self.resolve(text)
+                self.assertTrue(result.addressed_to_hebe)
+                self.assertEqual(result.canonical, "hebe")
+
 
 if __name__ == "__main__":
     unittest.main()

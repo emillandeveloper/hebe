@@ -2,8 +2,9 @@ import asyncio
 import time
 import inspect
 import logging
+import os
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
 from .ws import WSManager
@@ -60,11 +61,47 @@ async def maybe_await(x):
 
 @app.get("/health")
 def health():
+    engine = getattr(hebe, "_engine", None)
+    wake_loop = {}
+    if engine is not None:
+        try:
+            wake_loop = engine.wake_loop_health()
+        except Exception as exc:
+            wake_loop = {"alive": False, "last_error": str(exc), "thread_alive": False}
+    ok = not wake_loop or bool(wake_loop.get("alive") or not getattr(engine, "use_wakeword", False))
+    return {"ok": ok, "ts": time.time(), "wake_loop": wake_loop}
+
+
+@app.post("/dev/shutdown")
+async def dev_shutdown():
+    """Best-effort cleanup before Electron restarts the owned backend process."""
+    enabled = (
+        os.getenv("ELECTRON_DEV", "0").strip() == "1"
+        or os.getenv("HEBE_DEV_CONTROLS", "0").strip() == "1"
+        or os.getenv("HEBE_DEV_SHUTDOWN_ENABLED", "0").strip() == "1"
+    )
+    if not enabled:
+        raise HTTPException(status_code=404, detail="Not found")
+    print("[HEBE][DEV] shutdown requested", flush=True)
+    try:
+        await hebe.stop()
+    except Exception as exc:
+        print(f"[HEBE][DEV] hebe stop failed: {type(exc).__name__}: {exc}", flush=True)
+    try:
+        await ws_manager.broadcast(
+            {"type": "status", "data": {"backend": "stopping", "running": False}, "ts": time.time()}
+        )
+    except Exception:
+        pass
     return {"ok": True, "ts": time.time()}
 
 
 @app.on_event("shutdown")
 async def shutdown():
+    try:
+        await hebe.stop()
+    except Exception:
+        pass
     _try_dump_stream_summary("sigterm")
 
 

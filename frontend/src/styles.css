@@ -2088,6 +2088,67 @@ input[type="range"]{
   font-family:"JetBrains Mono", "SFMono-Regular", Menlo, Consolas, monospace;
 }
 
+.devCard{
+  border-color:rgba(98,199,216,0.16);
+  background:
+    linear-gradient(180deg, rgba(98,199,216,0.075), rgba(0,0,0,0.18)),
+    rgba(255,255,255,0.035);
+}
+
+.devState{
+  padding:3px 8px;
+  border-radius:999px;
+  border:1px solid rgba(255,255,255,0.10);
+  font-size:10px;
+  font-weight:950;
+  text-transform:uppercase;
+}
+
+.devState.ok{
+  color:var(--ok);
+  border-color:rgba(56,217,150,0.24);
+  background:rgba(56,217,150,0.10);
+}
+
+.devState.warn{
+  color:var(--warn);
+  border-color:rgba(212,179,95,0.24);
+  background:rgba(212,179,95,0.10);
+}
+
+.devState.bad{
+  color:var(--red);
+  border-color:rgba(209,74,92,0.28);
+  background:rgba(209,74,92,0.11);
+}
+
+.devState.idle{
+  color:var(--muted);
+  background:rgba(255,255,255,0.045);
+}
+
+.devButtons{
+  display:grid;
+  grid-template-columns:1fr;
+  gap:7px;
+  margin-bottom:10px;
+}
+
+.devStatusList{
+  padding-top:2px;
+}
+
+.devError{
+  margin-top:9px;
+  padding:8px;
+  border-radius:10px;
+  color:rgba(255,210,216,0.95);
+  border:1px solid rgba(209,74,92,0.24);
+  background:rgba(209,74,92,0.10);
+  white-space:pre-wrap;
+  overflow-wrap:anywhere;
+}
+
 @media (max-width: 1280px){
   .quickToolbar.compact.grouped .quickGroupGrid{
     grid-template-columns:repeat(2, minmax(0, 1fr));

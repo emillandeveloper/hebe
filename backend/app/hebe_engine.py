@@ -2,6 +2,7 @@ import os
 import re
 import time
 import threading
+from dataclasses import replace
 from queue import Empty
 from difflib import SequenceMatcher
 from datetime import datetime, timedelta, timezone
@@ -86,6 +87,8 @@ class HebeEngine:
     def __init__(self, runtime: HebeRuntime, use_wakeword: bool = True, say_hello: bool = False):
         self.runtime = runtime
         self._stt_worker: STTWorker | None = None
+        self._wake_loop_alive = False
+        self._wake_loop_last_error = ""
         self.say_hello = say_hello
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
@@ -335,34 +338,77 @@ class HebeEngine:
             print(f"[HEBE][LIVE_SESSION] debug snapshot failed: {exc!r}", flush=True)
             return {}
 
+    def _set_wake_loop_alive(self, alive: bool, *, error: str = "") -> None:
+        self._wake_loop_alive = bool(alive)
+        self._wake_loop_last_error = str(error or "")
+        print(
+            f"[HEBE][WAKE_LOOP] alive={str(bool(alive)).lower()}"
+            + (f" error={self._wake_loop_last_error!r}" if self._wake_loop_last_error else ""),
+            flush=True,
+        )
+        try:
+            emit(
+                "status",
+                {
+                    "wake_loop_alive": bool(alive),
+                    "wake_loop_error": self._wake_loop_last_error,
+                    "wake_loop_status": "alive" if alive else "crashed" if self._wake_loop_last_error else "stopped",
+                },
+            )
+        except Exception:
+            pass
+
+    def wake_loop_health(self) -> dict:
+        return {
+            "alive": bool(getattr(self, "_wake_loop_alive", False)),
+            "last_error": str(getattr(self, "_wake_loop_last_error", "") or ""),
+            "thread_alive": bool(getattr(getattr(self, "_thread", None), "is_alive", lambda: False)()),
+        }
+
     def _apply_stream_performance_profile(self) -> None:
-        stream = self._get_stream_state()
-        policies = getattr(stream, "policies", None) if stream else None
-        if policies is None:
+        try:
+            stream = self._get_stream_state()
+            policies = getattr(stream, "policies", None) if stream else None
+            if policies is None:
+                return
+            profile = os.getenv("HEBE_GAME_PERFORMANCE_PROFILE", "").strip().lower()
+            game = str(getattr(stream, "current_game", None) or getattr(stream, "current_category", None) or "").strip().lower()
+            if not profile:
+                if "baldur" in game or "bg3" in game:
+                    profile = "bg3"
+                elif "persona" in game:
+                    profile = "light"
+            if not profile:
+                return
+            print(f"[HEBE][PERFORMANCE_PROFILE] applying profile={profile}", flush=True)
+            if profile in {"light", "persona", "persona5", "persona_5_royal"}:
+                policies.allow_tts_replies = True
+                policies.allow_tts_idle_prompts = os.getenv("HEBE_SPONTANEOUS_TTS_ENABLED", "true").strip().lower() in ("1", "true", "yes", "on")
+                self._set_stream_spontaneity_cooldown_floor(5 * 60)
+            elif profile in {"bg3", "heavy", "baldurs_gate_3"}:
+                policies.allow_tts_replies = True
+                policies.allow_tts_idle_prompts = os.getenv("HEBE_SPONTANEOUS_TTS_ENABLED", "false").strip().lower() in ("1", "true", "yes", "on")
+                self._set_stream_spontaneity_cooldown_floor(10 * 60)
+        except Exception as exc:
+            print(f"[HEBE][PERFORMANCE_PROFILE][ERROR] failed but continuing error={exc!r}", flush=True)
+
+    def _set_stream_spontaneity_cooldown_floor(self, minimum_seconds: float) -> None:
+        service = getattr(self, "stream_spontaneity", None)
+        config = getattr(service, "config", None) if service is not None else None
+        if config is None:
             return
-        profile = os.getenv("HEBE_GAME_PERFORMANCE_PROFILE", "").strip().lower()
-        game = str(getattr(stream, "current_game", None) or getattr(stream, "current_category", None) or "").strip().lower()
-        if not profile:
-            if "baldur" in game or "bg3" in game:
-                profile = "bg3"
-            elif "persona" in game:
-                profile = "light"
-        if profile in {"light", "persona", "persona5", "persona_5_royal"}:
-            policies.allow_tts_replies = True
-            policies.allow_tts_idle_prompts = os.getenv("HEBE_SPONTANEOUS_TTS_ENABLED", "true").strip().lower() in ("1", "true", "yes", "on")
-            if hasattr(self, "stream_spontaneity"):
-                self.stream_spontaneity.config.global_stream_cooldown_sec = max(
-                    float(getattr(self.stream_spontaneity.config, "global_stream_cooldown_sec", 0.0) or 0.0),
-                    5 * 60,
-                )
-        elif profile in {"bg3", "heavy", "baldurs_gate_3"}:
-            policies.allow_tts_replies = True
-            policies.allow_tts_idle_prompts = os.getenv("HEBE_SPONTANEOUS_TTS_ENABLED", "false").strip().lower() in ("1", "true", "yes", "on")
-            if hasattr(self, "stream_spontaneity"):
-                self.stream_spontaneity.config.global_stream_cooldown_sec = max(
-                    float(getattr(self.stream_spontaneity.config, "global_stream_cooldown_sec", 0.0) or 0.0),
-                    10 * 60,
-                )
+        current = float(getattr(config, "global_stream_cooldown_sec", 0.0) or 0.0)
+        effective = max(current, float(minimum_seconds or 0.0))
+        try:
+            service.config = replace(config, global_stream_cooldown_sec=effective)
+            print(f"[HEBE][PERFORMANCE_PROFILE] applied global_stream_cooldown_sec={effective:g}", flush=True)
+        except Exception as exc:
+            self._stream_spontaneity_global_cooldown_override_sec = effective
+            print(
+                "[HEBE][PERFORMANCE_PROFILE][ERROR] failed but continuing "
+                f"error={exc!r} override_global_stream_cooldown_sec={effective:g}",
+                flush=True,
+            )
 
     def _resolve_twitch_target_details(self, raw_target: str):
         twitch = getattr(self.runtime, "twitch", None)
@@ -1586,15 +1632,30 @@ class HebeEngine:
                         "tts_enabled": bool(getattr(self.runtime.state, "tts_enabled", False)),
                         "stream_tts_enabled": bool(getattr(policies, "allow_tts_replies", False)),
                         "stt_enabled": bool(getattr(self.runtime, "stt_enabled", False)),
+                        "wake_loop_alive": False,
+                        "wake_loop_status": "starting",
                     },
                 )
 
                 target = self.wakeword_loop if self.use_wakeword else self.engine_loop
                 kwargs = {"say_hello": self.say_hello}
 
+                def run_loop():
+                    if self.use_wakeword:
+                        self._set_wake_loop_alive(True)
+                    try:
+                        return target(**kwargs)
+                    except Exception as exc:
+                        if self.use_wakeword:
+                            self._set_wake_loop_alive(False, error=str(exc))
+                        print(f"[HEBE][WAKE_LOOP][ERROR] crashed error={exc!r}", flush=True)
+                        return "error"
+                    finally:
+                        if self.use_wakeword and self._stop_event.is_set():
+                            self._set_wake_loop_alive(False)
+
                 self._thread = threading.Thread(
-                    target=target,
-                    kwargs=kwargs,
+                    target=run_loop,
                     daemon=True,
                 )
                 self._thread.start()
@@ -2289,7 +2350,7 @@ class HebeEngine:
                 last_assistant_reply=str(last_utterance.get("text") or ""),
                 expected_reply_type="correction_or_ack",
                 allow_no_wakeword=True,
-                output_target=[OUTPUT_TARGET_LOCAL_UI, OUTPUT_TARGET_STREAM_TTS if self._is_stream_enabled() else OUTPUT_TARGET_LOCAL_TTS],
+                output_target=[OUTPUT_TARGET_LOCAL_UI, self._direct_voice_tts_target()],
                 confidence=0.82,
                 matched=True,
                 reason="last_hebe_utterance_window",
@@ -2392,7 +2453,7 @@ class HebeEngine:
             self._current_input_event.stt_metadata["jarvis_allowed"] = bool(is_direct_command or pending_followup or has_action_intent)
         targets = [OUTPUT_TARGET_LOCAL_UI]
         if self._local_tts_output_enabled():
-            targets.append(OUTPUT_TARGET_STREAM_TTS if self._is_stream_enabled() else OUTPUT_TARGET_LOCAL_TTS)
+            targets.append(self._direct_voice_tts_target())
         response_decision = self._get_response_decision_resolver().decide(
             classification=classification,
             conversation_state=conversation_state,
@@ -2659,7 +2720,7 @@ class HebeEngine:
         if input_type in {"direct_to_hebe", "explicit_command", "explicit_question", "active_conversation_followup"}:
             targets = [OUTPUT_TARGET_LOCAL_UI]
             if self._local_tts_output_enabled():
-                targets.append(OUTPUT_TARGET_STREAM_TTS if self._is_stream_enabled() else OUTPUT_TARGET_LOCAL_TTS)
+                targets.append(self._direct_voice_tts_target())
             return targets
         if input_type == "twitch_chat_mention":
             targets = [OUTPUT_TARGET_TWITCH_CHAT]
@@ -2865,6 +2926,18 @@ class HebeEngine:
     def _is_stream_enabled(self) -> bool:
         stream = self._get_stream_state()
         return bool(stream and getattr(stream, "enabled", False))
+
+    def _direct_voice_tts_target(self) -> str:
+        stream = self._get_stream_state()
+        stream_voice = bool(
+            stream
+            and (
+                getattr(stream, "enabled", False)
+                or getattr(stream, "is_live", False)
+                or getattr(stream, "live_test_override", False)
+            )
+        )
+        return OUTPUT_TARGET_STREAM_TTS if stream_voice else OUTPUT_TARGET_LOCAL_TTS
 
     def _arm_stream(self) -> None:
         stream = self._get_stream_state()
@@ -5399,7 +5472,7 @@ class HebeEngine:
             return
 
         targets = [OUTPUT_TARGET_LOCAL_UI]
-        voice_target = OUTPUT_TARGET_STREAM_TTS if self._is_stream_enabled() else OUTPUT_TARGET_LOCAL_TTS
+        voice_target = self._direct_voice_tts_target()
         if self._local_tts_output_enabled():
             targets.append(voice_target)
         self._declare_output_route(
@@ -5518,10 +5591,18 @@ class HebeEngine:
         while True:
             if self._stop_event.is_set():
                 return "stop"
-            self.poll_internal_events()
-            self.poll_stream_routine()
-            self.poll_stream_context(require_enabled=False)
-            self.poll_stream_presence()
+            try:
+                self.poll_internal_events()
+                self.poll_stream_routine()
+                self.poll_stream_context(require_enabled=False)
+                self.poll_stream_presence()
+            except Exception as exc:
+                print(f"[HEBE][WAKE_LOOP][ERROR] poll failed but continuing error={exc!r}", flush=True)
+                self._wake_loop_last_error = str(exc)
+                try:
+                    emit("status", {"wake_loop_alive": True, "wake_loop_error": str(exc), "wake_loop_status": "alive"})
+                except Exception:
+                    pass
             try:
                 ui_inbox = get_ui_inbox()
                 cmd = ui_inbox.get_nowait()
