@@ -36,6 +36,7 @@ from app.cognitive.command_result import CommandResult
 from app.cognitive.input_event import InputEvent
 from app.cognitive.action_plan import ActionPlan
 from app.cognitive.stream_companion_flow import (
+    ConversationState,
     ContextRelevance,
     ConversationStateResolver,
     InputClassifier,
@@ -56,13 +57,15 @@ from app.stream.game_knowledge import GameKnowledgeConfig, GameKnowledgeResolver
 from app.stream.game_profiles import GameProfileStore
 from app.stream.game_research import GameKnowledgeResearchConfig, GameKnowledgeResearchService
 from app.stream import memory as stream_memory
+from app.stream.live_session import LiveSessionBrain, init_live_session_schema
 from app.stream.ambient_context import AmbientContextExtractor
 from app.stream.action_planner import StreamActionPlanner
 from app.stream import session_primer
 from app.stream.spontaneity import StreamSpontaneityConfig, StreamSpontaneityService
 
 WAKE_WORDS = ["hebe despierta", "eve despierta", "jebe despierta"]
-STREAM_WAKE_ALIASES = {"hebe", "ebe", "eve", "heve", "ebi", "heb", "jebe"}
+STREAM_WAKE_ALIASES = {"hebe", "ebe", "eve", "ehbe", "heve", "ebi", "heb", "jebe"}
+STREAM_WAKE_MULTI_ALIASES = ("eh ve", "e ve", "e be", "hey be", "he ve")
 OUTPUT_TARGET_LOCAL_UI = "local_ui"
 OUTPUT_TARGET_LOCAL_TTS = "local_tts"
 OUTPUT_TARGET_STREAM_TTS = "stream_tts"
@@ -210,6 +213,8 @@ class HebeEngine:
         self.stream_context_sync = StreamContextSyncService(
             twitch_api=getattr(self.runtime, "twitch", None),
         )
+        self.live_session_brain = LiveSessionBrain(getattr(self.runtime.state, "stream", None))
+        self._apply_stream_performance_profile()
         self.ambient_context_extractor = AmbientContextExtractor()
         self.memory_extractor = MemoryExtractor(
             intent_model=getattr(self.runtime, "intent_llm", None),
@@ -239,7 +244,7 @@ class HebeEngine:
         ).strip().lower() in ("1", "true", "yes", "on")
         self.spontaneous_twitch_chat_enabled = os.getenv(
             "HEBE_SPONTANEOUS_TWITCH_CHAT_ENABLED",
-            "false",
+            os.getenv("HEBE_TWITCH_SPONTANEOUS_ENABLED", "false"),
         ).strip().lower() in ("1", "true", "yes", "on")
 
         # Feature flag inicial
@@ -304,6 +309,60 @@ class HebeEngine:
             stream_state_provider=self._get_stream_state,
             target_resolver=self._resolve_twitch_target_details,
         )
+
+    def _get_live_session_brain(self) -> LiveSessionBrain:
+        brain = getattr(self, "live_session_brain", None)
+        stream = self._get_stream_state()
+        if brain is None:
+            brain = LiveSessionBrain(stream)
+            self.live_session_brain = brain
+        else:
+            try:
+                brain.sync_stream_metadata(stream)
+            except Exception as exc:
+                print(f"[HEBE][LIVE_SESSION] sync failed: {exc!r}", flush=True)
+        if stream is not None:
+            try:
+                stream.live_session_context = brain.state.as_dict()
+            except Exception:
+                pass
+        return brain
+
+    def _live_session_debug_snapshot(self) -> dict:
+        try:
+            return self._get_live_session_brain().as_debug_dict()
+        except Exception as exc:
+            print(f"[HEBE][LIVE_SESSION] debug snapshot failed: {exc!r}", flush=True)
+            return {}
+
+    def _apply_stream_performance_profile(self) -> None:
+        stream = self._get_stream_state()
+        policies = getattr(stream, "policies", None) if stream else None
+        if policies is None:
+            return
+        profile = os.getenv("HEBE_GAME_PERFORMANCE_PROFILE", "").strip().lower()
+        game = str(getattr(stream, "current_game", None) or getattr(stream, "current_category", None) or "").strip().lower()
+        if not profile:
+            if "baldur" in game or "bg3" in game:
+                profile = "bg3"
+            elif "persona" in game:
+                profile = "light"
+        if profile in {"light", "persona", "persona5", "persona_5_royal"}:
+            policies.allow_tts_replies = True
+            policies.allow_tts_idle_prompts = os.getenv("HEBE_SPONTANEOUS_TTS_ENABLED", "true").strip().lower() in ("1", "true", "yes", "on")
+            if hasattr(self, "stream_spontaneity"):
+                self.stream_spontaneity.config.global_stream_cooldown_sec = max(
+                    float(getattr(self.stream_spontaneity.config, "global_stream_cooldown_sec", 0.0) or 0.0),
+                    5 * 60,
+                )
+        elif profile in {"bg3", "heavy", "baldurs_gate_3"}:
+            policies.allow_tts_replies = True
+            policies.allow_tts_idle_prompts = os.getenv("HEBE_SPONTANEOUS_TTS_ENABLED", "false").strip().lower() in ("1", "true", "yes", "on")
+            if hasattr(self, "stream_spontaneity"):
+                self.stream_spontaneity.config.global_stream_cooldown_sec = max(
+                    float(getattr(self.stream_spontaneity.config, "global_stream_cooldown_sec", 0.0) or 0.0),
+                    10 * 60,
+                )
 
     def _resolve_twitch_target_details(self, raw_target: str):
         twitch = getattr(self.runtime, "twitch", None)
@@ -416,6 +475,16 @@ class HebeEngine:
         stream.recent_chat_topics = topics[-12:]
         if topics:
             stream.recent_chat_summary = ", ".join(dict.fromkeys(topics[-5:]))
+        try:
+            self._get_live_session_brain().observe_chat_message(
+                username,
+                display_name or username,
+                message,
+                topic=topic,
+                mention=self._message_mentions_hebe(message),
+            )
+        except Exception as exc:
+            print(f"[HEBE][LIVE_SESSION] chat observe failed: {exc!r}", flush=True)
         if topic != "general_chat":
             users = sorted({
                 str(item.get("username") or "").strip()
@@ -1048,6 +1117,13 @@ class HebeEngine:
         )
         event_type = str(getattr(event, "event_type", "") or "")
         payload = getattr(event, "payload", {}) or {}
+        try:
+            live_context = self._get_live_session_brain().retrieve_context(str(payload), limit_events=12, limit_summaries=3)
+            if isinstance(payload, dict):
+                payload.setdefault("live_session_context", live_context)
+                event.payload = payload
+        except Exception as exc:
+            print(f"[HEBE][LIVE_SESSION] internal event context failed: {exc!r}", flush=True)
         if event_type == "twitch_chat_react":
             raw_text = str((payload or {}).get("message_text") or "")
             event_source = "twitch_chat"
@@ -1155,6 +1231,10 @@ class HebeEngine:
             self._auto_enable_stream_if_live(stream, source="stream_online_event")
             self._ensure_stream_memory_session_if_live(stream)
             self._record_stream_event_safe("stream_online", payload, stream=stream)
+            try:
+                self._get_live_session_brain().observe_stream_metadata(stream, source="stream_online")
+            except Exception as exc:
+                print(f"[HEBE][LIVE_SESSION] stream_online failed: {exc!r}", flush=True)
             self.poll_stream_context(force=True, require_enabled=False)
             print("[HEBE][STREAM_CONTEXT] stream_online event handled", flush=True)
             return
@@ -1169,6 +1249,12 @@ class HebeEngine:
             if isinstance(getattr(stream, "cooldowns", None), dict):
                 stream.cooldowns.pop(getattr(self.stream_spontaneity.config, "cooldown_key", "stream_idle_prompt_next_ts"), None)
             self._record_stream_event_safe("stream_offline", payload, stream=stream)
+            try:
+                brain = self._get_live_session_brain()
+                brain.observe_stream_metadata(stream, source="stream_offline")
+                brain.retrieve_context("stream ended", limit_events=20, limit_summaries=5)
+            except Exception as exc:
+                print(f"[HEBE][LIVE_SESSION] stream_offline failed: {exc!r}", flush=True)
             self._close_stream_memory_session_safe(stream, reason="stream_offline_event")
             print("[HEBE][STREAM_CONTEXT] stream_offline event handled", flush=True)
 
@@ -1327,6 +1413,11 @@ class HebeEngine:
             elif was_live:
                 self._close_stream_memory_session_safe(stream, reason="context_sync_offline")
             self._maybe_research_game_after_context_sync(stream)
+            self._apply_stream_performance_profile()
+            try:
+                self._get_live_session_brain().observe_stream_metadata(stream, source="context_sync")
+            except Exception as exc:
+                print(f"[HEBE][LIVE_SESSION] context sync observe failed: {exc!r}", flush=True)
         print(f"[HEBE][STREAM_CONTEXT] refresh result success={ok}", flush=True)
         return ok
 
@@ -1453,6 +1544,7 @@ class HebeEngine:
                 try:
                     from app.cognitive.memory.memory_store import init_memory_chunks_schema
                     init_memory_chunks_schema()
+                    init_live_session_schema()
                     cleanup_stt_prompt_injection_rows()
                 except Exception as _e:
                     print(f"[HEBE][MEMORY] init_memory_chunks_schema failed: {_e!r}", flush=True)
@@ -2169,11 +2261,18 @@ class HebeEngine:
         has_action_intent = self._input_event_has_action_intent(getattr(self, "_current_input_event", None))
         is_direct_command = voice_type == "direct_command_to_hebe"
         relevance = ContextRelevance(useful=False, category="none", confidence=0.0, reason="not_evaluated")
+        try:
+            possible_reply_to_hebe = self._get_live_session_brain().is_possible_reply_to_hebe(command)
+        except Exception:
+            possible_reply_to_hebe = False
         pending_followup = (
             not has_action_intent
             and not is_direct_command
             and self._stt_has_meaningful_conversation_content(transcript_for_cognition, command)
-            and self._pending_conversation_matches(source="stt_voice", text=command, event_type=voice_type)
+            and (
+                self._pending_conversation_matches(source="stt_voice", text=command, event_type=voice_type)
+                or possible_reply_to_hebe
+            )
         )
         pending_turn_for_frame = self._get_pending_conversation_turn()
         conversation_state = self._get_conversation_state_resolver().from_pending_turn(
@@ -2181,6 +2280,20 @@ class HebeEngine:
             matched=bool(pending_followup),
             reason="active_conversation_state" if pending_followup else "no_matching_active_conversation",
         )
+        if possible_reply_to_hebe and pending_followup and not conversation_state.active:
+            last_utterance = getattr(self._get_live_session_brain().state, "last_hebe_utterance", {}) or {}
+            conversation_state = ConversationState(
+                active=True,
+                topic=str(last_utterance.get("topic") or "reply_to_hebe"),
+                source="hebe_utterance_window",
+                last_assistant_reply=str(last_utterance.get("text") or ""),
+                expected_reply_type="correction_or_ack",
+                allow_no_wakeword=True,
+                output_target=[OUTPUT_TARGET_LOCAL_UI, OUTPUT_TARGET_STREAM_TTS if self._is_stream_enabled() else OUTPUT_TARGET_LOCAL_TTS],
+                confidence=0.82,
+                matched=True,
+                reason="last_hebe_utterance_window",
+            )
         self._log_conversation_state(conversation_state)
         classification = self._get_input_classifier().classify(
             self._current_input_event,
@@ -2191,6 +2304,17 @@ class HebeEngine:
             valid=True,
         )
         self._log_input_classification(classification)
+        try:
+            self._get_live_session_brain().observe_leo_stt(
+                original_raw_text,
+                command,
+                addressed_to_hebe=is_direct_command,
+                voice_event_type=voice_type,
+                topic=classification.input_type,
+                confidence=float(getattr(classification, "confidence", 0.72) or 0.72),
+            )
+        except Exception as exc:
+            print(f"[HEBE][LIVE_SESSION] stt observe failed: {exc!r}", flush=True)
         if is_direct_command and not has_action_intent and not self._stt_has_meaningful_conversation_content(
             transcript_for_cognition,
             command,
@@ -2569,6 +2693,19 @@ class HebeEngine:
                 "current_phase": getattr(stream, "current_run_phase", None),
                 "recent_facts_count": len(getattr(stream, "recent_run_context_facts", []) or []),
             }
+        live_context = {}
+        try:
+            live_context = self._get_live_session_brain().retrieve_context(
+                getattr(event, "raw_text", "") if event is not None else "",
+                limit_events=12,
+                limit_summaries=3,
+            )
+        except Exception as exc:
+            print(f"[HEBE][LIVE_SESSION] response context retrieval failed: {exc!r}", flush=True)
+        if live_context:
+            session_context["live_session"] = live_context.get("live_state")
+            session_context["recent_timeline_events"] = live_context.get("recent_events")
+            session_context["rolling_summaries"] = live_context.get("rolling_summaries")
         frame = ResponseFrame(
             input_type=classification.input_type,
             source=classification.source,
@@ -2635,7 +2772,8 @@ class HebeEngine:
         stream = self._get_stream_state()
         policies = getattr(stream, "policies", None) if stream else None
         if event_type == "twitch_idle_prompt":
-            return bool(policies and getattr(policies, "allow_tts_idle_prompts", False))
+            config_enabled = os.getenv("HEBE_SPONTANEOUS_TTS_ENABLED", "true").strip().lower() in ("1", "true", "yes", "on")
+            return bool(config_enabled and policies and getattr(policies, "allow_tts_idle_prompts", False))
         if event_type == "twitch_raid":
             return bool(policies and getattr(policies, "allow_tts_raid_thanks", True))
         if event_type and event_type.startswith("twitch_") and event_type != "twitch_chat_react":
@@ -2645,7 +2783,10 @@ class HebeEngine:
     def _spontaneous_twitch_chat_enabled(self) -> bool:
         configured = getattr(self, "spontaneous_twitch_chat_enabled", None)
         if configured is None:
-            configured = os.getenv("HEBE_SPONTANEOUS_TWITCH_CHAT_ENABLED", "false").strip().lower() in (
+            configured = os.getenv(
+                "HEBE_SPONTANEOUS_TWITCH_CHAT_ENABLED",
+                os.getenv("HEBE_TWITCH_SPONTANEOUS_ENABLED", "false"),
+            ).strip().lower() in (
                 "1",
                 "true",
                 "yes",
@@ -2690,6 +2831,11 @@ class HebeEngine:
             return False, "spontaneous_twitch_cooldown"
 
         anchor_key = str(payload.get("used_fact_id") or payload.get("idle_topic") or "|".join(anchors)).strip()
+        try:
+            if self._get_live_session_brain().is_anchor_consumed_or_invalidated(anchor_key):
+                return False, "anchor_already_used"
+        except Exception:
+            pass
         used_anchors = set(getattr(stream, "spontaneous_twitch_used_anchor_keys", set()) or set())
         if anchor_key and anchor_key in used_anchors:
             return False, "anchor_already_used"
@@ -2776,6 +2922,17 @@ class HebeEngine:
         parts = normalized.split(" ", 1)
         first_word = parts[0]
         rest = parts[1].strip() if len(parts) > 1 else ""
+        for alias in STREAM_WAKE_MULTI_ALIASES:
+            if normalized == alias:
+                self._arm_stream()
+                try:
+                    vts_hotkey("HebeIdle")
+                except Exception as e:
+                    print(f"[HEBE] vts_hotkey failed while arming stream: {e!r}", flush=True)
+                return True, None
+            if normalized.startswith(alias + " "):
+                self._disarm_stream()
+                return True, normalized[len(alias):].strip()
 
         # Caso: "hebe" / "eve" / etc. => armar ventana corta
         if first_word in STREAM_WAKE_ALIASES:
@@ -2804,10 +2961,16 @@ class HebeEngine:
         if not normalized:
             return "unknown", None
         words = set(normalized.split())
-        if words.intersection(STREAM_WAKE_ALIASES) or normalized.startswith(("prepara stream", "activa modo stream", "desactiva modo stream")):
+        if (
+            words.intersection(STREAM_WAKE_ALIASES)
+            or any(normalized == alias or normalized.startswith(alias + " ") for alias in STREAM_WAKE_MULTI_ALIASES)
+            or normalized.startswith(("prepara stream", "activa modo stream", "desactiva modo stream"))
+        ):
             return "direct_command_to_hebe", None
         if normalized.startswith(("ya hemos pasado ", "hemos pasado ")):
             return "completed_marker", None
+        if any(marker in normalized for marker in ("terminando la", "terminando el", "tercera dungeon", "tercera mazmorra", "segunda dungeon", "segunda mazmorra")):
+            return "progress_update", None
         if any(marker in normalized for marker in ("ahora toca", "toca salir", "objetivo", "vamos a ", "hay que ")):
             return "objective_update", None
         if any(marker in normalized for marker in ("estamos en", "estoy en", "hemos llegado a", "salir de")):
@@ -2856,7 +3019,17 @@ class HebeEngine:
         if mood_hint:
             stream.leo_mood_hint = mood_hint
         self._apply_ambient_voice_to_run_context(stream, text, event_type)
-        return self._extract_and_store_ambient_context(stream, text, event_type)
+        relevance = self._extract_and_store_ambient_context(stream, text, event_type)
+        try:
+            self._get_live_session_brain().update_from_voice_relevance(
+                text,
+                event_type,
+                relevance,
+                facts=list(getattr(relevance, "facts", []) or []),
+            )
+        except Exception as exc:
+            print(f"[HEBE][LIVE_SESSION] voice context update failed: {exc!r}", flush=True)
+        return relevance
 
     def _extract_and_store_ambient_context(self, stream, text: str, event_type: str) -> ContextRelevance:
         extractor = getattr(self, "ambient_context_extractor", None)
@@ -2987,6 +3160,92 @@ class HebeEngine:
         words = normalized.split()
         return " ".join(words[:8]) if words else None
 
+    def _handle_live_session_manual_command(self, raw_command: str, normalized: str, stream) -> str | None:
+        brain = self._get_live_session_brain()
+        if normalized in {"estado de sesion", "estado de sesiÃ³n", "estado sesion", "estado sesiÃ³n"}:
+            return self._format_live_session_state_reply(brain.as_debug_dict())
+
+        if normalized in {"que recuerdas de este directo", "quÃ© recuerdas de este directo", "que recuerdas del directo", "memoria de este directo"}:
+            context = brain.retrieve_context("current stream memory", limit_events=18, limit_summaries=5)
+            return self._format_live_session_memory_reply(context)
+
+        if normalized in {"que ha dicho el chat", "quÃ© ha dicho el chat", "que dice el chat", "resumen del chat"}:
+            context = brain.retrieve_context("recent chat topics", limit_events=20, limit_summaries=3)
+            return self._format_live_session_chat_reply(context)
+
+        correction_match = re.match(r"^corrige contexto[:\s]+(.+)$", raw_command.strip(), flags=re.IGNORECASE)
+        if correction_match:
+            correction = correction_match.group(1).strip()
+            brain.apply_correction(correction, self._normalize_text(correction))
+            return "Contexto corregido. No vuelvo a tirar de ese ancla como si siguiera viva."
+
+        progress_match = re.match(r"^apunta avance[:\s]+(.+)$", raw_command.strip(), flags=re.IGNORECASE)
+        if progress_match:
+            progress = progress_match.group(1).strip()
+            if progress:
+                if progress not in getattr(stream, "completed_run_markers", []):
+                    self._add_completed_marker(stream, progress)
+                brain.update_from_voice_relevance(progress, "progress_update", ContextRelevance(useful=True, category="progress_marker", confidence=0.9, reason="manual_progress"))
+                return f"Avance apuntado: {progress}."
+
+        if normalized in {"olvida ese ancla", "olvida el ancla", "invalida ese ancla"}:
+            brain.invalidate_anchor(reason="manual_forget_anchor")
+            return "Ancla invalidada. No la reutilizo."
+
+        return None
+
+    def _format_live_session_state_reply(self, debug: dict) -> str:
+        live = debug.get("live_session") or {}
+        meta = debug.get("stream_metadata") or {}
+        return (
+            "Estado de sesiÃ³n:\n\n"
+            f"* Stream: {meta.get('stream_status') or meta.get('live_status') or 'desconocido'}.\n"
+            f"* Juego/categoria: {meta.get('game') or meta.get('category') or 'sin detectar'}.\n"
+            f"* Titulo: {meta.get('title') or 'sin titulo'}.\n"
+            f"* Fase: {live.get('current_phase') or 'sin fase clara'}.\n"
+            f"* Objetivo: {live.get('current_objective') or 'sin objetivo claro'}.\n"
+            f"* Ubicacion/actividad: {live.get('current_location') or 'sin ubicacion clara'}.\n"
+            f"* Ultima correccion: {live.get('latest_correction_from_leo') or 'ninguna'}.\n"
+            f"* Tema de chat: {live.get('current_chat_topic') or 'sin tema reciente'}.\n"
+            f"* Ultimo mensaje mio: {(live.get('last_hebe_utterance') or {}).get('text') or 'ninguno'}.\n"
+            f"* Actualizado: {live.get('last_updated_at') or 'nunca'}."
+        )
+
+    def _format_live_session_memory_reply(self, context: dict) -> str:
+        live = context.get("live_state") or {}
+        events = context.get("recent_events") or []
+        summaries = context.get("rolling_summaries") or []
+        important = [
+            f"{item.get('event_type')}: {item.get('raw_text') or item.get('topic') or ''}".strip()
+            for item in events[-8:]
+            if item.get("event_type") in {"leo_direct_to_hebe", "leo_reply_to_hebe", "correction", "session_context_update", "twitch_chat_mention"}
+        ]
+        return (
+            "De este directo tengo esto:\n\n"
+            f"* Juego/categoria: {live.get('current_game') or live.get('current_category') or 'sin detectar'}.\n"
+            f"* Progreso/fase: {live.get('current_phase') or 'sin fase clara'}.\n"
+            f"* Objetivo: {live.get('current_objective') or 'sin objetivo claro'}.\n"
+            f"* Chatters recientes: {', '.join((item.get('display_name') or item.get('username') or '') for item in (live.get('recent_chatters') or [])[:8]) or 'ninguno'}.\n"
+            f"* Eventos importantes: {' | '.join(important) if important else 'sin eventos destacados'}.\n"
+            f"* Ultimo resumen: {(summaries[0] or {}).get('summary_text') if summaries else 'aun no he generado resumen rolling'}."
+        )
+
+    def _format_live_session_chat_reply(self, context: dict) -> str:
+        live = context.get("live_state") or {}
+        chatters = live.get("recent_chatters") or []
+        names = [item.get("display_name") or item.get("username") for item in chatters[:10] if item.get("display_name") or item.get("username")]
+        topics = []
+        for item in chatters:
+            for topic in item.get("recent_topics") or []:
+                if topic and topic not in topics:
+                    topics.append(topic)
+        return (
+            "Chat reciente:\n\n"
+            f"* Tema actual: {live.get('current_chat_topic') or 'sin tema claro'}.\n"
+            f"* Participantes recientes: {', '.join(names) if names else 'nadie registrado'}.\n"
+            f"* Temas: {', '.join(topics[:8]) if topics else 'sin temas clasificados'}."
+        )
+
     def _handle_stream_manual_command(self, text: str) -> str | CommandResult | None:
         stream = self._get_stream_state()
         if not stream:
@@ -3052,6 +3311,10 @@ class HebeEngine:
         run_reply = self._handle_run_context_command(raw_command, normalized, stream)
         if run_reply is not None:
             return run_reply
+
+        live_reply = self._handle_live_session_manual_command(raw_command, normalized, stream)
+        if live_reply is not None:
+            return live_reply
 
         shoutout_reply = self._handle_shoutout_manual_command(raw_command, normalized, stream)
         if shoutout_reply is not None:
@@ -4971,6 +5234,8 @@ class HebeEngine:
             spontaneous_chat_allowed, spontaneous_chat_reason = self._spontaneous_twitch_chat_delivery_allowed(text, payload)
             if spontaneous_chat_allowed:
                 targets = [OUTPUT_TARGET_TWITCH_CHAT]
+                if tts_allowed:
+                    targets.append(OUTPUT_TARGET_STREAM_TTS)
             else:
                 if spontaneous_chat_reason == "twitch_spontaneous_disabled":
                     print("[HEBE][SPONTANEITY] skipped reason=twitch_spontaneous_disabled", flush=True)
@@ -4994,19 +5259,61 @@ class HebeEngine:
                 service = getattr(self, "stream_spontaneity", None)
                 if service is not None:
                     service.record_idle_message(stream, text, topic=topic)
+                anchor_id = str((payload or {}).get("used_fact_id") or (payload or {}).get("anchor_id") or topic or "").strip() or None
+                try:
+                    if anchor_id:
+                        self._get_live_session_brain().create_spontaneity_anchor(
+                            anchor_id=anchor_id,
+                            anchor_type="spontaneity",
+                            topic=topic or "unknown",
+                            payload=payload or {},
+                        )
+                except Exception as exc:
+                    print(f"[HEBE][LIVE_SESSION] anchor create failed: {exc!r}", flush=True)
         if is_spontaneous:
             if spontaneous_chat_allowed and twitch is not None and twitch.is_available():
                 try:
                     print("[HEBE][TWITCH][CHATBOT] send_message reason=spontaneity", flush=True)
                     twitch.send_message(str(text or "").strip())
                     self._record_spontaneous_twitch_chat_sent(text, payload)
+                    try:
+                        anchor_id = str((payload or {}).get("used_fact_id") or (payload or {}).get("anchor_id") or (payload or {}).get("idle_topic") or "").strip() or None
+                        self._get_live_session_brain().observe_hebe_utterance(
+                            text,
+                            output_target=targets,
+                            input_type="spontaneity",
+                            anchor_id=anchor_id,
+                            topic=(payload or {}).get("idle_topic"),
+                        )
+                        self._get_live_session_brain().consume_anchor(anchor_id)
+                    except Exception as exc:
+                        print(f"[HEBE][LIVE_SESSION] hebe spontaneity record failed: {exc!r}", flush=True)
                 except Exception as e:
                     print(f"[HEBE][EVENT][TWITCH] send_message failed: {e!r}", flush=True)
             else:
                 emit("chat.assistant", {"text": text, "source": "spontaneity", "output_target": OUTPUT_TARGET_LOCAL_UI})
+                try:
+                    self._get_live_session_brain().observe_hebe_utterance(
+                        text,
+                        output_target=targets,
+                        input_type="spontaneity",
+                        anchor_id=str((payload or {}).get("used_fact_id") or (payload or {}).get("idle_topic") or "").strip() or None,
+                        topic=(payload or {}).get("idle_topic"),
+                    )
+                except Exception as exc:
+                    print(f"[HEBE][LIVE_SESSION] hebe spontaneity record failed: {exc!r}", flush=True)
         elif twitch is not None and twitch.is_available():
             try:
                 twitch.send_message(text)
+                try:
+                    self._get_live_session_brain().observe_hebe_utterance(
+                        text,
+                        output_target=targets,
+                        input_type="twitch_mention_or_event",
+                        topic=event_type or "twitch_event",
+                    )
+                except Exception as exc:
+                    print(f"[HEBE][LIVE_SESSION] hebe twitch record failed: {exc!r}", flush=True)
             except Exception as e:
                 print(f"[HEBE][EVENT][TWITCH] send_message failed: {e!r}", flush=True)
         else:
@@ -5015,8 +5322,8 @@ class HebeEngine:
         if not getattr(self.runtime.state, "tts_enabled", False):
             print("[HEBE][TTS] skipped reason=global_disabled", flush=True)
             return
-        if is_spontaneous and spontaneous_chat_allowed:
-            print("[HEBE][TTS] skipped reason=spontaneous_twitch_chat", flush=True)
+        if is_spontaneous and spontaneous_chat_allowed and not tts_allowed:
+            print("[HEBE][TTS] skipped reason=spontaneous_twitch_chat_text_only", flush=True)
             return
         if not tts_allowed:
             print("[HEBE][TTS] skipped reason=stream_tts_disabled", flush=True)
@@ -5046,6 +5353,18 @@ class HebeEngine:
             )
         if emit_ui:
             emit("chat.assistant", {"text": text, "source": input_type, "output_target": OUTPUT_TARGET_LOCAL_UI})
+        try:
+            targets_for_brain = [OUTPUT_TARGET_LOCAL_UI] if emit_ui else []
+            if self._local_tts_output_enabled():
+                targets_for_brain.append(output_target)
+            self._get_live_session_brain().observe_hebe_utterance(
+                text,
+                output_target=targets_for_brain or [OUTPUT_TARGET_LOCAL_UI],
+                input_type=input_type,
+                expects_possible_reply_from_leo=True,
+            )
+        except Exception as exc:
+            print(f"[HEBE][LIVE_SESSION] hebe voice record failed: {exc!r}", flush=True)
         if not getattr(self.runtime.state, "tts_enabled", False):
             print("[HEBE][TTS] skipped reason=global_disabled", flush=True)
             return
@@ -5067,6 +5386,15 @@ class HebeEngine:
             )
             log_chat("assistant", text, source="ui")
             emit("chat.assistant", {"text": text, "source": "ui", "output_target": OUTPUT_TARGET_LOCAL_UI})
+            try:
+                self._get_live_session_brain().observe_hebe_utterance(
+                    text,
+                    output_target=[OUTPUT_TARGET_LOCAL_UI],
+                    input_type="ui_typed_input",
+                    expects_possible_reply_from_leo=True,
+                )
+            except Exception as exc:
+                print(f"[HEBE][LIVE_SESSION] hebe ui record failed: {exc!r}", flush=True)
             self._record_assistant_reply_for_conversation(text, source=source)
             return
 

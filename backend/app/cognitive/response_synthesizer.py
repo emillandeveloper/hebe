@@ -334,6 +334,12 @@ class ResponseSynthesizer:
                 f"- intent: {response_frame.get('intent')}\n"
                 "Follow this frame. If allow_question is false, end with a statement."
             )
+            session_context = response_frame.get("current_session_context")
+            if isinstance(session_context, dict) and session_context:
+                user_parts.append(
+                    "Live session context from DB/RAG brain:\n"
+                    f"{session_context}"
+                )
 
         entity_lines = entity_prompt_lines(getattr(context, "resolved_entities", []) or [])
         if entity_lines:
@@ -1021,6 +1027,7 @@ class ResponseSynthesizer:
         recent_idle_messages = payload.get("recent_idle_messages") or []
         specific_context_anchors = payload.get("specific_context_anchors") or []
         recent_motifs = payload.get("recent_style_motifs") or []
+        live_session_context = payload.get("live_session_context") or {}
 
         system = (
             f"{self._build_stream_style_block()}\n\n"
@@ -1080,6 +1087,8 @@ class ResponseSynthesizer:
             f"- topics: {', '.join(recent_idle_topics) or 'none'}\n"
             f"- messages: {' | '.join(str(item) for item in recent_idle_messages) or 'none'}\n\n"
             f"- recent_motifs: {', '.join(str(item) for item in recent_motifs) or 'none'}\n\n"
+            "live_session_brain:\n"
+            f"{live_session_context}\n\n"
             "game_profile:\n"
             f"- title: {game_profile.get('title') or 'unknown'}\n"
             f"- source_category_name: {game_profile.get('source_category_name') or 'unknown'}\n"

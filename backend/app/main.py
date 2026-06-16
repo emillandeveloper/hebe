@@ -91,6 +91,7 @@ def debug_memory():
     """Inspect persistent memory and last private chat turns."""
     from app.services import db_sqlite
     from app.cognitive.memory.memory_store import count_chunks, get_recent_chunks
+    from app.stream.live_session import latest_live_session_debug
 
     last_turns = db_sqlite.get_recent_chat_log(source="ui", limit=10)
     last_input = ""
@@ -122,6 +123,13 @@ def debug_memory():
     state = getattr(runtime, "state", None)
     stream = getattr(state, "stream", None)
     policies = getattr(stream, "policies", None) if stream is not None else None
+    live_session = None
+    if engine is not None:
+        try:
+            live_session = engine._live_session_debug_snapshot()
+        except Exception:
+            live_session = None
+    live_session = live_session or latest_live_session_debug()
 
     return {
         "db_path": db_sqlite.DB_PATH,
@@ -134,6 +142,7 @@ def debug_memory():
         "last_chunks": get_recent_chunks(limit=10, active_only=True),
         "last_chat_turns": last_turns,
         "retrieval_for_last_input": retrieval,
+        "live_session": live_session,
     }
 
 

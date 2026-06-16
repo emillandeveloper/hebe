@@ -21,7 +21,23 @@ class WakeNameResolver:
     """Resolve whether a transcript is addressing Hebe without phrase tables."""
 
     canonical_target = "hebe"
-    canonical_names = ("hebe", "ebe", "eve", "heve", "ebi", "heb", "eb", "e b", "jebe")
+    canonical_names = (
+        "hebe",
+        "ebe",
+        "eve",
+        "ehbe",
+        "eh ve",
+        "e ve",
+        "e be",
+        "hey be",
+        "he ve",
+        "heve",
+        "ebi",
+        "heb",
+        "eb",
+        "e b",
+        "jebe",
+    )
     wake_concepts = {"despierta", "levanta", "wake", "awake"}
     sleep_concepts = {"duerme", "descansa", "dormir", "sleep", "espera", "standby"}
 
@@ -78,7 +94,7 @@ class WakeNameResolver:
                     "name_with_command_context"
                     if has_command_context
                     else "stt_alias_vocative"
-                    if matched_name in {"eve", "ebe", "heve", "ebi", "heb"} and (has_direct_context or is_vocative)
+                    if matched_name in {"eve", "ebe", "ehbe", "ehve", "eve", "ebe", "heybe", "heve", "ebi", "heb"} and (has_direct_context or is_vocative)
                     else "name_match"
                 ),
             )
@@ -120,15 +136,20 @@ class WakeNameResolver:
         if name_index is None:
             return " ".join(tokens)
         values = list(tokens)
+        two_word_alias = (
+            name_index is not None
+            and name_index + 1 < len(values)
+            and f"{values[name_index]} {values[name_index + 1]}" in self.canonical_names
+        )
         if name_index == 0:
-            if len(values) >= 2 and f"{values[0]}{values[1]}" == "eb":
+            if two_word_alias or (len(values) >= 2 and f"{values[0]}{values[1]}" == "eb"):
                 values = values[2:]
             else:
                 values = values[1:]
         elif name_index == len(values) - 1:
             values = values[:-1]
         elif 0 <= name_index < len(values):
-            if name_index + 1 < len(values) and f"{values[name_index]}{values[name_index + 1]}" == "eb":
+            if two_word_alias or (name_index + 1 < len(values) and f"{values[name_index]}{values[name_index + 1]}" == "eb"):
                 values = values[:name_index] + values[name_index + 2 :]
             else:
                 values = values[:name_index] + values[name_index + 1 :]

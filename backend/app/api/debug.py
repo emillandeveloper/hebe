@@ -7,6 +7,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 
 from app.services import db_sqlite
 from app.core.log_bus import get_recent_logs
+from app.stream.live_session import latest_live_session_debug
 
 router = APIRouter(prefix="/debug", tags=["debug"])
 
@@ -137,6 +138,23 @@ def list_db_tables():
 @router.get("/logs")
 def list_backend_logs(limit: int = Query(1000, ge=1, le=5000)):
     return {"logs": get_recent_logs(limit=limit)}
+
+
+@router.get("/live-session")
+def get_live_session_debug(request: Request):
+    adapter = getattr(request.app.state, "adapter", None)
+    engine = getattr(adapter, "_engine", None) if adapter is not None else None
+    if engine is not None:
+        try:
+            snapshot = engine._live_session_debug_snapshot()
+            if snapshot:
+                return {"ok": True, **snapshot}
+        except Exception as exc:
+            _log_db_error(f"live session engine snapshot failed: {type(exc).__name__}: {exc}")
+    snapshot = latest_live_session_debug()
+    if snapshot:
+        return {"ok": True, **snapshot}
+    return {"ok": False, "reason": "no live session state yet"}
 
 
 @router.get("/db/tables/{table_name}/schema")
