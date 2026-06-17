@@ -1,4 +1,4 @@
-import type { MouseEvent as ReactMouseEvent } from "react";
+import type { MouseEvent as ReactMouseEvent, ReactNode } from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { HebeEvent } from "./lib/types";
 import { WSClient } from "./lib/wsClient";
@@ -22,8 +22,8 @@ type ChatMsg = {
 };
 
 type LangMode = "auto" | "es" | "en";
-type ViewMode = "chat" | "database" | "logs";
-type LogFilter = "all" | "chat.assistant" | "chat.user" | "twitch" | "stream_context" | "stt" | "tts" | "db" | "errors";
+type ViewMode = "chat" | "session" | "audio" | "dev" | "logs" | "database";
+type LogFilter = "all" | "chat.assistant" | "chat.user" | "twitch" | "stream_context" | "stt" | "tts" | "memory" | "routing" | "dev" | "spontaneity" | "db" | "errors";
 
 type DbTableInfo = {
   name: string;
@@ -171,6 +171,9 @@ export default function App() {
     status: "unknown",
   }));
   const [devBusy, setDevBusy] = useState<"" | "reload" | "restart" | "full">("");
+  const [sessionDebug, setSessionDebug] = useState<any | null>(null);
+  const [sessionLoading, setSessionLoading] = useState(false);
+  const [sessionError, setSessionError] = useState("");
 
   const [messages, setMessages] = useState<ChatMsg[]>(() => ([]));
   const [logs, setLogs] = useState<{ id: string; ev: HebeEvent }[]>([]);
@@ -496,6 +499,21 @@ export default function App() {
     }
   }
 
+  async function refreshSessionDebug() {
+    setSessionLoading(true);
+    setSessionError("");
+    try {
+      const res = await fetch(`${apiBase}/debug/live-session`);
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok || payload?.ok === false) throw new Error(payload?.reason || payload?.detail || "No live session data yet");
+      setSessionDebug(payload);
+    } catch (error) {
+      setSessionError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setSessionLoading(false);
+    }
+  }
+
   useEffect(() => {
     const client = new WSClient({
       url: wsUrl,
@@ -520,6 +538,14 @@ export default function App() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    if (view !== "session") return;
+    refreshSessionDebug();
+    const timer = window.setInterval(refreshSessionDebug, 5000);
+    return () => window.clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view, apiBase, connected]);
 
   useEffect(() => {
     if (!connected || !sessionStorage.getItem(FULL_RESET_PENDING_KEY)) return;
@@ -637,6 +663,18 @@ export default function App() {
   const [input, setInput] = useState("");
   const startDisabled = backendRunning === true;
   const stopDisabled = backendRunning === false;
+  const devControlsEnabled = Boolean(window.hebeDev?.enabled);
+  const liveSession = sessionDebug?.live_session || {};
+  const streamMetadata = sessionDebug?.stream_metadata || {};
+  const streamStatus = String(streamMetadata.stream_status || streamMetadata.live_status || liveSession.stream_status || "unknown");
+  const streamTitle = String(streamMetadata.title || liveSession.current_title || "no title");
+  const streamGame = String(streamMetadata.game || liveSession.current_game || streamMetadata.category || liveSession.current_category || "unknown");
+  const sttTone = sttStatus === "off" || sttStatus === "idle" ? "idle" : sttStatus === "recording" || sttStatus === "listening" ? "warn" : "ok";
+  const ttsTone = ttsEnabled === false ? "idle" : ttsState === "speaking" ? "warn" : "ok";
+  const hebeTone = hebeSleeping ? "idle" : engineReady ? "ok" : "warn";
+  const streamTone = streamStatus === "live" ? "ok" : streamStatus === "offline" ? "idle" : "warn";
+  const twitchTone = streamStatus === "live" ? "ok" : connected ? "warn" : "bad";
+  const micWarning = sttStatus !== "off" && sttStatus !== "idle" && uiTick - lastSttLevelAt > 10000 && sttRms <= 0.003 && (sttPeak || sttLevel) <= 0.001;
 
   return (
     <div className="app">
@@ -655,45 +693,21 @@ export default function App() {
           </div>
 
           <div className="viewTabs" role="tablist" aria-label="Vista principal">
-            <button
-              className={"tabBtn " + (view === "chat" ? "active" : "")}
-              onClick={() => setView("chat")}
-              role="tab"
-              aria-selected={view === "chat"}
-            >
-              Chat
-            </button>
-            <button
-              className={"tabBtn " + (view === "database" ? "active" : "")}
-              onClick={() => setView("database")}
-              role="tab"
-              aria-selected={view === "database"}
-            >
-              BBDD
-            </button>
-            <button
-              className={"tabBtn " + (view === "logs" ? "active" : "")}
-              onClick={() => setView("logs")}
-              role="tab"
-              aria-selected={view === "logs"}
-            >
-              Logs
-            </button>
+            <button className={"tabBtn " + (view === "chat" ? "active" : "")} onClick={() => setView("chat")} role="tab" aria-selected={view === "chat"}>Chat</button>
+            <button className={"tabBtn " + (view === "session" ? "active" : "")} onClick={() => setView("session")} role="tab" aria-selected={view === "session"}>Session</button>
+            <button className={"tabBtn " + (view === "audio" ? "active" : "")} onClick={() => setView("audio")} role="tab" aria-selected={view === "audio"}>Audio</button>
+            {devControlsEnabled && <button className={"tabBtn " + (view === "dev" ? "active" : "")} onClick={() => setView("dev")} role="tab" aria-selected={view === "dev"}>Dev</button>}
+            <button className={"tabBtn " + (view === "logs" ? "active" : "")} onClick={() => setView("logs")} role="tab" aria-selected={view === "logs"}>Logs</button>
+            <button className={"tabBtn " + (view === "database" ? "active" : "")} onClick={() => setView("database")} role="tab" aria-selected={view === "database"}>BBDD / Memory</button>
           </div>
 
-          <div className="pills">
-            <div className={"pill " + (connected ? "ok" : "bad")}>
-              <span className="dot" />
-              {connected ? "Backend conectado" : "Sin conexión"}
-            </div>
-            <div className={"pill " + (engineReady ? "ok" : "warn")}>
-              <span className="dot" />
-              {engineReady ? "Hebe lista" : `Arrancando…${engineStage ? " " + engineStage : ""}`}
-            </div>
-            <div className={"pill " + (ttsState === "idle" ? "" : "warn")}>
-              <span className="dot" />
-              {ttsState === "idle" ? "TTS: idle" : "TTS: speaking"}
-            </div>
+          <div className="pills statusBar" aria-label="Estado global">
+            <StatusChip label="Backend" value={connected ? "WS" : "off"} tone={connected ? "ok" : "bad"} detail={connected ? "WebSocket conectado" : "WebSocket desconectado"} />
+            <StatusChip label="Hebe" value={hebeSleeping ? "sleep" : engineReady ? "ready" : "boot"} tone={hebeTone} detail={engineStage || (hebeSleeping ? "Dormida" : "Estado de motor")} />
+            <StatusChip label="STT" value={sttStatus || "unknown"} tone={sttTone} detail={sttLive || lastSttFinal || "Entrada de voz"} />
+            <StatusChip label="TTS" value={ttsEnabled === false ? "off" : ttsState} tone={ttsTone} detail={ttsEnabled === false ? "TTS desactivado" : "Salida de voz"} />
+            <StatusChip label="Twitch" value={streamStatus === "live" ? "live" : connected ? "check" : "off"} tone={twitchTone} detail={streamTitle} />
+            <StatusChip label="Stream" value={streamStatus} tone={streamTone} detail={streamGame} />
           </div>
         </header>
 
@@ -701,208 +715,39 @@ export default function App() {
           <DatabaseInspector apiBase={apiBase} />
         ) : view === "logs" ? (
           <LogsView apiBase={apiBase} logs={logs} onClearVisible={(ids) => setLogs((prev) => prev.filter((item) => !ids.has(item.id)))} />
+        ) : view === "session" ? (
+          <SessionView data={sessionDebug} loading={sessionLoading} error={sessionError} onRefresh={refreshSessionDebug} onCommand={sendText} />
+        ) : view === "audio" ? (
+          <AudioView connected={connected} devices={micDevices} selectedId={selectedMicId} selectedName={selectedMicName} selectedHostApi={selectedMicHostApi} rms={sttRms} peak={sttPeak || sttLevel} sttStatus={sttStatus} lastPartial={sttLive} lastFinal={lastSttFinal} testResult={micTestResult} warning={micWarning} error={micError} volume={volume} speed={speed} lang={lang} ttsEnabled={ttsEnabled} ttsState={ttsState} onRefresh={refreshMicDevices} onSelect={selectMic} onTestMic={testSelectedMic} onVolume={setVolume} onSpeed={setSpeed} onLang={setLang} onStopSpeaking={() => sendCommand("stop_speaking")} onCommand={sendText} />
+        ) : view === "dev" ? (
+          <DevView enabled={devControlsEnabled} status={devStatus} websocketConnected={connected} busy={devBusy} wakeLoopAlive={wakeLoopAlive} wakeLoopError={wakeLoopError} onReloadUi={() => runDevAction("reload")} onRestartBackend={() => runDevAction("restart")} onFullReset={() => runDevAction("full")} onRefresh={refreshDevStatus} />
         ) : (
-        <main className="grid">
-          <section className="glass panel chat">
-            <div className="panelHeader">
-              <div className="panelTitle">Conversación</div>
-              <div className="panelMeta">
-                <span className="muted">🎙️ STT live:</span>{" "}
-                <span className="mono">{sttLive ? sttLive : "..."}</span>
-              </div>
-            </div>
-
-            <div className="chatList" ref={listRef}>
-              {messages.map((m) => (
-                <div key={m.id} className={"bubbleRow " + (m.role === "user" ? "right" : "left")}>
-                  <div className={"bubble " + (m.role === "user" ? "user" : "assistant") + (m.traceId ? " datasetLinked" : "")}>
-                    <div className="bubbleTop">
-                      <span className="bubbleName">{m.role === "user" ? "Tú" : "Hebe"}</span>
-                      <span className="bubbleTime">{fmtTime(m.ts)}</span>
-                    </div>
-
-                    {m.role === "assistant" && m.sourceMessage && (
-                      <div className="replyContext">
-                        <div className="replyContextLabel">Responde a {m.sourceUser || "chat"}</div>
-                        <div className="replyContextText">{m.sourceMessage}</div>
-                      </div>
-                    )}
-
-                    <div className={"bubbleText " + (m.partial ? "partial" : "")}>
-                      {m.role === "assistant" && m.partial && !m.text ? (
-                        <span className="thinkingDots" aria-label="Hebe está pensando">...</span>
-                      ) : (
-                        m.text
-                      )}
-                    </div>
-
-                    {m.role === "assistant" && m.traceId && !m.partial && (
-                      <div className="curationBar">
-                        <button
-                          className={"curationBtn ok " + (m.curation === "ok" ? "active" : "")}
-                          onClick={() => markCuration(m.id, m.traceId!, "ok")}
-                          title="Guardar como ejemplo bueno"
-                        >
-                          OK
-                        </button>
-                        <button
-                          className={"curationBtn bad " + (m.curation === "no_ok" ? "active" : "")}
-                          onClick={() => markCuration(m.id, m.traceId!, "no_ok")}
-                          title="Marcar como mal ejemplo"
-                        >
-                          No OK
-                        </button>
-                        <button
-                          className={"curationBtn warn " + (m.curation === "needs_enhancement" ? "active" : "")}
-                          onClick={() => markCuration(m.id, m.traceId!, "needs_enhancement")}
-                          title="La idea sirve, pero necesita mejorar"
-                        >
-                          Mejorar
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                </div>
-              ))}
-            </div>
-
-            <LiveControlToolbar
-              disabled={!connected}
-              onCommand={(command) => sendText(command)}
-              onStopSpeaking={() => sendCommand("stop_speaking")}
-              ttsEnabled={ttsEnabled}
-              sttStatus={sttStatus}
-              hebeSleeping={hebeSleeping}
-            />
-
-            <div className="composer">
-              <input
-                className="input"
-                placeholder="Escribe a Hebe…"
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
-                    sendText(input);
-                    setInput("");
-                  }
-                }}
-              />
-              <button
-                className="btn primary"
-                onClick={() => {
-                  sendText(input);
-                  setInput("");
-                }}
-              >
-                Enviar
-              </button>
-            </div>
-            <div className="hint muted">
-              Tip: <span className="mono">Ctrl+Enter</span> para enviar.
-            </div>
-          </section>
-
-          <aside className="glass panel controlPanel">
-            <div className="panelHeader slim">
-              <div className="panelTitle">Control</div>
-              <div className="panelMeta mono">{logs.length} eventos</div>
-            </div>
-
-            <div className="controlScroll">
-              <div className="btnStack">
-                <button className="btn" disabled={startDisabled} onClick={() => sendCommand("start")} title="Arranca pipeline / escucha">▶ Start</button>
-                <button className="btn danger" disabled={stopDisabled} onClick={() => sendCommand("stop")} title="Para pipeline / escucha">■ Stop</button>
-                <button className="btn" onClick={() => sendCommand("stop_speaking")} title="Corta el audio en reproducción">🔇 Stop Speaking</button>
-              </div>
-
-              {window.hebeDev?.enabled && (
-                <DevControlPanel
-                  status={devStatus}
-                  websocketConnected={connected}
-                  busy={devBusy}
-                  onReloadUi={() => runDevAction("reload")}
-                  onRestartBackend={() => runDevAction("restart")}
-                  onFullReset={() => runDevAction("full")}
-                />
-              )}
-
-              <div className="card">
-                <div className="cardTitle">Voz</div>
-
-                <div className="field">
-                  <div className="fieldTop"><span>Volumen</span><span className="mono">{Math.round(volume * 100)}%</span></div>
-                  <input type="range" min={0} max={1} step={0.01} value={volume} onChange={(e) => setVolume(Number(e.target.value))} />
-                </div>
-
-                <div className="field">
-                  <div className="fieldTop"><span>Velocidad</span><span className="mono">{speed.toFixed(2)}x</span></div>
-                  <input type="range" min={0.75} max={1.25} step={0.01} value={speed} onChange={(e) => setSpeed(Number(e.target.value))} />
-                </div>
-
-                <div className="field">
-                  <div className="fieldTop"><span>Idioma (STT/TTS)</span></div>
-                  <select className="select" value={lang} onChange={(e) => setLang(e.target.value as LangMode)}>
-                    <option value="auto">Auto</option>
-                    <option value="es">Español</option>
-                    <option value="en">English</option>
-                  </select>
-                  <div className="muted small">Si el backend no soporta el comando, no pasa nada.</div>
-                </div>
-              </div>
-
-              <MicSelector
-                devices={micDevices}
-                selectedId={selectedMicId}
-                selectedName={selectedMicName}
-                selectedHostApi={selectedMicHostApi}
-                rms={sttRms}
-                peak={sttPeak || sttLevel}
-                sttStatus={sttStatus}
-                lastPartial={sttLive}
-                lastFinal={lastSttFinal}
-                testResult={micTestResult}
-                warning={sttStatus !== "off" && sttStatus !== "idle" && uiTick - lastSttLevelAt > 10000 && sttRms <= 0.003 && (sttPeak || sttLevel) <= 0.001}
-                error={micError}
-                disabled={!connected}
-                onRefresh={refreshMicDevices}
-                onSelect={selectMic}
-                onTest={testSelectedMic}
-              />
-              <VoiceCommandDebugPanel debug={voiceCommandDebug} />
-
-              <div className="card">
-                <div className="cardTitle">Estado</div>
-                <div className="statusList">
-                  <div className="k">Conexión</div><div className="v">{connected ? "OK" : "OFF"}</div>
-                  <StatusLine label="Conexion" value={connected ? "OK" : "OFF"} tone={connected ? "ok" : "bad"} />
-                  <StatusLine label="Hebe" value={hebeSleeping ? "dormida" : engineReady ? "despierta" : "arrancando"} tone={hebeSleeping ? "idle" : engineReady ? "ok" : "warn"} />
-                  <StatusLine label="Wake required" value={wakeRequired ? "yes" : "no"} tone={wakeRequired ? "warn" : "ok"} />
-                  <StatusLine label="Wake/STT loop" value={wakeLoopAlive === false ? "crashed" : wakeLoopAlive === true ? "alive" : "unknown"} tone={wakeLoopAlive === false ? "bad" : wakeLoopAlive === true ? "ok" : "warn"} />
-                  {wakeLoopAlive === false && wakeLoopError && <div className="micError">Wake/STT loop crashed: {wakeLoopError}</div>}
-                  <StatusLine label="TTS" value={ttsEnabled === false ? "off" : ttsState} tone={ttsState === "speaking" ? "warn" : ttsEnabled === false ? "idle" : "ok"} />
-                  <StatusLine label="STT" value={sttStatus} tone={sttStatus === "recording" || sttStatus === "listening" ? "warn" : sttStatus === "off" ? "idle" : "ok"} />
-                  <StatusLine label="Stream" value="ver Estado" tone="idle" />
-                  <StatusLine label="Espontaneidad" value="ver Estado" tone="idle" />
-                </div>
-
-              </div>
-            </div>
-          </aside>
-
-          <aside className="glass panel modelPanel">
-            <div className="panelHeader slim">
-              <div className="panelTitle">Modelo VTuber</div>
-              <div className="panelMeta">preview vertical</div>
-            </div>
-            <VtuberPreview />
-          </aside>
-        </main>
+          <main className="grid chatGrid">
+            <section className="glass panel chat chatMainPanel">
+              <div className="panelHeader"><div><div className="panelTitle">Conversacion</div><div className="panelMeta">{messages.length} mensajes</div></div></div>
+              <div className="chatList" ref={listRef}>{messages.map((m) => (<div key={m.id} className={"bubbleRow " + (m.role === "user" ? "right" : "left")}><div className={"bubble " + (m.role === "user" ? "user" : "assistant") + (m.traceId ? " datasetLinked" : "")}><div className="bubbleTop"><span className="bubbleName">{m.role === "user" ? "Tu" : "Hebe"}</span><span className="bubbleTime">{fmtTime(m.ts)}</span></div>{m.role === "assistant" && m.sourceMessage && <div className="replyContext"><div className="replyContextLabel">Responde a {m.sourceUser || "chat"}</div><div className="replyContextText">{m.sourceMessage}</div></div>}<div className={"bubbleText " + (m.partial ? "partial" : "")}>{m.role === "assistant" && m.partial && !m.text ? <span className="thinkingDots" aria-label="Hebe esta pensando">...</span> : m.text}</div>{m.role === "assistant" && m.traceId && !m.partial && <div className="curationBar"><button className={"curationBtn ok " + (m.curation === "ok" ? "active" : "")} onClick={() => markCuration(m.id, m.traceId!, "ok")} title="Guardar como ejemplo bueno">OK</button><button className={"curationBtn bad " + (m.curation === "no_ok" ? "active" : "")} onClick={() => markCuration(m.id, m.traceId!, "no_ok")} title="Marcar como mal ejemplo">No OK</button><button className={"curationBtn warn " + (m.curation === "needs_enhancement" ? "active" : "")} onClick={() => markCuration(m.id, m.traceId!, "needs_enhancement")} title="La idea sirve, pero necesita mejorar">Mejorar</button></div>}</div></div>))}</div>
+              <div className="composer"><input className="input" placeholder="Escribe a Hebe..." value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { sendText(input); setInput(""); } }} /><button className="btn primary" onClick={() => { sendText(input); setInput(""); }}>Enviar</button></div>
+              <div className="hint muted">Tip: <span className="mono">Ctrl+Enter</span> para enviar.</div>
+            </section>
+            <aside className="glass panel controlPanel liveControlPanel"><div className="panelHeader slim"><div><div className="panelTitle">Live control center</div><div className="panelMeta mono">{logs.length} eventos</div></div></div><LiveControlColumn disabled={!connected} startDisabled={startDisabled} stopDisabled={stopDisabled} onCommand={sendText} onControl={sendCommand} onStopSpeaking={() => sendCommand("stop_speaking")} onOpenAudio={() => setView("audio")} ttsEnabled={ttsEnabled} sttStatus={sttStatus} sttLive={sttLive} hebeSleeping={hebeSleeping} selectedMicName={selectedMicName} selectedMicHostApi={selectedMicHostApi} rms={sttRms} peak={sttPeak || sttLevel} micWarning={micWarning} micError={micError} sessionData={sessionDebug} /></aside>
+            <aside className="glass panel modelPanel"><div className="panelHeader slim"><div className="panelTitle">Modelo VTuber</div><div className="panelMeta">preview vertical</div></div><VtuberPreview /></aside>
+          </main>
         )}
       </div>
     </div>
   );
 }
+
+function StatusChip({ label, value, tone, detail }: { label: string; value: string; tone: "ok" | "warn" | "bad" | "idle"; detail?: string }) { return <div className={"pill statusChip " + tone} title={detail || value}><span className="dot" /><span className="statusChipLabel">{label}</span><span className="statusChipValue">{value}</span></div>; }
+function displayValue(value: unknown, fallback = "-"): string { if (value === null || value === undefined || value === "") return fallback; if (Array.isArray(value)) return value.length ? value.map((item) => displayValue(item, "")).filter(Boolean).join(" | ") : fallback; if (typeof value === "object") { const data = value as Record<string, unknown>; return displayValue(data.text || data.raw_text || data.summary_text || data.message || data.topic || JSON.stringify(data), fallback); } return String(value); }
+function DevView({ enabled, status, websocketConnected, busy, wakeLoopAlive, wakeLoopError, onReloadUi, onRestartBackend, onFullReset, onRefresh }: { enabled: boolean; status: DevBackendStatus; websocketConnected: boolean; busy: "" | "reload" | "restart" | "full"; wakeLoopAlive: boolean | null; wakeLoopError: string; onReloadUi: () => void; onRestartBackend: () => void; onFullReset: () => void; onRefresh: () => void }) { return <main className="tabLayout devLayout"><section className="glass panel devMainPanel"><div className="panelHeader"><div><div className="panelTitle">Dev maintenance</div><div className="panelMeta">Controles separados del flujo normal</div></div><button className="btn compact" onClick={onRefresh}>Refresh</button></div>{enabled ? <DevControlPanel status={status} websocketConnected={websocketConnected} busy={busy} onReloadUi={onReloadUi} onRestartBackend={onRestartBackend} onFullReset={onFullReset} /> : <div className="emptyState">Dev controls disabled in this build.</div>}</section><section className="glass panel devHealthPanel"><div className="panelHeader slim"><div className="panelTitle">Backend health</div><div className="panelMeta">runtime</div></div><div className="statusList"><StatusLine label="Backend running" value={status.running ? "yes" : "no"} tone={status.running ? "ok" : "bad"} /><StatusLine label="PID" value={status.pid ? String(status.pid) : "-"} tone={status.pid ? "ok" : "idle"} /><StatusLine label="Uptime" value={formatDuration(status.uptimeMs || 0)} tone={status.running ? "ok" : "idle"} /><StatusLine label="Last restart" value={formatRestartTime(status.lastRestartTime)} tone={status.lastRestartTime ? "ok" : "idle"} /><StatusLine label="WebSocket" value={websocketConnected ? "yes" : "no"} tone={websocketConnected ? "ok" : "bad"} /><StatusLine label="Wake/STT loop" value={wakeLoopAlive === false ? "crashed" : wakeLoopAlive === true ? "alive" : "unknown"} tone={wakeLoopAlive === false ? "bad" : wakeLoopAlive === true ? "ok" : "warn"} /></div>{(wakeLoopAlive === false && wakeLoopError) && <div className="devError mono">Wake/STT loop crashed: {wakeLoopError}</div>}{(status.lastError || status.error) && <div className="devError mono">{status.lastError || status.error}</div>}</section></main>; }
+function SessionView({ data, loading, error, onRefresh, onCommand }: { data: any | null; loading: boolean; error: string; onRefresh: () => void; onCommand: (command: string) => void }) { const meta = data?.stream_metadata || {}; const live = data?.live_session || {}; const rag = data?.memory_rag || {}; const timeline = Array.isArray(rag.recent_timeline_events) ? rag.recent_timeline_events : Array.isArray(data?.recent_events) ? data.recent_events : []; const summaries = Array.isArray(rag.rolling_summaries) ? rag.rolling_summaries : Array.isArray(data?.rolling_summaries) ? data.rolling_summaries : []; const chatters = Array.isArray(live.recent_chatters) ? live.recent_chatters : Array.isArray(live.active_chatters) ? live.active_chatters : []; const lastSummary = summaries[0]?.summary_text || summaries[summaries.length - 1]?.summary_text; const lastHebe = live.last_hebe_utterance || live.last_spontaneous_message || {}; return <main className="sessionLayout"><section className="glass panel sessionPanel wide"><div className="panelHeader"><div><div className="panelTitle">Live session brain</div><div className="panelMeta">{loading ? "refreshing" : data ? "debug snapshot" : "waiting for session"}</div></div><button className="btn compact" onClick={onRefresh}>Refresh</button></div>{error && <div className="micWarn">{error}</div>}<div className="sessionCardGrid"><SessionCard title="Stream metadata"><InfoRow label="Status" value={displayValue(meta.stream_status || meta.live_status || live.stream_status)} /><InfoRow label="Game" value={displayValue(meta.game || live.current_game)} /><InfoRow label="Category" value={displayValue(meta.category || live.current_category)} /><InfoRow label="Title" value={displayValue(meta.title || live.current_title)} /></SessionCard><SessionCard title="Live session state"><InfoRow label="Phase" value={displayValue(live.current_phase)} /><InfoRow label="Objective" value={displayValue(live.current_objective)} /><InfoRow label="Progress" value={displayValue((live.recent_progress_markers || []).slice(-1)[0])} /><InfoRow label="Boss/combat" value={displayValue(live.latest_boss_state || live.latest_strategy_topic)} /><InfoRow label="Correction" value={displayValue(live.latest_correction_from_leo)} /></SessionCard><SessionCard title="Hebe memory/RAG"><InfoRow label="Events" value={displayValue(rag.meaningful_events)} /><InfoRow label="Context updates" value={displayValue(rag.session_context_updates)} /><InfoRow label="Last retrieval" value={displayValue(rag.last_retrieved_context_used?.query)} /><InfoRow label="Last memory update" value={displayValue(live.last_updated_at || rag.latest_rolling_summary_time)} /></SessionCard><SessionCard title="Interaction anchors"><InfoRow label="Chat topic" value={displayValue(live.current_chat_topic)} /><InfoRow label="Last Hebe" value={displayValue(lastHebe.text || lastHebe.raw_text)} /><InfoRow label="Last anchor" value={displayValue(live.last_hebe_anchor || lastHebe.anchor_id)} /><InfoRow label="Last direct" value={displayValue(live.last_direct_interaction_with_leo)} /></SessionCard></div></section><section className="glass panel sessionPanel"><div className="panelHeader slim"><div className="panelTitle">Recent timeline</div><div className="panelMeta">{timeline.length} events</div></div><div className="timelineList">{timeline.slice(0, 12).map((item: any, idx: number) => <div className="timelineItem" key={item.id || idx}><span className="timelineType">{displayValue(item.event_type || item.topic)}</span><span>{displayValue(item.raw_text || item.summary_text || item.output_target)}</span></div>)}{!timeline.length && <div className="emptyState">No timeline yet.</div>}</div></section><section className="glass panel sessionPanel"><div className="panelHeader slim"><div className="panelTitle">Chat participants</div><div className="panelMeta">{chatters.length} recent</div></div><div className="chatterList">{chatters.slice(0, 12).map((item: any, idx: number) => <div className="chatterItem" key={item.username || item.display_name || idx}><span>{displayValue(item.display_name || item.username)}</span><span className="muted">{displayValue(item.last_message || item.recent_topics?.[0])}</span></div>)}{!chatters.length && <div className="emptyState">No chat participants in the current snapshot.</div>}</div></section><section className="glass panel sessionPanel wide"><div className="panelHeader slim"><div className="panelTitle">Rolling summary preview</div><div className="panelMeta">session memory</div></div><div className="summaryPreview">{displayValue(lastSummary, "No rolling summary yet.")}</div><div className="sessionActions"><button className="btn compact" onClick={() => onCommand("Hebe, actualiza contexto de stream")}>Refresh stream context</button><button className="btn compact" onClick={() => onCommand("Hebe, que recuerdas de este directo")}>Ask memory</button></div></section></main>; }
+function SessionCard({ title, children }: { title: string; children: ReactNode }) { return <div className="sessionCard"><div className="sessionCardTitle">{title}</div>{children}</div>; }
+function InfoRow({ label, value }: { label: string; value: string }) { return <div className="infoRow"><span>{label}</span><strong title={value}>{value}</strong></div>; }
+function AudioView({ connected, devices, selectedId, selectedName, selectedHostApi, rms, peak, sttStatus, lastPartial, lastFinal, testResult, warning, error, volume, speed, lang, ttsEnabled, ttsState, onRefresh, onSelect, onTestMic, onVolume, onSpeed, onLang, onStopSpeaking, onCommand }: { connected: boolean; devices: AudioInputDevice[]; selectedId: string; selectedName: string; selectedHostApi: string; rms: number; peak: number; sttStatus: string; lastPartial: string; lastFinal: string; testResult: any; warning: boolean; error: string; volume: number; speed: number; lang: LangMode; ttsEnabled: boolean | null; ttsState: "idle" | "speaking"; onRefresh: () => void; onSelect: (deviceId: string) => void; onTestMic: () => void; onVolume: (value: number) => void; onSpeed: (value: number) => void; onLang: (value: LangMode) => void; onStopSpeaking: () => void; onCommand: (command: string) => void }) { return <main className="audioLayout"><section className="glass panel audioPanel wide"><div className="panelHeader"><div><div className="panelTitle">Audio / STT</div><div className="panelMeta">input device and voice controls</div></div></div><MicSelector devices={devices} selectedId={selectedId} selectedName={selectedName} selectedHostApi={selectedHostApi} rms={rms} peak={peak} sttStatus={sttStatus} lastPartial={lastPartial} lastFinal={lastFinal} testResult={testResult} warning={warning} error={error} disabled={!connected} onRefresh={onRefresh} onSelect={onSelect} onTest={onTestMic} /></section><section className="glass panel audioPanel"><div className="panelHeader slim"><div className="panelTitle">TTS</div><div className="panelMeta">backend config</div></div><div className="field"><div className="fieldTop"><span>Volume</span><span className="mono">{Math.round(volume * 100)}%</span></div><input type="range" min={0} max={1} step={0.01} value={volume} onChange={(e) => onVolume(Number(e.target.value))} /></div><div className="field"><div className="fieldTop"><span>Speed</span><span className="mono">{speed.toFixed(2)}x</span></div><input type="range" min={0.75} max={1.25} step={0.01} value={speed} onChange={(e) => onSpeed(Number(e.target.value))} /></div><div className="field"><div className="fieldTop"><span>Language</span></div><select className="select" value={lang} onChange={(e) => onLang(e.target.value as LangMode)}><option value="auto">Auto</option><option value="es">Espanol</option><option value="en">English</option></select></div><div className="statusList"><StatusLine label="TTS state" value={ttsEnabled === false ? "off" : ttsState} tone={ttsEnabled === false ? "idle" : ttsState === "speaking" ? "warn" : "ok"} /><StatusLine label="Engine" value="backend/default" tone="idle" /><StatusLine label="Output route" value="config" tone="idle" /></div><div className="audioActions"><button className="btn compact" onClick={() => onCommand("Hebe, estado voz")}>Voice status</button><button className="btn compact danger" onClick={onStopSpeaking}>Stop voice</button></div></section></main>; }
+function LiveControlColumn({ disabled, startDisabled, stopDisabled, onCommand, onControl, onStopSpeaking, onOpenAudio, ttsEnabled, sttStatus, sttLive, hebeSleeping, selectedMicName, selectedMicHostApi, rms, peak, micWarning, micError, sessionData }: { disabled: boolean; startDisabled: boolean; stopDisabled: boolean; onCommand: (command: string) => void; onControl: (name: string, payload?: Record<string, any>) => void; onStopSpeaking: () => void; onOpenAudio: () => void; ttsEnabled: boolean | null; sttStatus: string; sttLive: string; hebeSleeping: boolean; selectedMicName: string; selectedMicHostApi: string; rms: number; peak: number; micWarning: boolean; micError: string; sessionData: any | null }) { const sttOn = sttStatus !== "off" && sttStatus !== "idle"; const live = sessionData?.live_session || {}; return <div className="controlScroll controlAccordion"><details className="controlSection" open><summary>Stream <span>{displayValue(live.current_game || sessionData?.stream_metadata?.game, "context")}</span></summary><div className="controlActions"><ControlButton label="Prep" onClick={() => onCommand("Hebe, prepara el stream de hoy")} disabled={disabled} primary /><ControlButton label="Title" onClick={() => onCommand("Hebe, sugiere titulo para hoy")} disabled={disabled} /><ControlButton label="Context" onClick={() => onCommand("Hebe, actualiza contexto de stream")} disabled={disabled} primary /><ControlButton label="Status" onClick={() => onCommand("Hebe, que contexto de stream tienes")} disabled={disabled} /><ControlButton label="Start" onClick={() => onControl("start")} disabled={startDisabled} /><ControlButton label="Stop" onClick={() => onControl("stop")} disabled={stopDisabled} danger /></div></details><details className="controlSection" open><summary>Hebe <span>{hebeSleeping ? "sleeping" : "awake"}</span></summary><div className="controlActions"><ControlButton label="Wake" onClick={() => onCommand("Hebe, despierta")} disabled={disabled} primary={hebeSleeping} /><ControlButton label="Sleep" onClick={() => onCommand("Hebe, duerme")} disabled={disabled} /><ControlButton label="Session" onClick={() => onCommand("Hebe, que contexto de partida tienes")} disabled={disabled} /><ControlButton label="Memory" onClick={() => onCommand("Hebe, que recuerdas de este directo")} disabled={disabled} /></div></details><details className="controlSection" open><summary>Voice / STT <span>{sttStatus}</span></summary><CompactMicStatus selectedMicName={selectedMicName} selectedMicHostApi={selectedMicHostApi} rms={rms} peak={peak} sttStatus={sttStatus} sttLive={sttLive} warning={micWarning} error={micError} onOpenAudio={onOpenAudio} /><div className="controlActions"><ControlButton label="STT ON" onClick={() => onCommand("Hebe, activa STT ambiental")} disabled={disabled} primary={!sttOn} /><ControlButton label="STT OFF" onClick={() => onCommand("Hebe, desactiva STT ambiental")} disabled={disabled} primary={sttOn} /><ControlButton label="Voice ON" onClick={() => onCommand("Hebe, activa la voz")} disabled={disabled} primary={ttsEnabled === false} /><ControlButton label="Text only" onClick={() => onCommand("Hebe, solo texto")} disabled={disabled} /><ControlButton label="Stop voice" onClick={onStopSpeaking} disabled={disabled} danger /></div></details><details className="controlSection"><summary>Spontaneity <span>{displayValue(live.last_hebe_anchor, "anchors")}</span></summary><div className="controlActions"><ControlButton label="Status" onClick={() => onCommand("Hebe, estado de espontaneidad")} disabled={disabled} /><ControlButton label="Pause" onClick={() => onCommand("Hebe, pausa espontaneidad")} disabled={disabled} /><ControlButton label="Enable" onClick={() => onCommand("Hebe, activa espontaneidad")} disabled={disabled} primary /><ControlButton label="Companion" onClick={() => onCommand("Hebe, modo companera")} disabled={disabled} /><ControlButton label="Show" onClick={() => onCommand("Hebe, modo show")} disabled={disabled} /></div></details><details className="controlSection"><summary>Twitch <span>{displayValue(live.current_chat_topic, "chat")}</span></summary><div className="controlActions"><ControlButton label="Shoutout" onClick={() => onCommand("Hebe, prueba SO")} disabled={disabled} /><ControlButton label="Raid" onClick={() => onCommand("Hebe, prueba raid")} disabled={disabled} /><ControlButton label="Chat" onClick={() => onCommand("Hebe, que esta pasando en chat")} disabled={disabled} primary /></div></details></div>; }
+function ControlButton({ label, onClick, disabled, primary, danger }: { label: string; onClick: () => void; disabled: boolean; primary?: boolean; danger?: boolean }) { return <button className={"quickBtn controlActionBtn " + (primary ? "active " : "") + (danger ? "danger" : "")} onClick={onClick} disabled={disabled}>{label}</button>; }
+function CompactMicStatus({ selectedMicName, selectedMicHostApi, rms, peak, sttStatus, sttLive, warning, error, onOpenAudio }: { selectedMicName: string; selectedMicHostApi: string; rms: number; peak: number; sttStatus: string; sttLive: string; warning: boolean; error: string; onOpenAudio: () => void }) { const pct = Math.max(0, Math.min(100, Math.round(Math.max(rms * 500, peak * 100)))); return <div className="compactMic"><div className="compactMicTop"><div><div className="compactMicName" title={selectedMicName || "Default system input"}>{selectedMicName || "Default system input"}</div><div className="compactMicMeta">{selectedMicHostApi || sttStatus}</div></div><button className="miniBtn" onClick={onOpenAudio}>Audio</button></div><div className="meter"><div className="meterFill" style={{ width: String(pct) + "%" }} /></div>{sttLive && <div className="muted small mono">{sttLive}</div>}{warning && <div className="micWarn">No input signal.</div>}{error && <div className="micError">{error}</div>}</div>; }
 
 function DevControlPanel({
   status,
@@ -930,7 +775,7 @@ function DevControlPanel({
       </div>
       <div className="devButtons">
         <button className="btn compact" disabled={Boolean(busy)} onClick={onReloadUi}>Reload UI</button>
-        <button className="btn compact" disabled={Boolean(busy)} onClick={onRestartBackend}>{busy === "restart" ? "Restarting..." : "Restart Backend"}</button>
+        <button className="btn compact warning" disabled={Boolean(busy)} onClick={onRestartBackend}>{busy === "restart" ? "Restarting..." : "Restart Backend"}</button>
         <button className="btn compact danger" disabled={Boolean(busy)} onClick={onFullReset}>{busy === "full" ? "Resetting..." : "Full Dev Reset"}</button>
       </div>
       <div className="statusList devStatusList">
@@ -1352,8 +1197,12 @@ function LogsView({ apiBase, logs, onClearVisible }: { apiBase: string; logs: { 
         (filter === "stream_context" && (type.includes("stream") || category === "stream_context" || text.includes("stream_context"))) ||
         (filter === "stt" && (type.startsWith("stt") || category === "stt")) ||
         (filter === "tts" && (type.startsWith("tts") || category === "tts")) ||
-        (filter === "db" && (category === "db" || text.includes("[hebe][db"))) ||
-        (filter === "errors" && (type === "error" || level === "error" || category === "errors"));
+        (filter === "memory" && (category === "memory" || text.includes("memory") || text.includes("rag"))) ||
+        (filter === "routing" && (text.includes("routing") || text.includes("output_target") || category === "routing")) ||
+        (filter === "dev" && (category === "dev" || text.includes("[hebe][dev]") || text.includes("dev"))) ||
+        (filter === "spontaneity" && (category === "spontaneity" || text.includes("spontaneity") || text.includes("espontaneidad"))) ||
+        (filter === "db" && (category === "db" || text.includes("[hebe][db") || text.includes("database"))) ||
+        (filter === "errors" && (type === "error" || level === "error" || category === "errors" || text.includes("error") || text.includes("failed")));
       return matchesSearch && matchesFilter;
     });
   }, [mergedLogs, filter, search]);
@@ -1369,7 +1218,7 @@ function LogsView({ apiBase, logs, onClearVisible }: { apiBase: string; logs: { 
     await navigator.clipboard.writeText(text);
   }
 
-  const filters: LogFilter[] = ["all", "chat.assistant", "chat.user", "twitch", "stream_context", "stt", "tts", "db", "errors"];
+  const filters: LogFilter[] = ["all", "chat.assistant", "chat.user", "twitch", "stream_context", "stt", "tts", "memory", "routing", "dev", "spontaneity", "db", "errors"];
 
   return (
     <main className="logsLayout">
@@ -1401,7 +1250,7 @@ function LogsView({ apiBase, logs, onClearVisible }: { apiBase: string; logs: { 
         </div>
         <div className={"logsFullBox " + (wrap ? "wrap" : "nowrap")} ref={listRef}>
           {filtered.map(({ id, ev }) => (
-            <div className="logFullLine" key={id}>
+            <div className={"logFullLine " + (logBadgeClass(ev) === "bad" ? "error" : "")} key={id}>
               <span className="mono muted">{fmtTime(ev.ts)}</span>
               <span className={"badge " + logBadgeClass(ev)}>{formatLogKind(ev)}</span>
               <span className="mono logMsg">{formatLogMessage(ev)}</span>
