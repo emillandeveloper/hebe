@@ -1,4 +1,5 @@
 ﻿import os
+import time
 import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -639,23 +640,60 @@ class VoiceCommandPipelineTests(unittest.TestCase):
         self.assertGreaterEqual(rejected[-1]["similarity"], 0.82)
         self.assertFalse(any(event_type == "chat.user" for event_type, _ in emitted))
 
-    def test_stt_is_ignored_while_tts_is_speaking_when_enabled(self):
+    def test_tts_echo_variation_does_not_consume_followup_window(self):
         engine = make_engine(["nuria"])
-        engine.runtime.tts = SimpleNamespace(is_speaking=True)
-        engine.stt_ignore_while_tts_speaking = True
+        engine.runtime.state.stream.enabled = False
+        engine.runtime.state.pending_conversation_turn = {
+            "expected_type": "casual_answer",
+            "previous_assistant_message_id": "assistant-test",
+            "previous_assistant_message": "Pues bien, dormida a ratos pero lista para tus locuras, cabron.",
+            "created_at": 1.0,
+            "expires_at": time.time() + 30,
+            "source": "assistant_question",
+            "allowed_sources": ["stt_voice", "ui"],
+            "allow_without_wakeword": True,
+            "status": "pending",
+            "followups_used": 0,
+            "max_followups": 1,
+            "reply_source": "stt_voice",
+        }
+        engine.stt_tts_echo_window_seconds = 10
+        engine.stt_tts_echo_similarity_threshold = 0.82
+        engine._remember_tts_text("Pues bien, dormida a ratos pero lista para tus locuras, cabron.")
         handled = []
         emitted = []
         engine.handle_command = lambda command, source="voice": handled.append((source, command)) or "continue"
 
         with patch("app.hebe_engine.emit", lambda event_type, data=None: emitted.append((event_type, data or {}))):
-            result = engine._process_stt_voice_transcript("Hebe, cÃ³mo estÃ¡s?")
+            result = engine._process_stt_voice_transcript("Pues bien, dormia ratos, pero lista para tus locuras, cabron.")
 
         self.assertEqual(result, "continue")
         self.assertEqual(handled, [])
+        self.assertEqual(engine.runtime.state.pending_conversation_turn["status"], "pending")
+        self.assertEqual(engine.runtime.state.pending_conversation_turn["followups_used"], 0)
         rejected = [data for event_type, data in emitted if event_type == "voice.command" and data.get("status") == "rejected"]
         self.assertTrue(rejected)
         self.assertEqual(rejected[-1]["reason"], "self_tts_echo")
-        self.assertTrue(rejected[-1]["tts_speaking"])
+        self.assertFalse(any(event_type == "chat.user" for event_type, _ in emitted))
+
+    def test_user_speech_is_allowed_during_tts_when_not_echo(self):
+        engine = make_engine(["nuria"])
+        engine.runtime.state.stream.enabled = False
+        engine.runtime.tts = SimpleNamespace(is_speaking=True)
+        engine.stt_ignore_while_tts_speaking = True
+        engine._remember_tts_text("Ya estoy aqui, Leo.")
+        handled = []
+        emitted = []
+        engine.handle_command = lambda command, source="voice": handled.append((source, command)) or "continue"
+
+        with patch("app.hebe_engine.emit", lambda event_type, data=None: emitted.append((event_type, data or {}))):
+            result = engine._process_stt_voice_transcript("Hebe, como estas?")
+
+        self.assertEqual(result, "continue")
+        self.assertEqual(handled, [("stt_voice", "hebe como estas")])
+        rejected = [data for event_type, data in emitted if event_type == "voice.command" and data.get("status") == "rejected"]
+        self.assertFalse(rejected)
+        self.assertTrue(any(event_type == "chat.user" for event_type, _ in emitted))
 
     def test_valid_stt_question_still_enters_cognition_and_user_bubble(self):
         engine = make_engine(["nuria"])
@@ -899,7 +937,7 @@ class VoiceCommandPipelineTests(unittest.TestCase):
 
         joined = "\n".join(logs)
         self.assertEqual(engine.runtime.twitch.sent, [])
-        engine.runtime.speak.assert_called_once_with("Mira recursos antes de avanzar.")
+        engine.runtime.speak.assert_called_once_with("Mira recursos antes de avanzar.", emit_chat=False)
         self.assertIn("input_type=spontaneity output_target=stream_tts", joined)
         self.assertIn("skipped reason=twitch_spontaneous_disabled", joined)
         self.assertTrue(any(

@@ -7,13 +7,32 @@ from datetime import datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from app.cognitive.capabilities import (
+    CapabilityMatcher,
+    CapabilityMatchResult,
+    CapabilityRegistry,
+    Goal,
+    GoalExtractor,
+)
 from app.cognitive.context_builder import BuiltContext
 from app.cognitive.models import PlanStep, Plan, DeliberationResult
 from app.cognitive.temporal import TemporalInterpreter
 
 
+CAPABILITY_BACKLOG_QUERY = "hebe.capability_backlog_query"
+CAPABILITY_OPEN_APPLICATION = "pc.open_application"
+REPLY_MODE_CAPABILITY_CATALOGUE_QUERY = "capability_catalogue_query"
+
+
 class DeliberationService:
-    def __init__(self, intent_model: Any, reasoning_model: Any):
+    def __init__(
+        self,
+        intent_model: Any,
+        reasoning_model: Any,
+        capability_registry: CapabilityRegistry | None = None,
+        goal_extractor: GoalExtractor | None = None,
+        capability_matcher: CapabilityMatcher | None = None,
+    ):
         """
         intent_model: cliente LLM para extracción estructurada (hebe-intent).
                       Debe exponer chat_structured(system_prompt, user_prompt, schema, temperature).
@@ -25,6 +44,22 @@ class DeliberationService:
             timezone_name="Europe/Madrid",
             intent_client=intent_model,
         )
+        self.capability_catalogue_error = ""
+        if capability_registry is not None:
+            self.capability_registry = capability_registry
+        else:
+            try:
+                self.capability_registry = CapabilityRegistry.default()
+            except Exception as exc:
+                self.capability_registry = None
+                self.capability_catalogue_error = f"{type(exc).__name__}: {exc}"
+        self.goal_extractor = goal_extractor or GoalExtractor()
+        if capability_matcher is not None:
+            self.capability_matcher = capability_matcher
+        elif self.capability_registry is not None:
+            self.capability_matcher = CapabilityMatcher(self.capability_registry)
+        else:
+            self.capability_matcher = None
 
     def deliberate(self, context: BuiltContext) -> DeliberationResult:
         if context.internal_event:
@@ -78,29 +113,157 @@ class DeliberationService:
 
     def _handle_user_input(self, context: BuiltContext) -> DeliberationResult:
         text = (context.input_text or "").strip().lower()
+        goal, match = self._extract_goal_and_match(context)
+
+        catalogue_query = goal.slots.get("catalogue_query")
+        if catalogue_query:
+            return self._with_capability_metadata(
+                self._plan_capability_catalogue_query(str(catalogue_query)),
+                goal,
+                match,
+            )
 
         reminder = self._parse_relative_reminder(context.input_text or "")
         if reminder is not None:
-            return self._plan_relative_reminder(
-                title=reminder["title"],
-                message=reminder["message"],
-                due_at=reminder["due_at"],
-                relative_label=reminder["relative_label"],
-                source_text=context.input_text,
+            return self._with_capability_metadata(
+                self._plan_relative_reminder(
+                    title=reminder["title"],
+                    message=reminder["message"],
+                    due_at=reminder["due_at"],
+                    relative_label=reminder["relative_label"],
+                    source_text=context.input_text,
+                ),
+                goal,
+                match,
             )
 
-        pending = context.state_snapshot.get("pending_clarification")
+        pending = (getattr(context, "state_snapshot", {}) or {}).get("pending_clarification")
         if pending and pending.get("kind") == "appointment_datetime":
-            return self._resolve_pending_appointment(context, pending)
+            return self._with_capability_metadata(
+                self._resolve_pending_appointment(context, pending),
+                goal,
+                match,
+            )
 
         if self._looks_like_appointment(text):
-            return self._plan_appointment(context)
+            return self._with_capability_metadata(
+                self._plan_appointment(context),
+                goal,
+                match,
+            )
 
         app_name = self._extract_open_app_target(text)
         if app_name:
-            return self._plan_open_app(app_name)
+            return self._with_capability_metadata(
+                self._plan_open_app(app_name),
+                goal,
+                match,
+            )
 
-        return self._plan_with_llm(context)
+        return self._with_capability_metadata(
+            self._plan_with_llm(context),
+            goal,
+            match,
+        )
+
+    def _extract_goal_and_match(self, context: BuiltContext) -> tuple[Goal, CapabilityMatchResult]:
+        goal = self.goal_extractor.extract(context)
+        if self.capability_matcher is None:
+            return goal, CapabilityMatchResult(
+                goal=goal,
+                rejected_capabilities=[
+                    {
+                        "capability_id": CAPABILITY_BACKLOG_QUERY,
+                        "reason": "capability_catalogue_unavailable",
+                        "error": self.capability_catalogue_error,
+                    }
+                ],
+                confidence=0.0,
+            )
+        current_mode = self._current_mode(context)
+        match = self.capability_matcher.match(goal, current_mode=current_mode)
+        return goal, match
+
+    def _current_mode(self, context: BuiltContext) -> str:
+        internal_event = getattr(context, "internal_event", None)
+        if internal_event is not None and getattr(internal_event, "event_type", "").startswith("twitch_"):
+            return "stream"
+        state_snapshot = getattr(context, "state_snapshot", {}) or {}
+        if state_snapshot.get("stream_mode") or state_snapshot.get("live_mode"):
+            return "stream"
+        return "private"
+
+    def _with_capability_metadata(
+        self,
+        result: DeliberationResult,
+        goal: Goal,
+        match: CapabilityMatchResult,
+    ) -> DeliberationResult:
+        plan = result.plan
+        selected_ids = [capability.id for capability in match.selected_capabilities]
+        plan.goal = goal.to_dict()
+        plan.selected_capabilities = selected_ids
+        plan.message_id = goal.message_id
+        plan.requires_confirmation = bool(
+            plan.requires_confirmation
+            or match.requires_confirmation
+            or any(step.requires_confirmation for step in plan.steps)
+        )
+        plan.output_policy = dict(match.output_policy or plan.output_policy or {})
+        plan.risk_level = match.risk_level or plan.risk_level
+        plan.reasoning_summary = goal.reasoning_summary
+        metadata = dict(plan.metadata or {})
+        metadata["capability_match"] = {
+            "selected": selected_ids,
+            "rejected": match.rejected_capabilities,
+            "missing_slots": match.missing_slots,
+            "confidence": match.confidence,
+        }
+        plan.metadata = metadata
+        return result
+
+    def _plan_capability_catalogue_query(self, query_type: str) -> DeliberationResult:
+        if self.capability_registry is None:
+            return DeliberationResult(
+                plan=Plan(
+                    steps=[
+                        PlanStep(
+                            type="reply",
+                            data={
+                                "mode": REPLY_MODE_CAPABILITY_CATALOGUE_QUERY,
+                                "query_type": query_type,
+                                "payload": {
+                                    "query_type": query_type,
+                                    "catalogue_unavailable": True,
+                                    "error": self.capability_catalogue_error,
+                                    "items": [],
+                                },
+                            },
+                            capability_id=CAPABILITY_BACKLOG_QUERY,
+                            risk_level="low",
+                        )
+                    ],
+                    reasoning="Capability backlog query failed: catalogue unavailable",
+                )
+            )
+        data = self.capability_registry.answer_backlog_query(query_type)
+        return DeliberationResult(
+            plan=Plan(
+                steps=[
+                    PlanStep(
+                        type="reply",
+                        data={
+                            "mode": REPLY_MODE_CAPABILITY_CATALOGUE_QUERY,
+                            "query_type": query_type,
+                            "payload": data,
+                        },
+                        capability_id=CAPABILITY_BACKLOG_QUERY,
+                        risk_level="low",
+                    )
+                ],
+                reasoning=f"Capability backlog query: {query_type}",
+            )
+        )
 
     def _plan_appointment(self, context: BuiltContext) -> DeliberationResult:
         now = datetime.now(ZoneInfo("Europe/Madrid"))
@@ -511,6 +674,8 @@ class DeliberationService:
                             "name": "open_application",
                             "params": {"app_name": app_name},
                         },
+                        capability_id=CAPABILITY_OPEN_APPLICATION,
+                        risk_level="medium",
                     ),
                     PlanStep(
                         type="reply",

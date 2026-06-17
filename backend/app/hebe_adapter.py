@@ -1,5 +1,6 @@
 import asyncio
 import time
+import uuid
 
 from .events import Event
 from .hebe_engine import HebeEngine
@@ -16,7 +17,8 @@ class _AsyncEmitter:
         self.q = q
 
     def __call__(self, event_type: str, data: dict):
-        ev = Event(type=event_type, data=data, ts=time.time())
+        event_id = str((data or {}).get("event_id") or "").strip() or f"evt_{uuid.uuid4().hex}"
+        ev = Event(type=event_type, data=data, ts=time.time(), event_id=event_id)
         try:
             self.loop.call_soon_threadsafe(self.q.put_nowait, ev)
         except Exception:

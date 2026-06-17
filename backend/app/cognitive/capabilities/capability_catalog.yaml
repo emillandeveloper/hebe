@@ -1,0 +1,991 @@
+version: 1
+capabilities:
+  - id: hebe.chat_reply
+    category: hebe
+    name: Direct chat reply
+    description: Answer Leo directly through the normal response synthesizer.
+    status: implemented
+    enabled: true
+    risk_level: low
+    requires_confirmation: false
+    available_in_modes: [private, stream, any]
+    input_schema:
+      required: []
+      properties:
+        user_text:
+          type: string
+    output_schema:
+      properties:
+        reply_text:
+          type: string
+    dependencies: []
+    implemented_by:
+      - app.cognitive.deliberation_service.DeliberationService._plan_with_llm
+      - app.cognitive.response_synthesizer.ResponseSynthesizer
+    tests:
+      - backend.tests.test_voice_command_pipeline
+    notes: Default conversational fallback.
+    examples_semantic:
+      - answer a direct question
+      - react to small talk
+    output_policy:
+      reply_mode: chat
+    memory_policy:
+      read: relevant
+      write: none
+    spoiler_policy:
+      default: avoid_unrequested_spoilers
+    goal_types: [answer_question]
+    backlog:
+      priority: P3
+      effort: S
+      unblocked: true
+      blocked_by: []
+      next_actions: []
+      acceptance_criteria:
+        - Direct chat still produces a reply plan.
+      recommended_next: false
+      todo_owner: Hebe
+
+  - id: hebe.get_status
+    category: hebe
+    name: Hebe status summary
+    description: Report current backend, session, and voice status when available.
+    status: implemented
+    enabled: true
+    risk_level: low
+    requires_confirmation: false
+    available_in_modes: [private, stream, any]
+    input_schema:
+      required: []
+      properties: {}
+    output_schema:
+      properties:
+        status:
+          type: object
+    dependencies: []
+    implemented_by:
+      - app.api.health
+      - app.api.debug
+    tests:
+      - backend.tests.test_voice_command_pipeline
+    notes: Status surfaces may be split across API endpoints.
+    examples_semantic:
+      - check whether Hebe is healthy
+      - summarize current runtime status
+    output_policy:
+      reply_mode: diagnostic
+    memory_policy:
+      read: none
+      write: none
+    spoiler_policy:
+      default: none
+    goal_types: [diagnose_problem]
+    backlog:
+      priority: P2
+      effort: M
+      unblocked: true
+      blocked_by: []
+      next_actions:
+        - Consolidate wake loop and backend health into one status payload.
+      acceptance_criteria:
+        - Status includes backend and voice loop health.
+      recommended_next: false
+      todo_owner: Hebe
+
+  - id: hebe.capability_backlog_query
+    category: hebe
+    name: Capability backlog query
+    description: Answer questions about planned, partial, disabled, and recommended capability work.
+    status: implemented
+    enabled: true
+    risk_level: low
+    requires_confirmation: false
+    available_in_modes: [private, stream, any]
+    input_schema:
+      required: [catalogue_query]
+      properties:
+        catalogue_query:
+          type: string
+          enum:
+            - planned_not_implemented
+            - high_priority_unblocked
+            - next_todo
+            - implemented_disabled
+            - partial_needs_completion
+            - summary
+    output_schema:
+      properties:
+        items:
+          type: array
+        next_recommended_todo:
+          type: object
+    dependencies:
+      - capability_catalog.yaml
+    implemented_by:
+      - app.cognitive.capabilities.registry.CapabilityRegistry
+      - app.cognitive.deliberation_service.DeliberationService
+    tests:
+      - backend.tests.test_capability_catalogue
+      - backend.tests.test_goal_capability_planning
+    notes: This is intentionally read-only.
+    examples_semantic:
+      - what capabilities are planned but not implemented
+      - what is the next recommended TODO
+      - what partial capabilities need completion
+    output_policy:
+      reply_mode: capability_catalogue_query
+    memory_policy:
+      read: none
+      write: none
+    spoiler_policy:
+      default: none
+    goal_types: [analyze_data]
+    backlog:
+      priority: P0
+      effort: M
+      unblocked: true
+      blocked_by: []
+      next_actions: []
+      acceptance_criteria:
+        - Backlog questions return structured capability data.
+        - Planned-only capabilities are never executed.
+      recommended_next: false
+      todo_owner: Hebe
+
+  - id: pc.open_application
+    category: pc
+    name: Open application
+    description: Open a local application through the safe action runtime.
+    status: implemented
+    enabled: true
+    risk_level: medium
+    requires_confirmation: false
+    available_in_modes: [private]
+    input_schema:
+      required: [app_name]
+      properties:
+        app_name:
+          type: string
+    output_schema:
+      properties:
+        success:
+          type: boolean
+    dependencies:
+      - app.cognitive.action_runtime.ActionRuntime
+    implemented_by:
+      - app.cognitive.local_app_planner
+      - app.cognitive.action_runtime
+    tests:
+      - backend.tests.test_command_result_synthesis
+    notes: Execution remains constrained to known local app planning.
+    examples_semantic:
+      - open OBS
+      - launch a local app
+    output_policy:
+      reply_mode: confirm_action
+    memory_policy:
+      read: none
+      write: none
+    spoiler_policy:
+      default: none
+    goal_types: [control_pc]
+    backlog:
+      priority: P2
+      effort: S
+      unblocked: true
+      blocked_by: []
+      next_actions:
+        - Add per-app confirmation policy for risky targets.
+      acceptance_criteria:
+        - Opening an app records capability metadata in the plan.
+      recommended_next: false
+      todo_owner: Hebe
+
+  - id: session.get_live_state
+    category: session
+    name: Get live session state
+    description: Read the current live session state and debug snapshot.
+    status: implemented
+    enabled: true
+    risk_level: low
+    requires_confirmation: false
+    available_in_modes: [private, stream, any]
+    input_schema:
+      required: []
+      properties: {}
+    output_schema:
+      properties:
+        live_session:
+          type: object
+    dependencies:
+      - app.stream.live_session
+    implemented_by:
+      - app.api.debug.get_live_session_debug
+    tests:
+      - backend.tests.test_live_session_brain
+    notes: Read-only session inspection.
+    examples_semantic:
+      - summarize current stream context
+      - show live session debug state
+    output_policy:
+      reply_mode: diagnostic
+    memory_policy:
+      read: session
+      write: none
+    spoiler_policy:
+      default: avoid_unrequested_spoilers
+    goal_types: [diagnose_problem]
+    backlog:
+      priority: P2
+      effort: S
+      unblocked: true
+      blocked_by: []
+      next_actions: []
+      acceptance_criteria:
+        - Live session state can be read without mutation.
+      recommended_next: false
+      todo_owner: Hebe
+
+  - id: memory.search
+    category: memory
+    name: Search memory
+    description: Retrieve relevant structured facts and semantic chunks.
+    status: implemented
+    enabled: true
+    risk_level: low
+    requires_confirmation: false
+    available_in_modes: [private, stream, any]
+    input_schema:
+      required: [query]
+      properties:
+        query:
+          type: string
+    output_schema:
+      properties:
+        results:
+          type: array
+    dependencies:
+      - app.cognitive.memory_store.MemoryStore
+    implemented_by:
+      - app.cognitive.context_builder.ContextBuilder
+    tests:
+      - backend.tests.test_hebe_identity_memory
+    notes: Currently used by context building rather than as a standalone tool step.
+    examples_semantic:
+      - recall relevant memory
+      - search conversation history
+    output_policy:
+      reply_mode: memory_context
+    memory_policy:
+      read: relevant
+      write: none
+    spoiler_policy:
+      default: avoid_unrequested_spoilers
+    goal_types: [answer_question]
+    backlog:
+      priority: P2
+      effort: M
+      unblocked: true
+      blocked_by: []
+      next_actions:
+        - Expose a read-only memory search tool step.
+      acceptance_criteria:
+        - Planner can request memory search without raw SQL.
+      recommended_next: false
+      todo_owner: Hebe
+
+  - id: audio.stop_speaking
+    category: audio
+    name: Stop speaking
+    description: Stop current TTS playback if active.
+    status: implemented
+    enabled: true
+    risk_level: low
+    requires_confirmation: false
+    available_in_modes: [private, stream, any]
+    input_schema:
+      required: []
+      properties: {}
+    output_schema:
+      properties:
+        stopped:
+          type: boolean
+    dependencies:
+      - app.api.tts_control
+    implemented_by:
+      - app.api.tts_control
+    tests:
+      - backend.tests.test_tts_control
+    notes: Useful for interrupt and dev restart flows.
+    examples_semantic:
+      - stop TTS playback
+      - silence current voice
+    output_policy:
+      reply_mode: none
+    memory_policy:
+      read: none
+      write: none
+    spoiler_policy:
+      default: none
+    goal_types: [control_pc]
+    backlog:
+      priority: P2
+      effort: S
+      unblocked: true
+      blocked_by: []
+      next_actions: []
+      acceptance_criteria:
+        - Stop command is exposed safely.
+      recommended_next: false
+      todo_owner: Hebe
+
+  - id: stream.chat_activity_report
+    category: stream
+    name: Chat activity report
+    description: Summarize Twitch chat activity and viewer participation over a chosen time window.
+    status: partial
+    enabled: false
+    risk_level: low
+    requires_confirmation: false
+    available_in_modes: [private, stream]
+    input_schema:
+      required: [time_range]
+      properties:
+        time_range:
+          type: string
+        exclude_bots:
+          type: boolean
+    output_schema:
+      properties:
+        report:
+          type: object
+    dependencies:
+      - twitch chat log persistence
+      - read-only analytics adapter
+    implemented_by:
+      - app.services.db_sqlite
+    tests: []
+    notes: Database tables exist, but a safe analytics service is not complete.
+    examples_semantic:
+      - tell me who talked most in chat
+      - summarize all recorded chat activity
+    output_policy:
+      reply_mode: data_summary
+    memory_policy:
+      read: stream_history
+      write: none
+    spoiler_policy:
+      default: none
+    goal_types: [analyze_chat_activity]
+    backlog:
+      priority: P0
+      effort: M
+      unblocked: true
+      blocked_by: []
+      next_actions:
+        - Add a read-only chat analytics service.
+        - Add aggregation tests for message counts and bot exclusion.
+        - Wire a non-mutating query step into the planner.
+      acceptance_criteria:
+        - User can ask for planned chat activity reports.
+        - Bot accounts are excluded when requested.
+        - No raw SQL is accepted from user input.
+      recommended_next: true
+      todo_owner: Hebe
+
+  - id: game.strategy_research
+    category: game
+    name: Game strategy research
+    description: Research mechanics-focused strategies while avoiding unrequested story spoilers.
+    status: partial
+    enabled: false
+    risk_level: medium
+    requires_confirmation: false
+    available_in_modes: [private, stream]
+    input_schema:
+      required: [game, strategy_mode]
+      properties:
+        game:
+          type: string
+        strategy_mode:
+          type: string
+    output_schema:
+      properties:
+        strategy_notes:
+          type: array
+    dependencies:
+      - game knowledge retrieval
+      - spoiler policy enforcement
+    implemented_by:
+      - app.game_knowledge
+    tests:
+      - backend.tests.test_game_knowledge
+    notes: Retrieval exists in pieces; planner/tool contract is incomplete.
+    examples_semantic:
+      - help me break this game mechanically
+      - find an overpowered route without story spoilers
+    output_policy:
+      reply_mode: strategy_summary
+      avoid_story_spoilers: true
+    memory_policy:
+      read: relevant
+      write: optional_session_notes
+    spoiler_policy:
+      mechanics: allowed
+      story: avoid_unrequested
+    goal_types: [research_game_strategy]
+    backlog:
+      priority: P1
+      effort: L
+      unblocked: true
+      blocked_by: []
+      next_actions:
+        - Define source ranking and spoiler filters.
+        - Add tests for mechanics-only recommendations.
+      acceptance_criteria:
+        - Planner rejects missing game names.
+        - Output separates mechanics from story context.
+      recommended_next: false
+      todo_owner: Hebe
+
+  - id: game.safe_hint_context
+    category: game
+    name: Safe hint context
+    description: Provide contextual game hints without spoiling story or late-game reveals.
+    status: partial
+    enabled: false
+    risk_level: low
+    requires_confirmation: false
+    available_in_modes: [private, stream]
+    input_schema:
+      required: [game, current_location]
+      properties:
+        game:
+          type: string
+        current_location:
+          type: string
+    output_schema:
+      properties:
+        hint:
+          type: string
+    dependencies:
+      - stream context
+      - game knowledge retrieval
+    implemented_by:
+      - app.cognitive.context_builder.ContextBuilder
+    tests:
+      - backend.tests.test_game_profiles
+    notes: Needs a planner-safe hint contract.
+    examples_semantic:
+      - give a spoiler-safe hint
+      - nudge me without revealing the plot
+    output_policy:
+      reply_mode: safe_hint
+      avoid_story_spoilers: true
+    memory_policy:
+      read: session
+      write: none
+    spoiler_policy:
+      mechanics: allowed
+      story: avoid_unrequested
+    goal_types: [research_game_strategy]
+    backlog:
+      priority: P1
+      effort: M
+      unblocked: true
+      blocked_by: []
+      next_actions:
+        - Add current location slot extraction.
+        - Add spoiler boundary fixtures.
+      acceptance_criteria:
+        - Missing location requests clarification instead of guessing.
+      recommended_next: false
+      todo_owner: Hebe
+
+  - id: session.update_live_state
+    category: session
+    name: Update live session state
+    description: Record stream progress updates and corrections in live session memory.
+    status: partial
+    enabled: false
+    risk_level: medium
+    requires_confirmation: false
+    available_in_modes: [private, stream]
+    input_schema:
+      required: [state_change]
+      properties:
+        state_change:
+          type: string
+    output_schema:
+      properties:
+        updated:
+          type: boolean
+    dependencies:
+      - live session brain
+      - memory write policy
+    implemented_by:
+      - app.stream.live_session
+    tests:
+      - backend.tests.test_live_session_brain
+    notes: Some live session updates exist, but planner integration is not complete.
+    examples_semantic:
+      - we already beat that boss
+      - correct current stream objective
+    output_policy:
+      reply_mode: confirm_session_update
+    memory_policy:
+      read: session
+      write: session_state
+    spoiler_policy:
+      default: session_scoped
+    goal_types: [update_session_state, correct_assumption]
+    backlog:
+      priority: P1
+      effort: M
+      unblocked: true
+      blocked_by: []
+      next_actions:
+        - Add structured session update events.
+        - Persist corrections with source turn metadata.
+      acceptance_criteria:
+        - Corrections update state without duplicating old assumptions.
+      recommended_next: false
+      todo_owner: Hebe
+
+  - id: diagnostics.no_voice_response
+    category: diagnostics
+    name: No voice response diagnostic
+    description: Diagnose cases where STT hears Leo but Hebe does not answer.
+    status: partial
+    enabled: false
+    risk_level: low
+    requires_confirmation: false
+    available_in_modes: [private, stream]
+    input_schema:
+      required: []
+      properties: {}
+    output_schema:
+      properties:
+        findings:
+          type: array
+    dependencies:
+      - wake loop health
+      - STT logs
+      - TTS status
+    implemented_by:
+      - app.hebe_engine
+    tests:
+      - backend.tests.test_voice_command_pipeline
+    notes: Wake loop health exists in parts; a complete diagnostic report is pending.
+    examples_semantic:
+      - why does Hebe hear me but not reply
+      - debug voice command pipeline
+    output_policy:
+      reply_mode: diagnostic
+    memory_policy:
+      read: logs
+      write: none
+    spoiler_policy:
+      default: none
+    goal_types: [diagnose_problem]
+    backlog:
+      priority: P0
+      effort: M
+      unblocked: true
+      blocked_by: []
+      next_actions:
+        - Combine wake loop, websocket, STT, and TTS status.
+        - Show fatal loop errors in health response.
+      acceptance_criteria:
+        - UI can display a voice pipeline failure distinct from backend health.
+      recommended_next: false
+      todo_owner: Hebe
+
+  - id: obs.start_stream
+    category: obs
+    name: Start OBS stream
+    description: Start broadcasting through OBS after explicit confirmation.
+    status: planned
+    enabled: false
+    risk_level: danger
+    requires_confirmation: true
+    available_in_modes: [private]
+    input_schema:
+      required: []
+      properties: {}
+    output_schema:
+      properties:
+        started:
+          type: boolean
+    dependencies:
+      - OBS websocket client
+      - explicit confirmation gate
+    implemented_by: []
+    tests: []
+    notes: Dangerous external action; never execute while planned.
+    examples_semantic:
+      - start the stream
+      - go live on OBS
+    output_policy:
+      reply_mode: confirmation_required
+    memory_policy:
+      read: session
+      write: audit_log
+    spoiler_policy:
+      default: none
+    goal_types: [control_pc]
+    backlog:
+      priority: P2
+      effort: L
+      unblocked: false
+      blocked_by:
+        - OBS websocket permission design
+      next_actions:
+        - Add explicit confirmation UX.
+      acceptance_criteria:
+        - Cannot start streaming without confirmation.
+      recommended_next: false
+      todo_owner: Hebe
+
+  - id: twitch.start_raid
+    category: twitch
+    name: Start Twitch raid
+    description: Start a Twitch raid after explicit confirmation.
+    status: planned
+    enabled: false
+    risk_level: high
+    requires_confirmation: true
+    available_in_modes: [stream]
+    input_schema:
+      required: [target_channel]
+      properties:
+        target_channel:
+          type: string
+    output_schema:
+      properties:
+        raid_started:
+          type: boolean
+    dependencies:
+      - Twitch API client
+      - broadcaster auth scope
+    implemented_by: []
+    tests: []
+    notes: Needs moderation and confirmation policy.
+    examples_semantic:
+      - raid another channel
+      - send viewers to a target channel
+    output_policy:
+      reply_mode: confirmation_required
+    memory_policy:
+      read: stream
+      write: audit_log
+    spoiler_policy:
+      default: none
+    goal_types: [control_pc]
+    backlog:
+      priority: P2
+      effort: L
+      unblocked: false
+      blocked_by:
+        - Twitch API command scope
+      next_actions:
+        - Define raid confirmation and cancellation flow.
+      acceptance_criteria:
+        - Raid cannot start without target and confirmation.
+      recommended_next: false
+      todo_owner: Hebe
+
+  - id: twitch.timeout_user
+    category: twitch
+    name: Timeout Twitch user
+    description: Temporarily timeout a Twitch chatter after moderation confirmation.
+    status: planned
+    enabled: false
+    risk_level: high
+    requires_confirmation: true
+    available_in_modes: [stream]
+    input_schema:
+      required: [user_login, duration_seconds, reason]
+      properties:
+        user_login:
+          type: string
+        duration_seconds:
+          type: integer
+        reason:
+          type: string
+    output_schema:
+      properties:
+        timeout_applied:
+          type: boolean
+    dependencies:
+      - Twitch moderation API
+      - moderation policy
+    implemented_by: []
+    tests: []
+    notes: Moderation action; planned only.
+    examples_semantic:
+      - timeout a chatter
+      - moderate chat user
+    output_policy:
+      reply_mode: confirmation_required
+    memory_policy:
+      read: chat
+      write: moderation_audit
+    spoiler_policy:
+      default: none
+    goal_types: [control_pc]
+    backlog:
+      priority: P2
+      effort: L
+      unblocked: false
+      blocked_by:
+        - moderation policy approval
+      next_actions:
+        - Build moderation confirmation review.
+      acceptance_criteria:
+        - Requires reason, duration, target, and confirmation.
+      recommended_next: false
+      todo_owner: Hebe
+
+  - id: db.analytics_query
+    category: db
+    name: Database analytics query
+    description: Run allowlisted read-only analytics queries over Hebe data.
+    status: planned
+    enabled: false
+    risk_level: medium
+    requires_confirmation: false
+    available_in_modes: [private]
+    input_schema:
+      required: [query_name]
+      properties:
+        query_name:
+          type: string
+        parameters:
+          type: object
+    output_schema:
+      properties:
+        rows:
+          type: array
+    dependencies:
+      - allowlisted analytics registry
+    implemented_by: []
+    tests: []
+    notes: Must never accept raw SQL from the user.
+    examples_semantic:
+      - count chat messages by user
+      - summarize database metrics
+    output_policy:
+      reply_mode: data_summary
+    memory_policy:
+      read: database
+      write: none
+    spoiler_policy:
+      default: none
+    goal_types: [analyze_data, analyze_chat_activity]
+    backlog:
+      priority: P1
+      effort: M
+      unblocked: true
+      blocked_by: []
+      next_actions:
+        - Define named query registry.
+        - Add SQL injection regression tests.
+      acceptance_criteria:
+        - Only allowlisted read-only queries can run.
+      recommended_next: false
+      todo_owner: Hebe
+
+  - id: game.create_break_plan
+    category: game
+    name: Create break-the-game plan
+    description: Convert strategy research into a stepwise gameplay plan.
+    status: planned
+    enabled: false
+    risk_level: medium
+    requires_confirmation: false
+    available_in_modes: [private, stream]
+    input_schema:
+      required: [game, objective]
+      properties:
+        game:
+          type: string
+        objective:
+          type: string
+    output_schema:
+      properties:
+        plan:
+          type: array
+    dependencies:
+      - game.strategy_research
+    implemented_by: []
+    tests: []
+    notes: Depends on spoiler-safe research foundation.
+    examples_semantic:
+      - make a route to break the run
+      - plan an overpowered build
+    output_policy:
+      reply_mode: strategy_plan
+      avoid_story_spoilers: true
+    memory_policy:
+      read: relevant
+      write: optional_session_notes
+    spoiler_policy:
+      mechanics: allowed
+      story: avoid_unrequested
+    goal_types: [research_game_strategy]
+    backlog:
+      priority: P1
+      effort: L
+      unblocked: false
+      blocked_by:
+        - game.strategy_research
+      next_actions:
+        - Wait for strategy research contract.
+      acceptance_criteria:
+        - Plan is reproducible and spoiler-filtered.
+      recommended_next: false
+      todo_owner: Hebe
+
+  - id: spontaneity.score_opportunity
+    category: spontaneity
+    name: Score spontaneous reply opportunity
+    description: Decide whether Hebe should speak spontaneously in stream context.
+    status: planned
+    enabled: false
+    risk_level: low
+    requires_confirmation: false
+    available_in_modes: [stream]
+    input_schema:
+      required: [stream_context]
+      properties:
+        stream_context:
+          type: object
+    output_schema:
+      properties:
+        score:
+          type: number
+    dependencies:
+      - stream context
+      - cooldown policy
+    implemented_by: []
+    tests: []
+    notes: Must respect stream cooldowns and avoid interrupting Leo.
+    examples_semantic:
+      - decide if Hebe should comment now
+      - score stream spontaneity
+    output_policy:
+      reply_mode: internal_signal
+    memory_policy:
+      read: session
+      write: none
+    spoiler_policy:
+      default: session_scoped
+    goal_types: [analyze_data]
+    backlog:
+      priority: P1
+      effort: M
+      unblocked: true
+      blocked_by: []
+      next_actions:
+        - Define transparent scoring inputs.
+        - Add cooldown regression tests.
+      acceptance_criteria:
+        - Cooldowns cannot be bypassed by scoring.
+      recommended_next: false
+      todo_owner: Hebe
+
+  - id: files.delete_file
+    category: files
+    name: Delete local file
+    description: Delete a local file only after explicit confirmation and path safety checks.
+    status: planned
+    enabled: false
+    risk_level: danger
+    requires_confirmation: true
+    available_in_modes: [private]
+    input_schema:
+      required: [path]
+      properties:
+        path:
+          type: string
+    output_schema:
+      properties:
+        deleted:
+          type: boolean
+    dependencies:
+      - safe filesystem action runtime
+      - confirmation gate
+    implemented_by: []
+    tests: []
+    notes: Dangerous file action; planned only.
+    examples_semantic:
+      - delete a file
+      - remove a local artifact
+    output_policy:
+      reply_mode: confirmation_required
+    memory_policy:
+      read: none
+      write: audit_log
+    spoiler_policy:
+      default: none
+    goal_types: [control_pc]
+    backlog:
+      priority: P3
+      effort: L
+      unblocked: false
+      blocked_by:
+        - filesystem safety design
+      next_actions:
+        - Define workspace allowlist and recovery policy.
+      acceptance_criteria:
+        - No delete operation can run without confirmation.
+      recommended_next: false
+      todo_owner: Hebe
+
+  - id: dev.full_dev_reset
+    category: dev
+    name: Full dev reset
+    description: Restart backend and reload the UI during development.
+    status: implemented
+    enabled: false
+    risk_level: high
+    requires_confirmation: true
+    available_in_modes: [private]
+    input_schema:
+      required: []
+      properties: {}
+    output_schema:
+      properties:
+        reset_complete:
+          type: boolean
+    dependencies:
+      - electron dev IPC
+      - backend health check
+    implemented_by:
+      - electron main dev controls
+    tests: []
+    notes: Disabled by default because it is a dev-only control.
+    examples_semantic:
+      - full dev reset
+      - restart backend and reload UI
+    output_policy:
+      reply_mode: dev_control
+    memory_policy:
+      read: none
+      write: audit_log
+    spoiler_policy:
+      default: none
+    goal_types: [control_pc]
+    backlog:
+      priority: P1
+      effort: M
+      unblocked: true
+      blocked_by: []
+      next_actions:
+        - Add explicit config gate for production builds.
+      acceptance_criteria:
+        - Disabled capabilities appear in implemented-disabled backlog queries.
+      recommended_next: false
+      todo_owner: Hebe

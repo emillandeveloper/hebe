@@ -8,6 +8,7 @@ export type EventType =
   | "avatar.state"
   | "status"
   | "error"
+  | "chat_message"
   | "chat.user"
   | "chat.assistant"
   // Futuro
@@ -18,6 +19,7 @@ export type HebeEvent = {
   type: EventType;
   data: any;
   ts: number;
+  event_id?: string;
 };
 
 export type ClientMsg =

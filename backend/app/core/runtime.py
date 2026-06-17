@@ -31,10 +31,11 @@ from app.integrations.twitch.event_adapter import TwitchEventAdapter
 from app.integrations.twitch.helix_client import TwitchHelixClient
 
 
-def build_speak(state: HebeState) -> Callable[[str, str], None]:
-    def speak(text: str, language: str = "es") -> None:
+def build_speak(state: HebeState) -> Callable[..., None]:
+    def speak(text: str, language: str = "es", *, emit_chat: bool = True) -> None:
         if not getattr(state, "tts_enabled", False):
-            emit("chat.assistant", {"text": text})
+            if emit_chat:
+                emit("chat.assistant", {"text": text})
             print("[HEBE][TTS] skipped reason=global_disabled", flush=True)
             return
 
@@ -46,6 +47,7 @@ def build_speak(state: HebeState) -> Callable[[str, str], None]:
                 language=language,
                 emit=emit,
                 log_chat=log_chat,
+                emit_chat=emit_chat,
             )
         except Exception as exc:
             safe_error = str(exc).replace('"', '\\"')
@@ -63,7 +65,7 @@ class HebeRuntime:
     win: WinAutomationService
     actions: InteractionActions
     tools: ToolSystem
-    speak: Callable[[str, str], None]
+    speak: Callable[..., None]
     state: HebeState
     twitch: TwitchService
     twitch_events: TwitchEventAdapter

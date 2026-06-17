@@ -6,9 +6,11 @@ export type ServerEvent = {
     | "avatar.state"
     | "status"
     | "error"
+    | "chat_message"
     | "chat.user" | "chat.assistant";
   data: any;
   ts: number;
+  event_id?: string;
 };
 
 export type ClientMsg =

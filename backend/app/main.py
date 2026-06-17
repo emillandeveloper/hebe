@@ -3,6 +3,8 @@ import time
 import inspect
 import logging
 import os
+import uuid
+from datetime import datetime, timezone
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -12,6 +14,7 @@ from .events import Event, ClientMsg
 from .hebe_adapter import HebeAdapter
 from .api.debug import router as debug_router
 from .api.audio import router as audio_router
+from .api.capabilities import router as capabilities_router
 from .core.log_bus import get_recent_logs, install_log_capture
 
 from dotenv import load_dotenv
@@ -29,6 +32,7 @@ app.add_middleware(
 )
 app.include_router(debug_router)
 app.include_router(audio_router)
+app.include_router(capabilities_router)
 
 ws_manager = WSManager()
 event_q: asyncio.Queue[Event] = asyncio.Queue()
@@ -59,6 +63,91 @@ async def maybe_await(x):
         return await x
     return x
 
+
+def _prepare_ws_payload(payload: dict) -> dict:
+    event = dict(payload or {})
+    data = event.get("data")
+    if isinstance(data, dict):
+        data = dict(data)
+    else:
+        data = {} if data is None else data
+
+    event_id = str(event.get("event_id") or (data.get("event_id") if isinstance(data, dict) else "") or "").strip()
+    if not event_id:
+        event_id = f"evt_{uuid.uuid4().hex}"
+    event["event_id"] = event_id
+    if isinstance(data, dict):
+        data.setdefault("event_id", event_id)
+        event["data"] = data
+
+    message_event = _chat_message_event(event, data, event_id)
+    if message_event is not None:
+        message = message_event["message"]
+        print(
+            "[HEBE][UI_EVENT] "
+            f"broadcast type=chat_message event_id={message_event['event_id']} "
+            f"message_id={message['message_id']} role={message['role']} text={message['text']!r}",
+            flush=True,
+        )
+        return message_event
+    return event
+
+
+def _chat_message_event(event: dict, data: dict, event_id: str) -> dict | None:
+    event_type = str(event.get("type") or "")
+    if event_type not in {"chat.user", "chat.assistant", "llm.final"}:
+        return None
+
+    if event_type == "chat.user":
+        role = "user"
+        speaker = str(data.get("speaker") or "Leo")
+        source = str(data.get("source") or "ui")
+        text = str(data.get("text") or "").strip()
+    else:
+        role = "assistant"
+        speaker = str(data.get("speaker") or "Hebe")
+        source = str(data.get("source") or ("llm" if event_type == "llm.final" else "system"))
+        text = str(data.get("text") or "").strip()
+
+    if not text:
+        return None
+
+    message_id = str(data.get("message_id") or data.get("id") or "").strip()
+    if not message_id:
+        message_id = f"msg_{event_id}"
+    ts = float(event.get("ts") or time.time())
+    created_at = str(
+        data.get("created_at")
+        or datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+    )
+    message = {
+        "message_id": message_id,
+        "role": role,
+        "speaker": speaker,
+        "text": text,
+        "source": source,
+        "created_at": created_at,
+        "output_target": str(data.get("output_target") or data.get("target") or "local_ui"),
+        "metadata": {
+            key: value
+            for key, value in data.items()
+            if key not in {"message_id", "id", "role", "speaker", "text", "source", "created_at", "output_target", "target"}
+        },
+    }
+    return {
+        "type": "chat_message",
+        "event_id": event_id,
+        "message": message,
+        "data": {
+            **data,
+            "event_id": event_id,
+            "message_id": message_id,
+            "legacy_type": event_type,
+            "message": message,
+        },
+        "ts": ts,
+    }
+
 @app.get("/health")
 def health():
     engine = getattr(hebe, "_engine", None)
@@ -75,12 +164,7 @@ def health():
 @app.post("/dev/shutdown")
 async def dev_shutdown():
     """Best-effort cleanup before Electron restarts the owned backend process."""
-    enabled = (
-        os.getenv("ELECTRON_DEV", "0").strip() == "1"
-        or os.getenv("HEBE_DEV_CONTROLS", "0").strip() == "1"
-        or os.getenv("HEBE_DEV_SHUTDOWN_ENABLED", "0").strip() == "1"
-    )
-    if not enabled:
+    if not _dev_controls_enabled():
         raise HTTPException(status_code=404, detail="Not found")
     print("[HEBE][DEV] shutdown requested", flush=True)
     try:
@@ -94,6 +178,40 @@ async def dev_shutdown():
     except Exception:
         pass
     return {"ok": True, "ts": time.time()}
+
+
+def _dev_controls_enabled() -> bool:
+    return (
+        os.getenv("ELECTRON_DEV", "0").strip() == "1"
+        or os.getenv("HEBE_DEV_CONTROLS", "0").strip() == "1"
+        or os.getenv("HEBE_DEV_SHUTDOWN_ENABLED", "0").strip() == "1"
+    )
+
+
+@app.api_route("/dev/test-ui-message", methods=["GET", "POST"])
+async def dev_test_ui_message():
+    if not _dev_controls_enabled():
+        raise HTTPException(status_code=404, detail="Not found")
+    event_id = f"evt_{uuid.uuid4().hex}"
+    message_id = f"msg_{uuid.uuid4().hex}"
+    text = "Hebe UI test message"
+    await event_q.put(
+        Event(
+            type="chat.assistant",
+            event_id=event_id,
+            ts=time.time(),
+            data={
+                "event_id": event_id,
+                "message_id": message_id,
+                "text": text,
+                "speaker": "Hebe",
+                "source": "system",
+                "output_target": "local_ui",
+                "metadata": {"dev_test": True},
+            },
+        )
+    )
+    return {"ok": True, "event_id": event_id, "message_id": message_id, "text": text}
 
 
 @app.on_event("shutdown")
@@ -207,7 +325,7 @@ async def event_pump():
     global last_status
     while True:
         ev = await event_q.get()
-        payload = ev.model_dump()
+        payload = _prepare_ws_payload(ev.model_dump())
         if payload.get("type") == "status":
             last_status = payload
         await ws_manager.broadcast(payload)
@@ -216,15 +334,15 @@ async def event_pump():
 async def ws_endpoint(ws: WebSocket):
     await ws_manager.connect(ws)
     try:
-        await ws.send_json({"type": "status", "data": {"connected": True}, "ts": time.time()})
+        await ws.send_json(_prepare_ws_payload({"type": "status", "data": {"connected": True}, "ts": time.time()}))
         for entry in get_recent_logs(limit=1000):
-            await ws.send_json({"type": "backend.log", "data": entry, "ts": float(entry.get("ts") or time.time())})
+            await ws.send_json(_prepare_ws_payload({"type": "backend.log", "data": entry, "ts": float(entry.get("ts") or time.time())}))
         
         if not hebe.running:
             asyncio.create_task(hebe.start())
 
         if last_status:
-            await ws.send_json(last_status)
+            await ws.send_json(_prepare_ws_payload(last_status))
 
         while True:
             msg = await ws.receive_json()
@@ -252,7 +370,7 @@ async def ws_endpoint(ws: WebSocket):
     except Exception as e:
         logging.exception("WS error: %s", e)
         try:
-            await ws.send_json({"type": "error", "data": {"message": str(e)}, "ts": time.time()})
+            await ws.send_json(_prepare_ws_payload({"type": "error", "data": {"message": str(e)}, "ts": time.time()}))
         except Exception:
             pass
     finally:

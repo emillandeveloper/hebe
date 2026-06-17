@@ -7,6 +7,7 @@ class Event(BaseModel):
   type: str
   data: Any
   ts: float
+  event_id: str | None = None
 
 
 class ClientMsg(BaseModel):

@@ -17,6 +17,7 @@ def speak(
     language: str = "es",
     emit: Optional[Callable[[str, dict], None]] = None,
     log_chat: Optional[Callable[[str, str, str], None]] = None,
+    emit_chat: bool = True,
 ) -> None:
     """
     High-level speech output:
@@ -29,7 +30,7 @@ def speak(
     if not text:
         return
 
-    if emit:
+    if emit and emit_chat:
         emit("chat.assistant", {"text": text})
 
     audio_path = ""

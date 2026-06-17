@@ -5,6 +5,16 @@ from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
+from app.api.capabilities import (
+    capability_backlog_payload,
+    capability_detail_payload,
+    capability_list_payload,
+    capability_summary_payload,
+    implemented_disabled_capabilities_payload,
+    next_capability_payload,
+    partial_capabilities_payload,
+    planned_capabilities_payload,
+)
 from app.services import db_sqlite
 from app.core.log_bus import get_recent_logs
 from app.stream.live_session import latest_live_session_debug
@@ -138,6 +148,50 @@ def list_db_tables():
 @router.get("/logs")
 def list_backend_logs(limit: int = Query(1000, ge=1, le=5000)):
     return {"logs": get_recent_logs(limit=limit)}
+
+
+@router.get("/capabilities")
+def list_capabilities(
+    status: str | None = Query(None),
+    category: str | None = Query(None),
+    executable: bool | None = Query(None),
+):
+    return capability_list_payload(status=status, category=category, executable=executable)
+
+
+@router.get("/capabilities/summary")
+def get_capability_summary():
+    return capability_summary_payload()
+
+
+@router.get("/capabilities/backlog")
+def get_capability_backlog():
+    return capability_backlog_payload()
+
+
+@router.get("/capabilities/backlog/next")
+def get_next_capability_todo():
+    return next_capability_payload()
+
+
+@router.get("/capabilities/backlog/planned")
+def get_planned_capability_backlog():
+    return planned_capabilities_payload()
+
+
+@router.get("/capabilities/backlog/partial")
+def get_partial_capability_backlog():
+    return partial_capabilities_payload()
+
+
+@router.get("/capabilities/backlog/implemented-disabled")
+def get_implemented_disabled_capability_backlog():
+    return implemented_disabled_capabilities_payload()
+
+
+@router.get("/capabilities/{capability_id}")
+def get_capability(capability_id: str):
+    return capability_detail_payload(capability_id)
 
 
 @router.get("/live-session")

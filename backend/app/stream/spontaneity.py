@@ -7,6 +7,11 @@ from typing import Callable, Optional
 
 from app.cognitive.scheduler import InternalEvent
 from app.stream.game_profiles import GameProfileStore
+from app.stream.policy import (
+    ACTIVITY_CONFIDANT_EVENT,
+    ACTIVITY_SOCIAL_LINKS,
+    validate_spontaneity_anchor,
+)
 from app.stream.state import StreamSessionState
 
 
@@ -234,8 +239,13 @@ class StreamSpontaneityService:
         if topic is None:
             result["blocked_reason"] = "topic_recently_used"
             return result
-        result["candidate_topic"] = topic
         used_fact = self._recent_run_context_fact(stream, now)
+        validation = validate_spontaneity_anchor(stream, topic=topic, fact=used_fact)
+        if not validation.allow:
+            result["blocked_reason"] = "activity_mismatch"
+            print("[HEBE][SPONTANEITY_VALIDATOR] blocked reason=activity_mismatch", flush=True)
+            return result
+        result["candidate_topic"] = topic
         used_fact_id = used_fact.get("id") if used_fact else None
         if used_fact:
             print(
@@ -300,6 +310,10 @@ class StreamSpontaneityService:
                 "objective": getattr(stream, "current_run_objective", None),
                 "location": getattr(stream, "current_run_location", None),
                 "phase": getattr(stream, "current_run_phase", None),
+                "current_activity": getattr(stream, "current_activity", None),
+                "combat_state": getattr(stream, "combat_state", None),
+                "activity_provenance": getattr(stream, "current_game_activity_provenance", None),
+                "blocked_comment_categories": list(getattr(stream, "blocked_comment_categories", []) or []),
                 "source": getattr(stream, "run_context_source", None),
                 "updated_ts": getattr(stream, "run_context_updated_ts", 0.0),
                 "facts": [
@@ -414,6 +428,15 @@ class StreamSpontaneityService:
         return {"fresh": fresh, "stale": stale}
 
     def _choose_topic(self, stream: StreamSessionState, now: float) -> str | None:
+        if getattr(stream, "current_activity", None) in {ACTIVITY_SOCIAL_LINKS, ACTIVITY_CONFIDANT_EVENT}:
+            recent = list(getattr(stream, "recent_idle_messages", []) or [])
+            social_topics = ["social_link_comment", "character_dynamics", "school_life_comment", "game_vibe"]
+            last_topic = recent[-1].get("topic") if recent else None
+            for topic in social_topics:
+                if topic != last_topic:
+                    return topic
+            return None
+
         recent_fact = self._recent_run_context_fact(stream, now)
         if recent_fact:
             category_topic = self._topic_for_fact(recent_fact)

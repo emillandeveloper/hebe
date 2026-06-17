@@ -10,6 +10,17 @@ from app.cognitive.models import (
 from app.cognitive.action_runtime import ActionRuntime
 
 
+PASSIVE_STEP_TYPES = {
+    "ask",
+    "suggest",
+    "tool",
+    "query",
+    "state_update",
+    "diagnostic",
+    "noop",
+}
+
+
 class PlanExecutor:
     """
     Ejecuta los pasos de un plan cognitivo.
@@ -73,7 +84,14 @@ class PlanExecutor:
                 return StepExecutionResult(
                     step_type="reply",
                     success=True,
-                    data=step.data or {},
+                    data=self._step_data(step),
+                )
+
+            if step.type in PASSIVE_STEP_TYPES:
+                return StepExecutionResult(
+                    step_type=step.type,
+                    success=True,
+                    data=self._step_data(step),
                 )
 
             return StepExecutionResult(
@@ -88,8 +106,18 @@ class PlanExecutor:
                 step_type=step.type,
                 success=False,
                 data={},
-                error=str(e),
-            )
+            error=str(e),
+        )
+
+    def _step_data(self, step: PlanStep) -> dict:
+        data = dict(step.data or {})
+        if step.capability_id:
+            data["capability_id"] = step.capability_id
+        if step.result_key:
+            data["result_key"] = step.result_key
+        data["risk_level"] = step.risk_level
+        data["requires_confirmation"] = step.requires_confirmation
+        return data
 
     # =========================
     # Memory

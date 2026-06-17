@@ -135,6 +135,9 @@ class ResponseSynthesizer:
             if mode == "clarify_appointment_datetime":
                 return self._generate_clarification_reply(context, reply_step.data)
 
+            if mode == "capability_catalogue_query":
+                return self._generate_capability_catalogue_reply(reply_step.data)
+
         return self._fallback_text("No tengo suficiente contexto para responder con seguridad.")
 
     # =========================
@@ -259,6 +262,35 @@ class ResponseSynthesizer:
         if minutes is not None:
             return f"Vale, Leo. Te aviso en {minutes} minutos."
         return f"Vale, Leo. Te aviso: {message}."
+
+    def _generate_capability_catalogue_reply(self, reply_data: dict) -> str:
+        payload = reply_data.get("payload") or {}
+        query_type = reply_data.get("query_type") or payload.get("query_type") or "summary"
+        if payload.get("catalogue_unavailable"):
+            return "No puedo leer el catalogo de capabilities ahora mismo, asi que no puedo responder ese TODO con seguridad."
+        items = payload.get("items") or []
+        if query_type == "next_todo":
+            item = payload.get("next_recommended_todo") or (items[0] if items else None)
+            if not item:
+                return "No veo ningun TODO recomendado ahora mismo."
+            backlog = item.get("backlog") or {}
+            actions = backlog.get("next_actions") or []
+            suffix = f" Siguiente accion: {actions[0]}" if actions else ""
+            return f"El siguiente TODO recomendado es {item.get('id')}: {item.get('name')}.{suffix}"
+
+        labels = {
+            "planned_not_implemented": "planeadas sin implementar",
+            "high_priority_unblocked": "de alta prioridad desbloqueadas",
+            "implemented_disabled": "implementadas pero desactivadas",
+            "partial_needs_completion": "parciales que necesitan cierre",
+            "summary": "registradas",
+        }
+        if not items:
+            return f"No veo capacidades {labels.get(query_type, 'para esa consulta')}."
+        names = ", ".join(str(item.get("id") or item.get("name")) for item in items[:5])
+        remaining = len(items) - 5
+        more = f" y {remaining} mas" if remaining > 0 else ""
+        return f"Veo {len(items)} capacidades {labels.get(query_type, 'para esa consulta')}: {names}{more}."
 
     def _generate_clarification_reply(
         self,

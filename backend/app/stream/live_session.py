@@ -159,6 +159,10 @@ class LiveSessionState:
     language_mode: str | None = None
     spoiler_policy: str | None = None
     current_phase: str | None = None
+    current_activity: str | None = None
+    combat_state: bool | None = None
+    current_activity_provenance: str | None = None
+    blocked_comment_categories: list[str] = field(default_factory=list)
     current_location: str | None = None
     current_objective: str | None = None
     recent_progress_markers: list[str] = field(default_factory=list)
@@ -215,6 +219,10 @@ class LiveSessionBrain:
         self._set("language_mode", getattr(stream, "language_mode", None), source="twitch_title")
         self._set("spoiler_policy", getattr(stream, "spoiler_policy", None), source="twitch_title")
         self._set("current_phase", getattr(stream, "current_run_phase", None), source=getattr(stream, "run_context_source", None))
+        self._set("current_activity", getattr(stream, "current_activity", None), source=getattr(stream, "current_game_activity_provenance", None))
+        self.state.combat_state = getattr(stream, "combat_state", None)
+        self.state.current_activity_provenance = getattr(stream, "current_game_activity_provenance", None)
+        self.state.blocked_comment_categories = list(getattr(stream, "blocked_comment_categories", []) or [])
         self._set("current_location", getattr(stream, "current_run_location", None), source=getattr(stream, "run_context_source", None))
         self._set("current_objective", getattr(stream, "current_run_objective", None), source=getattr(stream, "run_context_source", None))
         markers = list(getattr(stream, "completed_run_markers", []) or [])[-8:]
@@ -542,6 +550,19 @@ class LiveSessionBrain:
     def apply_correction(self, raw_text: str, normalized_text: str | None = None) -> int:
         normalized = _norm(normalized_text or raw_text)
         self._set("latest_correction_from_leo", raw_text, source="manual_correction", confidence=1.0)
+        if any(marker in normalized for marker in ("no estoy peleando", "no estoy en combate", "fuera de combate", "vinculos sociales", "social links", "confidant", "confidants")):
+            self._set("current_activity", "confidant_event" if "confidant" in normalized else "social_links", source="manual_correction", confidence=1.0)
+            self.state.combat_state = False
+            self.state.current_activity_provenance = "owner_correction"
+            self.state.blocked_comment_categories = [
+                "combat_advice",
+                "healing_advice",
+                "boss_strategy",
+                "wipe_comment",
+                "dungeon_resource_management",
+                "SP_management",
+            ]
+            self.invalidate_anchor(reason="activity_corrected")
         if any(marker in normalized for marker in ("vencimos al boss", "vencimos el boss", "derrotamos al boss", "boss derrotado", "jefe derrotado")):
             self._set("latest_boss_state", "defeated", source="manual_correction", confidence=1.0)
             self.invalidate_anchor(reason="boss_state_corrected")

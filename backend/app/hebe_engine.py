@@ -2,6 +2,8 @@ import os
 import re
 import time
 import threading
+import unicodedata
+import hashlib
 from dataclasses import replace
 from queue import Empty
 from difflib import SequenceMatcher
@@ -61,6 +63,13 @@ from app.stream import memory as stream_memory
 from app.stream.live_session import LiveSessionBrain, init_live_session_schema
 from app.stream.ambient_context import AmbientContextExtractor
 from app.stream.action_planner import StreamActionPlanner
+from app.stream.policy import (
+    PolicyDecision,
+    ViewerIntentPolicy,
+    apply_owner_game_activity_correction,
+    filter_ambient_facts_for_activity,
+    owner_behavior_decision,
+)
 from app.stream import session_primer
 from app.stream.spontaneity import StreamSpontaneityConfig, StreamSpontaneityService
 
@@ -289,6 +298,7 @@ class HebeEngine:
         ).strip().lower() in ("1", "true", "yes", "on")
         self.stt_tts_echo_window_seconds = float(os.getenv("HEBE_STT_TTS_ECHO_WINDOW_SECONDS", "10") or 10)
         self.stt_tts_echo_similarity_threshold = float(os.getenv("HEBE_STT_TTS_ECHO_SIMILARITY_THRESHOLD", "0.82") or 0.82)
+        self.stt_tts_echo_grace_seconds = float(os.getenv("HEBE_STT_TTS_ECHO_GRACE_SECONDS", "2.5") or 2.5)
         self.stt_log_rejected_raw = os.getenv("HEBE_STT_LOG_REJECTED_RAW", "false").strip().lower() in ("1", "true", "yes", "on")
         self.stt_auto_disable_prompt_on_echo = os.getenv("HEBE_STT_AUTO_DISABLE_PROMPT_ON_ECHO", "true").strip().lower() in ("1", "true", "yes", "on")
         self.stt_prompt_echo_window_seconds = float(os.getenv("HEBE_STT_PROMPT_ECHO_WINDOW_SECONDS", "300") or 300)
@@ -298,10 +308,17 @@ class HebeEngine:
         self.stt_duplicate_window_seconds = float(os.getenv("HEBE_STT_DUPLICATE_WINDOW_SECONDS", "8") or 8)
         self.stt_duplicate_similarity_threshold = float(os.getenv("HEBE_STT_DUPLICATE_SIMILARITY_THRESHOLD", "0.92") or 0.92)
         self._recent_tts_texts: list[dict] = []
+        self._last_tts_text = ""
+        self._last_tts_normalized = ""
+        self._last_tts_message_id = ""
+        self._tts_started_at = 0.0
+        self._tts_until = 0.0
+        self._tts_active = False
         self._recent_stt_transcripts: list[dict] = []
         self._stt_prompt_echo_rejection_ts: list[float] = []
         self._stt_visible_transcripts: set[str] = set()
         self.stream_action_planner = self._build_stream_action_planner()
+        self.viewer_intent_policy = ViewerIntentPolicy()
         self._current_input_event: InputEvent | None = None
 
     def _build_stream_action_planner(self) -> StreamActionPlanner:
@@ -312,6 +329,13 @@ class HebeEngine:
             stream_state_provider=self._get_stream_state,
             target_resolver=self._resolve_twitch_target_details,
         )
+
+    def _get_viewer_intent_policy(self) -> ViewerIntentPolicy:
+        policy = getattr(self, "viewer_intent_policy", None)
+        if policy is None:
+            policy = ViewerIntentPolicy()
+            self.viewer_intent_policy = policy
+        return policy
 
     def _get_live_session_brain(self) -> LiveSessionBrain:
         brain = getattr(self, "live_session_brain", None)
@@ -330,6 +354,37 @@ class HebeEngine:
             except Exception:
                 pass
         return brain
+
+    def _owner_policy_decision(self, command: str, *, source: str = "") -> PolicyDecision | None:
+        if source not in {"ui", "typed_ui", "stt_voice", "voice"}:
+            return None
+        stream = self._get_stream_state()
+        if stream is None:
+            return None
+        activity_decision = apply_owner_game_activity_correction(stream, command)
+        if not activity_decision.allow_llm:
+            try:
+                brain = self._get_live_session_brain()
+                brain.sync_stream_metadata(stream)
+                brain.apply_correction(command, self._normalize_text(command))
+            except Exception as exc:
+                print(f"[HEBE][LIVE_SESSION] owner policy correction failed: {exc!r}", flush=True)
+            return activity_decision
+        behavior_decision = owner_behavior_decision(stream, command)
+        if not behavior_decision.allow_llm:
+            return behavior_decision
+        return None
+
+    def _viewer_policy_decision(self, payload: dict) -> PolicyDecision | None:
+        stream = self._get_stream_state()
+        if stream is None:
+            return None
+        return self._get_viewer_intent_policy().decide(
+            stream,
+            username=str((payload or {}).get("user_login") or (payload or {}).get("username") or ""),
+            display_name=str((payload or {}).get("display_name") or ""),
+            text=str((payload or {}).get("message_text") or (payload or {}).get("text") or ""),
+        )
 
     def _live_session_debug_snapshot(self) -> dict:
         try:
@@ -970,6 +1025,13 @@ class HebeEngine:
             print("[HEBE][COG] decision=rejected reason=hebe_sleeping", flush=True)
             return "continue"
 
+        owner_decision = self._owner_policy_decision(command, source=source)
+        if owner_decision is not None and not owner_decision.allow_llm:
+            if owner_decision.allow_reply and owner_decision.direct_template_response:
+                self._deliver_manual_reply(owner_decision.direct_template_response, source=source)
+            print(f"[HEBE][COG] decision=owner_policy reason={owner_decision.reason}", flush=True)
+            return "continue"
+
         local_app = self._plan_and_execute_local_app_action(command, source)
         if local_app is not None:
             text = self._synthesize_command_result(local_app, input_text=command)
@@ -1156,13 +1218,29 @@ class HebeEngine:
             self._handle_twitch_raid_event(event)
             return
 
+        event_type = str(getattr(event, "event_type", "") or "")
+        payload = getattr(event, "payload", {}) or {}
+        if event_type == "twitch_chat_react":
+            policy_decision = self._viewer_policy_decision(payload)
+            if policy_decision is not None and not policy_decision.allow_llm:
+                if policy_decision.allow_reply and policy_decision.direct_template_response:
+                    self._deliver_twitch_reply(
+                        policy_decision.direct_template_response,
+                        event_type=event_type,
+                        payload=payload,
+                    )
+                else:
+                    print(
+                        f"[HEBE][VIEWER_POLICY] decision=ignored reason={policy_decision.reason}",
+                        flush=True,
+                    )
+                return
+
         context = self.context_builder.build(
             state=self.runtime.state,
             input_text=None,
             internal_event=event,
         )
-        event_type = str(getattr(event, "event_type", "") or "")
-        payload = getattr(event, "payload", {}) or {}
         try:
             live_context = self._get_live_session_brain().retrieve_context(str(payload), limit_events=12, limit_summaries=3)
             if isinstance(payload, dict):
@@ -1943,18 +2021,65 @@ class HebeEngine:
         return True
 
     def _normalize_for_echo_match(self, text: str) -> str:
-        cleaned = "".join(ch if ch.isalnum() or ch.isspace() else " " for ch in (text or "").strip().lower())
+        raw = (text or "").strip().lower()
+        without_accents = "".join(
+            char for char in unicodedata.normalize("NFKD", raw)
+            if not unicodedata.combining(char)
+        )
+        cleaned = "".join(ch if ch.isalnum() or ch.isspace() else " " for ch in without_accents)
         return " ".join(cleaned.split())
 
-    def _remember_tts_text(self, text: str) -> None:
+    def _tts_echo_duration_estimate(self, text: str) -> float:
+        normalized = self._normalize_for_echo_match(text)
+        words = len(normalized.split())
+        chars = len(normalized)
+        return max(2.5, min(30.0, max(words * 0.42, chars / 13.0)))
+
+    def _echo_similarity(self, left: str, right: str) -> float:
+        a = self._normalize_for_echo_match(left)
+        b = self._normalize_for_echo_match(right)
+        if not a or not b:
+            return 0.0
+        direct = SequenceMatcher(None, a, b).ratio()
+        sorted_a = " ".join(sorted(a.split()))
+        sorted_b = " ".join(sorted(b.split()))
+        sorted_ratio = SequenceMatcher(None, sorted_a, sorted_b).ratio()
+        a_tokens = set(a.split())
+        b_tokens = set(b.split())
+        overlap = 0.0
+        if min(len(a_tokens), len(b_tokens)) >= 4:
+            overlap = len(a_tokens & b_tokens) / max(1, min(len(a_tokens), len(b_tokens)))
+        return max(direct, sorted_ratio, overlap)
+
+    def _remember_tts_text(self, text: str, message_id: str | None = None) -> None:
         value = str(text or "").strip()
         if not value:
             return
         recent = list(getattr(self, "_recent_tts_texts", []) or [])
         now = time.time()
         window = float(getattr(self, "stt_tts_echo_window_seconds", 10) or 10)
+        grace = float(getattr(self, "stt_tts_echo_grace_seconds", 2.5) or 2.5)
+        duration = self._tts_echo_duration_estimate(value)
+        until = now + duration + grace
+        normalized = self._normalize_for_echo_match(value)
+        tts_message_id = str(message_id or "").strip()
+        if not tts_message_id:
+            digest = hashlib.sha1(f"{normalized}:{int(now * 1000)}".encode("utf-8")).hexdigest()[:16]
+            tts_message_id = f"tts_{digest}"
+        self._last_tts_text = value
+        self._last_tts_normalized = normalized
+        self._last_tts_message_id = tts_message_id
+        self._tts_started_at = now
+        self._tts_until = until
+        self._tts_active = True
         recent = [item for item in recent if now - float(item.get("ts", 0.0) or 0.0) <= window]
-        recent.append({"text": value, "normalized": self._normalize_for_echo_match(value), "ts": now})
+        recent.append({
+            "text": value,
+            "normalized": normalized,
+            "message_id": tts_message_id,
+            "ts": now,
+            "until": until,
+        })
         self._recent_tts_texts = recent[-8:]
 
     def _stt_self_tts_echo_metrics(self, text: str) -> dict:
@@ -1963,27 +2088,57 @@ class HebeEngine:
         threshold = float(getattr(self, "stt_tts_echo_similarity_threshold", 0.82) or 0.82)
         normalized = self._normalize_for_echo_match(text)
         best = 0.0
+        best_text = ""
+        best_message_id = ""
         for item in list(getattr(self, "_recent_tts_texts", []) or []):
             if now - float(item.get("ts", 0.0) or 0.0) > window:
                 continue
             candidate = str(item.get("normalized") or self._normalize_for_echo_match(item.get("text") or ""))
             if not normalized or not candidate:
                 continue
-            best = max(best, SequenceMatcher(None, normalized, candidate).ratio())
+            score = self._echo_similarity(normalized, candidate)
+            if score > best:
+                best = score
+                best_text = str(item.get("text") or "")
+                best_message_id = str(item.get("message_id") or "")
         tts = getattr(getattr(self, "runtime", None), "tts", None)
         speaking = bool(getattr(tts, "is_speaking", False))
         ignore_while_speaking = bool(getattr(self, "stt_ignore_while_tts_speaking", True))
+        active_until = float(getattr(self, "_tts_until", 0.0) or 0.0)
+        active_window = bool(speaking or now <= active_until)
+        self._tts_active = active_window
+        rejected = best >= threshold
+        if ignore_while_speaking and speaking and not best_text and not normalized:
+            rejected = True
         return {
-            "rejected": (best >= threshold) or (ignore_while_speaking and speaking),
+            "rejected": rejected,
             "similarity": round(best, 3),
             "threshold": threshold,
             "tts_speaking": speaking,
+            "tts_active": active_window,
+            "tts_until": active_until,
+            "matched_tts_text": best_text,
+            "matched_tts_message_id": best_message_id,
         }
 
     def _reject_self_tts_echo_if_needed(self, raw_text: str) -> bool:
         metrics = self._stt_self_tts_echo_metrics(raw_text)
         if not metrics.get("rejected"):
+            if metrics.get("tts_active") or float(metrics.get("similarity") or 0.0) > 0.35:
+                safe_text = str(raw_text or "").replace('"', '\\"')
+                print(
+                    "[HEBE][ECHO_SUPPRESSION] "
+                    f"allowed user_speech similarity={metrics.get('similarity')} "
+                    f"reason=not_tts_echo text=\"{safe_text}\"",
+                    flush=True,
+                )
             return False
+        safe_text = str(raw_text or "").replace('"', '\\"')
+        print(
+            "[HEBE][ECHO_SUPPRESSION] "
+            f"ignored self_tts_echo similarity={metrics.get('similarity')} text=\"{safe_text}\"",
+            flush=True,
+        )
         self._emit_stt_rejection(
             raw_text,
             script=self._unsupported_stt_script(raw_text) or "latin",
@@ -2115,6 +2270,9 @@ class HebeEngine:
         if source not in allowed:
             return False
         if source == "stt_voice":
+            if self._stt_self_tts_echo_metrics(text or "").get("rejected"):
+                print("[HEBE][CONVERSATION] pending_turn_not_matched reason=self_tts_echo", flush=True)
+                return False
             normalized = self._normalize_stt_metric_text(text or "")
             if not normalized or normalized in {"mmm", "um", "eh", "vale", "ok"}:
                 return False
@@ -3117,6 +3275,20 @@ class HebeEngine:
             self._log_context_relevance(relevance)
             print(f"[HEBE][AMBIENT_CONTEXT] ignored reason={extraction.reason}", flush=True)
             return relevance
+        filtered_facts = filter_ambient_facts_for_activity(stream, list(extraction.facts))
+        if not filtered_facts:
+            stream.last_ambient_context_ignored_reason = "owner_confirmed_activity"
+            stream.last_ambient_context_ignored_ts = time.time()
+            relevance = ContextRelevance(useful=False, category="none", confidence=0.0, reason="owner_confirmed_activity")
+            self._log_context_relevance(relevance)
+            print("[HEBE][AMBIENT_CONTEXT] ignored reason=owner_confirmed_activity", flush=True)
+            return relevance
+        extraction = type(extraction)(
+            useful=extraction.useful,
+            facts=filtered_facts,
+            mood=extraction.mood,
+            reason=extraction.reason,
+        )
         facts = list(getattr(stream, "recent_run_context_facts", []) or [])
         now = time.time()
         facts = [
@@ -3165,6 +3337,7 @@ class HebeEngine:
         )
 
     def _apply_extracted_facts_to_stream(self, stream, facts: list[dict]) -> None:
+        facts = filter_ambient_facts_for_activity(stream, facts)
         for fact in facts:
             kind = str(fact.get("kind") or "")
             text = str(fact.get("text") or "").strip()
@@ -5445,7 +5618,7 @@ class HebeEngine:
             safe_text = str(text or "").replace('"', '\\"')
             print(f"[HEBE][TTS] speaking output_target={output_target} text=\"{safe_text}\"", flush=True)
             self._remember_tts_text(text)
-            self.runtime.speak(text)
+            self.runtime.speak(text, emit_chat=False)
         except Exception as e:
             safe_error = str(e).replace('"', '\\"')
             print(f"[HEBE][TTS] failed error=\"{safe_error}\"", flush=True)

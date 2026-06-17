@@ -292,6 +292,47 @@ class StreamSpontaneityTests(unittest.TestCase):
         self.assertEqual(event.payload["idle_topic"], "challenge_comment")
         self.assertEqual(event.payload["used_fact_id"], "ambient:rng_dependency:1")
 
+    def test_social_links_blocks_healing_anchor_before_llm(self):
+        now = 1_000_000.0
+        stream = self.make_stream(now=now, presence_mode="show")
+        stream.last_chat_activity_ts = now - 60 * 60
+        stream.current_activity = "social_links"
+        stream.combat_state = False
+        stream.current_game_activity_provenance = "owner_correction"
+        stream.current_game_activity_expires_at = now + 60 * 60
+        stream.run_context_updated_ts = now
+        stream.recent_run_context_facts = [{
+            "id": "ambient:healing:1",
+            "kind": "healing_or_recovery",
+            "category": "healing_or_recovery",
+            "text": "Leo mentioned healing in combat.",
+            "summary": "Leo mentioned healing in combat.",
+            "confidence": 0.84,
+            "timestamp": now,
+            "expires_at": now + 60,
+        }]
+
+        readiness = self.make_service(now).evaluate(stream, now=now)
+
+        self.assertFalse(readiness["would_send"])
+        self.assertEqual(readiness["blocked_reason"], "activity_mismatch")
+
+    def test_social_links_allows_social_spontaneity_topic(self):
+        now = 1_000_000.0
+        stream = self.make_stream(now=now, presence_mode="show")
+        stream.last_chat_activity_ts = now - 60 * 60
+        stream.current_activity = "social_links"
+        stream.combat_state = False
+        stream.current_game_activity_provenance = "owner_correction"
+        stream.current_game_activity_expires_at = now + 60 * 60
+
+        event = self.make_service(now).build_due_event(stream)
+
+        self.assertIsNotNone(event)
+        self.assertEqual(event.payload["idle_topic"], "social_link_comment")
+        self.assertEqual(event.payload["run_context"]["current_activity"], "social_links")
+        self.assertFalse(event.payload["run_context"]["combat_state"])
+
     def test_motif_cooldown_blocks_repeated_coffee(self):
         now = 1_000_000.0
         stream = self.make_stream(now=now, presence_mode="show")

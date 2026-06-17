@@ -13,10 +13,15 @@ from typing import Optional, Any
 class PlanStep:
     """
     Paso individual de un plan cognitivo.
-    type: memory | reminder | action | reply | ask | suggest
+    type: memory | reminder | action | reply | ask | suggest | tool | query | state_update | diagnostic | noop
     """
     type: str
     data: dict[str, Any] = field(default_factory=dict)
+    capability_id: Optional[str] = None
+    depends_on: list[str] = field(default_factory=list)
+    result_key: Optional[str] = None
+    risk_level: str = "low"
+    requires_confirmation: bool = False
 
 @dataclass(slots=True)
 class Plan:
@@ -25,6 +30,14 @@ class Plan:
     """
     steps: list[PlanStep] = field(default_factory=list)
     reasoning: Optional[str] = None
+    goal: Optional[dict[str, Any]] = None
+    selected_capabilities: list[str] = field(default_factory=list)
+    requires_confirmation: bool = False
+    output_policy: dict[str, Any] = field(default_factory=dict)
+    risk_level: str = "low"
+    reasoning_summary: Optional[str] = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+    message_id: Optional[str] = None
 
 
 @dataclass(slots=True)

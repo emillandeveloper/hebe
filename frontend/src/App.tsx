@@ -11,6 +11,8 @@ type CurationStatus = "ok" | "no_ok" | "needs_enhancement" | null;
 
 type ChatMsg = {
   id: string;
+  messageId?: string;
+  eventId?: string;
   role: MsgRole;
   text: string;
   ts: number;
@@ -101,6 +103,46 @@ type DevBackendStatus = {
   error?: string;
 };
 
+type CapabilityBacklogFields = {
+  priority?: string;
+  effort?: string;
+  unblocked?: boolean;
+  blocked_by?: string[];
+  next_actions?: string[];
+  acceptance_criteria?: string[];
+  recommended_next?: boolean;
+  todo_owner?: string;
+};
+
+type CapabilityItem = {
+  id: string;
+  category?: string;
+  name?: string;
+  description?: string;
+  status?: string;
+  enabled?: boolean;
+  priority?: string;
+  effort?: string;
+  risk_level?: string;
+  requires_confirmation?: boolean;
+  dependencies?: string[];
+  blocked_by?: string[];
+  next_actions?: string[];
+  acceptance_criteria?: string[];
+  implemented_by?: string[];
+  recommended_next?: boolean;
+  backlog?: CapabilityBacklogFields;
+};
+
+type CapabilityBacklogPayload = {
+  counts?: Record<string, number>;
+  planned_not_implemented?: CapabilityItem[];
+  high_priority_unblocked?: CapabilityItem[];
+  next_recommended_todo?: CapabilityItem | null;
+  implemented_disabled?: CapabilityItem[];
+  partial_needing_completion?: CapabilityItem[];
+};
+
 type HebeDevBridge = {
   enabled: boolean;
   reloadUi?: () => Promise<DevBackendStatus>;
@@ -118,6 +160,34 @@ declare global {
 
 const LS_KEY = "hebe.ui.settings.v1";
 const FULL_RESET_PENDING_KEY = "hebe.dev.fullResetPending";
+const CHAT_DEDUPE_ENABLED = true;
+
+type ChatDebugStats = {
+  wsEvents: number;
+  chatMessageEvents: number;
+  messagesAppended: number;
+  duplicatesIgnored: number;
+  invalidPayloads: number;
+};
+
+type ExtractedChatMessage = {
+  message_id: string;
+  event_id?: string;
+  role: MsgRole;
+  text: string;
+  speaker: string;
+  created_at: string;
+  source: string;
+  ts: number;
+};
+
+const EMPTY_CHAT_DEBUG_STATS: ChatDebugStats = {
+  wsEvents: 0,
+  chatMessageEvents: 0,
+  messagesAppended: 0,
+  duplicatesIgnored: 0,
+  invalidPayloads: 0,
+};
 
 function readSettings(): { volume: number; speed: number; lang: LangMode } {
   try {
@@ -178,6 +248,7 @@ export default function App() {
   const [messages, setMessages] = useState<ChatMsg[]>(() => ([]));
   const [logs, setLogs] = useState<{ id: string; ev: HebeEvent }[]>([]);
   const [draft, setDraft] = useState<string>("");
+  const [chatDebugStats, setChatDebugStats] = useState<ChatDebugStats>(EMPTY_CHAT_DEBUG_STATS);
 
   const settings0 = useMemo(() => readSettings(), []);
   const [volume, setVolume] = useState(settings0.volume);
@@ -187,21 +258,230 @@ export default function App() {
   const listRef = useRef<HTMLDivElement | null>(null);
   const clientRef = useRef<WSClient | null>(null);
   const lastUserRef = useRef<{ text: string; ts: number } | null>(null);
+  const seenChatMessageIdsRef = useRef<Set<string>>(new Set());
+  const chatDebugStatsRef = useRef<ChatDebugStats>(EMPTY_CHAT_DEBUG_STATS);
 
-  function pushUser(text: string, ts: number) {
+  function normalizeChatText(text: string) {
+    return text.trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9?\s]/g, " ").replace(/\s+/g, " ").trim();
+  }
+
+  function bumpChatDebugCounter(key: keyof ChatDebugStats) {
+    const next = { ...chatDebugStatsRef.current, [key]: chatDebugStatsRef.current[key] + 1 };
+    chatDebugStatsRef.current = next;
+    setChatDebugStats(next);
+    console.log("[HEBE][UI][CHAT][COUNTERS]", next);
+  }
+
+  function logIgnored(reason: string, payload: unknown) {
+    console.warn("[HEBE][UI][CHAT][IGNORED]", reason, payload);
+  }
+
+  function eventTs(ev: HebeEvent) {
+    const parsed = Number(ev.ts);
+    return Number.isFinite(parsed) ? parsed : Date.now() / 1000;
+  }
+
+  function objectValue(value: unknown): Record<string, any> {
+    return value && typeof value === "object" ? value as Record<string, any> : {};
+  }
+
+  function firstNonEmpty(...values: unknown[]) {
+    for (const value of values) {
+      const text = nonEmptyId(value);
+      if (text) return text;
+    }
+    return "";
+  }
+
+  function chatPayloadFrom(ev: HebeEvent) {
+    const raw = ev as any;
+    const data = raw.data && typeof raw.data === "object" ? raw.data : {};
+    if (raw.message && typeof raw.message === "object") return raw.message;
+    if (data.message && typeof data.message === "object") return data.message;
+    if (data && (data.text || data.message_id || data.role || data.id)) return data;
+    return raw;
+  }
+
+  function chatRoleFrom(roleValue: unknown, speakerValue: unknown, sourceValue: unknown): MsgRole {
+    const role = String(roleValue ?? "").trim().toLowerCase();
+    if (role === "user" || role === "assistant" || role === "system") return role;
+
+    const speaker = String(speakerValue ?? "").trim().toLowerCase();
+    if (speaker === "leo") return "user";
+    if (speaker === "hebe" || speaker === "ebe" || speaker === "eve") return "assistant";
+
+    const source = String(sourceValue ?? "").trim().toLowerCase();
+    if (source === "system") return "system";
+    if (source === "ui" || source === "stt_voice") return "user";
+    if (source === "tts") return "assistant";
+
+    return "assistant";
+  }
+
+  function extractChatMessage(payload: unknown): ExtractedChatMessage | null {
+    const root = objectValue(payload);
+    const data = objectValue(root.data);
+    const nested = Object.keys(objectValue(root.message)).length ? objectValue(root.message) : objectValue(data.message);
+    const roleRaw = firstNonEmpty(nested.role, root.role, data.role, "system").toLowerCase();
+    const role: MsgRole = roleRaw === "user" || roleRaw === "assistant" || roleRaw === "system" ? roleRaw : "system";
+    const text = firstNonEmpty(nested.text, root.text, data.text, nested.content, root.content, data.content);
+    if (!text) return null;
+
+    const ts = Number.isFinite(Number(root.ts)) ? Number(root.ts) : Date.now() / 1000;
+    const eventId = firstNonEmpty(root.event_id, data.event_id);
+    const messageId = firstNonEmpty(
+      nested.message_id,
+      root.message_id,
+      data.message_id,
+      eventId,
+      nested.id,
+      root.id,
+      data.id,
+      fallbackMessageId(role, text, ts),
+    );
+    return {
+      message_id: messageId,
+      event_id: eventId,
+      role,
+      text,
+      speaker: firstNonEmpty(nested.speaker, root.speaker, data.speaker, role),
+      created_at: firstNonEmpty(nested.created_at, root.created_at, data.created_at, new Date().toISOString()),
+      source: firstNonEmpty(nested.source, root.source, data.source, "websocket"),
+      ts,
+    };
+  }
+
+  function eventIdFrom(ev: HebeEvent) {
+    const raw = ev as any;
+    return nonEmptyId(raw.event_id) || nonEmptyId(ev.data?.event_id) || nonEmptyId(raw.id) || nonEmptyId(ev.data?.id);
+  }
+
+  function fallbackMessageId(role: MsgRole, text: string, ts: number) {
+    const normalized = normalizeChatText(text);
+    let hash = 0;
+    for (let i = 0; i < normalized.length; i += 1) {
+      hash = ((hash << 5) - hash + normalized.charCodeAt(i)) | 0;
+    }
+    return "fallback:" + role + ":" + Math.round(Number(ts || Date.now() / 1000) * 1000) + ":" + Math.abs(hash).toString(16);
+  }
+
+  function nonEmptyId(value: unknown) {
+    const text = String(value ?? "").trim();
+    if (!text || text === "undefined" || text === "null") return "";
+    return text;
+  }
+
+  function messageIdFrom(ev: HebeEvent, role: MsgRole, text: string) {
+    const raw = ev as any;
+    const message = chatPayloadFrom(ev);
+    const explicit = (
+      nonEmptyId(message.message_id)
+      || nonEmptyId(message.id)
+      || nonEmptyId(raw.message_id)
+      || nonEmptyId(ev.data?.message_id)
+      || nonEmptyId(raw.event_id)
+      || nonEmptyId(ev.data?.event_id)
+      || nonEmptyId(raw.id)
+      || nonEmptyId(ev.data?.id)
+    );
+    if (explicit) {
+      if (!nonEmptyId(message.message_id) && !nonEmptyId(raw.message_id) && !nonEmptyId(ev.data?.message_id)) {
+        console.warn("[HEBE][UI][CHAT][WARN] missing id fallback_id=" + explicit);
+      }
+      return explicit;
+    }
+    const fallbackId = fallbackMessageId(role, text, ev.ts);
+    console.warn("[HEBE][UI][CHAT][WARN] missing id fallback_id=" + fallbackId);
+    return fallbackId;
+  }
+
+  function hasSeenMessage(prev: ChatMsg[], messageId: string) {
+    if (!nonEmptyId(messageId)) return false;
+    return seenChatMessageIdsRef.current.has(messageId) || prev.some((m) => m.messageId === messageId || m.id === messageId);
+  }
+
+  function rememberMessage(messageId: string) {
+    if (!nonEmptyId(messageId)) return;
+    seenChatMessageIdsRef.current.add(messageId);
+    if (seenChatMessageIdsRef.current.size > 500) {
+      seenChatMessageIdsRef.current = new Set(Array.from(seenChatMessageIdsRef.current).slice(-300));
+    }
+  }
+
+  function logAppend(messageId: string, role?: MsgRole, text?: string) {
+    console.log("[HEBE][UI][CHAT] append message_id=" + messageId + (role ? " role=" + role : "") + (text ? " text=" + text : ""));
+  }
+
+  function logDuplicate(messageId: string, payload?: unknown) {
+    console.log("[HEBE][UI][CHAT] duplicate ignored message_id=" + messageId);
+    bumpChatDebugCounter("duplicatesIgnored");
+    logIgnored("duplicate message_id=" + messageId, payload || { message_id: messageId });
+  }
+
+  function appendChatMessage(role: MsgRole, text: string, ts: number, messageId: string, eventId?: string, payload?: unknown) {
+    const cleanText = text.trim();
+    const cleanTs = Number.isFinite(Number(ts)) ? Number(ts) : Date.now() / 1000;
+    const cleanId = nonEmptyId(messageId) || fallbackMessageId(role, cleanText, cleanTs);
+    const debugMessage = { message_id: cleanId, event_id: eventId, role, text: cleanText, ts: cleanTs };
+    console.log("[HEBE][UI][CHAT][TRY_APPEND]", debugMessage);
+
+    if (!cleanText) {
+      bumpChatDebugCounter("invalidPayloads");
+      logIgnored("empty text", payload || debugMessage);
+      return;
+    }
+
+    if (CHAT_DEDUPE_ENABLED && nonEmptyId(cleanId) && seenChatMessageIdsRef.current.has(cleanId)) {
+      logDuplicate(cleanId, payload || debugMessage);
+      return;
+    }
+
+    if (CHAT_DEDUPE_ENABLED && nonEmptyId(cleanId)) {
+      rememberMessage(cleanId);
+    }
+    logAppend(cleanId, role, cleanText);
+
+    setMessages((prev) => {
+      if (role === "assistant") {
+        const last = prev[prev.length - 1];
+        if (last?.role === "assistant" && last.partial) {
+          const updated = { ...last, id: cleanId, messageId: cleanId, eventId, text: cleanText, ts: cleanTs, partial: false };
+          return [...prev.slice(0, -1), updated];
+        }
+      }
+
+      const message: ChatMsg = { id: cleanId, messageId: cleanId, eventId, role, text: cleanText, ts: cleanTs };
+      if (role === "user") {
+        return [
+          ...prev,
+          message,
+          { id: uid(), role: "assistant", text: "", ts: Date.now() / 1000, partial: true },
+        ];
+      }
+      return [...prev, message];
+    });
+    if (role === "user") {
+      lastUserRef.current = { text: cleanText, ts: cleanTs };
+    }
+    console.log("[HEBE][UI][CHAT][APPENDED]", debugMessage);
+    bumpChatDebugCounter("messagesAppended");
+  }
+
+  function appendEnvelopeMessage(ev: HebeEvent) {
+    const message = extractChatMessage(ev);
+    if (!message) {
+      console.error("[HEBE][UI][CHAT][ERROR] unsupported payload shape", ev);
+      bumpChatDebugCounter("invalidPayloads");
+      logIgnored("chat_message without text", ev);
+      return;
+    }
+    appendChatMessage(message.role, message.text, message.ts, message.message_id, message.event_id || eventIdFrom(ev), ev);
+  }
+
+  function pushUser(text: string, ts: number, messageIdArg?: string, eventIdArg?: string) {
     const t = text.trim();
     if (!t) return;
-
-    const last = lastUserRef.current;
-    if (last && last.text === t && Math.abs(ts - last.ts) < 2.0) return;
-
-    lastUserRef.current = { text: t, ts };
-
-    setMessages((prev) => [
-      ...prev,
-      { id: uid(), role: "user", text: t, ts },
-      { id: uid(), role: "assistant", text: "", ts: Date.now() / 1000, partial: true },
-    ]);
+    appendChatMessage("user", t, ts, messageIdArg || fallbackMessageId("user", t, ts), eventIdArg);
   }
 
   const wsUrl = (import.meta as any).env?.VITE_WS_URL || "ws://127.0.0.1:8000/ws";
@@ -221,19 +501,43 @@ export default function App() {
     if (nearBottom) el.scrollTop = el.scrollHeight;
   }
 
-  function upsertAssistantDraft(deltaOrFinal: string, isFinal: boolean) {
+  function upsertAssistantDraft(deltaOrFinal: string, isFinal: boolean, messageIdArg?: string, eventIdArg?: string) {
     setMessages((prev) => {
+      const ts = Date.now() / 1000;
+      const text = deltaOrFinal.trim();
+      const messageId = messageIdArg || (isFinal && text ? fallbackMessageId("assistant", text, ts) : eventIdArg || uid());
+      if (isFinal && text && hasSeenMessage(prev.filter((m) => !(m.role === "assistant" && m.partial)), messageId)) {
+        logDuplicate(messageId);
+        return prev;
+      }
       const last = prev[prev.length - 1];
       if (last?.role === "assistant" && last.partial) {
-        const updated = { ...last, text: isFinal ? deltaOrFinal : (last.text + deltaOrFinal), partial: !isFinal };
+        const updated = {
+          ...last,
+          id: last.messageId ? last.id : messageId,
+          messageId,
+          eventId: eventIdArg || last.eventId,
+          text: isFinal ? deltaOrFinal : (last.text + deltaOrFinal),
+          partial: !isFinal,
+        };
+        if (isFinal) {
+          rememberMessage(messageId);
+          logAppend(messageId, "assistant", text);
+        }
         return [...prev.slice(0, -1), updated];
       }
-      const newMsg: ChatMsg = { id: uid(), role: "assistant", text: deltaOrFinal, ts: Date.now()/1000, partial: !isFinal };
+      if (hasSeenMessage(prev, messageId)) {
+        logDuplicate(messageId);
+        return prev;
+      }
+      rememberMessage(messageId);
+      logAppend(messageId, "assistant", deltaOrFinal.trim());
+      const newMsg: ChatMsg = { id: messageId, messageId, eventId: eventIdArg, role: "assistant", text: deltaOrFinal, ts, partial: !isFinal };
       return [...prev, newMsg];
     });
   }
 
-  function attachDatasetExample(data: any, ts: number) {
+  function attachDatasetExample(data: any, ts: number, messageIdArg?: string, eventIdArg?: string) {
     const traceId = String(data?.trace_id ?? "").trim();
     const response = String(data?.response ?? "").trim();
     if (!traceId || !response) return;
@@ -245,9 +549,25 @@ export default function App() {
     setMessages((prev) => {
       const next = [...prev];
 
+      const messageId = messageIdArg || fallbackMessageId("assistant", response, ts);
+      const existingByMessageId = next.findIndex((m) => m.messageId === messageId);
+      if (existingByMessageId >= 0) {
+        logDuplicate(messageId);
+        next[existingByMessageId] = {
+          ...next[existingByMessageId],
+          traceId,
+          sourceMessage,
+          sourceUser,
+          curation: status,
+        };
+        rememberMessage(messageId);
+        return next;
+      }
+
       // 1) Evitar duplicados si llega dos veces el evento.
       const existingIdx = next.findIndex((m) => m.traceId === traceId);
       if (existingIdx >= 0) {
+        logDuplicate(messageId);
         next[existingIdx] = {
           ...next[existingIdx],
           sourceMessage,
@@ -261,6 +581,7 @@ export default function App() {
       for (let i = next.length - 1; i >= 0; i--) {
         const m = next[i];
         if (m.role === "assistant" && !m.partial && m.text.trim() === response) {
+          logDuplicate(messageId);
           next[i] = {
             ...m,
             traceId,
@@ -274,7 +595,9 @@ export default function App() {
 
       // 3) Si no hay burbuja previa porque no lleg贸 llm.final, crearla.
       next.push({
-        id: uid(),
+        id: messageId,
+        messageId,
+        eventId: eventIdArg,
         role: "assistant",
         text: response,
         ts,
@@ -283,6 +606,8 @@ export default function App() {
         sourceUser,
         curation: status,
       });
+      rememberMessage(messageId);
+      logAppend(messageId, "assistant", response);
       return next;
     });
   }
@@ -316,9 +641,16 @@ export default function App() {
   }
 
   function handleEvent(ev: HebeEvent) {
+    console.log("[HEBE][UI][WS] received type=" + String(ev.type) + " event_id=" + eventIdFrom(ev));
+    bumpChatDebugCounter("wsEvents");
     pushLog(ev);
 
     switch (ev.type) {
+      case "chat_message": {
+        bumpChatDebugCounter("chatMessageEvents");
+        appendEnvelopeMessage(ev);
+        break;
+      }
       case "status": {
         if (typeof ev.data?.connected === "boolean") setConnected(ev.data.connected);
         if (typeof ev.data?.running === "boolean") setBackendRunning(ev.data.running);
@@ -384,36 +716,26 @@ export default function App() {
       }
       case "chat.user": {
         const txt = String(ev.data?.text ?? "").trim();
-        if (txt) pushUser(txt, ev.ts);
+        if (txt) pushUser(txt, ev.ts, messageIdFrom(ev, "user", txt), eventIdFrom(ev));
         break;
       }
       case "llm.partial": {
         const d = String(ev.data?.delta ?? "");
-        if (d) upsertAssistantDraft(d, false);
+        if (d) upsertAssistantDraft(d, false, ev.data?.message_id ? String(ev.data.message_id) : undefined, eventIdFrom(ev));
         break;
       }
       case "llm.final": {
         const txt = String(ev.data?.text ?? "").trim();
-        if (txt) upsertAssistantDraft(txt, true);
+        if (txt) appendChatMessage("assistant", txt, ev.ts, messageIdFrom(ev, "assistant", txt), eventIdFrom(ev));
         break;
       }
       case "chat.assistant": {
         const txt = String(ev.data?.text ?? "").trim();
-        if (txt) {
-          setMessages((prev) => {
-            const last = prev[prev.length - 1];
-            if (last?.role === "assistant" && last.partial) {
-              const updated = { ...last, text: txt, ts: ev.ts, partial: false };
-              return [...prev.slice(0, -1), updated];
-            }
-            if (last?.role === "assistant" && !last.partial && last.text === txt) return prev;
-            return [...prev, { id: uid(), role: "assistant", text: txt, ts: ev.ts }];
-          });
-        }
+        if (txt) appendChatMessage("assistant", txt, ev.ts, messageIdFrom(ev, "assistant", txt), eventIdFrom(ev));
         break;
       }
       case "dataset.example": {
-        attachDatasetExample(ev.data, ev.ts);
+        attachDatasetExample(ev.data, ev.ts, ev.data?.message_id ? String(ev.data.message_id) : undefined, eventIdFrom(ev));
         break;
       }
       case "dataset.curation.updated": {
@@ -457,6 +779,24 @@ export default function App() {
       return;
     }
 
+    setTimeout(ensureScrollBottom, 0);
+  }
+
+  function sendLocalTestUiMessage() {
+    const now = Date.now();
+    appendEnvelopeMessage({
+      type: "chat_message",
+      event_id: "local_test_" + now,
+      message: {
+        message_id: "local_test_msg_" + now,
+        role: "assistant",
+        speaker: "Hebe",
+        text: "Mensaje local de prueba UI",
+        created_at: new Date(now).toISOString(),
+        source: "local_dev_test",
+      },
+      ts: now / 1000,
+    } as any);
     setTimeout(ensureScrollBottom, 0);
   }
 
@@ -720,7 +1060,7 @@ export default function App() {
         ) : view === "audio" ? (
           <AudioView connected={connected} devices={micDevices} selectedId={selectedMicId} selectedName={selectedMicName} selectedHostApi={selectedMicHostApi} rms={sttRms} peak={sttPeak || sttLevel} sttStatus={sttStatus} lastPartial={sttLive} lastFinal={lastSttFinal} testResult={micTestResult} warning={micWarning} error={micError} volume={volume} speed={speed} lang={lang} ttsEnabled={ttsEnabled} ttsState={ttsState} onRefresh={refreshMicDevices} onSelect={selectMic} onTestMic={testSelectedMic} onVolume={setVolume} onSpeed={setSpeed} onLang={setLang} onStopSpeaking={() => sendCommand("stop_speaking")} onCommand={sendText} />
         ) : view === "dev" ? (
-          <DevView enabled={devControlsEnabled} status={devStatus} websocketConnected={connected} busy={devBusy} wakeLoopAlive={wakeLoopAlive} wakeLoopError={wakeLoopError} onReloadUi={() => runDevAction("reload")} onRestartBackend={() => runDevAction("restart")} onFullReset={() => runDevAction("full")} onRefresh={refreshDevStatus} />
+          <DevViewWithCapabilities apiBase={apiBase} enabled={devControlsEnabled} status={devStatus} websocketConnected={connected} busy={devBusy} wakeLoopAlive={wakeLoopAlive} wakeLoopError={wakeLoopError} chatDebugStats={chatDebugStats} onTestUiMessage={sendLocalTestUiMessage} onReloadUi={() => runDevAction("reload")} onRestartBackend={() => runDevAction("restart")} onFullReset={() => runDevAction("full")} onRefresh={refreshDevStatus} />
         ) : (
           <main className="grid chatGrid">
             <section className="glass panel chat chatMainPanel">
@@ -740,6 +1080,305 @@ export default function App() {
 
 function StatusChip({ label, value, tone, detail }: { label: string; value: string; tone: "ok" | "warn" | "bad" | "idle"; detail?: string }) { return <div className={"pill statusChip " + tone} title={detail || value}><span className="dot" /><span className="statusChipLabel">{label}</span><span className="statusChipValue">{value}</span></div>; }
 function displayValue(value: unknown, fallback = "-"): string { if (value === null || value === undefined || value === "") return fallback; if (Array.isArray(value)) return value.length ? value.map((item) => displayValue(item, "")).filter(Boolean).join(" | ") : fallback; if (typeof value === "object") { const data = value as Record<string, unknown>; return displayValue(data.text || data.raw_text || data.summary_text || data.message || data.topic || JSON.stringify(data), fallback); } return String(value); }
+function capabilityBacklog(capability: CapabilityItem | null | undefined): CapabilityBacklogFields {
+  return capability?.backlog || {};
+}
+
+function capabilityPriority(capability: CapabilityItem | null | undefined) {
+  return capability?.priority || capabilityBacklog(capability).priority || "-";
+}
+
+function capabilityEffort(capability: CapabilityItem | null | undefined) {
+  return capability?.effort || capabilityBacklog(capability).effort || "-";
+}
+
+function capabilityRecommended(capability: CapabilityItem | null | undefined) {
+  return Boolean(capability?.recommended_next ?? capabilityBacklog(capability).recommended_next);
+}
+
+function capabilityNextActions(capability: CapabilityItem | null | undefined) {
+  return capability?.next_actions || capabilityBacklog(capability).next_actions || [];
+}
+
+function capabilityAcceptance(capability: CapabilityItem | null | undefined) {
+  return capability?.acceptance_criteria || capabilityBacklog(capability).acceptance_criteria || [];
+}
+
+function capabilityBlockedBy(capability: CapabilityItem | null | undefined) {
+  return capability?.blocked_by || capabilityBacklog(capability).blocked_by || [];
+}
+
+function uniqueCapabilities(items: (CapabilityItem | null | undefined)[]) {
+  const seen = new Set<string>();
+  const out: CapabilityItem[] = [];
+  for (const item of items) {
+    if (!item?.id || seen.has(item.id)) continue;
+    seen.add(item.id);
+    out.push(item);
+  }
+  return out;
+}
+
+function capabilityPrompt(capability: CapabilityItem) {
+  const nextActions = capabilityNextActions(capability);
+  const acceptance = capabilityAcceptance(capability);
+  return [
+    `Implement or complete Hebe capability: ${capability.id}`,
+    `Status: ${capability.status || "unknown"}`,
+    `Priority: ${capabilityPriority(capability)}`,
+    `Effort: ${capabilityEffort(capability)}`,
+    `Risk: ${capability.risk_level || "unknown"}`,
+    "",
+    "Rules:",
+    "- Keep the change scoped to this capability.",
+    "- Do not implement unrelated Hebe logic.",
+    "- Preserve existing voice/chat/dev flows.",
+    "",
+    "Next actions:",
+    ...(nextActions.length ? nextActions.map((item) => `- ${item}`) : ["- Define the smallest safe implementation step."]),
+    "",
+    "Acceptance criteria:",
+    ...(acceptance.length ? acceptance.map((item) => `- ${item}`) : ["- Add focused tests and keep current tests passing."]),
+  ].join("\n");
+}
+
+function DevViewWithCapabilities({
+  apiBase,
+  enabled,
+  status,
+  websocketConnected,
+  busy,
+  wakeLoopAlive,
+  wakeLoopError,
+  chatDebugStats,
+  onTestUiMessage,
+  onReloadUi,
+  onRestartBackend,
+  onFullReset,
+  onRefresh,
+}: {
+  apiBase: string;
+  enabled: boolean;
+  status: DevBackendStatus;
+  websocketConnected: boolean;
+  busy: "" | "reload" | "restart" | "full";
+  wakeLoopAlive: boolean | null;
+  wakeLoopError: string;
+  chatDebugStats: ChatDebugStats;
+  onTestUiMessage: () => void;
+  onReloadUi: () => void;
+  onRestartBackend: () => void;
+  onFullReset: () => void;
+  onRefresh: () => void;
+}) {
+  const [capabilities, setCapabilities] = useState<CapabilityBacklogPayload | null>(null);
+  const [capabilitiesLoading, setCapabilitiesLoading] = useState(false);
+  const [capabilitiesError, setCapabilitiesError] = useState("");
+  const [selectedCapabilityId, setSelectedCapabilityId] = useState("");
+
+  async function refreshCapabilities(showNext = false) {
+    setCapabilitiesLoading(true);
+    setCapabilitiesError("");
+    try {
+      const [backlogRes, nextRes] = await Promise.all([
+        fetch(`${apiBase}/capabilities/backlog`),
+        fetch(`${apiBase}/capabilities/backlog/next`),
+      ]);
+      const backlogPayload = await backlogRes.json().catch(() => ({}));
+      const nextPayload = await nextRes.json().catch(() => ({}));
+      if (!backlogRes.ok) throw new Error(backlogPayload?.detail || "Capability backlog unavailable");
+      if (!nextRes.ok) throw new Error(nextPayload?.detail || "Next capability unavailable");
+      const merged: CapabilityBacklogPayload = {
+        ...backlogPayload,
+        next_recommended_todo: nextPayload?.next_recommended_todo || backlogPayload?.next_recommended_todo || null,
+      };
+      setCapabilities(merged);
+      const nextId = merged.next_recommended_todo?.id || "";
+      if (showNext || !selectedCapabilityId) setSelectedCapabilityId(nextId);
+    } catch (error) {
+      setCapabilitiesError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setCapabilitiesLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    refreshCapabilities(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [apiBase]);
+
+  return (
+    <main className="tabLayout devLayout">
+      <section className="glass panel devMainPanel">
+        <div className="panelHeader">
+          <div>
+            <div className="panelTitle">Dev maintenance</div>
+            <div className="panelMeta">Controles separados del flujo normal</div>
+          </div>
+          <div className="capabilityActions">
+            <button className="btn compact" onClick={onTestUiMessage}>Send test UI message</button>
+            <button className="btn compact" onClick={onRefresh}>Refresh</button>
+          </div>
+        </div>
+        {enabled ? (
+          <DevControlPanel status={status} websocketConnected={websocketConnected} busy={busy} onReloadUi={onReloadUi} onRestartBackend={onRestartBackend} onFullReset={onFullReset} />
+        ) : (
+          <div className="emptyState">Dev controls disabled in this build.</div>
+        )}
+        <CapabilityBacklogPanel
+          data={capabilities}
+          loading={capabilitiesLoading}
+          error={capabilitiesError}
+          selectedId={selectedCapabilityId}
+          onSelectedId={setSelectedCapabilityId}
+          onRefresh={() => refreshCapabilities(false)}
+          onShowNext={() => refreshCapabilities(true)}
+        />
+      </section>
+      <section className="glass panel devHealthPanel">
+        <div className="panelHeader slim">
+          <div className="panelTitle">Backend health</div>
+          <div className="panelMeta">runtime</div>
+        </div>
+        <div className="statusList">
+          <StatusLine label="Backend running" value={status.running ? "yes" : "no"} tone={status.running ? "ok" : "bad"} />
+          <StatusLine label="PID" value={status.pid ? String(status.pid) : "-"} tone={status.pid ? "ok" : "idle"} />
+          <StatusLine label="Uptime" value={formatDuration(status.uptimeMs || 0)} tone={status.running ? "ok" : "idle"} />
+          <StatusLine label="Last restart" value={formatRestartTime(status.lastRestartTime)} tone={status.lastRestartTime ? "ok" : "idle"} />
+          <StatusLine label="WebSocket" value={websocketConnected ? "yes" : "no"} tone={websocketConnected ? "ok" : "bad"} />
+          <StatusLine label="Wake/STT loop" value={wakeLoopAlive === false ? "crashed" : wakeLoopAlive === true ? "alive" : "unknown"} tone={wakeLoopAlive === false ? "bad" : wakeLoopAlive === true ? "ok" : "warn"} />
+          <StatusLine label="WS events" value={String(chatDebugStats.wsEvents)} tone="idle" />
+          <StatusLine label="Chat events" value={String(chatDebugStats.chatMessageEvents)} tone="idle" />
+          <StatusLine label="Appended" value={String(chatDebugStats.messagesAppended)} tone={chatDebugStats.messagesAppended ? "ok" : "idle"} />
+          <StatusLine label="Duplicates" value={String(chatDebugStats.duplicatesIgnored)} tone={chatDebugStats.duplicatesIgnored ? "warn" : "idle"} />
+          <StatusLine label="Invalid payloads" value={String(chatDebugStats.invalidPayloads)} tone={chatDebugStats.invalidPayloads ? "bad" : "idle"} />
+        </div>
+        {(wakeLoopAlive === false && wakeLoopError) && <div className="devError mono">Wake/STT loop crashed: {wakeLoopError}</div>}
+        {(status.lastError || status.error) && <div className="devError mono">{status.lastError || status.error}</div>}
+      </section>
+    </main>
+  );
+}
+
+function CapabilityBacklogPanel({
+  data,
+  loading,
+  error,
+  selectedId,
+  onSelectedId,
+  onRefresh,
+  onShowNext,
+}: {
+  data: CapabilityBacklogPayload | null;
+  loading: boolean;
+  error: string;
+  selectedId: string;
+  onSelectedId: (id: string) => void;
+  onRefresh: () => void;
+  onShowNext: () => void;
+}) {
+  const counts = data?.counts || {};
+  const nextTodo = data?.next_recommended_todo || null;
+  const highPriority = data?.high_priority_unblocked || [];
+  const partial = data?.partial_needing_completion || [];
+  const implementedDisabled = data?.implemented_disabled || [];
+  const allCards = uniqueCapabilities([nextTodo, ...highPriority, ...partial, ...implementedDisabled]);
+  const selected = allCards.find((item) => item.id === selectedId) || nextTodo || allCards[0] || null;
+
+  async function copySelectedPrompt() {
+    if (!selected) return;
+    await navigator.clipboard?.writeText(capabilityPrompt(selected));
+  }
+
+  return (
+    <section className="capabilityPanel">
+      <div className="panelHeader slim">
+        <div>
+          <div className="panelTitle">Capabilities</div>
+          <div className="panelMeta">{loading ? "refreshing" : "backlog / TODO"}</div>
+        </div>
+        <div className="capabilityActions">
+          <button className="btn compact" onClick={onRefresh}>Refresh capabilities</button>
+          <button className="btn compact warning" onClick={onShowNext}>Show next TODO</button>
+          <button className="btn compact" disabled={!selected} onClick={copySelectedPrompt}>Copy Codex prompt</button>
+        </div>
+      </div>
+      {error && <div className="devError mono">{error}</div>}
+      <div className="capabilityStats">
+        <CapabilityStat label="Total" value={counts.all} />
+        <CapabilityStat label="Implemented" value={counts.implemented} />
+        <CapabilityStat label="Partial" value={counts.partial} />
+        <CapabilityStat label="Planned" value={counts.planned} />
+        <CapabilityStat label="Enabled" value={counts.enabled} />
+        <CapabilityStat label="Disabled" value={counts.disabled} />
+      </div>
+      {nextTodo && (
+        <div className="nextTodoBox">
+          <span>Next TODO</span>
+          <strong>{nextTodo.id}</strong>
+          <em>{capabilityPriority(nextTodo)} 路 {nextTodo.status || "unknown"} 路 {capabilityEffort(nextTodo)}</em>
+        </div>
+      )}
+      <div className="capabilityColumns">
+        <CapabilityList title="High priority unblocked" items={highPriority} selectedId={selected?.id || ""} onSelect={onSelectedId} />
+        <CapabilityList title="Partial needs completion" items={partial} selectedId={selected?.id || ""} onSelect={onSelectedId} />
+      </div>
+      <div className="capabilityCards">
+        {allCards.map((capability) => (
+          <CapabilityCard
+            key={capability.id}
+            capability={capability}
+            selected={capability.id === selected?.id}
+            onSelect={() => onSelectedId(capability.id)}
+          />
+        ))}
+        {!allCards.length && !loading && <div className="emptyState">No capability backlog data.</div>}
+      </div>
+    </section>
+  );
+}
+
+function CapabilityStat({ label, value }: { label: string; value: number | undefined }) {
+  return <div className="capabilityStat"><span>{label}</span><strong>{value ?? "-"}</strong></div>;
+}
+
+function CapabilityList({ title, items, selectedId, onSelect }: { title: string; items: CapabilityItem[]; selectedId: string; onSelect: (id: string) => void }) {
+  return (
+    <div className="capabilityList">
+      <div className="capabilityListTitle">{title}</div>
+      {items.slice(0, 5).map((item) => (
+        <button key={item.id} className={"capabilityListItem " + (item.id === selectedId ? "active" : "")} onClick={() => onSelect(item.id)}>
+          <span>{item.id}</span>
+          <em>{capabilityPriority(item)} 路 {capabilityEffort(item)}</em>
+        </button>
+      ))}
+      {!items.length && <div className="emptyState compact">No items.</div>}
+    </div>
+  );
+}
+
+function CapabilityCard({ capability, selected, onSelect }: { capability: CapabilityItem; selected: boolean; onSelect: () => void }) {
+  const nextAction = capabilityNextActions(capability)[0] || "No next action listed.";
+  const blockedBy = capabilityBlockedBy(capability);
+  return (
+    <button className={"capabilityCard " + (selected ? "active" : "")} onClick={onSelect}>
+      <div className="capabilityCardTop">
+        <strong title={capability.id}>{capability.id}</strong>
+        {capabilityRecommended(capability) && <span className="devState warn">next</span>}
+      </div>
+      <div className="capabilityMetaLine">
+        <span>{capability.status || "unknown"}</span>
+        <span>{capability.enabled ? "enabled" : "disabled"}</span>
+        <span>{capabilityPriority(capability)}</span>
+        <span>{capabilityEffort(capability)}</span>
+        <span>{capability.risk_level || "low"}</span>
+      </div>
+      <p>{nextAction}</p>
+      {blockedBy.length > 0 && <small>Blocked by: {blockedBy.join(", ")}</small>}
+    </button>
+  );
+}
+
 function DevView({ enabled, status, websocketConnected, busy, wakeLoopAlive, wakeLoopError, onReloadUi, onRestartBackend, onFullReset, onRefresh }: { enabled: boolean; status: DevBackendStatus; websocketConnected: boolean; busy: "" | "reload" | "restart" | "full"; wakeLoopAlive: boolean | null; wakeLoopError: string; onReloadUi: () => void; onRestartBackend: () => void; onFullReset: () => void; onRefresh: () => void }) { return <main className="tabLayout devLayout"><section className="glass panel devMainPanel"><div className="panelHeader"><div><div className="panelTitle">Dev maintenance</div><div className="panelMeta">Controles separados del flujo normal</div></div><button className="btn compact" onClick={onRefresh}>Refresh</button></div>{enabled ? <DevControlPanel status={status} websocketConnected={websocketConnected} busy={busy} onReloadUi={onReloadUi} onRestartBackend={onRestartBackend} onFullReset={onFullReset} /> : <div className="emptyState">Dev controls disabled in this build.</div>}</section><section className="glass panel devHealthPanel"><div className="panelHeader slim"><div className="panelTitle">Backend health</div><div className="panelMeta">runtime</div></div><div className="statusList"><StatusLine label="Backend running" value={status.running ? "yes" : "no"} tone={status.running ? "ok" : "bad"} /><StatusLine label="PID" value={status.pid ? String(status.pid) : "-"} tone={status.pid ? "ok" : "idle"} /><StatusLine label="Uptime" value={formatDuration(status.uptimeMs || 0)} tone={status.running ? "ok" : "idle"} /><StatusLine label="Last restart" value={formatRestartTime(status.lastRestartTime)} tone={status.lastRestartTime ? "ok" : "idle"} /><StatusLine label="WebSocket" value={websocketConnected ? "yes" : "no"} tone={websocketConnected ? "ok" : "bad"} /><StatusLine label="Wake/STT loop" value={wakeLoopAlive === false ? "crashed" : wakeLoopAlive === true ? "alive" : "unknown"} tone={wakeLoopAlive === false ? "bad" : wakeLoopAlive === true ? "ok" : "warn"} /></div>{(wakeLoopAlive === false && wakeLoopError) && <div className="devError mono">Wake/STT loop crashed: {wakeLoopError}</div>}{(status.lastError || status.error) && <div className="devError mono">{status.lastError || status.error}</div>}</section></main>; }
 function SessionView({ data, loading, error, onRefresh, onCommand }: { data: any | null; loading: boolean; error: string; onRefresh: () => void; onCommand: (command: string) => void }) { const meta = data?.stream_metadata || {}; const live = data?.live_session || {}; const rag = data?.memory_rag || {}; const timeline = Array.isArray(rag.recent_timeline_events) ? rag.recent_timeline_events : Array.isArray(data?.recent_events) ? data.recent_events : []; const summaries = Array.isArray(rag.rolling_summaries) ? rag.rolling_summaries : Array.isArray(data?.rolling_summaries) ? data.rolling_summaries : []; const chatters = Array.isArray(live.recent_chatters) ? live.recent_chatters : Array.isArray(live.active_chatters) ? live.active_chatters : []; const lastSummary = summaries[0]?.summary_text || summaries[summaries.length - 1]?.summary_text; const lastHebe = live.last_hebe_utterance || live.last_spontaneous_message || {}; return <main className="sessionLayout"><section className="glass panel sessionPanel wide"><div className="panelHeader"><div><div className="panelTitle">Live session brain</div><div className="panelMeta">{loading ? "refreshing" : data ? "debug snapshot" : "waiting for session"}</div></div><button className="btn compact" onClick={onRefresh}>Refresh</button></div>{error && <div className="micWarn">{error}</div>}<div className="sessionCardGrid"><SessionCard title="Stream metadata"><InfoRow label="Status" value={displayValue(meta.stream_status || meta.live_status || live.stream_status)} /><InfoRow label="Game" value={displayValue(meta.game || live.current_game)} /><InfoRow label="Category" value={displayValue(meta.category || live.current_category)} /><InfoRow label="Title" value={displayValue(meta.title || live.current_title)} /></SessionCard><SessionCard title="Live session state"><InfoRow label="Phase" value={displayValue(live.current_phase)} /><InfoRow label="Objective" value={displayValue(live.current_objective)} /><InfoRow label="Progress" value={displayValue((live.recent_progress_markers || []).slice(-1)[0])} /><InfoRow label="Boss/combat" value={displayValue(live.latest_boss_state || live.latest_strategy_topic)} /><InfoRow label="Correction" value={displayValue(live.latest_correction_from_leo)} /></SessionCard><SessionCard title="Hebe memory/RAG"><InfoRow label="Events" value={displayValue(rag.meaningful_events)} /><InfoRow label="Context updates" value={displayValue(rag.session_context_updates)} /><InfoRow label="Last retrieval" value={displayValue(rag.last_retrieved_context_used?.query)} /><InfoRow label="Last memory update" value={displayValue(live.last_updated_at || rag.latest_rolling_summary_time)} /></SessionCard><SessionCard title="Interaction anchors"><InfoRow label="Chat topic" value={displayValue(live.current_chat_topic)} /><InfoRow label="Last Hebe" value={displayValue(lastHebe.text || lastHebe.raw_text)} /><InfoRow label="Last anchor" value={displayValue(live.last_hebe_anchor || lastHebe.anchor_id)} /><InfoRow label="Last direct" value={displayValue(live.last_direct_interaction_with_leo)} /></SessionCard></div></section><section className="glass panel sessionPanel"><div className="panelHeader slim"><div className="panelTitle">Recent timeline</div><div className="panelMeta">{timeline.length} events</div></div><div className="timelineList">{timeline.slice(0, 12).map((item: any, idx: number) => <div className="timelineItem" key={item.id || idx}><span className="timelineType">{displayValue(item.event_type || item.topic)}</span><span>{displayValue(item.raw_text || item.summary_text || item.output_target)}</span></div>)}{!timeline.length && <div className="emptyState">No timeline yet.</div>}</div></section><section className="glass panel sessionPanel"><div className="panelHeader slim"><div className="panelTitle">Chat participants</div><div className="panelMeta">{chatters.length} recent</div></div><div className="chatterList">{chatters.slice(0, 12).map((item: any, idx: number) => <div className="chatterItem" key={item.username || item.display_name || idx}><span>{displayValue(item.display_name || item.username)}</span><span className="muted">{displayValue(item.last_message || item.recent_topics?.[0])}</span></div>)}{!chatters.length && <div className="emptyState">No chat participants in the current snapshot.</div>}</div></section><section className="glass panel sessionPanel wide"><div className="panelHeader slim"><div className="panelTitle">Rolling summary preview</div><div className="panelMeta">session memory</div></div><div className="summaryPreview">{displayValue(lastSummary, "No rolling summary yet.")}</div><div className="sessionActions"><button className="btn compact" onClick={() => onCommand("Hebe, actualiza contexto de stream")}>Refresh stream context</button><button className="btn compact" onClick={() => onCommand("Hebe, que recuerdas de este directo")}>Ask memory</button></div></section></main>; }
 function SessionCard({ title, children }: { title: string; children: ReactNode }) { return <div className="sessionCard"><div className="sessionCardTitle">{title}</div>{children}</div>; }
@@ -815,10 +1454,10 @@ function QuickControlToolbar({ disabled, onCommand }: { disabled: boolean; onCom
       title: "Stream",
       items: [
         ["Prep", "Preparar hoy", "Hebe, prepara el stream de hoy"],
-        ["Title", "T韙ulo", "Hebe, sugiere t韙ulo para hoy"],
+        ["Title", "Titulo", "Hebe, sugiere titulo para hoy"],
         ["Start", "Guardar inicio", "Hebe, guarda que empezamos por confirmar"],
         ["End", "Guardar final", "Hebe, guarda que terminamos por confirmar"],
-        ["View", "Ver sesi髇", "Hebe, prepara el stream de hoy"],
+        ["View", "Ver sesion", "Hebe, prepara el stream de hoy"],
         ["馃攧", "Actualizar contexto", "Hebe, actualiza contexto de stream"],
         ["馃摗", "Estado stream", "Hebe, qu茅 contexto de stream tienes"],
         ["馃", "Contexto partida", "Hebe, qu茅 contexto de partida tienes"],
@@ -930,10 +1569,10 @@ function LiveControlToolbar({
       title: "STREAM",
       items: [
         { icon: "Prep", label: "Preparar", command: "Hebe, prepara el stream de hoy", featured: true },
-        { icon: "Title", label: "T韙ulo", command: "Hebe, sugiere t韙ulo para hoy", featured: true },
+        { icon: "Title", label: "Titulo", command: "Hebe, sugiere titulo para hoy", featured: true },
         { icon: "Start", label: "Inicio", command: "Hebe, guarda que empezamos por confirmar" },
         { icon: "End", label: "Final", command: "Hebe, guarda que terminamos por confirmar" },
-        { icon: "View", label: "Sesi髇", command: "Hebe, prepara el stream de hoy" },
+        { icon: "View", label: "Sesion", command: "Hebe, prepara el stream de hoy" },
         { icon: "馃攧", label: "Contexto", command: "Hebe, actualiza contexto de stream", featured: true },
         { icon: "馃摗", label: "Estado", command: "Hebe, qu茅 contexto de stream tienes", featured: true },
         { icon: "馃", label: "Partida", command: "Hebe, qu茅 contexto de partida tienes", featured: true },
