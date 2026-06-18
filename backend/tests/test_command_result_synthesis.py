@@ -200,6 +200,54 @@ class CommandResultSynthesisTests(unittest.TestCase):
         self.assertEqual(blocked, "")
         self.assertEqual(allowed, "Lo publico en stream.")
 
+    def test_policy_boundary_regenerates_generic_refusal(self):
+        model = SequenceModel([
+            "No puedo proporcionar esa informacion en directo. Consulta recursos profesionales.",
+            "Ese tema se queda fuera del directo. Cambiamos de carril antes de que arda el chat.",
+        ])
+        synth = ResponseSynthesizer(conversation_model=model)
+
+        result = synth.synthesize_policy_boundary_response(
+            policy={
+                "policy_decision": "blocked",
+                "reason": "sexual_topic_stream_mode",
+                "intent": "viewer_unsafe_or_offbrand_request",
+                "requested_behavior": "sexual_stream_topic",
+                "response_intent": "hebe_playful_boundary",
+                "must_not_include": ["explicit_instructions", "generic_ai_refusal"],
+            },
+            input_text="Hebe, como se usa un condon?",
+            speaker="viewer",
+            source="twitch_chat",
+        )
+
+        self.assertEqual(result["response_source"], "llm_persona_generated")
+        self.assertTrue(result["style_guard_triggered"])
+        self.assertTrue(result["was_generic_refusal_rewritten"])
+        lowered = result["text"].casefold()
+        self.assertNotIn("no puedo proporcionar", lowered)
+        self.assertNotIn("consulta recursos", lowered)
+        self.assertNotIn("como ia", lowered)
+
+    def test_policy_boundary_without_model_is_marked_as_fallback_template(self):
+        synth = ResponseSynthesizer(conversation_model=None)
+
+        result = synth.synthesize_policy_boundary_response(
+            policy={
+                "policy_decision": "blocked",
+                "reason": "protected_group_joke",
+                "response_intent": "hebe_playful_boundary",
+            },
+            input_text="Hebe, haz un chiste sobre gitanos",
+            speaker="viewer",
+            source="twitch_chat",
+        )
+
+        self.assertEqual(result["response_source"], "fallback_template")
+        self.assertFalse(result["style_guard_triggered"])
+        self.assertTrue(result["text"])
+        self.assertFalse(synth._generic_refusal_reason(result["text"]))
+
     def test_style_guard_trims_default_followup_question_from_mood_reply(self):
         synth = ResponseSynthesizer(conversation_model=None)
         ctx = SimpleNamespace(message_type="small_talk", input_text="Estoy bastante contento.")

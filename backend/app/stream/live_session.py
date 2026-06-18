@@ -158,6 +158,7 @@ class LiveSessionState:
     current_title: str | None = None
     language_mode: str | None = None
     spoiler_policy: str | None = None
+    stream_output_mode: str | None = None
     current_phase: str | None = None
     current_activity: str | None = None
     combat_state: bool | None = None
@@ -218,6 +219,7 @@ class LiveSessionBrain:
         self._set("current_title", getattr(stream, "current_stream_title", None), source="twitch_title")
         self._set("language_mode", getattr(stream, "language_mode", None), source="twitch_title")
         self._set("spoiler_policy", getattr(stream, "spoiler_policy", None), source="twitch_title")
+        self._set("stream_output_mode", getattr(stream, "stream_output_mode", None), source="stream_output")
         self._set("current_phase", getattr(stream, "current_run_phase", None), source=getattr(stream, "run_context_source", None))
         self._set("current_activity", getattr(stream, "current_activity", None), source=getattr(stream, "current_game_activity_provenance", None))
         self.state.combat_state = getattr(stream, "combat_state", None)

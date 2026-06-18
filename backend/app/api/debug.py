@@ -211,6 +211,30 @@ def get_live_session_debug(request: Request):
     return {"ok": False, "reason": "no live session state yet"}
 
 
+@router.get("/policy/last")
+def get_last_policy_decision(request: Request):
+    adapter = getattr(request.app.state, "adapter", None)
+    engine = getattr(adapter, "_engine", None) if adapter is not None else None
+    if engine is None:
+        return {"ok": False, "reason": "engine not running", "last_policy_decision": None}
+    try:
+        return {"ok": True, "last_policy_decision": engine.get_last_policy_trace()}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Policy debug failed: {type(exc).__name__}: {exc}")
+
+
+@router.get("/policy/behavior-blocks")
+def get_policy_behavior_blocks(request: Request):
+    adapter = getattr(request.app.state, "adapter", None)
+    engine = getattr(adapter, "_engine", None) if adapter is not None else None
+    if engine is None:
+        return {"ok": False, "reason": "engine not running", "behavior_blocks": []}
+    try:
+        return {"ok": True, "behavior_blocks": engine.get_active_behavior_blocks()}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Behavior block debug failed: {type(exc).__name__}: {exc}")
+
+
 @router.get("/db/tables/{table_name}/schema")
 def get_db_table_schema(table_name: str):
     try:

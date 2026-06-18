@@ -60,7 +60,8 @@ body{
 
 button,
 input,
-select{
+select,
+textarea{
   font:inherit;
 }
 
@@ -201,6 +202,7 @@ select{
   z-index:1;
   display:flex;
   align-items:center;
+  flex-wrap:wrap;
   gap:6px;
   padding:5px;
   border-radius:14px;
@@ -2139,6 +2141,10 @@ input[type="range"]{
   margin-bottom:10px;
 }
 
+.devButtons.twoCol{
+  grid-template-columns:repeat(2, minmax(0, 1fr));
+}
+
 .devStatusList{
   padding-top:2px;
 }
@@ -2152,6 +2158,325 @@ input[type="range"]{
   background:rgba(209,74,92,0.10);
   white-space:pre-wrap;
   overflow-wrap:anywhere;
+}
+
+.simulationPanel{
+  margin-top:12px;
+  padding-top:12px;
+  border-top:1px solid rgba(255,255,255,0.075);
+}
+
+.simulationGrid{
+  display:grid;
+  grid-template-columns:1fr 1fr;
+  gap:8px;
+}
+
+.compactInput{
+  min-height:34px;
+}
+
+.simTextarea{
+  width:100%;
+  min-height:62px;
+  resize:vertical;
+  padding:9px 10px;
+  border-radius:10px;
+  border:1px solid rgba(255,255,255,0.11);
+  color:var(--text);
+  background:rgba(0,0,0,0.22);
+  outline:none;
+}
+
+.simTextarea:focus{
+  border-color:rgba(98,199,216,0.40);
+  box-shadow:0 0 0 3px rgba(98,199,216,0.10);
+}
+
+.simulationOutputMode{
+  display:grid;
+  grid-template-columns:minmax(0, 1fr) 170px;
+  gap:8px;
+  align-items:center;
+  margin:8px 0;
+}
+
+.toggleRow{
+  display:flex;
+  align-items:center;
+  gap:8px;
+  color:rgba(255,255,255,0.84);
+  font-size:12px;
+  font-weight:850;
+}
+
+.simulationResult{
+  min-height:84px;
+  max-height:220px;
+  overflow:auto;
+  margin:8px 0 0;
+  padding:9px;
+  border-radius:10px;
+  border:1px solid rgba(255,255,255,0.075);
+  color:rgba(235,241,248,0.88);
+  background:rgba(0,0,0,0.20);
+  font-family:"JetBrains Mono", "SFMono-Regular", Menlo, Consolas, monospace;
+  font-size:11px;
+  white-space:pre-wrap;
+}
+
+.simulationLab{
+  flex:1;
+  min-height:0;
+  display:grid;
+  grid-template-rows:auto auto minmax(0, 1fr) 168px;
+  gap:12px;
+  overflow:hidden;
+}
+
+.simulationTop{
+  min-height:0;
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:14px;
+  padding:12px;
+}
+
+.simulationStatusStrip{
+  min-width:0;
+  display:grid;
+  grid-template-columns:repeat(5, minmax(110px, 1fr));
+  gap:8px;
+  flex:1;
+  max-width:850px;
+}
+
+.simulationPresetBar{
+  min-height:0;
+  display:flex;
+  gap:7px;
+  overflow-x:auto;
+  padding-bottom:2px;
+}
+
+.simulationPresetBar .btn{
+  flex:0 0 auto;
+}
+
+.simulationColumns{
+  min-height:0;
+  display:grid;
+  grid-template-columns:minmax(260px, 0.88fr) minmax(320px, 1.15fr) minmax(280px, 0.97fr);
+  gap:12px;
+  overflow:hidden;
+}
+
+.simColumn{
+  min-height:0;
+  display:flex;
+  flex-direction:column;
+  gap:10px;
+  padding:12px;
+  overflow:auto;
+}
+
+.simResultColumn{
+  overflow:hidden;
+}
+
+.roleToggles{
+  display:flex;
+  gap:12px;
+  padding:7px 0 2px;
+}
+
+.simTextarea.tall{
+  min-height:84px;
+}
+
+.simulationLoading{
+  padding:8px 10px;
+  border-radius:10px;
+  color:var(--warn);
+  background:rgba(212,179,95,0.08);
+  border:1px solid rgba(212,179,95,0.20);
+  font-size:12px;
+  font-weight:850;
+}
+
+.verdictCard{
+  padding:14px;
+  border-radius:12px;
+  border:1px solid rgba(255,255,255,0.10);
+  background:rgba(0,0,0,0.22);
+}
+
+.verdictCard.ok{
+  border-color:rgba(56,217,150,0.24);
+  background:rgba(56,217,150,0.08);
+}
+
+.verdictCard.warn{
+  border-color:rgba(212,179,95,0.24);
+  background:rgba(212,179,95,0.08);
+}
+
+.verdictCard.bad{
+  border-color:rgba(209,74,92,0.26);
+  background:rgba(209,74,92,0.10);
+}
+
+.verdictTitle{
+  font-size:22px;
+  font-weight:950;
+}
+
+.verdictReason{
+  margin-top:4px;
+  color:var(--muted);
+  font-family:"JetBrains Mono", "SFMono-Regular", Menlo, Consolas, monospace;
+  font-size:12px;
+  overflow-wrap:anywhere;
+}
+
+.resultGrid{
+  display:grid;
+  grid-template-columns:1fr 1fr;
+  gap:8px;
+}
+
+.simulationFact{
+  min-width:0;
+  padding:9px;
+  border-radius:10px;
+  border:1px solid rgba(255,255,255,0.075);
+  background:rgba(0,0,0,0.17);
+}
+
+.simulationFact span{
+  display:block;
+  color:var(--muted);
+  font-size:10px;
+  font-weight:950;
+  text-transform:uppercase;
+}
+
+.simulationFact strong{
+  display:block;
+  min-width:0;
+  margin-top:4px;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+  font-size:12px;
+}
+
+.hebeWouldSay{
+  padding:10px;
+  border-radius:12px;
+  border:1px solid rgba(98,199,216,0.16);
+  background:rgba(98,199,216,0.06);
+}
+
+.resultSectionHeader{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:8px;
+  margin-bottom:7px;
+  color:rgba(255,255,255,0.86);
+  font-size:11px;
+  font-weight:950;
+  text-transform:uppercase;
+}
+
+.hebeResponseText{
+  min-height:48px;
+  color:rgba(255,255,255,0.90);
+  line-height:1.42;
+  overflow-wrap:anywhere;
+}
+
+.simulationResult.large{
+  flex:1;
+  min-height:0;
+  max-height:none;
+}
+
+.stateBlock{
+  display:grid;
+  gap:7px;
+}
+
+.stateBlockTitle{
+  color:rgba(255,255,255,0.86);
+  font-size:11px;
+  font-weight:950;
+  text-transform:uppercase;
+}
+
+.behaviorBlockCard{
+  display:grid;
+  gap:4px;
+  padding:9px;
+  border-radius:10px;
+  border:1px solid rgba(212,179,95,0.22);
+  background:rgba(212,179,95,0.08);
+}
+
+.behaviorBlockCard strong{
+  color:var(--warn);
+  font-size:12px;
+}
+
+.behaviorBlockCard span,
+.behaviorBlockCard em,
+.behaviorBlockCard small{
+  color:rgba(255,255,255,0.72);
+  font-size:11px;
+  font-style:normal;
+  overflow-wrap:anywhere;
+}
+
+.blockedCategories{
+  padding:8px;
+  border-radius:10px;
+  color:var(--muted);
+  background:rgba(0,0,0,0.17);
+  font-size:11px;
+  overflow-wrap:anywhere;
+}
+
+.stateJson{
+  min-height:68px;
+  max-height:180px;
+  overflow:auto;
+  margin:0;
+  padding:8px;
+  border-radius:10px;
+  color:rgba(235,241,248,0.88);
+  background:rgba(0,0,0,0.20);
+  border:1px solid rgba(255,255,255,0.075);
+  font-family:"JetBrains Mono", "SFMono-Regular", Menlo, Consolas, monospace;
+  font-size:10.5px;
+  white-space:pre-wrap;
+}
+
+.simulationTimelinePanel{
+  min-height:0;
+  padding:12px;
+  overflow:hidden;
+}
+
+.simulationTimeline{
+  min-height:0;
+  max-height:104px;
+  display:grid;
+  gap:6px;
+  overflow:auto;
+  font-family:"JetBrains Mono", "SFMono-Regular", Menlo, Consolas, monospace;
+  font-size:11px;
 }
 
 .capabilityPanel{

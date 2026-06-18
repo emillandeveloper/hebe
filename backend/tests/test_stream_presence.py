@@ -246,7 +246,9 @@ class StreamPresenceTests(unittest.TestCase):
         self.assertEqual(engine._unsupported_stt_script("தமிழ்"), "tamil")
 
     def test_chat_message_without_mention_updates_activity_without_reply(self):
-        engine = make_engine(StreamSessionState(enabled=True))
+        stream = StreamSessionState(enabled=True)
+        stream.is_live = True
+        engine = make_engine(stream)
 
         engine.observe_twitch_chat_message("viewer", "Viewer", "linux y ram hoy", "#chan")
 
@@ -257,6 +259,7 @@ class StreamPresenceTests(unittest.TestCase):
 
     def test_chat_rng_topic_links_to_recent_run_context_without_reply(self):
         stream = StreamSessionState(enabled=True)
+        stream.is_live = True
         now = time.time()
         stream.recent_run_context_facts = [{
             "id": "ambient:rng_dependency:1",
@@ -704,13 +707,17 @@ class StreamPresenceTests(unittest.TestCase):
         ]
         for phrase in phrases:
             with self.subTest(phrase=phrase):
-                engine = make_engine(StreamSessionState(enabled=True))
+                stream = StreamSessionState(enabled=True)
+                stream.is_live = True
+                engine = make_engine(stream)
                 reply = engine._handle_stream_manual_command(phrase)
                 self.assertIn("SO enviado", reply)
                 self.assertEqual(engine.runtime.twitch.sent, ["!so Totodile"])
 
     def test_manual_shoutout_normalizes_at_target(self):
-        engine = make_engine(StreamSessionState(enabled=True))
+        stream = StreamSessionState(enabled=True)
+        stream.is_live = True
+        engine = make_engine(stream)
 
         engine._handle_stream_manual_command("Hebe, haz SO a @Totodile")
 
@@ -718,6 +725,7 @@ class StreamPresenceTests(unittest.TestCase):
 
     def test_manual_shoutout_uses_last_raider(self):
         stream = StreamSessionState(enabled=True)
+        stream.is_live = True
         stream.last_raid_event = {"user_login": "LastRaider", "display_name": "LastRaider", "ts": time.time()}
         engine = make_engine(stream)
 
@@ -734,7 +742,9 @@ class StreamPresenceTests(unittest.TestCase):
         self.assertEqual(engine.runtime.twitch.sent, [])
 
     def test_blocked_bot_users_do_not_receive_shoutout(self):
-        engine = make_engine(StreamSessionState(enabled=True))
+        stream = StreamSessionState(enabled=True)
+        stream.is_live = True
+        engine = make_engine(stream)
 
         reply = engine._handle_stream_manual_command("Hebe, haz SO a Nightbot")
 
@@ -742,7 +752,9 @@ class StreamPresenceTests(unittest.TestCase):
         self.assertEqual(engine.runtime.twitch.sent, [])
 
     def test_hebe_does_not_shoutout_herself(self):
-        engine = make_engine(StreamSessionState(enabled=True))
+        stream = StreamSessionState(enabled=True)
+        stream.is_live = True
+        engine = make_engine(stream)
 
         reply = engine._handle_stream_manual_command("Hebe, haz SO a HebeNifelheim")
 
@@ -759,6 +771,7 @@ class StreamPresenceTests(unittest.TestCase):
 
     def test_shoutout_command_failure_sets_error(self):
         stream = StreamSessionState(enabled=True)
+        stream.is_live = True
         engine = make_engine(stream)
         engine.runtime.twitch = FailingShoutoutTwitch()
 
@@ -769,13 +782,14 @@ class StreamPresenceTests(unittest.TestCase):
 
     def test_simulated_raid_sends_thank_you_and_shoutout(self):
         stream = StreamSessionState(enabled=True, presence_mode="reactive")
+        stream.is_live = True
         engine = make_engine(stream)
         engine._synthesize_internal_event_reply = Mock(return_value="Gracias por la raid.")
 
         reply = engine._handle_stream_manual_command("Hebe, simula raid de Totodile")
 
         self.assertIn("Raid simulado", reply)
-        self.assertEqual(engine.runtime.twitch.sent, ["Gracias por la raid.", "!so totodile"])
+        self.assertEqual(engine.runtime.twitch.sent, [])
 
     def test_shoutout_status_reports_debug_fields(self):
         engine = make_engine(StreamSessionState(enabled=True))

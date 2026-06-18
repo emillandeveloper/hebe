@@ -188,6 +188,69 @@ def _dev_controls_enabled() -> bool:
     )
 
 
+def _require_dev_engine():
+    if not _dev_controls_enabled():
+        raise HTTPException(status_code=404, detail="Not found")
+    engine = getattr(hebe, "_engine", None)
+    if engine is None or not hebe.running:
+        raise HTTPException(status_code=503, detail="engine not running")
+    return engine
+
+
+@app.post("/dev/simulate/twitch-message")
+async def dev_simulate_twitch_message(body: dict):
+    engine = _require_dev_engine()
+    viewer = str((body or {}).get("viewer_name") or (body or {}).get("user_login") or (body or {}).get("username") or "viewer").strip()
+    text = str((body or {}).get("text") or (body or {}).get("message_text") or "").strip()
+    print(f"[HEBE][SIM] twitch_message viewer={viewer} text={text!r}", flush=True)
+    if not text:
+        raise HTTPException(status_code=400, detail="missing text")
+    return engine.simulate_twitch_message(body or {})
+
+
+@app.post("/dev/simulate/leo-message")
+async def dev_simulate_leo_message(body: dict):
+    engine = _require_dev_engine()
+    source = str((body or {}).get("source") or "ui").strip()
+    text = str((body or {}).get("text") or "").strip()
+    print(f"[HEBE][SIM] leo_message source={source} text={text!r}", flush=True)
+    if not text:
+        raise HTTPException(status_code=400, detail="missing text")
+    return engine.simulate_leo_message(text, source=source)
+
+
+@app.post("/dev/simulate/ambient-stt")
+async def dev_simulate_ambient_stt(body: dict):
+    engine = _require_dev_engine()
+    text = str((body or {}).get("text") or "").strip()
+    print(f"[HEBE][SIM] ambient_stt text={text!r}", flush=True)
+    if not text:
+        raise HTTPException(status_code=400, detail="missing text")
+    return engine.simulate_ambient_stt(text)
+
+
+@app.post("/dev/policy/behavior-blocks/clear")
+async def dev_clear_behavior_blocks():
+    engine = _require_dev_engine()
+    blocks = engine.clear_active_behavior_blocks()
+    return {
+        "ok": True,
+        "behavior_blocks": blocks,
+        "last_policy_decision": engine.get_last_policy_trace(),
+    }
+
+
+@app.post("/dev/stream-output-mode")
+async def dev_set_stream_output_mode(body: dict):
+    engine = _require_dev_engine()
+    mode = str((body or {}).get("mode") or "").strip()
+    reason = str((body or {}).get("reason") or "heavy_game_or_user_setting").strip()
+    try:
+        return {"ok": True, **engine.set_stream_output_mode(mode, reason=reason)}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
 @app.api_route("/dev/test-ui-message", methods=["GET", "POST"])
 async def dev_test_ui_message():
     if not _dev_controls_enabled():
@@ -290,6 +353,7 @@ def debug_memory():
         "db_path": db_sqlite.DB_PATH,
         "tts_enabled": bool(getattr(state, "tts_enabled", False)),
         "stream_tts_enabled": bool(getattr(policies, "allow_tts_replies", False)),
+        "stream_output_mode": str(getattr(stream, "stream_output_mode", "tts_enabled") if stream is not None else "tts_enabled"),
         "stt_enabled": bool(getattr(runtime, "stt_enabled", False)),
         "facts_count": db_sqlite.count_memory_facts(active_only=True),
         "chunks_count": count_chunks(active_only=True),

@@ -977,12 +977,17 @@ class VoiceCommandPipelineTests(unittest.TestCase):
 
     def test_twitch_mention_reply_posts_to_twitch_chat_and_no_private_pending_turn(self):
         engine = make_engine(["nuria"])
+        engine.runtime.state.stream.is_live = True
         engine.runtime.state.tts_enabled = False
         logs = []
 
         with patch("builtins.print", lambda *args, **kwargs: logs.append(" ".join(str(arg) for arg in args))), \
              patch("app.hebe_engine.emit"):
-            engine._deliver_twitch_reply("Corta y al pie.", event_type="twitch_chat_react", payload={})
+            engine._deliver_twitch_reply(
+                "Corta y al pie.",
+                event_type="twitch_chat_react",
+                payload={"user_login": "viewer", "display_name": "Viewer", "message_text": "Hebe"},
+            )
             engine._record_assistant_reply_for_conversation("¿tú qué tal?", source="twitch_chat_react", synthesizer=pending_marker())
 
         self.assertEqual(engine.runtime.twitch.sent, ["Corta y al pie."])
@@ -1171,10 +1176,10 @@ class VoiceCommandPipelineTests(unittest.TestCase):
         joined = "\n".join(logs)
         self.assertEqual(result, "continue")
         self.assertIn("[HEBE][INPUT] source=stt_voice raw='Estoy hablando solo'", joined)
-        self.assertIn("[HEBE][COG] incoming source='stt_voice'", joined)
+        self.assertIn("[HEBE][INPUT_FIREWALL] source=ambient_stt", joined)
         self.assertIn("[HEBE][INPUT_CLASSIFY] source=stt_voice input_type=ambient_stream_context", joined)
         self.assertIn("[HEBE][RESPONSE_DECISION] should_reply=false reason=no_ignore", joined)
-        self.assertIn("[HEBE][COG] decision=ambient_ignored_low_value reason=not_direct_command", joined)
+        self.assertIn("[HEBE][COG] decision=ambient_ignored_low_value reason=ambient_context_only", joined)
 
     def test_stt_shoutout_without_wakeword_still_has_action_intent(self):
         engine = make_engine(["nuria"])

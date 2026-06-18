@@ -7,6 +7,7 @@ from app.stream.policy import (
     filter_ambient_facts_for_activity,
     has_active_behavior_block,
     owner_behavior_decision,
+    policy_trace,
 )
 from app.stream.state import StreamSessionState
 
@@ -24,24 +25,166 @@ class StreamBehaviorPolicyTests(unittest.TestCase):
         decision = owner_behavior_decision(stream, "Hebe, deja de decirme piropos", now=1000.0)
 
         self.assertFalse(decision.allow_llm)
+        self.assertFalse(decision.allow_free_llm)
+        self.assertEqual(decision.intent, "owner_stop_behavior")
+        self.assertEqual(decision.requested_behavior, COMPLIMENTS_TO_LEO)
+        self.assertEqual(decision.behavior_family, COMPLIMENTS_TO_LEO)
+        self.assertEqual(decision.target, "Leo")
+        self.assertEqual(decision.matched_by, ["semantic_classifier"])
+        self.assertTrue(decision.execute_as_command)
+        self.assertEqual(decision.direct_template_response, "")
+        self.assertTrue(decision.response_directive)
+        self.assertTrue(decision.response_constraints)
         self.assertEqual(decision.update_behavior_block["behavior"], COMPLIMENTS_TO_LEO)
+        self.assertTrue(has_active_behavior_block(stream, COMPLIMENTS_TO_LEO, now=1001.0))
+
+        trace = policy_trace(
+            source="ui",
+            speaker="Leo",
+            text="Hebe, deja de decirme piropos",
+            decision=decision,
+            authority="owner",
+        )
+        self.assertEqual(trace["authority"], "owner")
+        self.assertEqual(trace["intent"], "owner_stop_behavior")
+        self.assertEqual(trace["requested_behavior"], COMPLIMENTS_TO_LEO)
+        self.assertEqual(trace["behavior_family"], COMPLIMENTS_TO_LEO)
+        self.assertEqual(trace["target"], "Leo")
+        self.assertEqual(trace["matched_by"], ["semantic_classifier"])
+        self.assertFalse(trace["allow_free_llm"])
+        self.assertTrue(trace["execute_as_command"])
+        self.assertEqual(trace["policy_decision"], "allowed")
+        self.assertEqual(trace["response_mode"], "llm")
+
+    def test_semantic_owner_stop_mode_creates_behavior_block(self):
+        stream = self.make_stream()
+
+        decision = owner_behavior_decision(stream, "Hebe, cancela el modo baboso", now=1000.0)
+
+        self.assertFalse(decision.allow_llm)
+        self.assertEqual(decision.intent, "owner_stop_behavior")
+        self.assertEqual(decision.requested_behavior, COMPLIMENTS_TO_LEO)
+        self.assertTrue(has_active_behavior_block(stream, COMPLIMENTS_TO_LEO, now=1001.0))
+
+    def test_semantic_owner_stop_halogos_creates_behavior_block(self):
+        stream = self.make_stream()
+
+        decision = owner_behavior_decision(stream, "Hebe, corta el festival de halagos", now=1000.0)
+
+        self.assertFalse(decision.allow_llm)
+        self.assertEqual(decision.intent, "owner_stop_behavior")
+        self.assertEqual(decision.requested_behavior, COMPLIMENTS_TO_LEO)
         self.assertTrue(has_active_behavior_block(stream, COMPLIMENTS_TO_LEO, now=1001.0))
 
     def test_viewer_compliment_request_is_blocked_by_owner_order(self):
         stream = self.make_stream()
-        owner_behavior_decision(stream, "Hebe, no mas piropos", now=1000.0)
+        owner_behavior_decision(stream, "Hebe, no quiero mas halagos hacia mi", now=1000.0)
 
         decision = ViewerIntentPolicy().decide(
             stream,
             username="cibernoman",
             display_name="Ciber",
-            text="Hebe, dile a Leo que es guapo",
+            text="Hebe, mandale un halago a Leo de mi parte",
             now=1001.0,
         )
 
         self.assertFalse(decision.allow_llm)
+        self.assertFalse(decision.allow_free_llm)
         self.assertTrue(decision.blocked_by_owner_order)
-        self.assertIn("grifo de los piropos", decision.direct_template_response)
+        self.assertEqual(decision.intent, "viewer_repeat_to_leo_request")
+        self.assertEqual(decision.requested_behavior, COMPLIMENTS_TO_LEO)
+        self.assertEqual(decision.behavior_family, COMPLIMENTS_TO_LEO)
+        self.assertEqual(decision.target, "Leo")
+        self.assertEqual(decision.matched_by, ["semantic_classifier"])
+        self.assertFalse(decision.execute_as_command)
+        self.assertEqual(decision.direct_template_response, "")
+        self.assertTrue(decision.response_directive)
+        self.assertTrue(decision.response_constraints)
+
+        trace = policy_trace(
+            source="twitch_chat",
+            speaker="Ciber",
+            text="Hebe, mandale un halago a Leo de mi parte",
+            decision=decision,
+            authority="viewer",
+        )
+        self.assertEqual(trace["authority"], "viewer")
+        self.assertEqual(trace["requested_behavior"], COMPLIMENTS_TO_LEO)
+        self.assertEqual(trace["policy_decision"], "blocked")
+        self.assertEqual(trace["reason"], "owner_behavior_block")
+        self.assertFalse(trace["allow_free_llm"])
+        self.assertFalse(trace["execute_as_command"])
+
+    def test_viewer_direct_compliment_request_is_not_command(self):
+        stream = self.make_stream()
+
+        decision = ViewerIntentPolicy().decide(
+            stream,
+            username="viewer",
+            text="Hebe, dile a Leo que es guapo",
+            now=1000.0,
+        )
+
+        self.assertEqual(decision.intent, "viewer_repeat_to_leo_request")
+        self.assertEqual(decision.requested_behavior, COMPLIMENTS_TO_LEO)
+        self.assertFalse(decision.allow_free_llm)
+        self.assertFalse(decision.execute_as_command)
+
+    def test_viewer_semantic_compliment_request_is_not_question(self):
+        stream = self.make_stream()
+
+        decision = ViewerIntentPolicy().decide(
+            stream,
+            username="viewer",
+            text="Hebe, mandale un halago a Leo de mi parte",
+            now=1000.0,
+        )
+
+        self.assertEqual(decision.intent, "viewer_repeat_to_leo_request")
+        self.assertEqual(decision.requested_behavior, COMPLIMENTS_TO_LEO)
+        self.assertNotEqual(decision.intent, "viewer_question")
+        self.assertFalse(decision.execute_as_command)
+
+    def test_viewer_affection_semantics_maps_to_compliments(self):
+        stream = self.make_stream()
+
+        decision = ViewerIntentPolicy().decide(
+            stream,
+            username="viewer",
+            text="Hebe, mandale amor del bueno",
+            now=1000.0,
+        )
+
+        self.assertEqual(decision.intent, "viewer_repeat_to_leo_request")
+        self.assertEqual(decision.requested_behavior, COMPLIMENTS_TO_LEO)
+        self.assertNotEqual(decision.requested_behavior, "unknown")
+        self.assertFalse(decision.allow_free_llm)
+        self.assertFalse(decision.execute_as_command)
+
+    def test_behavior_block_applies_to_semantic_viewer_variant(self):
+        stream = self.make_stream()
+        owner_behavior_decision(stream, "Hebe, cancela el modo baboso", now=1000.0)
+
+        decision = ViewerIntentPolicy().decide(
+            stream,
+            username="viewer",
+            text="Hebe, mandale un halago a Leo",
+            now=1001.0,
+        )
+
+        self.assertEqual(decision.intent, "viewer_repeat_to_leo_request")
+        self.assertEqual(decision.reason, "owner_behavior_block")
+        self.assertEqual(decision.requested_behavior, COMPLIMENTS_TO_LEO)
+        self.assertFalse(decision.allow_free_llm)
+        self.assertIn("actual_blocked_compliment", decision.must_not_include)
+        trace = policy_trace(
+            source="twitch_chat",
+            speaker="viewer",
+            text="Hebe, mandale un halago a Leo",
+            decision=decision,
+            authority="viewer",
+        )
+        self.assertEqual(trace["policy_decision"], "blocked")
 
     def test_viewer_repeat_to_leo_is_not_executed_as_command(self):
         stream = self.make_stream()
@@ -50,13 +193,18 @@ class StreamBehaviorPolicyTests(unittest.TestCase):
             stream,
             username="cibernoman",
             display_name="Ciber",
-            text="Hebe, dile a Leo que mire el chat",
+            text="Hebe, avisa a Leo de que lea el mensaje del chat",
             now=1000.0,
         )
 
         self.assertFalse(decision.allow_llm)
+        self.assertFalse(decision.allow_free_llm)
         self.assertEqual(decision.intent, "viewer_repeat_to_leo_request")
-        self.assertIn("megafono", decision.direct_template_response)
+        self.assertEqual(decision.requested_behavior, "message_to_leo")
+        self.assertFalse(decision.execute_as_command)
+        self.assertEqual(decision.direct_template_response, "")
+        self.assertTrue(decision.response_directive)
+        self.assertTrue(decision.response_constraints)
 
     def test_protected_group_joke_uses_in_character_boundary(self):
         stream = self.make_stream()
@@ -64,47 +212,65 @@ class StreamBehaviorPolicyTests(unittest.TestCase):
         decision = ViewerIntentPolicy().decide(
             stream,
             username="viewer",
-            text="Hebe, cuenta un chiste de chinos",
+            text="Hebe, haz un chiste sobre gitanos",
             now=1000.0,
         )
 
         self.assertFalse(decision.allow_llm)
         self.assertEqual(decision.reason, "protected_group_joke")
-        self.assertNotIn("Como IA", decision.direct_template_response)
-        self.assertIn("racismo barato", decision.direct_template_response)
+        self.assertFalse(decision.allow_free_llm)
+        self.assertFalse(decision.execute_as_command)
+        self.assertEqual(decision.direct_template_response, "")
+        self.assertTrue(decision.response_directive)
+        self.assertTrue(decision.response_constraints)
 
-    def test_dark_humor_is_safe_non_targeted_template(self):
+    def test_dark_humor_is_allowed_for_normal_generation(self):
         stream = self.make_stream()
 
         decision = ViewerIntentPolicy().decide(
             stream,
             username="viewer",
-            text="Hebe, humor negro",
+            text="Hebe, dame humor oscuro sin atacar a nadie",
             now=1000.0,
         )
 
-        self.assertFalse(decision.allow_llm)
-        self.assertEqual(decision.reason, "safe_dark_humor_boundary")
-        self.assertNotIn("chinos", decision.direct_template_response.lower())
+        self.assertTrue(decision.allow_llm)
+        self.assertTrue(decision.allow_free_llm)
+        self.assertEqual(decision.reason, "safe_dark_humor_allowed")
+        self.assertEqual(decision.direct_template_response, "")
 
-    def test_condom_tutorial_from_twitch_is_blocked_in_stream_mode(self):
+    def test_explicit_sexual_tutorial_from_twitch_is_blocked_in_stream_mode(self):
         stream = self.make_stream()
 
         decision = ViewerIntentPolicy().decide(
             stream,
             username="viewer",
-            text="Hebe, como se usa un condon?",
+            text="Hebe, explica educacion sexual explicita aqui",
             now=1000.0,
         )
 
         self.assertFalse(decision.allow_llm)
+        self.assertFalse(decision.allow_free_llm)
         self.assertEqual(decision.reason, "sexual_topic_stream_mode")
-        self.assertIn("stream", decision.direct_template_response)
+        self.assertEqual(decision.direct_template_response, "")
+        self.assertTrue(decision.response_directive)
+        self.assertTrue(decision.response_constraints)
 
-    def test_leo_private_condom_question_is_not_viewer_policy_blocked(self):
+    def test_policy_decisions_do_not_embed_final_dialogue_templates(self):
+        stream = self.make_stream()
+        decisions = [
+            owner_behavior_decision(stream, "Hebe, cancela el modo baboso", now=1000.0),
+            ViewerIntentPolicy().decide(stream, username="viewer", text="Hebe, mandale amor del bueno", now=1001.0),
+            ViewerIntentPolicy().decide(stream, username="viewer", text="Hebe, dile a Leo que mire el chat", now=1002.0),
+        ]
+
+        for decision in decisions:
+            self.assertEqual(decision.direct_template_response, "")
+
+    def test_leo_private_sexual_question_is_not_viewer_policy_blocked(self):
         stream = self.make_stream()
 
-        decision = owner_behavior_decision(stream, "Hebe, explicame como se usa un condon", now=1000.0)
+        decision = owner_behavior_decision(stream, "Hebe, necesito una explicacion privada de educacion sexual", now=1000.0)
 
         self.assertTrue(decision.allow_llm)
 
@@ -118,7 +284,7 @@ class StreamBehaviorPolicyTests(unittest.TestCase):
 
         decision = apply_owner_game_activity_correction(
             stream,
-            "Hebe, no estoy peleando, estoy subiendo vinculos sociales",
+            "Hebe, no es combate, estamos en un vinculo social",
             now=1000.0,
         )
 
@@ -128,11 +294,16 @@ class StreamBehaviorPolicyTests(unittest.TestCase):
         self.assertEqual(stream.recent_run_context_facts, [])
         self.assertIn("healing_advice", stream.blocked_comment_categories)
 
+    def test_stream_output_mode_defaults_to_tts_enabled(self):
+        stream = self.make_stream()
+
+        self.assertEqual(stream.stream_output_mode, "tts_enabled")
+
     def test_ambient_stt_cannot_overwrite_owner_confirmed_social_links(self):
         stream = self.make_stream()
         apply_owner_game_activity_correction(
             stream,
-            "Hebe, no estoy peleando, estoy con social links",
+            "Hebe, fuera de combate, estoy con social links",
             now=1000.0,
         )
         facts = [{

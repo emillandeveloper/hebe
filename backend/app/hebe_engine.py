@@ -4,6 +4,7 @@ import time
 import threading
 import unicodedata
 import hashlib
+import uuid
 from dataclasses import replace
 from queue import Empty
 from difflib import SequenceMatcher
@@ -64,11 +65,22 @@ from app.stream.live_session import LiveSessionBrain, init_live_session_schema
 from app.stream.ambient_context import AmbientContextExtractor
 from app.stream.action_planner import StreamActionPlanner
 from app.stream.policy import (
+    active_behavior_blocks,
     PolicyDecision,
     ViewerIntentPolicy,
     apply_owner_game_activity_correction,
     filter_ambient_facts_for_activity,
     owner_behavior_decision,
+    policy_trace,
+)
+from app.stream.input_firewall import (
+    ACTION_PROMOTION_SHOUTOUT,
+    ACTION_TWITCH_ACTION,
+    ACTION_TWITCH_REPLY,
+    InputAuthorityFirewall,
+    InputFirewallDecision,
+    is_known_bot_username,
+    looks_like_media_or_singing,
 )
 from app.stream import session_primer
 from app.stream.spontaneity import StreamSpontaneityConfig, StreamSpontaneityService
@@ -151,7 +163,16 @@ class HebeEngine:
                 self.observe_twitch_chat_message(username, display_name, text, channel)
 
             def _twitch_chat_callback(username, display_name, text, channel):
-                self.observe_twitch_chat_message(username, display_name, text, channel)
+                firewall = self._input_firewall_decision(
+                    source="twitch_viewer",
+                    text=text,
+                    username=username,
+                    event_type="twitch_chat_react",
+                    addressed_to_hebe=self._message_mentions_hebe(text),
+                )
+                if not self._firewall_allows_pipeline(firewall):
+                    return
+                self.observe_twitch_chat_message(username, display_name, text, channel, firewall_decision=firewall)
                 stream = self._get_stream_state()
                 recent_chat = list(getattr(stream, "recent_chat_messages", []) or [])[-10:] if stream is not None else []
                 print(
@@ -226,6 +247,12 @@ class HebeEngine:
             twitch_api=getattr(self.runtime, "twitch", None),
         )
         self.live_session_brain = LiveSessionBrain(getattr(self.runtime.state, "stream", None))
+        initial_output_mode = os.getenv("HEBE_STREAM_OUTPUT_MODE", "").strip()
+        if initial_output_mode in {"ui_only", "tts_enabled", "twitch_chat_only", "silent"}:
+            stream_state = getattr(self.runtime.state, "stream", None)
+            if stream_state is not None:
+                stream_state.stream_output_mode = initial_output_mode
+                print(f"[HEBE][OUTPUT_MODE] mode={initial_output_mode} reason=config", flush=True)
         self._apply_stream_performance_profile()
         self.ambient_context_extractor = AmbientContextExtractor()
         self.memory_extractor = MemoryExtractor(
@@ -319,7 +346,109 @@ class HebeEngine:
         self._stt_visible_transcripts: set[str] = set()
         self.stream_action_planner = self._build_stream_action_planner()
         self.viewer_intent_policy = ViewerIntentPolicy()
+        self.input_authority_firewall = self._build_input_firewall()
+        self._last_input_firewall: dict = {}
+        self._last_policy_trace: dict = {}
         self._current_input_event: InputEvent | None = None
+
+    def _build_input_firewall(self) -> InputAuthorityFirewall:
+        return InputAuthorityFirewall(extra_bot_usernames=self._input_firewall_bot_usernames())
+
+    def _input_firewall_bot_usernames(self) -> set[str]:
+        stream = self._get_stream_state()
+        twitch = getattr(self.runtime, "twitch", None)
+        configured = os.getenv("HEBE_TWITCH_BOT_USERNAMES", "")
+        names = {
+            "hebenifelheim",
+            getattr(stream, "bot_username", "") if stream else "",
+            getattr(twitch, "bot_username", "") if twitch else "",
+            getattr(getattr(self.runtime, "twitch_chat_bot", None), "bot_username", ""),
+        }
+        names.update(part.strip() for part in configured.split(",") if part.strip())
+        return {str(name or "").strip().lower().lstrip("@") for name in names if str(name or "").strip()}
+
+    def _get_input_firewall(self) -> InputAuthorityFirewall:
+        firewall = getattr(self, "input_authority_firewall", None)
+        if firewall is None:
+            firewall = self._build_input_firewall()
+            self.input_authority_firewall = firewall
+        return firewall
+
+    def _current_stream_is_live(self) -> bool:
+        stream = self._get_stream_state()
+        return bool(stream and getattr(stream, "is_live", False))
+
+    def _input_firewall_decision(
+        self,
+        *,
+        source: str,
+        text: str | None = "",
+        username: str | None = "",
+        event_type: str | None = "",
+        addressed_to_hebe: bool = False,
+        pending_followup: bool = False,
+        has_action_intent: bool = False,
+        record: bool = True,
+    ) -> InputFirewallDecision:
+        decision = self._get_input_firewall().decide(
+            source=source,
+            text=text,
+            username=username,
+            stream_is_live=self._current_stream_is_live(),
+            is_simulation=False,
+            addressed_to_hebe=addressed_to_hebe,
+            pending_followup=pending_followup,
+            has_action_intent=has_action_intent,
+            event_type=event_type,
+        )
+        if record:
+            self._record_input_firewall(decision, text=text)
+        return decision
+
+    def _record_input_firewall(self, decision: InputFirewallDecision, *, text: str | None = "") -> None:
+        payload = decision.as_dict()
+        self._last_input_firewall = payload
+        print(
+            "[HEBE][INPUT_FIREWALL] "
+            f"source={decision.source} authority={decision.authority} "
+            f"trust={decision.input_trust} decision={decision.firewall_decision} "
+            f"reason={decision.reason}",
+            flush=True,
+        )
+        if decision.media_or_singing_detected:
+            print(
+                f"[HEBE][MEDIA_GATE] detected=true reason={decision.media_reason or 'singing_or_lyrics'}",
+                flush=True,
+            )
+        if decision.bot_detected:
+            print(
+                f"[HEBE][BOT_FILTER] ignored username={decision.username} reason=known_bot",
+                flush=True,
+            )
+        if decision.reason == "offline_stream":
+            if decision.firewall_decision.startswith("block") or decision.firewall_decision == "ignore":
+                print(
+                    f"[HEBE][STREAM_GATE] blocked reason=offline_stream source={decision.source}",
+                    flush=True,
+                )
+            elif decision.authority == "owner":
+                print("[HEBE][STREAM_GATE] allowed reason=owner_local_command", flush=True)
+        elif decision.authority == "owner" and not decision.stream_is_live:
+            print("[HEBE][STREAM_GATE] allowed reason=owner_local_command", flush=True)
+        for action in (ACTION_TWITCH_REPLY, ACTION_TWITCH_ACTION, ACTION_PROMOTION_SHOUTOUT):
+            if decision.blocks_action(action):
+                print(
+                    f"[HEBE][ACTION_PERMISSIONS] action={action} allowed=false reason={decision.reason}",
+                    flush=True,
+                )
+
+    def _firewall_allows_pipeline(self, decision: InputFirewallDecision | None) -> bool:
+        if decision is None:
+            return True
+        return decision.firewall_decision in {"allow", "allow_context_only"}
+
+    def _firewall_payload(self) -> dict:
+        return dict(getattr(self, "_last_input_firewall", {}) or {})
 
     def _build_stream_action_planner(self) -> StreamActionPlanner:
         return StreamActionPlanner(
@@ -355,6 +484,290 @@ class HebeEngine:
                 pass
         return brain
 
+    def _record_policy_trace(self, trace: dict | None) -> dict:
+        clean = dict(trace or {})
+        if not clean:
+            return clean
+        clean.setdefault("event_id", f"policy_{uuid.uuid4().hex}")
+        clean.setdefault("created_at", datetime.now(timezone.utc).isoformat())
+        firewall = self._firewall_payload()
+        if firewall:
+            clean.setdefault("input_firewall", firewall)
+        self._last_policy_trace = clean
+        stream = self._get_stream_state()
+        if stream is not None:
+            try:
+                stream.last_policy_trace = clean
+            except Exception:
+                pass
+        print(
+            f"[HEBE][AUTHORITY] speaker={clean.get('speaker')} authority={clean.get('authority')}",
+            flush=True,
+        )
+        print(
+            "[HEBE][INTENT] "
+            f"intent={clean.get('intent')} "
+            f"requested_behavior={clean.get('requested_behavior')} "
+            f"matched_by={clean.get('matched_by')}",
+            flush=True,
+        )
+        print(
+            "[HEBE][POLICY] "
+            f"decision={clean.get('policy_decision')} "
+            f"reason={clean.get('reason')} "
+            f"allow_free_llm={clean.get('allow_free_llm')} "
+            f"response_intent={clean.get('response_intent')}",
+            flush=True,
+        )
+        blocks = active_behavior_blocks(stream) if stream is not None else []
+        print(f"[HEBE][BEHAVIOR_BLOCK] active={blocks}", flush=True)
+        return clean
+
+    def _update_policy_trace_response(
+        self,
+        reply_text: str,
+        *,
+        response_mode: str = "llm",
+        response_source: str = "hybrid",
+        style_guard_triggered: bool = False,
+        was_generic_refusal_rewritten: bool = False,
+    ) -> None:
+        trace = self.get_last_policy_trace()
+        if not trace:
+            return
+        updated = dict(trace)
+        updated["hebe_response"] = str(reply_text or "")
+        updated["final_response"] = str(reply_text or "")
+        updated["response_mode"] = response_mode
+        updated["response_source"] = response_source
+        updated["style_guard_triggered"] = bool(style_guard_triggered)
+        updated["was_generic_refusal_rewritten"] = bool(was_generic_refusal_rewritten)
+        self._last_policy_trace = updated
+        stream = self._get_stream_state()
+        if stream is not None:
+            try:
+                stream.last_policy_trace = updated
+            except Exception:
+                pass
+        print(f"[HEBE][RESPONSE_SOURCE] source={response_source}", flush=True)
+
+    def _synthesize_policy_reply(
+        self,
+        decision: PolicyDecision,
+        *,
+        input_text: str,
+        source: str,
+        speaker: str,
+    ) -> dict:
+        if not decision.allow_reply:
+            return {"text": "", "response_source": "silent"}
+        directive = str(getattr(decision, "response_directive", "") or "").strip()
+        if not directive:
+            return {"text": "", "response_source": "silent"}
+        policy_payload = {
+            "policy_decision": "blocked",
+            "reason": decision.reason,
+            "intent": decision.intent,
+            "requested_behavior": decision.requested_behavior,
+            "behavior_family": decision.behavior_family,
+            "target": decision.target,
+            "response_intent": decision.response_intent or "hebe_playful_boundary",
+            "response_tone": decision.response_tone or "sarcastic_playful_stream_safe",
+            "must_include": list(getattr(decision, "must_include", []) or []),
+            "must_not_include": list(getattr(decision, "must_not_include", []) or []),
+        }
+        synthesizer = getattr(self, "response_synthesizer", None)
+        if synthesizer is not None and hasattr(synthesizer, "synthesize_policy_boundary_response"):
+            return synthesizer.synthesize_policy_boundary_response(
+                policy=policy_payload,
+                input_text=input_text,
+                speaker=speaker,
+                source=source,
+            )
+        print(
+            f"[HEBE][POLICY] reply_generation_failed reason={decision.reason} source=no_persona_response_layer",
+            flush=True,
+        )
+        return {"text": "", "response_source": "silent"}
+
+    def get_last_policy_trace(self) -> dict:
+        stream = self._get_stream_state()
+        stream_trace = getattr(stream, "last_policy_trace", None) if stream is not None else None
+        return dict(stream_trace or getattr(self, "_last_policy_trace", {}) or {})
+
+    def get_active_behavior_blocks(self) -> list[dict]:
+        stream = self._get_stream_state()
+        if stream is None:
+            return []
+        return list(active_behavior_blocks(stream))
+
+    def clear_active_behavior_blocks(self) -> list[dict]:
+        stream = self._get_stream_state()
+        if stream is None:
+            return []
+        stream.active_behavior_blocks = []
+        self._record_policy_trace({
+            "source": "dev",
+            "speaker": "dev",
+            "authority": "system",
+            "addressed_to_hebe": False,
+            "intent": "clear_behavior_blocks",
+            "requested_behavior": "all",
+            "policy_decision": "allowed",
+            "reason": "dev_clear",
+            "response_mode": "silent",
+        })
+        return []
+
+    def simulate_twitch_message(self, payload: dict) -> dict:
+        viewer_name = str((payload or {}).get("viewer_name") or (payload or {}).get("user_login") or (payload or {}).get("username") or "viewer").strip()
+        display_name = str((payload or {}).get("display_name") or viewer_name).strip()
+        text = str((payload or {}).get("text") or (payload or {}).get("message_text") or "").strip()
+        channel = str((payload or {}).get("channel") or "").strip()
+        event_payload = {
+            **(payload or {}),
+            "display_name": display_name,
+            "user_login": viewer_name,
+            "username": viewer_name,
+            "message_text": text,
+            "channel": channel,
+            "_simulated": True,
+        }
+        firewall = self._input_firewall_decision(
+            source="twitch_viewer",
+            text=text,
+            username=viewer_name,
+            event_type="twitch_chat_react",
+            addressed_to_hebe=self._message_mentions_hebe(text),
+        )
+        event_payload["input_firewall"] = firewall.as_dict()
+        self.process_internal_event(InternalEvent(
+            event_type="twitch_chat_react",
+            payload=event_payload,
+            created_at=datetime.now(timezone.utc).isoformat(),
+        ))
+        return self._simulation_debug_payload()
+
+    def simulate_leo_message(self, text: str, *, source: str = "ui") -> dict:
+        clean_source = source if source in {"ui", "stt_voice"} else "ui"
+        before_event_id = self.get_last_policy_trace().get("event_id")
+        self.cognitive_flow(str(text or "").strip(), source=clean_source)
+        after_event_id = self.get_last_policy_trace().get("event_id")
+        if before_event_id == after_event_id:
+            self._record_policy_trace(policy_trace(
+                source=clean_source,
+                speaker="Leo",
+                text=str(text or "").strip(),
+                decision=PolicyDecision(
+                    allow_reply=True,
+                    allow_llm=True,
+                    reason="owner_allowed",
+                    intent="owner_message",
+                ),
+                addressed_to_hebe=True,
+                authority="owner",
+            ))
+        return self._simulation_debug_payload()
+
+    def simulate_ambient_stt(self, text: str) -> dict:
+        clean_text = str(text or "").strip()
+        voice_type, mood_hint = self._classify_voice_event(clean_text)
+        relevance = ContextRelevance(useful=False, category="none", reason="not_stream_enabled")
+        firewall = self._input_firewall_decision(
+            source="ambient_stt",
+            text=clean_text,
+            event_type=voice_type,
+            addressed_to_hebe=False,
+        )
+        if firewall.firewall_decision == "allow_context_only" and self._is_stream_enabled():
+            relevance = self._record_voice_event(clean_text, voice_type, mood_hint)
+        decision = PolicyDecision(
+            allow_reply=False,
+            allow_llm=False,
+            reason=firewall.reason if firewall.firewall_decision != "allow_context_only" else (
+                "ambient_context_updated" if getattr(relevance, "useful", False) else "ambient_stt_observed"
+            ),
+            intent=voice_type or "ambient_stt",
+            requested_behavior="ambient_context",
+        )
+        self._record_policy_trace(policy_trace(
+            source="ambient_stt",
+            speaker="ambient_stt",
+            text=clean_text,
+            decision=decision,
+            addressed_to_hebe=False,
+            authority="ambient",
+            requested_behavior="ambient_context",
+        ))
+        return self._simulation_debug_payload(extra={"relevance": getattr(relevance, "__dict__", {})})
+
+    def _simulation_debug_payload(self, *, extra: dict | None = None) -> dict:
+        stream = self._get_stream_state()
+        trace = self.get_last_policy_trace()
+        game_state = {
+            "game": getattr(stream, "current_game", None) or getattr(stream, "current_category", None) if stream is not None else None,
+            "current_activity": getattr(stream, "current_activity", None) if stream is not None else None,
+            "combat_state": getattr(stream, "combat_state", None) if stream is not None else None,
+            "last_owner_correction": getattr(stream, "last_owner_correction", None) if stream is not None else None,
+            "blocked_comment_categories": list(getattr(stream, "blocked_comment_categories", []) or []) if stream is not None else [],
+        }
+        payload = {
+            "ok": True,
+            "event_id": trace.get("event_id"),
+            "source": trace.get("source"),
+            "speaker": trace.get("speaker"),
+            "display_name": trace.get("speaker"),
+            "authority": trace.get("authority"),
+            "addressed_to_hebe": trace.get("addressed_to_hebe"),
+            "intent": trace.get("intent"),
+            "requested_behavior": trace.get("requested_behavior"),
+            "behavior_family": trace.get("behavior_family"),
+            "target": trace.get("target"),
+            "matched_by": trace.get("matched_by"),
+            "policy_decision": trace.get("policy_decision"),
+            "reason": trace.get("reason"),
+            "response_mode": trace.get("response_mode"),
+            "response_source": trace.get("response_source"),
+            "allow_free_llm": trace.get("allow_free_llm"),
+            "execute_as_command": trace.get("execute_as_command"),
+            "style_guard_triggered": trace.get("style_guard_triggered"),
+            "was_generic_refusal_rewritten": trace.get("was_generic_refusal_rewritten"),
+            "hebe_response": trace.get("hebe_response") or "",
+            "final_response": trace.get("final_response") or trace.get("hebe_response") or "",
+            "last_policy_decision": trace,
+            "input_firewall": self._firewall_payload(),
+            "is_simulation": True,
+            "behavior_blocks": self.get_active_behavior_blocks(),
+            "game_state": game_state,
+            "cooldowns": dict(getattr(stream, "viewer_policy_cooldowns", {}) or {}) if stream is not None else {},
+            "timeline": self._policy_timeline(trace),
+            "stream_output_mode": self._stream_output_mode(),
+            "current_activity": game_state["current_activity"],
+            "combat_state": game_state["combat_state"],
+        }
+        if extra:
+            payload.update(extra)
+        return payload
+
+    def _policy_timeline(self, trace: dict) -> list[str]:
+        if not trace:
+            return []
+        text = str(trace.get("text") or "").replace('"', '\\"')
+        response = str(trace.get("hebe_response") or "").replace('"', '\\"')
+        source = trace.get("source") or "unknown"
+        speaker = trace.get("speaker") or "unknown"
+        lines = [
+            f"[SIM] source={source} speaker={speaker} text=\"{text}\"",
+            f"[AUTHORITY] authority={trace.get('authority') or 'unknown'}",
+            f"[INTENT] intent={trace.get('intent') or 'unknown'} requested_behavior={trace.get('requested_behavior') or 'unknown'} matched_by={trace.get('matched_by') or []}",
+            f"[POLICY] decision={trace.get('policy_decision') or 'unknown'} reason={trace.get('reason') or 'unknown'} allow_free_llm={trace.get('allow_free_llm')}",
+        ]
+        if response:
+            lines.append(f"[OUTPUT] {trace.get('response_mode') or 'unknown'} text=\"{response}\"")
+        else:
+            lines.append(f"[OUTPUT] {trace.get('response_mode') or 'unknown'}")
+        return lines
+
     def _owner_policy_decision(self, command: str, *, source: str = "") -> PolicyDecision | None:
         if source not in {"ui", "typed_ui", "stt_voice", "voice"}:
             return None
@@ -363,6 +776,14 @@ class HebeEngine:
             return None
         activity_decision = apply_owner_game_activity_correction(stream, command)
         if not activity_decision.allow_llm:
+            self._record_policy_trace(policy_trace(
+                source=source,
+                speaker="Leo",
+                text=command,
+                decision=activity_decision,
+                addressed_to_hebe=True,
+                authority="owner",
+            ))
             try:
                 brain = self._get_live_session_brain()
                 brain.sync_stream_metadata(stream)
@@ -372,6 +793,14 @@ class HebeEngine:
             return activity_decision
         behavior_decision = owner_behavior_decision(stream, command)
         if not behavior_decision.allow_llm:
+            self._record_policy_trace(policy_trace(
+                source=source,
+                speaker="Leo",
+                text=command,
+                decision=behavior_decision,
+                addressed_to_hebe=True,
+                authority="owner",
+            ))
             return behavior_decision
         return None
 
@@ -379,12 +808,24 @@ class HebeEngine:
         stream = self._get_stream_state()
         if stream is None:
             return None
-        return self._get_viewer_intent_policy().decide(
+        username = str((payload or {}).get("user_login") or (payload or {}).get("username") or "")
+        display_name = str((payload or {}).get("display_name") or "")
+        text = str((payload or {}).get("message_text") or (payload or {}).get("text") or "")
+        decision = self._get_viewer_intent_policy().decide(
             stream,
-            username=str((payload or {}).get("user_login") or (payload or {}).get("username") or ""),
-            display_name=str((payload or {}).get("display_name") or ""),
-            text=str((payload or {}).get("message_text") or (payload or {}).get("text") or ""),
+            username=username,
+            display_name=display_name,
+            text=text,
         )
+        self._record_policy_trace(policy_trace(
+            source="twitch_chat",
+            speaker=display_name or username or "viewer",
+            text=text,
+            decision=decision,
+            addressed_to_hebe=True,
+            authority="viewer",
+        ))
+        return decision
 
     def _live_session_debug_snapshot(self) -> dict:
         try:
@@ -483,15 +924,33 @@ class HebeEngine:
                 print(f"[HEBE][TWITCH][TARGET] legacy resolver failed target={raw_target!r} error={exc!r}", flush=True)
         return None
 
-    def observe_twitch_chat_message(self, username: str, display_name: str, text: str, channel: str = "") -> None:
+    def observe_twitch_chat_message(
+        self,
+        username: str,
+        display_name: str,
+        text: str,
+        channel: str = "",
+        *,
+        firewall_decision: InputFirewallDecision | None = None,
+    ) -> None:
         if not getattr(self, "stream_observe_chat", True):
             return
         stream = self._get_stream_state()
-        if not stream or self._is_chat_bot_user(username):
+        if not stream:
             return
 
         message = str(text or "").strip()
         if not message:
+            return
+
+        firewall = firewall_decision or self._input_firewall_decision(
+            source="twitch_viewer",
+            text=message,
+            username=username,
+            event_type="twitch_chat_observe",
+            addressed_to_hebe=self._message_mentions_hebe(message),
+        )
+        if not self._firewall_allows_pipeline(firewall):
             return
 
         print(f"[HEBE][TWITCH][CHAT] observed username={username} message={message!r}", flush=True)
@@ -602,22 +1061,7 @@ class HebeEngine:
         user = (username or "").strip().lower().lstrip("@")
         if not user:
             return True
-        stream = self._get_stream_state()
-        bot_names = {
-            "hebenifelheim",
-            "jotunbot",
-            "streamelements",
-            "nightbot",
-            "moobot",
-            "fossabot",
-            "streamlabs",
-            (getattr(stream, "bot_username", "") or "").lower(),
-            (getattr(getattr(self.runtime, "twitch", None), "bot_username", "") or "").lower(),
-            (getattr(getattr(self.runtime, "twitch_chat_bot", None), "bot_username", "") or "").lower(),
-        }
-        configured = os.getenv("HEBE_TWITCH_BOT_USERNAMES", "")
-        bot_names.update(part.strip().lower().lstrip("@") for part in configured.split(",") if part.strip())
-        return user in bot_names
+        return is_known_bot_username(user, self._input_firewall_bot_usernames())
 
     def _load_shoutout_blocked_users(self) -> set[str]:
         configured = os.getenv(
@@ -632,6 +1076,7 @@ class HebeEngine:
             "moobot",
             "fossabot",
             "streamlabs",
+            "wizebot",
         }
         blocked.update(part.strip().lower().lstrip("@") for part in configured.split(",") if part.strip())
         stream = self._get_stream_state()
@@ -719,11 +1164,35 @@ class HebeEngine:
     def _send_shoutout(self, target: str, *, source: str, force: bool = False, explicit_self: bool = False) -> tuple[bool, str, str]:
         stream = self._get_stream_state()
         normalized = self._normalize_shoutout_target(target)
+        stream_live = bool(stream and getattr(stream, "is_live", False))
+        if not stream_live:
+            reason = "offline_stream"
+            if stream is not None:
+                stream.last_shoutout_error = reason
+            print(f"[HEBE][PROMOTION_GATE] blocked reason={reason} target={target}", flush=True)
+            print(f"[HEBE][ACTION_PERMISSIONS] action={ACTION_PROMOTION_SHOUTOUT} allowed=false reason={reason}", flush=True)
+            return False, normalized, reason
+        if source not in {"manual", "raid"}:
+            reason = "untrusted_source"
+            if source in {"ambient_stt", "media_or_music"}:
+                reason = "ambient_stt_not_allowed"
+            if stream is not None:
+                stream.last_shoutout_error = reason
+            print(f"[HEBE][PROMOTION_GATE] blocked reason={reason} target={target}", flush=True)
+            print(f"[HEBE][ACTION_PERMISSIONS] action={ACTION_PROMOTION_SHOUTOUT} allowed=false reason={reason}", flush=True)
+            return False, normalized, reason
+        print(
+            "[HEBE][PROMOTION_GATE] "
+            f"allowed reason={'approved_stream_event' if source == 'raid' else 'owner_direct_command'} target={normalized}",
+            flush=True,
+        )
         reason = self._shoutout_block_reason(normalized, explicit_self=explicit_self)
         if reason:
             if stream is not None:
                 stream.last_shoutout_error = reason
             print(f"[HEBE][TWITCH][SO] blocked reason={reason} target={target}", flush=True)
+            if reason in {"blocked_bot_user", "invalid_target"}:
+                print(f"[HEBE][PROMOTION_GATE] blocked reason=untrusted_target target={target}", flush=True)
             return False, normalized, reason
 
         now = time.time()
@@ -774,7 +1243,8 @@ class HebeEngine:
         if not bool(getattr(self, "auto_shoutout_raiders", True)) and not force:
             print(f"[HEBE][TWITCH][SO] blocked reason=auto_disabled target={target}", flush=True)
             return
-        if not force and not (stream and getattr(stream, "is_live", False)):
+        if not (stream and getattr(stream, "is_live", False)):
+            print(f"[HEBE][PROMOTION_GATE] blocked reason=offline_stream target={target}", flush=True)
             print(f"[HEBE][TWITCH][SO] blocked reason=stream_offline target={target}", flush=True)
             return
         print(f"[HEBE][TWITCH][SO] auto shoutout planned target={target}", flush=True)
@@ -1012,6 +1482,13 @@ class HebeEngine:
             f"current_pending={getattr(self.runtime.state, 'pending_clarification', None)!r}",
             flush=True,
         )
+        if source in {"ui", "typed_ui"}:
+            self._input_firewall_decision(
+                source="owner_ui",
+                text=command,
+                addressed_to_hebe=True,
+                has_action_intent=False,
+            )
 
         wake_result = self._handle_wake_sleep_command(command)
         if wake_result is not None:
@@ -1027,8 +1504,22 @@ class HebeEngine:
 
         owner_decision = self._owner_policy_decision(command, source=source)
         if owner_decision is not None and not owner_decision.allow_llm:
-            if owner_decision.allow_reply and owner_decision.direct_template_response:
-                self._deliver_manual_reply(owner_decision.direct_template_response, source=source)
+            if owner_decision.allow_reply:
+                policy_reply_result = self._synthesize_policy_reply(
+                    owner_decision,
+                    input_text=command,
+                    source=source,
+                    speaker="Leo",
+                )
+                policy_reply = str(policy_reply_result.get("text") or "")
+                if policy_reply:
+                    self._update_policy_trace_response(
+                        policy_reply,
+                        response_source=str(policy_reply_result.get("response_source") or "hybrid"),
+                        style_guard_triggered=bool(policy_reply_result.get("style_guard_triggered")),
+                        was_generic_refusal_rewritten=bool(policy_reply_result.get("was_generic_refusal_rewritten")),
+                    )
+                    self._deliver_manual_reply(policy_reply, source=source)
             print(f"[HEBE][COG] decision=owner_policy reason={owner_decision.reason}", flush=True)
             return "continue"
 
@@ -1214,21 +1705,73 @@ class HebeEngine:
         if getattr(event, "event_type", None) in {"stream_online", "stream_offline"}:
             self._handle_stream_lifecycle_event(event)
             return
-        if getattr(event, "event_type", None) == "twitch_raid":
+        event_type = str(getattr(event, "event_type", "") or "")
+        payload = getattr(event, "payload", {}) or {}
+        if event_type.startswith("twitch_"):
+            raw_text = str((payload or {}).get("message_text") or (payload or {}).get("text") or "")
+            username = str((payload or {}).get("user_login") or (payload or {}).get("username") or "")
+            source = "twitch_viewer" if event_type == "twitch_chat_react" else "twitch_system"
+            firewall = self._input_firewall_decision(
+                source=source,
+                text=raw_text,
+                username=username,
+                event_type=event_type,
+                addressed_to_hebe=self._message_mentions_hebe(raw_text) if raw_text else False,
+            )
+            if isinstance(payload, dict):
+                payload["input_firewall"] = firewall.as_dict()
+                event.payload = payload
+            if not self._firewall_allows_pipeline(firewall):
+                self._record_policy_trace(policy_trace(
+                    source=firewall.source,
+                    speaker=str((payload or {}).get("display_name") or username or firewall.source),
+                    text=raw_text,
+                    decision=PolicyDecision(
+                        allow_reply=False,
+                        allow_llm=False,
+                        allow_free_llm=False,
+                        reason=firewall.reason,
+                        intent="input_firewall",
+                        requested_behavior="blocked_input",
+                    ),
+                    addressed_to_hebe=False,
+                    authority=firewall.authority,
+                ))
+                return
+        if event_type == "twitch_raid":
             self._handle_twitch_raid_event(event)
             return
 
-        event_type = str(getattr(event, "event_type", "") or "")
-        payload = getattr(event, "payload", {}) or {}
         if event_type == "twitch_chat_react":
             policy_decision = self._viewer_policy_decision(payload)
             if policy_decision is not None and not policy_decision.allow_llm:
-                if policy_decision.allow_reply and policy_decision.direct_template_response:
-                    self._deliver_twitch_reply(
-                        policy_decision.direct_template_response,
-                        event_type=event_type,
-                        payload=payload,
+                if policy_decision.allow_reply:
+                    speaker = str((payload or {}).get("display_name") or (payload or {}).get("user_login") or "viewer")
+                    raw_text = str((payload or {}).get("message_text") or (payload or {}).get("text") or "")
+                    policy_reply_result = self._synthesize_policy_reply(
+                        policy_decision,
+                        input_text=raw_text,
+                        source="twitch_chat",
+                        speaker=speaker,
                     )
+                    policy_reply = str(policy_reply_result.get("text") or "")
+                    if policy_reply:
+                        self._update_policy_trace_response(
+                            policy_reply,
+                            response_source=str(policy_reply_result.get("response_source") or "hybrid"),
+                            style_guard_triggered=bool(policy_reply_result.get("style_guard_triggered")),
+                            was_generic_refusal_rewritten=bool(policy_reply_result.get("was_generic_refusal_rewritten")),
+                        )
+                        self._deliver_twitch_reply(
+                            policy_reply,
+                            event_type=event_type,
+                            payload=payload,
+                        )
+                    else:
+                        print(
+                            f"[HEBE][VIEWER_POLICY] decision=ignored reason={policy_decision.reason}",
+                            flush=True,
+                        )
                 else:
                     print(
                         f"[HEBE][VIEWER_POLICY] decision=ignored reason={policy_decision.reason}",
@@ -1413,6 +1956,19 @@ class HebeEngine:
         payload = getattr(event, "payload", {}) or {}
         username = payload.get("display_name") or payload.get("user_login") or "alguien"
         viewers = int(payload.get("viewer_count") or 0)
+        firewall = self._input_firewall_decision(
+            source="twitch_system",
+            text="",
+            username=payload.get("user_login") or username,
+            event_type="twitch_raid",
+            addressed_to_hebe=False,
+        )
+        if isinstance(payload, dict):
+            payload["input_firewall"] = firewall.as_dict()
+            event.payload = payload
+        if not self._firewall_allows_pipeline(firewall):
+            print(f"[HEBE][TWITCH][RAID] blocked reason={firewall.reason}", flush=True)
+            return
         print(f"[HEBE][TWITCH][RAID] received from={username} viewers={viewers}", flush=True)
         if stream is not None:
             self._ensure_stream_memory_session_if_live(stream)
@@ -1444,6 +2000,9 @@ class HebeEngine:
             return
         self._deliver_twitch_reply(reply_text, event_type="twitch_raid", payload=payload)
         print("[HEBE][TWITCH][RAID] sent thank-you", flush=True)
+        if bool(payload.get("_simulated")):
+            print("[HEBE][PROMOTION_GATE] blocked reason=simulation_mode target={}".format(payload.get("user_login") or username), flush=True)
+            return
         self._maybe_auto_shoutout_raider(payload.get("user_login") or username, force=bool(payload.get("_force_shoutout")))
 
     def _synthesize_internal_event_reply(self, event) -> str:
@@ -1709,6 +2268,7 @@ class HebeEngine:
                         "stage": "ready",
                         "tts_enabled": bool(getattr(self.runtime.state, "tts_enabled", False)),
                         "stream_tts_enabled": bool(getattr(policies, "allow_tts_replies", False)),
+                        "stream_output_mode": str(getattr(stream, "stream_output_mode", "tts_enabled") if stream else "tts_enabled"),
                         "stt_enabled": bool(getattr(self.runtime, "stt_enabled", False)),
                         "wake_loop_alive": False,
                         "wake_loop_status": "starting",
@@ -2268,13 +2828,20 @@ class HebeEngine:
             return False
         allowed = set(turn.get("allowed_sources") or ["stt_voice", "ui"])
         if source not in allowed:
+            print(f"[HEBE][FOLLOWUP_GATE] rejected reason=source_not_allowed source={source}", flush=True)
             return False
         if source == "stt_voice":
             if self._stt_self_tts_echo_metrics(text or "").get("rejected"):
                 print("[HEBE][CONVERSATION] pending_turn_not_matched reason=self_tts_echo", flush=True)
+                print("[HEBE][FOLLOWUP_GATE] rejected reason=self_tts_echo", flush=True)
                 return False
             normalized = self._normalize_stt_metric_text(text or "")
             if not normalized or normalized in {"mmm", "um", "eh", "vale", "ok"}:
+                print("[HEBE][FOLLOWUP_GATE] rejected reason=empty_or_backchannel", flush=True)
+                return False
+            media_detected, _media_reason = looks_like_media_or_singing(normalized)
+            if media_detected:
+                print("[HEBE][FOLLOWUP_GATE] rejected reason=media_or_singing", flush=True)
                 return False
             ambient_types = {
                 "victory", "objective_update", "location_update",
@@ -2283,10 +2850,13 @@ class HebeEngine:
             }
             expected = str(turn.get("expected_type") or "")
             if expected != "casual_answer" and event_type in ambient_types:
+                print(f"[HEBE][FOLLOWUP_GATE] rejected reason=ambient_stt event_type={event_type}", flush=True)
                 return False
             if self._looks_like_stream_ambient_comment(normalized):
+                print("[HEBE][FOLLOWUP_GATE] rejected reason=semantic_unrelated", flush=True)
                 return False
         print(f"[HEBE][CONVERSATION] pending_turn matched source={source}", flush=True)
+        print("[HEBE][FOLLOWUP_GATE] accepted reason=owner_related_followup", flush=True)
         return True
 
     def _looks_like_stream_ambient_comment(self, normalized: str) -> bool:
@@ -2479,20 +3049,100 @@ class HebeEngine:
         voice_type, mood_hint = self._classify_voice_event(command)
         has_action_intent = self._input_event_has_action_intent(getattr(self, "_current_input_event", None))
         is_direct_command = voice_type == "direct_command_to_hebe"
-        relevance = ContextRelevance(useful=False, category="none", confidence=0.0, reason="not_evaluated")
+        media_detected, _media_reason = looks_like_media_or_singing(command)
+        if media_detected and not is_direct_command:
+            firewall = self._input_firewall_decision(
+                source="ambient_stt",
+                text=command,
+                event_type=voice_type,
+                addressed_to_hebe=False,
+                has_action_intent=has_action_intent,
+            )
+            if self._current_input_event is not None:
+                self._current_input_event.stt_metadata["input_firewall"] = firewall.as_dict()
+            self._current_input_event = None
+            return "continue"
         try:
             possible_reply_to_hebe = self._get_live_session_brain().is_possible_reply_to_hebe(command)
         except Exception:
             possible_reply_to_hebe = False
+        pending_match = self._pending_conversation_matches(source="stt_voice", text=command, event_type=voice_type)
         pending_followup = (
             not has_action_intent
             and not is_direct_command
             and self._stt_has_meaningful_conversation_content(transcript_for_cognition, command)
             and (
-                self._pending_conversation_matches(source="stt_voice", text=command, event_type=voice_type)
+                pending_match
                 or possible_reply_to_hebe
             )
         )
+        firewall_source = (
+            "owner_stt_direct"
+            if is_direct_command
+            else "owner_stt_followup"
+            if pending_followup
+            else "ambient_stt"
+        )
+        firewall = self._input_firewall_decision(
+            source=firewall_source,
+            text=command,
+            event_type=voice_type,
+            addressed_to_hebe=is_direct_command,
+            pending_followup=pending_followup,
+            has_action_intent=has_action_intent,
+        )
+        if self._current_input_event is not None:
+            self._current_input_event.stt_metadata["input_firewall"] = firewall.as_dict()
+        relevance = ContextRelevance(useful=False, category="none", confidence=0.0, reason="not_evaluated")
+        if not is_direct_command and not pending_followup:
+            if firewall.firewall_decision == "allow_context_only" and self._is_stream_enabled():
+                relevance = self._record_voice_event(command, voice_type, mood_hint)
+            classification = self._get_input_classifier().classify(
+                self._current_input_event,
+                voice_event_type=voice_type,
+                addressed_to_hebe=False,
+                has_action_intent=False,
+                pending_followup=False,
+                valid=True,
+            )
+            self._log_input_classification(classification)
+            conversation_state = self._get_conversation_state_resolver().from_pending_turn(
+                self._get_pending_conversation_turn(),
+                matched=False,
+                reason="no_matching_active_conversation",
+            )
+            self._log_conversation_state(conversation_state)
+            output_targets = self._output_targets_for_input_type(classification.input_type)
+            response_decision = self._get_response_decision_resolver().decide(
+                classification=classification,
+                conversation_state=conversation_state,
+                relevance=relevance,
+                output_targets=output_targets,
+            )
+            self._log_knowledge_resolution()
+            self._log_response_decision(response_decision)
+            self._build_response_frame(
+                event=self._current_input_event,
+                classification=classification,
+                conversation_state=conversation_state,
+                response_decision=response_decision,
+            )
+            print("[HEBE][STT_GATE] ambient_only reason=no_wake_no_valid_pending", flush=True)
+            self._declare_output_route(
+                input_type="ambient_stt",
+                targets=response_decision.output_target,
+                reason=response_decision.reason,
+            )
+            if firewall.firewall_decision == "allow_context_only":
+                self._log_stt_non_command_decision(
+                    command,
+                    "ambient_context_updated" if relevance.useful else "ambient_ignored_low_value",
+                    reason=firewall.reason,
+                )
+            else:
+                self._log_stt_non_command_decision(command, "ambient_ignored_low_value", reason=firewall.reason)
+            self._current_input_event = None
+            return "continue"
         pending_turn_for_frame = self._get_pending_conversation_turn()
         conversation_state = self._get_conversation_state_resolver().from_pending_turn(
             pending_turn_for_frame,
@@ -2988,6 +3638,8 @@ class HebeEngine:
     def _stream_tts_output_enabled_for_event(self, event_type: str | None = None) -> bool:
         if not bool(getattr(self.runtime.state, "tts_enabled", False)):
             return False
+        if self._stream_output_mode() in {"ui_only", "twitch_chat_only", "silent"}:
+            return False
         stream = self._get_stream_state()
         policies = getattr(stream, "policies", None) if stream else None
         if event_type == "twitch_idle_prompt":
@@ -3079,7 +3731,49 @@ class HebeEngine:
             stream.spontaneous_twitch_used_anchor_keys = used_anchors
 
     def _local_tts_output_enabled(self) -> bool:
-        return bool(getattr(self.runtime.state, "tts_enabled", False))
+        if not bool(getattr(self.runtime.state, "tts_enabled", False)):
+            return False
+        stream = self._get_stream_state()
+        stream_active = bool(
+            stream
+            and (
+                getattr(stream, "enabled", False)
+                or getattr(stream, "is_live", False)
+                or getattr(stream, "live_test_override", False)
+            )
+        )
+        if stream_active and self._stream_output_mode() in {"ui_only", "twitch_chat_only", "silent"}:
+            print("[HEBE][ROUTING] output_target=local_ui reason=tts_disabled", flush=True)
+            return False
+        return True
+
+    def _stream_output_mode(self) -> str:
+        stream = self._get_stream_state()
+        mode = str(getattr(stream, "stream_output_mode", "tts_enabled") if stream is not None else "tts_enabled").strip()
+        if mode not in {"ui_only", "tts_enabled", "twitch_chat_only", "silent"}:
+            mode = "tts_enabled"
+        return mode
+
+    def set_stream_output_mode(self, mode: str, *, reason: str = "user_setting") -> dict:
+        stream = self._get_stream_state()
+        clean_mode = str(mode or "").strip()
+        if clean_mode not in {"ui_only", "tts_enabled", "twitch_chat_only", "silent"}:
+            raise ValueError("invalid stream output mode")
+        if stream is not None:
+            stream.stream_output_mode = clean_mode
+            policies = getattr(stream, "policies", None)
+            if policies is not None:
+                stream_tts = clean_mode == "tts_enabled"
+                policies.allow_tts_replies = stream_tts
+                policies.allow_tts_event_replies = stream_tts
+                policies.allow_tts_raid_thanks = stream_tts
+        print(f"[HEBE][OUTPUT_MODE] mode={clean_mode} reason={reason}", flush=True)
+        self._emit_audio_status()
+        return {
+            "stream_output_mode": clean_mode,
+            "stream_tts_enabled": clean_mode == "tts_enabled",
+            "reason": reason,
+        }
 
     def _is_stream_enabled(self) -> bool:
         stream = self._get_stream_state()
@@ -3724,6 +4418,7 @@ class HebeEngine:
                 "display_name": target,
                 "user_login": target,
                 "viewer_count": 1,
+                "_simulated": True,
                 "_force_shoutout": True,
             }))
             return f"Raid simulado de {target} enviado." if send else f"Raid simulado de {target}: thank-you y SO probados."
@@ -5079,7 +5774,12 @@ class HebeEngine:
                 return None
             enabled = intent == "stream_on"
             policies.allow_tts_replies = enabled
+            stream.stream_output_mode = "tts_enabled" if enabled else "twitch_chat_only"
             print(f"[HEBE][TTS] stream enabled={str(enabled).lower()} source=command", flush=True)
+            print(
+                f"[HEBE][OUTPUT_MODE] mode={stream.stream_output_mode} reason=user_setting",
+                flush=True,
+            )
             self._emit_audio_status()
             return CommandResult(
                 action_type="stream_tts_enabled" if enabled else "stream_tts_disabled",
@@ -5089,7 +5789,7 @@ class HebeEngine:
                     if enabled
                     else "Stream TTS replies disabled; Twitch replies remain text chat only."
                 ),
-                state_changes={"stream_tts": enabled},
+                state_changes={"stream_tts": enabled, "stream_output_mode": stream.stream_output_mode},
                 constraints=["Do not ask for clarification.", "Do not claim idle spontaneous TTS changed."],
                 fallback_text=(
                     "Vale. Si toca, también hablaré en stream."
@@ -5208,6 +5908,8 @@ class HebeEngine:
         self.runtime.state.tts_enabled = True
         if policies is not None:
             policies.allow_tts_idle_prompts = False
+        if stream is not None:
+            stream.stream_output_mode = "ui_only"
         self.runtime.state.pending_tts_scope = None
         print("[HEBE][INTENT] resolved pending_tts_scope=local", flush=True)
         print("[HEBE][INTENT] cleared pending_tts_scope", flush=True)
@@ -5215,7 +5917,7 @@ class HebeEngine:
             action_type="tts_scope_resolved",
             success=True,
             user_visible_summary="Voice is enabled locally only; stream remains text-only unless Leo asks otherwise.",
-            state_changes={"tts_enabled": True, "stream_idle_tts": False, "pending_tts_scope": False, "defaulted": defaulted},
+            state_changes={"tts_enabled": True, "stream_idle_tts": False, "stream_output_mode": "ui_only", "pending_tts_scope": False, "defaulted": defaulted},
             constraints=["Do not ask for more clarification.", "Do not claim stream voice is enabled."],
             fallback_text="Perfecto, voz activada solo aquí. En stream seguiré en texto salvo que me digas lo contrario.",
             requires_model_response=True,
@@ -5230,6 +5932,8 @@ class HebeEngine:
             policies.allow_tts_replies = True
             policies.allow_tts_event_replies = True
             policies.allow_tts_raid_thanks = True
+        if stream is not None:
+            stream.stream_output_mode = "tts_enabled"
         self.runtime.state.pending_tts_scope = None
         print("[HEBE][INTENT] resolved pending_tts_scope=stream", flush=True)
         print("[HEBE][INTENT] cleared pending_tts_scope", flush=True)
@@ -5237,7 +5941,7 @@ class HebeEngine:
             action_type="tts_scope_resolved",
             success=True,
             user_visible_summary="Voice is enabled locally and for stream event replies; idle spontaneity remains text-only unless Leo asks otherwise.",
-            state_changes={"tts_enabled": True, "stream_replies_tts": True, "stream_event_tts": True, "stream_raid_tts": True, "pending_tts_scope": False},
+            state_changes={"tts_enabled": True, "stream_replies_tts": True, "stream_event_tts": True, "stream_raid_tts": True, "stream_output_mode": "tts_enabled", "pending_tts_scope": False},
             constraints=["Do not ask for more clarification.", "Do not claim idle spontaneous voice is enabled."],
             fallback_text="Perfecto, voz activada aquí y también para eventos del stream. La espontaneidad idle sigue en texto salvo que me digas lo contrario.",
             requires_model_response=True,
@@ -5282,6 +5986,7 @@ class HebeEngine:
         return (
             "Estado de voz/TTS:\n\n"
             f"* Global TTS enabled: {yes_no(getattr(self.runtime.state, 'tts_enabled', False))}\n"
+            f"* Stream output mode: {self._stream_output_mode()}\n"
             f"* TTS backend: {tts_backend}\n"
             f"* Stream idle TTS: {yes_no(getattr(policies, 'allow_tts_idle_prompts', False))}\n"
             f"* Event TTS: {yes_no(getattr(policies, 'allow_tts_event_replies', False))}\n"
@@ -5402,6 +6107,7 @@ class HebeEngine:
                 {
                     "tts_enabled": bool(getattr(self.runtime.state, "tts_enabled", False)),
                     "stream_tts_enabled": bool(getattr(policies, "allow_tts_replies", False)),
+                    "stream_output_mode": str(getattr(stream, "stream_output_mode", "tts_enabled") if stream else "tts_enabled"),
                     "stt_enabled": bool(getattr(self.runtime, "stt_enabled", False)),
                     "stt": getattr(stt, "status", "off") if stt is not None else "off",
                     "last_stt_error": getattr(stt, "last_input_device_error", None) if stt is not None else None,
@@ -5473,24 +6179,62 @@ class HebeEngine:
         twitch = getattr(self.runtime, "twitch", None)
         stream = getattr(self.runtime.state, "stream", None)
         is_spontaneous = event_type == "twitch_idle_prompt"
+        is_simulated = bool((payload or {}).get("_simulated"))
+        if event_type and event_type.startswith("twitch_"):
+            raw_text = str((payload or {}).get("message_text") or (payload or {}).get("text") or "")
+            username = str((payload or {}).get("user_login") or (payload or {}).get("username") or "")
+            source = "twitch_viewer" if event_type == "twitch_chat_react" else "twitch_system"
+            firewall = self._input_firewall_decision(
+                source=source,
+                text=raw_text or text,
+                username=username,
+                event_type=event_type,
+                addressed_to_hebe=self._message_mentions_hebe(raw_text) if raw_text else False,
+            )
+            if not self._firewall_allows_pipeline(firewall) or firewall.blocks_action(ACTION_TWITCH_REPLY):
+                print(
+                    f"[HEBE][EVENT][TWITCH] blocked reason={firewall.reason} event_type={event_type}",
+                    flush=True,
+                )
+                return
+            if is_simulated:
+                print("[HEBE][STREAM_GATE] allowed reason=simulation_mode", flush=True)
+        if not is_simulated and not (stream and getattr(stream, "is_live", False)):
+            print("[HEBE][STREAM_GATE] blocked reason=offline_stream source=twitch_delivery", flush=True)
+            print(f"[HEBE][ACTION_PERMISSIONS] action={ACTION_TWITCH_REPLY} allowed=false reason=offline_stream", flush=True)
+            return
+        output_mode = self._stream_output_mode()
         tts_allowed = self._stream_tts_output_enabled_for_event(event_type)
         spontaneous_chat_allowed = False
         spontaneous_chat_reason = ""
         if is_spontaneous:
-            spontaneous_chat_allowed, spontaneous_chat_reason = self._spontaneous_twitch_chat_delivery_allowed(text, payload)
+            if output_mode == "ui_only":
+                spontaneous_chat_allowed, spontaneous_chat_reason = False, "stream_output_mode_ui_only"
+                targets = [OUTPUT_TARGET_LOCAL_UI]
+            elif output_mode == "silent":
+                spontaneous_chat_allowed, spontaneous_chat_reason = False, "stream_output_mode_silent"
+                targets = [OUTPUT_TARGET_SILENT_CONTEXT_UPDATE]
+            else:
+                spontaneous_chat_allowed, spontaneous_chat_reason = self._spontaneous_twitch_chat_delivery_allowed(text, payload)
+                targets = []
             if spontaneous_chat_allowed:
                 targets = [OUTPUT_TARGET_TWITCH_CHAT]
                 if tts_allowed:
                     targets.append(OUTPUT_TARGET_STREAM_TTS)
-            else:
+            elif not targets:
                 if spontaneous_chat_reason == "twitch_spontaneous_disabled":
                     print("[HEBE][SPONTANEITY] skipped reason=twitch_spontaneous_disabled", flush=True)
                 else:
                     print(f"[HEBE][SPONTANEITY] skipped reason={spontaneous_chat_reason}", flush=True)
                 targets = [OUTPUT_TARGET_STREAM_TTS if tts_allowed else OUTPUT_TARGET_LOCAL_UI]
         else:
-            targets = [OUTPUT_TARGET_TWITCH_CHAT]
-        if not is_spontaneous and tts_allowed:
+            if output_mode == "ui_only" or is_simulated:
+                targets = [OUTPUT_TARGET_LOCAL_UI]
+            elif output_mode == "silent":
+                targets = [OUTPUT_TARGET_SILENT_CONTEXT_UPDATE]
+            else:
+                targets = [OUTPUT_TARGET_TWITCH_CHAT]
+        if not is_spontaneous and tts_allowed and not is_simulated:
             targets.append(OUTPUT_TARGET_STREAM_TTS)
         self._declare_output_route(
             input_type="spontaneity" if is_spontaneous else "twitch_mention_or_event",
@@ -5537,6 +6281,9 @@ class HebeEngine:
                 except Exception as e:
                     print(f"[HEBE][EVENT][TWITCH] send_message failed: {e!r}", flush=True)
             else:
+                if output_mode == "silent":
+                    print("[HEBE][SPONTANEITY] skipped reason=stream_output_mode_silent", flush=True)
+                    return
                 emit("chat.assistant", {"text": text, "source": "spontaneity", "output_target": OUTPUT_TARGET_LOCAL_UI})
                 try:
                     self._get_live_session_brain().observe_hebe_utterance(
@@ -5548,6 +6295,20 @@ class HebeEngine:
                     )
                 except Exception as exc:
                     print(f"[HEBE][LIVE_SESSION] hebe spontaneity record failed: {exc!r}", flush=True)
+        elif is_simulated or output_mode == "ui_only":
+            emit("chat.assistant", {"text": text, "source": "simulation" if is_simulated else "twitch", "output_target": OUTPUT_TARGET_LOCAL_UI})
+            try:
+                self._get_live_session_brain().observe_hebe_utterance(
+                    text,
+                    output_target=targets,
+                    input_type="twitch_mention_or_event",
+                    topic=event_type or "twitch_event",
+                )
+            except Exception as exc:
+                print(f"[HEBE][LIVE_SESSION] hebe twitch record failed: {exc!r}", flush=True)
+        elif output_mode == "silent":
+            print("[HEBE][EVENT][TWITCH] output_mode=silent dropping chat reply", flush=True)
+            return
         elif twitch is not None and twitch.is_available():
             try:
                 twitch.send_message(text)
@@ -5567,6 +6328,9 @@ class HebeEngine:
 
         if not getattr(self.runtime.state, "tts_enabled", False):
             print("[HEBE][TTS] skipped reason=global_disabled", flush=True)
+            return
+        if is_simulated:
+            print("[HEBE][TTS] skipped reason=dev_simulation", flush=True)
             return
         if is_spontaneous and spontaneous_chat_allowed and not tts_allowed:
             print("[HEBE][TTS] skipped reason=spontaneous_twitch_chat_text_only", flush=True)
@@ -5613,6 +6377,9 @@ class HebeEngine:
             print(f"[HEBE][LIVE_SESSION] hebe voice record failed: {exc!r}", flush=True)
         if not getattr(self.runtime.state, "tts_enabled", False):
             print("[HEBE][TTS] skipped reason=global_disabled", flush=True)
+            return
+        if not self._local_tts_output_enabled():
+            print("[HEBE][TTS] skipped reason=stream_output_mode", flush=True)
             return
         try:
             safe_text = str(text or "").replace('"', '\\"')

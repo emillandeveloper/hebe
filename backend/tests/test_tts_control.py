@@ -215,6 +215,7 @@ class TTSControlTests(unittest.TestCase):
 
     def test_stream_tts_off_command_keeps_text_chat(self):
         engine = make_engine(tts_enabled=True)
+        engine.runtime.state.stream.is_live = True
 
         reply = engine._handle_tts_manual_command("Hebe, responde solo por chat")
 
@@ -241,6 +242,7 @@ class TTSControlTests(unittest.TestCase):
 
     def test_global_tts_disabled_blocks_stream_tts_even_when_policy_allows(self):
         engine = make_engine(tts_enabled=False)
+        engine.runtime.state.stream.is_live = True
         engine.runtime.state.stream.policies.allow_tts_replies = True
 
         engine._deliver_twitch_reply("Texto al chat.")

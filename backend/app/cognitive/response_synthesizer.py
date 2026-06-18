@@ -819,6 +819,169 @@ class ResponseSynthesizer:
             return fallback
         return reply
 
+    def synthesize_policy_boundary_response(
+        self,
+        *,
+        policy: dict[str, Any],
+        input_text: str = "",
+        speaker: str = "",
+        source: str = "",
+    ) -> dict[str, Any]:
+        reason = str(policy.get("reason") or "")
+        response_intent = str(policy.get("response_intent") or "hebe_playful_boundary")
+        fallback = self._policy_boundary_fallback(reason)
+        base = {
+            "text": "",
+            "response_source": "fallback_template",
+            "style_guard_triggered": False,
+            "was_generic_refusal_rewritten": False,
+        }
+        if self.conversation_model is None:
+            print("[HEBE][PERSONA_RESPONSE] source=fallback_template intent=%s" % response_intent, flush=True)
+            return {**base, "text": fallback}
+
+        system = (
+            f"{build_hebe_core_identity()}\n\n"
+            f"{build_hebe_stream_style_block()}\n\n"
+            "You are writing Hebe's final stream-safe boundary response after policy has already decided the request is blocked.\n"
+            "Policy decides what cannot happen; Hebe decides how to say it.\n"
+            "Rules:\n"
+            "- One short line only, no markdown, no labels.\n"
+            "- Stay in Hebe's voice: loyal to Leo, dry, playful, direct, streamer-safe.\n"
+            "- Do not sound like a corporate safety bot, legal disclaimer, or generic assistant.\n"
+            "- Do not provide instructions for blocked content.\n"
+            "- Do not repeat the viewer's requested message as an action.\n"
+            "- Do not moralize or lecture.\n"
+            "- Do not copy examples, prompts, tests, policy metadata, or scenario wording.\n"
+            "- If the topic is sexual or explicit, deflect briefly without explicit details.\n"
+            "- If Leo has set a boundary, respect Leo's authority without turning it into a policy lecture."
+        )
+        user = (
+            "Structured policy boundary:\n"
+            f"source: {source}\n"
+            f"speaker: {speaker}\n"
+            f"user_text: {input_text}\n"
+            f"policy_decision: {policy.get('policy_decision') or 'blocked'}\n"
+            f"reason: {reason}\n"
+            f"intent: {policy.get('intent') or ''}\n"
+            f"requested_behavior: {policy.get('requested_behavior') or ''}\n"
+            f"behavior_family: {policy.get('behavior_family') or ''}\n"
+            f"target: {policy.get('target') or ''}\n"
+            f"response_intent: {response_intent}\n"
+            f"tone: {policy.get('response_tone') or 'sarcastic_playful_stream_safe'}\n"
+            f"must_include: {policy.get('must_include') or []}\n"
+            f"must_not_include: {policy.get('must_not_include') or []}\n\n"
+            "Write Hebe's fresh final reply."
+        )
+        raw = self._call_model(system, user, fallback="")
+        reply = clean_twitch_reply(raw).strip()
+        if not reply:
+            print("[HEBE][PERSONA_RESPONSE] source=fallback_template intent=%s" % response_intent, flush=True)
+            return {**base, "text": fallback}
+
+        generic_reason = self._generic_refusal_reason(reply)
+        if generic_reason:
+            print("[HEBE][STYLE_GUARD] generic_refusal_detected=true action=regenerate", flush=True)
+            rewrite = self._regenerate_policy_boundary_response(
+                bad_reply=reply,
+                policy=policy,
+                input_text=input_text,
+                speaker=speaker,
+                source=source,
+                fallback=fallback,
+            )
+            if rewrite and not self._generic_refusal_reason(rewrite):
+                print("[HEBE][PERSONA_RESPONSE] source=llm_persona_generated intent=%s" % response_intent, flush=True)
+                return {
+                    **base,
+                    "text": rewrite,
+                    "response_source": "llm_persona_generated",
+                    "style_guard_triggered": True,
+                    "was_generic_refusal_rewritten": True,
+                }
+            print("[HEBE][PERSONA_RESPONSE] source=fallback_template intent=%s" % response_intent, flush=True)
+            return {
+                **base,
+                "text": fallback,
+                "style_guard_triggered": True,
+                "was_generic_refusal_rewritten": True,
+            }
+
+        print("[HEBE][STYLE_GUARD] generic_refusal_detected=false", flush=True)
+        print("[HEBE][PERSONA_RESPONSE] source=llm_persona_generated intent=%s" % response_intent, flush=True)
+        return {
+            **base,
+            "text": reply,
+            "response_source": "llm_persona_generated",
+        }
+
+    def _regenerate_policy_boundary_response(
+        self,
+        *,
+        bad_reply: str,
+        policy: dict[str, Any],
+        input_text: str,
+        speaker: str,
+        source: str,
+        fallback: str,
+    ) -> str:
+        if self.conversation_model is None:
+            return ""
+        system = (
+            f"{build_hebe_core_identity()}\n\n"
+            f"{build_hebe_stream_style_block()}\n\n"
+            "Rewrite this blocked-policy boundary in Hebe's voice.\n"
+            "Keep it short, playful, loyal to Leo, and stream-safe.\n"
+            "Remove generic assistant/legal wording. Do not add instructions for the blocked topic.\n"
+            "Return only the final reply."
+        )
+        user = (
+            f"source: {source}\n"
+            f"speaker: {speaker}\n"
+            f"user_text: {input_text}\n"
+            f"reason: {policy.get('reason') or ''}\n"
+            f"bad_reply: {bad_reply}\n"
+            "Rewrite it now."
+        )
+        raw = self._call_model(system, user, fallback=fallback, seed=random.randint(1, 999999))
+        return clean_twitch_reply(raw).strip()
+
+    def _generic_refusal_reason(self, text: str) -> str:
+        normalized = self._normalize_guard_text(text)
+        if not normalized:
+            return ""
+        if "como ia" in normalized or "soy una ia" in normalized:
+            return "ai_identity_refusal"
+        if "no puedo" in normalized and any(stem in normalized for stem in ("proporcion", "dar", "ayud", "responder")):
+            return "generic_no_puedo"
+        if "no estoy" in normalized and any(stem in normalized for stem in ("capac", "autoriz")):
+            return "generic_capability_disclaimer"
+        if "debo" in normalized and any(stem in normalized for stem in ("mantener", "evitar", "cumplir")):
+            return "generic_policy_disclaimer"
+        if any(stem in normalized for stem in ("consulta", "busca", "acude")) and any(
+            stem in normalized for stem in ("profesional", "acredit", "confiable", "fiable", "recurso", "guia")
+        ):
+            return "generic_external_resource_referral"
+        if "informacion seria" in normalized or "informacion confiable" in normalized:
+            return "generic_resource_language"
+        return ""
+
+    def _policy_boundary_fallback(self, reason: str) -> str:
+        reason_key = str(reason or "")
+        if reason_key == "sexual_topic_stream_mode":
+            return "Ese tema no se convierte en clase de directo. Lo aparco y seguimos."
+        if reason_key == "protected_group_joke":
+            return "Humor si; usar colectivos como diana, paso. Prueba con algo menos cutre."
+        if reason_key == "owner_behavior_block":
+            return "Leo ya marco ese limite. Yo no voy a hacer el rodeo por el chat."
+        if reason_key == "viewer_repeat_to_leo_request":
+            return "Si quieres decirselo a Leo, el chat esta ahi. Yo no hago de recadera."
+        if reason_key == "viewer_behavior_request":
+            return "Puedes hablar conmigo; dirigir mi tono con Leo ya es otro negociado."
+        if reason_key == "viewer_not_authority":
+            return "Puedes sugerir, no conducir. El volante aqui no lo lleva el chat."
+        return "Ese camino no toca en directo. Lo corto aqui y seguimos."
+
     def _valid_command_reply(self, reply: str, result: CommandResult) -> bool:
         if not reply:
             return False

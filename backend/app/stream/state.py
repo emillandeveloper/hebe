@@ -67,6 +67,7 @@ class StreamSessionState:
     recent_run_context_facts: list[dict] = field(default_factory=list)
     completed_run_markers: list[str] = field(default_factory=list)
     current_activity: str = "unknown"
+    stream_output_mode: str = "tts_enabled"
     combat_state: Optional[bool] = None
     current_game_activity_confidence: float = 0.0
     current_game_activity_provenance: Optional[str] = None
@@ -75,6 +76,7 @@ class StreamSessionState:
     last_owner_correction: Optional[str] = None
     blocked_comment_categories: list[str] = field(default_factory=list)
     active_behavior_blocks: list[dict] = field(default_factory=list)
+    last_policy_trace: Optional[dict] = None
     viewer_policy_cooldowns: dict[str, dict] = field(default_factory=dict)
     last_invalidated_run_context_facts: list[dict] = field(default_factory=list)
     title_context_markers: list[str] = field(default_factory=list)
