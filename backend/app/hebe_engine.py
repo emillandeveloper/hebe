@@ -1301,7 +1301,7 @@ class HebeEngine:
 
     def _ensure_stream_memory_session_if_live(self, stream=None) -> int | None:
         stream = stream or self._get_stream_state()
-        if not stream or not (getattr(stream, "is_live", False) or getattr(stream, "enabled", False)):
+        if not stream or not getattr(stream, "is_live", False):
             return getattr(stream, "active_stream_session_id", None) if stream else None
         try:
             return stream_memory.ensure_active_stream_session(stream, source="engine")
@@ -1970,21 +1970,25 @@ class HebeEngine:
             print(f"[HEBE][TWITCH][RAID] blocked reason={firewall.reason}", flush=True)
             return
         print(f"[HEBE][TWITCH][RAID] received from={username} viewers={viewers}", flush=True)
+        is_simulated = bool(payload.get("_simulated"))
         if stream is not None:
-            self._ensure_stream_memory_session_if_live(stream)
             stream.last_raid_event = {
                 "display_name": username,
                 "user_login": payload.get("user_login") or username,
                 "viewer_count": viewers,
                 "ts": time.time(),
             }
-            self._record_stream_event_safe("twitch_raid", payload, stream=stream)
-            self._observe_stream_presence_safe(
-                payload.get("user_login") or username,
-                username,
-                stream_session_id=getattr(stream, "active_stream_session_id", None),
-                source="raid",
-            )
+            if is_simulated:
+                print("[HEBE][STREAM_SESSION] skipped reason=simulation", flush=True)
+            else:
+                self._ensure_stream_memory_session_if_live(stream)
+                self._record_stream_event_safe("twitch_raid", payload, stream=stream)
+                self._observe_stream_presence_safe(
+                    payload.get("user_login") or username,
+                    username,
+                    stream_session_id=getattr(stream, "active_stream_session_id", None),
+                    source="raid",
+                )
 
         if not stream:
             print("[HEBE][TWITCH][RAID] blocked reason=no_stream_state", flush=True)
@@ -2000,7 +2004,7 @@ class HebeEngine:
             return
         self._deliver_twitch_reply(reply_text, event_type="twitch_raid", payload=payload)
         print("[HEBE][TWITCH][RAID] sent thank-you", flush=True)
-        if bool(payload.get("_simulated")):
+        if is_simulated:
             print("[HEBE][PROMOTION_GATE] blocked reason=simulation_mode target={}".format(payload.get("user_login") or username), flush=True)
             return
         self._maybe_auto_shoutout_raider(payload.get("user_login") or username, force=bool(payload.get("_force_shoutout")))

@@ -7,9 +7,11 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from app.hebe_engine import HebeEngine
+from app.services import db_sqlite
 from app.stream.context_sync import StreamContextSyncService
 from app.stream.game_research import GameKnowledgeResearchConfig, GameKnowledgeResearchService
 from app.stream.game_profiles import GameProfileStore
+from app.stream import memory as stream_memory
 from app.stream.state import StreamSessionState
 from app.stream.spontaneity import StreamSpontaneityConfig, StreamSpontaneityService
 
@@ -136,6 +138,18 @@ class FakeContextSync:
 
 
 class StreamPresenceTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp_db = tempfile.TemporaryDirectory()
+        self.old_db_path = db_sqlite.DB_PATH
+        db_sqlite.DB_PATH = os.path.join(self.tmp_db.name, "hebe_stream_presence.sqlite3")
+        stream_memory._READY_DB_PATH = None
+        stream_memory.init_stream_memory_schema()
+
+    def tearDown(self):
+        db_sqlite.DB_PATH = self.old_db_path
+        stream_memory._READY_DB_PATH = None
+        self.tmp_db.cleanup()
+
     def test_stream_presence_default_is_reactive(self):
         stream = StreamSessionState()
 

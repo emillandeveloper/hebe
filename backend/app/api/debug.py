@@ -1,3 +1,4 @@
+import os
 import sqlite3
 from contextlib import closing
 from pathlib import Path
@@ -18,6 +19,7 @@ from app.api.capabilities import (
 from app.services import db_sqlite
 from app.core.log_bus import get_recent_logs
 from app.stream.live_session import latest_live_session_debug
+from app.stream import memory as stream_memory
 
 router = APIRouter(prefix="/debug", tags=["debug"])
 
@@ -30,6 +32,14 @@ SENSITIVE_COLUMN_PARTS = (
     "authorization",
     "bearer",
 )
+
+
+def _stream_data_repair_enabled() -> bool:
+    return (
+        os.getenv("ELECTRON_DEV", "0").strip() == "1"
+        or os.getenv("HEBE_DEV_CONTROLS", "0").strip() == "1"
+        or os.getenv("HEBE_STREAM_DATA_REPAIR_ENABLED", "0").strip() == "1"
+    )
 
 
 def _log_db_error(message: str) -> None:
@@ -148,6 +158,26 @@ def list_db_tables():
 @router.get("/logs")
 def list_backend_logs(limit: int = Query(1000, ge=1, le=5000)):
     return {"logs": get_recent_logs(limit=limit)}
+
+
+@router.get("/stream-data/health")
+def get_stream_data_health():
+    try:
+        return {"ok": True, **stream_memory.stream_data_health()}
+    except Exception as exc:
+        _log_db_error(f"stream data health failed: {type(exc).__name__}: {exc}")
+        raise HTTPException(status_code=500, detail="Stream data health failed")
+
+
+@router.post("/stream-data/repair")
+def repair_stream_data(dry_run: bool = Query(True)):
+    if not _stream_data_repair_enabled():
+        raise HTTPException(status_code=404, detail="Not found")
+    try:
+        return {"ok": True, **stream_memory.repair_stream_data(dry_run=bool(dry_run))}
+    except Exception as exc:
+        _log_db_error(f"stream data repair failed: {type(exc).__name__}: {exc}")
+        raise HTTPException(status_code=500, detail="Stream data repair failed")
 
 
 @router.get("/capabilities")

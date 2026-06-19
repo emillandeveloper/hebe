@@ -20,6 +20,9 @@ BOT_USERNAMES = {
     "streamlabs",
 }
 
+_READY_DB_PATH: str | None = None
+_INITIALIZING_SCHEMA = False
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -82,17 +85,104 @@ def _is_bot(username: str | None) -> bool:
     return _norm_user(username) in bots
 
 
-def init_stream_memory_schema() -> None:
-    conn = db_sqlite.get_db_connection()
-    cur = conn.cursor()
+def _clean_text(value: Any, *, max_len: int = 240) -> str | None:
+    text = str(value or "").strip()
+    return text[:max_len] if text else None
 
-    existing = {
-        row["name"]
-        for row in cur.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+
+def _stream_metadata(stream: Any = None) -> dict[str, Any]:
+    if stream is None:
+        return {}
+    title = _clean_text(getattr(stream, "current_stream_title", None), max_len=300)
+    category = _clean_text(getattr(stream, "current_category", None), max_len=160)
+    game = _clean_text(getattr(stream, "current_game", None), max_len=160) or category
+    started_at = getattr(stream, "stream_started_at", None)
+    twitch_stream_id = (
+        getattr(stream, "twitch_stream_id", None)
+        or getattr(stream, "current_twitch_stream_id", None)
+        or getattr(stream, "stream_id", None)
+    )
+    started_at = db_sqlite.normalize_iso(started_at) if started_at else None
+    return {
+        "twitch_stream_id": _clean_text(twitch_stream_id, max_len=80),
+        "title": title,
+        "category": category,
+        "game": game,
+        "started_at": started_at,
+        "playthrough_type": _clean_text(getattr(stream, "current_playthrough_type", None), max_len=80),
+        "challenge": _clean_text(getattr(stream, "current_challenge", None), max_len=160),
+        "language_mode": _clean_text(getattr(stream, "language_mode", None), max_len=60),
+        "spoiler_policy": _clean_text(getattr(stream, "spoiler_policy", None), max_len=80) or "no_spoilers",
     }
 
-    cur.executescript(
-        """
+
+def _source_is_dev_or_simulation(source: str | None, payload: dict | None = None) -> bool:
+    text = str(source or "").strip().lower()
+    if any(token in text for token in ("sim", "dev", "test", "fixture")):
+        return True
+    payload = payload or {}
+    return bool(payload.get("_simulated") or payload.get("simulated") or payload.get("source") in {"simulation", "dev"})
+
+
+def _stream_is_live(stream: Any = None) -> bool:
+    return bool(stream is not None and getattr(stream, "is_live", False))
+
+
+def _metadata_missing(row: sqlite3.Row | dict | None) -> bool:
+    if not row:
+        return True
+    return not (_clean_text(row["title"] if isinstance(row, sqlite3.Row) else row.get("title")) and (
+        _clean_text(row["game"] if isinstance(row, sqlite3.Row) else row.get("game"))
+        or _clean_text(row["category"] if isinstance(row, sqlite3.Row) else row.get("category"))
+    ))
+
+
+def _ensure_stream_memory_columns(conn: sqlite3.Connection) -> None:
+    migrations = {
+        "stream_sessions": {
+            "twitch_stream_id": "TEXT",
+            "title": "TEXT",
+            "category": "TEXT",
+            "game": "TEXT",
+            "started_at": "TEXT",
+            "ended_at": "TEXT",
+            "duration_seconds": "INTEGER",
+            "playthrough_type": "TEXT",
+            "challenge": "TEXT",
+            "language_mode": "TEXT",
+            "spoiler_policy": "TEXT",
+            "status": "TEXT NOT NULL DEFAULT 'unknown'",
+            "source": "TEXT NOT NULL DEFAULT 'unknown'",
+            "is_real_stream": "INTEGER NOT NULL DEFAULT 1",
+            "created_at": "TEXT",
+            "updated_at": "TEXT",
+        },
+        "stream_events": {
+            "dedupe_key": "TEXT",
+        },
+        "stream_summaries": {
+            "metadata_json": "TEXT",
+        },
+    }
+    for table, columns in migrations.items():
+        for column, definition in columns.items():
+            db_sqlite.ensure_column(conn, table, column, definition)
+
+
+def init_stream_memory_schema() -> None:
+    global _READY_DB_PATH, _INITIALIZING_SCHEMA
+    _INITIALIZING_SCHEMA = True
+    conn = db_sqlite.get_db_connection()
+    try:
+        cur = conn.cursor()
+
+        existing = {
+            row["name"]
+            for row in cur.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        }
+
+        cur.executescript(
+            """
         CREATE TABLE IF NOT EXISTS stream_sessions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             twitch_stream_id TEXT,
@@ -107,6 +197,8 @@ def init_stream_memory_schema() -> None:
             language_mode TEXT,
             spoiler_policy TEXT,
             status TEXT NOT NULL DEFAULT 'unknown',
+            source TEXT NOT NULL DEFAULT 'unknown',
+            is_real_stream INTEGER NOT NULL DEFAULT 1,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );
@@ -230,6 +322,7 @@ def init_stream_memory_schema() -> None:
             raids_json TEXT,
             shoutouts_json TEXT,
             next_stream_context TEXT,
+            metadata_json TEXT,
             created_at TEXT NOT NULL,
             FOREIGN KEY(stream_session_id) REFERENCES stream_sessions(id)
         );
@@ -240,6 +333,7 @@ def init_stream_memory_schema() -> None:
             event_type TEXT NOT NULL,
             event_ts TEXT NOT NULL,
             payload_json TEXT,
+            dedupe_key TEXT,
             created_at TEXT NOT NULL,
             FOREIGN KEY(stream_session_id) REFERENCES stream_sessions(id)
         );
@@ -269,54 +363,88 @@ def init_stream_memory_schema() -> None:
         CREATE INDEX IF NOT EXISTS idx_stream_events_ts ON stream_events(event_ts);
         CREATE INDEX IF NOT EXISTS idx_stream_summaries_session ON stream_summaries(stream_session_id);
         CREATE INDEX IF NOT EXISTS idx_stream_summaries_created_at ON stream_summaries(created_at);
-        """
-    )
-
-    conn.commit()
-    created = [
-        name
-        for name in (
-            "stream_sessions",
-            "stream_chat_messages",
-            "chatter_profiles",
-            "chatter_presence",
-            "chatter_facts",
-            "stream_chatter_summaries",
-            "stream_summaries",
-            "stream_events",
+            """
         )
-        if name not in existing
-    ]
-    print(
-        "[HEBE][STREAM_MEMORY] schema checked "
-        f"existing_reused={sorted(existing & {'chat_log','internal_events_log','memory_chunks','memory_facts','memories','reminders'})} "
-        f"new_tables_created={created} indexes_created_or_verified=true "
-        "reuse=chat_log/general_conversation,memory_facts/general_facts,memory_chunks/stream_summary_rag",
-        flush=True,
-    )
-    conn.close()
+        _ensure_stream_memory_columns(conn)
+        cur.executescript(
+            """
+            CREATE INDEX IF NOT EXISTS idx_stream_sessions_real_status ON stream_sessions(is_real_stream, status);
+            CREATE INDEX IF NOT EXISTS idx_stream_events_dedupe ON stream_events(stream_session_id, event_type, dedupe_key);
+            """
+        )
+
+        conn.commit()
+        created = [
+            name
+            for name in (
+                "stream_sessions",
+                "stream_chat_messages",
+                "chatter_profiles",
+                "chatter_presence",
+                "chatter_facts",
+                "stream_chatter_summaries",
+                "stream_summaries",
+                "stream_events",
+            )
+            if name not in existing
+        ]
+        print(
+            "[HEBE][STREAM_MEMORY] schema checked "
+            f"existing_reused={sorted(existing & {'chat_log','internal_events_log','memory_chunks','memory_facts','memories','reminders'})} "
+            f"new_tables_created={created} indexes_created_or_verified=true "
+            "reuse=chat_log/general_conversation,memory_facts/general_facts,memory_chunks/stream_summary_rag",
+            flush=True,
+        )
+        _READY_DB_PATH = db_sqlite.DB_PATH
+    finally:
+        conn.close()
+        _INITIALIZING_SCHEMA = False
 
 
-def get_active_stream_session(conn: sqlite3.Connection | None = None) -> dict | None:
+def ensure_stream_memory_ready() -> None:
+    if _INITIALIZING_SCHEMA:
+        return
+    if _READY_DB_PATH != db_sqlite.DB_PATH:
+        init_stream_memory_schema()
+
+
+def get_active_stream_session(conn: sqlite3.Connection | None = None, *, real_only: bool = True) -> dict | None:
+    ensure_stream_memory_ready()
     close = conn is None
     conn = conn or db_sqlite.get_db_connection()
-    row = conn.execute(
-        "SELECT * FROM stream_sessions WHERE status = 'live' ORDER BY started_at DESC, id DESC LIMIT 1"
-    ).fetchone()
+    if real_only:
+        row = conn.execute(
+            """
+            SELECT * FROM stream_sessions
+            WHERE status = 'live' AND COALESCE(is_real_stream, 1) = 1
+            ORDER BY started_at DESC, id DESC LIMIT 1
+            """
+        ).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT * FROM stream_sessions WHERE status = 'live' ORDER BY started_at DESC, id DESC LIMIT 1"
+        ).fetchone()
     if close:
         conn.close()
     return _row(row)
 
 
-def ensure_active_stream_session(stream: Any = None, *, source: str = "unknown") -> int:
+def ensure_active_stream_session(stream: Any = None, *, source: str = "unknown") -> int | None:
+    ensure_stream_memory_ready()
     conn = db_sqlite.get_db_connection()
     now = _now_iso()
+    metadata = _stream_metadata(stream)
     active = get_active_stream_session(conn)
-    title = getattr(stream, "current_stream_title", None) if stream is not None else None
-    category = getattr(stream, "current_category", None) if stream is not None else None
-    game = getattr(stream, "current_game", None) if stream is not None else None
-    started_at = getattr(stream, "stream_started_at", None) if stream is not None else None
-    started_at = db_sqlite.normalize_iso(started_at) if started_at else now
+    stored_source = "twitch" if source in {"engine", "context_sync", "stream_online"} else source
+    if _source_is_dev_or_simulation(source):
+        print(f"[HEBE][STREAM_SESSION] skipped reason=simulation source={source}", flush=True)
+        conn.close()
+        return getattr(stream, "active_stream_session_id", None) if stream is not None else None
+    if not _stream_is_live(stream):
+        print("[HEBE][STREAM_SESSION] skipped reason=offline", flush=True)
+        conn.close()
+        return getattr(stream, "active_stream_session_id", None) if stream is not None else None
+    started_at = metadata.get("started_at") or now
 
     if active:
         session_id = int(active["id"])
@@ -333,49 +461,59 @@ def ensure_active_stream_session(stream: Any = None, *, source: str = "unknown")
                 language_mode = COALESCE(?, language_mode),
                 spoiler_policy = COALESCE(?, spoiler_policy),
                 status = 'live',
+                source = COALESCE(NULLIF(source, 'unknown'), ?),
+                is_real_stream = 1,
                 updated_at = ?
             WHERE id = ?
             """,
             (
-                getattr(stream, "twitch_stream_id", None) if stream is not None else None,
-                title,
-                category,
-                game,
+                metadata.get("twitch_stream_id"),
+                metadata.get("title"),
+                metadata.get("category"),
+                metadata.get("game"),
                 started_at,
-                getattr(stream, "current_playthrough_type", None) if stream is not None else None,
-                getattr(stream, "current_challenge", None) if stream is not None else None,
-                getattr(stream, "language_mode", None) if stream is not None else None,
-                getattr(stream, "spoiler_policy", None) if stream is not None else None,
+                metadata.get("playthrough_type"),
+                metadata.get("challenge"),
+                metadata.get("language_mode"),
+                metadata.get("spoiler_policy"),
+                stored_source,
                 now,
                 session_id,
             ),
         )
+        print(f"[HEBE][STREAM_SESSION] reused_active id={session_id}", flush=True)
     else:
         cur = conn.execute(
             """
             INSERT INTO stream_sessions (
                 twitch_stream_id, title, category, game, started_at,
                 playthrough_type, challenge, language_mode, spoiler_policy,
-                status, created_at, updated_at
+                status, source, is_real_stream, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'live', ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'live', ?, 1, ?, ?)
             """,
             (
-                getattr(stream, "twitch_stream_id", None) if stream is not None else None,
-                title,
-                category,
-                game,
+                metadata.get("twitch_stream_id"),
+                metadata.get("title"),
+                metadata.get("category"),
+                metadata.get("game"),
                 started_at,
-                getattr(stream, "current_playthrough_type", None) if stream is not None else None,
-                getattr(stream, "current_challenge", None) if stream is not None else None,
-                getattr(stream, "language_mode", None) if stream is not None else None,
-                getattr(stream, "spoiler_policy", "no_spoilers") if stream is not None else "no_spoilers",
+                metadata.get("playthrough_type"),
+                metadata.get("challenge"),
+                metadata.get("language_mode"),
+                metadata.get("spoiler_policy"),
+                stored_source,
                 now,
                 now,
             ),
         )
         session_id = int(cur.lastrowid)
-        print(f"[HEBE][STREAM_MEMORY] created stream_session id={session_id} source={source}", flush=True)
+        print(
+            "[HEBE][STREAM_SESSION] "
+            f"created id={session_id} title={metadata.get('title')!r} "
+            f"game={(metadata.get('game') or metadata.get('category'))!r} source=twitch",
+            flush=True,
+        )
 
     conn.commit()
     conn.close()
@@ -385,6 +523,7 @@ def ensure_active_stream_session(stream: Any = None, *, source: str = "unknown")
 
 
 def close_active_stream_session(stream: Any = None, *, reason: str = "offline") -> dict | None:
+    ensure_stream_memory_ready()
     conn = db_sqlite.get_db_connection()
     active = get_active_stream_session(conn)
     if not active:
@@ -405,26 +544,121 @@ def close_active_stream_session(stream: Any = None, *, reason: str = "offline") 
     if stream is not None:
         setattr(stream, "active_stream_session_id", None)
     summary = summarize_stream_session(int(active["id"]), reason=reason)
-    print(f"[HEBE][STREAM_MEMORY] closed stream_session id={active['id']} reason={reason}", flush=True)
+    print(f"[HEBE][STREAM_SESSION] closed id={active['id']} duration={duration or 0}", flush=True)
     return summary
 
 
+def _event_identity_payload(payload: dict | None) -> dict[str, Any]:
+    payload = payload or {}
+    keys = (
+        "id",
+        "event_id",
+        "twitch_event_id",
+        "message_id",
+        "user_login",
+        "display_name",
+        "viewer_count",
+        "target_channel",
+        "target_user_login",
+        "raid_id",
+        "started_at",
+        "ended_at",
+    )
+    return {key: payload.get(key) for key in keys if payload.get(key) not in (None, "")}
+
+
+def _stream_event_dedupe_key(event_type: str, payload: dict | None, event_ts: str) -> str:
+    parsed = _parse_iso(event_ts) or datetime.now(timezone.utc)
+    rounded = parsed.replace(microsecond=0, second=(parsed.second // 10) * 10)
+    identity = _event_identity_payload(payload)
+    if not identity:
+        identity = {"payload": payload or {}}
+    return _json({"type": event_type, "window": rounded.isoformat(), "identity": identity})
+
+
+def _stream_event_is_duplicate(
+    conn: sqlite3.Connection,
+    *,
+    session_id: int | None,
+    event_type: str,
+    payload: dict | None,
+    event_ts: str,
+    dedupe_key: str,
+) -> bool:
+    exact = conn.execute(
+        """
+        SELECT id FROM stream_events
+        WHERE COALESCE(stream_session_id, 0) = COALESCE(?, 0)
+          AND event_type = ?
+          AND dedupe_key = ?
+        LIMIT 1
+        """,
+        (session_id, event_type, dedupe_key),
+    ).fetchone()
+    if exact:
+        return True
+    event_time = _parse_iso(event_ts)
+    if event_time is None:
+        return False
+    identity = _event_identity_payload(payload)
+    if not identity:
+        return False
+    candidates = conn.execute(
+        """
+        SELECT payload_json, event_ts
+        FROM stream_events
+        WHERE COALESCE(stream_session_id, 0) = COALESCE(?, 0)
+          AND event_type = ?
+        ORDER BY event_ts DESC
+        LIMIT 50
+        """,
+        (session_id, event_type),
+    ).fetchall()
+    for row in candidates:
+        other_time = _parse_iso(row["event_ts"])
+        if other_time is None or abs((event_time - other_time).total_seconds()) > 120:
+            continue
+        other_identity = _event_identity_payload(_loads(row["payload_json"], {}))
+        if identity and other_identity == identity:
+            return True
+    return False
+
+
 def record_stream_event(event_type: str, payload: dict | None = None, *, stream: Any = None) -> int:
+    ensure_stream_memory_ready()
+    payload = payload or {}
+    if _source_is_dev_or_simulation(getattr(stream, "source", None), payload):
+        print(f"[HEBE][STREAM_SESSION] skipped reason=simulation event_type={event_type}", flush=True)
+        return 0
     session_id = getattr(stream, "active_stream_session_id", None) if stream is not None else None
     if not session_id:
         active = get_active_stream_session()
         session_id = active["id"] if active else None
     conn = db_sqlite.get_db_connection()
+    event_ts = db_sqlite.normalize_iso(str(payload.get("event_ts") or payload.get("timestamp") or "")) or _now_iso()
+    dedupe_key = _stream_event_dedupe_key(event_type, payload, event_ts)
+    if _stream_event_is_duplicate(
+        conn,
+        session_id=int(session_id) if session_id else None,
+        event_type=event_type,
+        payload=payload,
+        event_ts=event_ts,
+        dedupe_key=dedupe_key,
+    ):
+        conn.close()
+        print(f"[HEBE][STREAM_EVENT] duplicate_ignored type={event_type}", flush=True)
+        return 0
     cur = conn.execute(
         """
-        INSERT INTO stream_events (stream_session_id, event_type, event_ts, payload_json, created_at)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO stream_events (stream_session_id, event_type, event_ts, payload_json, dedupe_key, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
         """,
-        (session_id, event_type, _now_iso(), _json(payload or {}), _now_iso()),
+        (session_id, event_type, event_ts, _json(payload), dedupe_key, _now_iso()),
     )
     conn.commit()
     event_id = int(cur.lastrowid)
     conn.close()
+    print(f"[HEBE][STREAM_EVENT] inserted id={event_id} type={event_type} session_id={session_id}", flush=True)
     return event_id
 
 
@@ -438,6 +672,7 @@ def observe_presence(
     direct_interaction: bool = False,
     passive: bool = False,
 ) -> None:
+    ensure_stream_memory_ready()
     user = _norm_user(username)
     if not user:
         return
@@ -636,8 +871,12 @@ def record_chat_message(
     topic_hint: str | None = None,
     language_hint: str | None = None,
 ) -> int:
+    ensure_stream_memory_ready()
     user = _norm_user(username)
     if not user or not str(message_text or "").strip():
+        return 0
+    if _source_is_dev_or_simulation(source):
+        print("[HEBE][STREAM_SESSION] skipped reason=simulation chat_message=true", flush=True)
         return 0
     bot = _is_bot(user) if is_bot is None else bool(is_bot)
     if not stream_session_id:
@@ -700,6 +939,7 @@ def maybe_record_chatter_fact_from_message(
     source_message_id: int | None = None,
     stream_session_id: int | None = None,
 ) -> int | None:
+    ensure_stream_memory_ready()
     user = _norm_user(username)
     text = str(message_text or "").strip()
     normalized = text.lower()
@@ -757,7 +997,105 @@ def maybe_record_chatter_fact_from_message(
     return fact_id
 
 
+def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
+    row = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name = ?", (table_name,)).fetchone()
+    return row is not None
+
+
+def _session_metadata_for_summary(conn: sqlite3.Connection, session: sqlite3.Row) -> tuple[dict[str, Any], list[str]]:
+    metadata = {
+        "title": _clean_text(session["title"], max_len=300),
+        "category": _clean_text(session["category"], max_len=160),
+        "game": _clean_text(session["game"], max_len=160),
+        "twitch_stream_id": _clean_text(session["twitch_stream_id"], max_len=80),
+        "started_at": session["started_at"],
+        "ended_at": session["ended_at"],
+        "duration_seconds": session["duration_seconds"],
+        "playthrough_type": _clean_text(session["playthrough_type"], max_len=80),
+        "challenge": _clean_text(session["challenge"], max_len=160),
+        "language_mode": _clean_text(session["language_mode"], max_len=60),
+        "spoiler_policy": _clean_text(session["spoiler_policy"], max_len=80),
+        "source": _clean_text(session["source"], max_len=80) or "unknown",
+        "is_real_stream": bool(session["is_real_stream"]),
+    }
+    if not metadata["game"] and metadata["category"]:
+        metadata["game"] = metadata["category"]
+
+    if _metadata_missing(metadata) and _table_exists(conn, "live_session_state"):
+        live_row = conn.execute(
+            """
+            SELECT current_title, current_category, current_game, language_mode, spoiler_policy
+            FROM live_session_state
+            WHERE stream_session_id = ?
+            ORDER BY updated_at DESC LIMIT 1
+            """,
+            (session["id"],),
+        ).fetchone()
+        if live_row:
+            metadata["title"] = metadata["title"] or _clean_text(live_row["current_title"], max_len=300)
+            metadata["category"] = metadata["category"] or _clean_text(live_row["current_category"], max_len=160)
+            metadata["game"] = metadata["game"] or _clean_text(live_row["current_game"], max_len=160) or metadata["category"]
+            metadata["language_mode"] = metadata["language_mode"] or _clean_text(live_row["language_mode"], max_len=60)
+            metadata["spoiler_policy"] = metadata["spoiler_policy"] or _clean_text(live_row["spoiler_policy"], max_len=80)
+
+    if _metadata_missing(metadata):
+        try:
+            from app.stream import session_primer
+
+            started = _parse_iso(str(session["started_at"] or "")) or datetime.now(timezone.utc)
+            schedule = session_primer.get_schedule_for_date(started)
+        except Exception:
+            schedule = None
+        if schedule:
+            metadata["category"] = metadata["category"] or _clean_text(schedule.get("category"), max_len=160)
+            metadata["game"] = metadata["game"] or _clean_text(schedule.get("game"), max_len=160) or metadata["category"]
+            metadata["playthrough_type"] = metadata["playthrough_type"] or _clean_text(schedule.get("playthrough_type"), max_len=80)
+            metadata["source"] = metadata["source"] or "schedule"
+
+    missing = []
+    if not metadata["title"]:
+        missing.append("title")
+    if not (metadata["game"] or metadata["category"]):
+        missing.append("game_or_category")
+    print(
+        "[HEBE][STREAM_SUMMARY] using_metadata "
+        f"session_id={session['id']} title={metadata.get('title')!r} "
+        f"category={metadata.get('category')!r} game={metadata.get('game')!r}",
+        flush=True,
+    )
+    if missing:
+        print(f"[HEBE][STREAM_SUMMARY] metadata_missing session_id={session['id']} missing={missing}", flush=True)
+    return metadata, missing
+
+
+def _live_timeline_for_summary(conn: sqlite3.Connection, stream_session_id: int) -> list[dict[str, Any]]:
+    if not _table_exists(conn, "live_session_timeline"):
+        return []
+    rows = conn.execute(
+        """
+        SELECT event_type, event_ts, raw_text, topic, category, payload_json
+        FROM live_session_timeline
+        WHERE stream_session_id = ?
+        ORDER BY event_ts ASC
+        LIMIT 200
+        """,
+        (stream_session_id,),
+    ).fetchall()
+    return [
+        {
+            "type": row["event_type"],
+            "ts": row["event_ts"],
+            "text": row["raw_text"],
+            "topic": row["topic"],
+            "category": row["category"],
+            "payload": _loads(row["payload_json"], {}),
+        }
+        for row in rows
+    ]
+
+
 def summarize_stream_session(stream_session_id: int, *, reason: str = "manual") -> dict | None:
+    ensure_stream_memory_ready()
     conn = db_sqlite.get_db_connection()
     session = conn.execute("SELECT * FROM stream_sessions WHERE id = ?", (stream_session_id,)).fetchone()
     if not session:
@@ -783,6 +1121,7 @@ def summarize_stream_session(stream_session_id: int, *, reason: str = "manual") 
         """,
         (stream_session_id,),
     ).fetchall()
+    timeline = _live_timeline_for_summary(conn, stream_session_id)
     by_user: dict[str, list[sqlite3.Row]] = {}
     topics: dict[str, int] = {}
     for msg in messages:
@@ -792,6 +1131,7 @@ def summarize_stream_session(stream_session_id: int, *, reason: str = "manual") 
 
     chatter_highlights = []
     now = _now_iso()
+    conn.execute("DELETE FROM stream_chatter_summaries WHERE stream_session_id = ?", (stream_session_id,))
     for user, user_msgs in sorted(by_user.items(), key=lambda item: len(item[1]), reverse=True):
         if len(user_msgs) < 2:
             continue
@@ -821,23 +1161,39 @@ def summarize_stream_session(stream_session_id: int, *, reason: str = "manual") 
         )
         chatter_highlights.append({"username": user, "message_count": len(user_msgs), "summary": summary})
 
-    title = session["title"] or "sin título"
-    game = session["game"] or session["category"] or "sin categoría"
+    metadata, missing = _session_metadata_for_summary(conn, session)
+    title = metadata.get("title") or "unknown title"
+    game = metadata.get("game") or metadata.get("category") or "unknown category"
+    raids = [_loads(e["payload_json"], {}) for e in events if e["event_type"] == "twitch_raid"]
+    shoutouts = [_loads(e["payload_json"], {}) for e in events if e["event_type"] == "twitch_shoutout"]
+    key_events = [{"type": e["event_type"], "ts": e["event_ts"], "payload": _event_identity_payload(_loads(e["payload_json"], {}))} for e in events]
+    key_events.extend({"type": item["type"], "ts": item["ts"], "topic": item["topic"], "category": item["category"]} for item in timeline)
     summary_text = (
         f"Stream de {game}. Título: {title}. "
         f"Mensajes reales observados: {len(messages)}. "
-        f"Chatters activos: {len(by_user)}. Finalizado por: {reason}."
+        f"Chatters activos: {len(by_user)}. "
+        f"Eventos registrados: {len(events)}. "
+        f"Timeline RAG: {len(timeline)}. Finalizado por: {reason}."
     )
 
     payload = {
         "summary_text": summary_text,
-        "key_events_json": _json([{"type": e["event_type"], "ts": e["event_ts"]} for e in events]),
-        "game_progress_json": _json({"title": title, "game": game}),
+        "key_events_json": _json(key_events),
+        "game_progress_json": _json({
+            "title": title,
+            "game": game,
+            "category": metadata.get("category"),
+            "playthrough_type": metadata.get("playthrough_type"),
+            "challenge": metadata.get("challenge"),
+            "timeline_event_count": len(timeline),
+            "metadata_missing": missing,
+        }),
         "chat_topics_json": _json(topics),
         "chatter_highlights_json": _json(chatter_highlights[:10]),
-        "raids_json": _json([_loads(e["payload_json"], {}) for e in events if e["event_type"] == "twitch_raid"]),
-        "shoutouts_json": _json([_loads(e["payload_json"], {}) for e in events if e["event_type"] == "twitch_shoutout"]),
+        "raids_json": _json(raids),
+        "shoutouts_json": _json(shoutouts),
         "next_stream_context": "",
+        "metadata_json": _json(metadata),
     }
     if existing:
         conn.execute(
@@ -845,7 +1201,7 @@ def summarize_stream_session(stream_session_id: int, *, reason: str = "manual") 
             UPDATE stream_summaries
             SET summary_text = ?, key_events_json = ?, game_progress_json = ?,
                 chat_topics_json = ?, chatter_highlights_json = ?, raids_json = ?,
-                shoutouts_json = ?, next_stream_context = ?, created_at = ?
+                shoutouts_json = ?, next_stream_context = ?, metadata_json = ?, created_at = ?
             WHERE id = ?
             """,
             (
@@ -857,6 +1213,7 @@ def summarize_stream_session(stream_session_id: int, *, reason: str = "manual") 
                 payload["raids_json"],
                 payload["shoutouts_json"],
                 payload["next_stream_context"],
+                payload["metadata_json"],
                 now,
                 existing["id"],
             ),
@@ -868,9 +1225,9 @@ def summarize_stream_session(stream_session_id: int, *, reason: str = "manual") 
             INSERT INTO stream_summaries (
                 stream_session_id, summary_text, key_events_json, game_progress_json,
                 chat_topics_json, chatter_highlights_json, raids_json, shoutouts_json,
-                next_stream_context, created_at
+                next_stream_context, metadata_json, created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 stream_session_id,
@@ -882,16 +1239,22 @@ def summarize_stream_session(stream_session_id: int, *, reason: str = "manual") 
                 payload["raids_json"],
                 payload["shoutouts_json"],
                 payload["next_stream_context"],
+                payload["metadata_json"],
                 now,
             ),
         )
         summary_id = int(cur.lastrowid)
     conn.commit()
     conn.close()
+    if existing:
+        print(f"[HEBE][STREAM_SUMMARY] regenerated session_id={stream_session_id}", flush=True)
+    else:
+        print(f"[HEBE][STREAM_SUMMARY] generated session_id={stream_session_id}", flush=True)
     return {"id": summary_id, "stream_session_id": stream_session_id, **payload}
 
 
 def get_latest_stream_summary() -> dict | None:
+    ensure_stream_memory_ready()
     conn = db_sqlite.get_db_connection()
     row = conn.execute(
         """
@@ -906,7 +1269,256 @@ def get_latest_stream_summary() -> dict | None:
     return _row(row)
 
 
+def _count(conn: sqlite3.Connection, sql: str, params: tuple[Any, ...] = ()) -> int:
+    return int(conn.execute(sql, params).fetchone()[0] or 0)
+
+
+def _latest_session(conn: sqlite3.Connection) -> dict | None:
+    return _row(conn.execute("SELECT * FROM stream_sessions ORDER BY COALESCE(started_at, created_at) DESC, id DESC LIMIT 1").fetchone())
+
+
+def _latest_summary(conn: sqlite3.Connection) -> dict | None:
+    return _row(
+        conn.execute(
+            """
+            SELECT s.*, ss.title, ss.game, ss.category, ss.status, ss.source, ss.is_real_stream
+            FROM stream_summaries s
+            LEFT JOIN stream_sessions ss ON ss.id = s.stream_session_id
+            ORDER BY s.created_at DESC, s.id DESC LIMIT 1
+            """
+        ).fetchone()
+    )
+
+
+def _duplicate_event_groups(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT COALESCE(stream_session_id, 0) AS stream_session_id,
+               event_type,
+               COALESCE(dedupe_key, payload_json, '') AS identity_key,
+               COUNT(*) AS count,
+               GROUP_CONCAT(id) AS ids
+        FROM stream_events
+        GROUP BY COALESCE(stream_session_id, 0), event_type, COALESCE(dedupe_key, payload_json, '')
+        HAVING COUNT(*) > 1 AND COALESCE(dedupe_key, payload_json, '') != ''
+        ORDER BY count DESC
+        LIMIT 100
+        """
+    ).fetchall()
+    return [
+        {
+            "stream_session_id": row["stream_session_id"],
+            "event_type": row["event_type"],
+            "count": int(row["count"] or 0),
+            "ids": [int(part) for part in str(row["ids"] or "").split(",") if part],
+        }
+        for row in rows
+    ]
+
+
+def stream_data_health() -> dict[str, Any]:
+    init_stream_memory_schema()
+    conn = db_sqlite.get_db_connection()
+    sessions = conn.execute("SELECT * FROM stream_sessions").fetchall()
+    summaries = conn.execute("SELECT * FROM stream_summaries").fetchall()
+    missing_sessions = [int(row["id"]) for row in sessions if bool(row["is_real_stream"]) and _metadata_missing(row)]
+    duplicate_groups = _duplicate_event_groups(conn)
+    active = get_active_stream_session(conn)
+    latest_session = _latest_session(conn)
+    latest_summary = _latest_summary(conn)
+    warnings: list[str] = []
+    if active and _metadata_missing(active):
+        warnings.append("active stream session is missing metadata")
+    if duplicate_groups:
+        warnings.append("possible duplicate stream events detected")
+    summaries_without_session = _count(
+        conn,
+        """
+        SELECT COUNT(*)
+        FROM stream_summaries s
+        LEFT JOIN stream_sessions ss ON ss.id = s.stream_session_id
+        WHERE ss.id IS NULL
+        """,
+    )
+    if summaries_without_session:
+        warnings.append("summaries without session links detected")
+    payload = {
+        "sessions_total": len(sessions),
+        "real_sessions": sum(1 for row in sessions if bool(row["is_real_stream"])),
+        "active_session": active,
+        "sessions_missing_metadata": len(missing_sessions),
+        "sessions_missing_metadata_ids": missing_sessions[:50],
+        "summaries_total": len(summaries),
+        "summaries_missing_metadata": sum(
+            1
+            for row in summaries
+            if not _clean_text(row["metadata_json"], max_len=20)
+            or row["stream_session_id"] in set(missing_sessions)
+        ),
+        "sessions_without_summary": _count(
+            conn,
+            """
+            SELECT COUNT(*)
+            FROM stream_sessions ss
+            LEFT JOIN stream_summaries s ON s.stream_session_id = ss.id
+            WHERE COALESCE(ss.is_real_stream, 1) = 1
+              AND ss.status = 'ended'
+              AND s.id IS NULL
+            """,
+        ),
+        "summaries_without_session": summaries_without_session,
+        "chat_messages_without_session": _count(conn, "SELECT COUNT(*) FROM stream_chat_messages WHERE stream_session_id IS NULL"),
+        "events_without_session": _count(conn, "SELECT COUNT(*) FROM stream_events WHERE stream_session_id IS NULL"),
+        "possible_duplicate_events": sum(max(0, int(group["count"]) - 1) for group in duplicate_groups),
+        "possible_duplicate_event_groups": duplicate_groups[:20],
+        "dev_simulation_sessions": _count(
+            conn,
+            """
+            SELECT COUNT(*)
+            FROM stream_sessions
+            WHERE COALESCE(is_real_stream, 1) = 0
+               OR lower(COALESCE(source, '')) LIKE '%sim%'
+               OR lower(COALESCE(source, '')) LIKE '%dev%'
+               OR lower(COALESCE(source, '')) LIKE '%test%'
+            """,
+        ),
+        "latest_session": latest_session,
+        "latest_summary": latest_summary,
+        "warnings": warnings,
+    }
+    conn.close()
+    print(
+        "[HEBE][STREAM_DATA_HEALTH] "
+        f"sessions_total={payload['sessions_total']} real_sessions={payload['real_sessions']} "
+        f"missing_metadata={payload['sessions_missing_metadata']} duplicate_events={payload['possible_duplicate_events']}",
+        flush=True,
+    )
+    return payload
+
+
+def _session_evidence_counts(conn: sqlite3.Connection, session_id: int) -> dict[str, int]:
+    return {
+        "chat_messages": _count(conn, "SELECT COUNT(*) FROM stream_chat_messages WHERE stream_session_id = ?", (session_id,)),
+        "events": _count(conn, "SELECT COUNT(*) FROM stream_events WHERE stream_session_id = ?", (session_id,)),
+        "chatter_summaries": _count(conn, "SELECT COUNT(*) FROM stream_chatter_summaries WHERE stream_session_id = ?", (session_id,)),
+    }
+
+
+def _repair_event_dedupe_keys(conn: sqlite3.Connection, *, dry_run: bool) -> int:
+    rows = conn.execute("SELECT id, event_type, event_ts, payload_json, dedupe_key FROM stream_events").fetchall()
+    changed = 0
+    for row in rows:
+        payload = _loads(row["payload_json"], {})
+        next_key = _stream_event_dedupe_key(row["event_type"], payload, row["event_ts"] or _now_iso())
+        if row["dedupe_key"] == next_key:
+            continue
+        changed += 1
+        if not dry_run:
+            conn.execute("UPDATE stream_events SET dedupe_key = ? WHERE id = ?", (next_key, row["id"]))
+    return changed
+
+
+def repair_stream_data(*, dry_run: bool = True, regenerate_summaries: bool = True) -> dict[str, Any]:
+    init_stream_memory_schema()
+    conn = db_sqlite.get_db_connection()
+    sessions = conn.execute("SELECT * FROM stream_sessions ORDER BY id ASC").fetchall()
+    sessions_repaired = 0
+    sessions_marked_unknown = 0
+    warnings: list[str] = []
+    regenerate_ids: set[int] = set()
+
+    for session in sessions:
+        session_id = int(session["id"])
+        metadata, missing = _session_metadata_for_summary(conn, session)
+        updates: dict[str, Any] = {}
+        for column in ("title", "category", "game", "playthrough_type", "challenge", "language_mode", "spoiler_policy"):
+            if not _clean_text(session[column]) and metadata.get(column):
+                updates[column] = metadata[column]
+        if updates:
+            sessions_repaired += 1
+            regenerate_ids.add(session_id)
+            if not dry_run:
+                assignments = ", ".join(f"{column} = ?" for column in updates)
+                conn.execute(
+                    f"UPDATE stream_sessions SET {assignments}, updated_at = ? WHERE id = ?",
+                    (*updates.values(), _now_iso(), session_id),
+                )
+        if missing and bool(session["is_real_stream"]) and session["status"] != "live":
+            evidence = _session_evidence_counts(conn, session_id)
+            if sum(evidence.values()) == 0 and not _clean_text(session["twitch_stream_id"]):
+                sessions_marked_unknown += 1
+                sessions_repaired += 1
+                if not dry_run:
+                    conn.execute(
+                        """
+                        UPDATE stream_sessions
+                        SET source = 'unknown', is_real_stream = 0, status = 'unknown', updated_at = ?
+                        WHERE id = ?
+                        """,
+                        (_now_iso(), session_id),
+                    )
+            else:
+                warnings.append(f"session {session_id} missing metadata but has evidence; left as real")
+
+    dedupe_keys_repaired = _repair_event_dedupe_keys(conn, dry_run=dry_run)
+    duplicate_groups = _duplicate_event_groups(conn)
+    duplicate_ids: list[int] = []
+    for group in duplicate_groups:
+        ids = sorted(group["ids"])
+        duplicate_ids.extend(ids[1:])
+
+    if duplicate_ids and not dry_run:
+        placeholders = ",".join("?" for _ in duplicate_ids)
+        conn.execute(f"DELETE FROM stream_events WHERE id IN ({placeholders})", tuple(duplicate_ids))
+
+    ended_without_summary = [
+        int(row["id"])
+        for row in conn.execute(
+            """
+            SELECT ss.id
+            FROM stream_sessions ss
+            LEFT JOIN stream_summaries s ON s.stream_session_id = ss.id
+            WHERE COALESCE(ss.is_real_stream, 1) = 1
+              AND ss.status = 'ended'
+              AND s.id IS NULL
+            """
+        ).fetchall()
+    ]
+    regenerate_ids.update(ended_without_summary)
+    if not regenerate_summaries:
+        regenerate_ids.clear()
+
+    if dry_run:
+        conn.close()
+    else:
+        conn.commit()
+        conn.close()
+        for session_id in sorted(regenerate_ids):
+            summarize_stream_session(session_id, reason="repair")
+
+    result = {
+        "dry_run": bool(dry_run),
+        "sessions_checked": len(sessions),
+        "sessions_repaired": sessions_repaired,
+        "sessions_marked_unknown": sessions_marked_unknown,
+        "summaries_regenerated": len(regenerate_ids),
+        "duplicate_events_found": len(duplicate_ids),
+        "duplicate_events_removed_or_marked": 0 if dry_run else len(duplicate_ids),
+        "dedupe_keys_repaired": dedupe_keys_repaired,
+        "warnings": warnings,
+    }
+    print(
+        "[HEBE][STREAM_DATA_REPAIR] "
+        f"dry_run={dry_run} sessions_checked={result['sessions_checked']} "
+        f"sessions_repaired={sessions_repaired} duplicates={len(duplicate_ids)} "
+        f"summaries_regenerated={len(regenerate_ids)}",
+        flush=True,
+    )
+    return result
+
+
 def get_chatter_profile(username: str) -> dict | None:
+    ensure_stream_memory_ready()
     user = _norm_user(username)
     if not user:
         return None
@@ -930,6 +1542,7 @@ def get_chatter_profile(username: str) -> dict | None:
 
 
 def list_recent_chatter_names(limit: int = 80) -> list[str]:
+    ensure_stream_memory_ready()
     conn = db_sqlite.get_db_connection()
     try:
         rows = conn.execute(
@@ -956,6 +1569,7 @@ def list_recent_chatter_names(limit: int = 80) -> list[str]:
 
 
 def get_last_chatter_summary(username: str) -> dict | None:
+    ensure_stream_memory_ready()
     user = _norm_user(username)
     if not user:
         return None

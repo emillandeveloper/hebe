@@ -52,6 +52,34 @@ type DbRowsPayload = {
   rows: Record<string, unknown>[];
 };
 
+type StreamDataHealth = {
+  sessions_total?: number;
+  real_sessions?: number;
+  active_session?: Record<string, unknown> | null;
+  sessions_missing_metadata?: number;
+  summaries_total?: number;
+  summaries_missing_metadata?: number;
+  sessions_without_summary?: number;
+  summaries_without_session?: number;
+  chat_messages_without_session?: number;
+  events_without_session?: number;
+  possible_duplicate_events?: number;
+  dev_simulation_sessions?: number;
+  latest_session?: Record<string, unknown> | null;
+  latest_summary?: Record<string, unknown> | null;
+  warnings?: string[];
+};
+
+type StreamDataRepairResult = {
+  dry_run?: boolean;
+  sessions_checked?: number;
+  sessions_repaired?: number;
+  summaries_regenerated?: number;
+  duplicate_events_found?: number;
+  duplicate_events_removed_or_marked?: number;
+  warnings?: string[];
+};
+
 type DbCellSelection = {
   table: string;
   column: string;
@@ -2447,9 +2475,14 @@ function DatabaseInspector({ apiBase }: { apiBase: string }) {
   const [loadingTables, setLoadingTables] = useState(false);
   const [loadingRows, setLoadingRows] = useState(false);
   const [error, setError] = useState("");
+  const [streamHealth, setStreamHealth] = useState<StreamDataHealth | null>(null);
+  const [streamHealthLoading, setStreamHealthLoading] = useState(false);
+  const [streamHealthError, setStreamHealthError] = useState("");
+  const [streamRepairBusy, setStreamRepairBusy] = useState<"" | "dry" | "execute">("");
+  const [streamRepairResult, setStreamRepairResult] = useState<StreamDataRepairResult | null>(null);
 
-  async function readJson<T>(url: string): Promise<T> {
-    const res = await fetch(url);
+  async function readJson<T>(url: string, init?: RequestInit): Promise<T> {
+    const res = await fetch(url, init);
     const payload = await res.json().catch(() => ({}));
     if (!res.ok) {
       const detail = String(payload?.detail || payload?.message || "Read failed");
@@ -2476,6 +2509,41 @@ function DatabaseInspector({ apiBase }: { apiBase: string }) {
       setError(exc instanceof Error ? exc.message : "Database read failed");
     } finally {
       setLoadingTables(false);
+    }
+  }
+
+  async function loadStreamHealth() {
+    setStreamHealthLoading(true);
+    setStreamHealthError("");
+    try {
+      const payload = await readJson<StreamDataHealth>(`${apiBase}/debug/stream-data/health`);
+      setStreamHealth(payload || null);
+    } catch (exc) {
+      setStreamHealth(null);
+      setStreamHealthError(exc instanceof Error ? exc.message : "Stream data health failed");
+    } finally {
+      setStreamHealthLoading(false);
+    }
+  }
+
+  async function runStreamRepair(mode: "dry" | "execute") {
+    if (mode === "execute" && !window.confirm("Execute stream data repair? This may update rows and remove obvious duplicate events.")) {
+      return;
+    }
+    setStreamRepairBusy(mode);
+    setStreamHealthError("");
+    try {
+      const payload = await readJson<StreamDataRepairResult>(
+        `${apiBase}/debug/stream-data/repair?dry_run=${mode === "dry" ? "true" : "false"}`,
+        { method: "POST" }
+      );
+      setStreamRepairResult(payload || null);
+      await loadStreamHealth();
+      if (selectedTable) await loadSelectedTable(selectedTable);
+    } catch (exc) {
+      setStreamHealthError(exc instanceof Error ? exc.message : "Stream data repair failed");
+    } finally {
+      setStreamRepairBusy("");
     }
   }
 
@@ -2517,11 +2585,13 @@ function DatabaseInspector({ apiBase }: { apiBase: string }) {
 
   function refreshAll() {
     loadTables();
+    loadStreamHealth();
     if (selectedTable) loadSelectedTable(selectedTable);
   }
 
   useEffect(() => {
     loadTables();
+    loadStreamHealth();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [apiBase]);
 
@@ -2548,6 +2618,23 @@ function DatabaseInspector({ apiBase }: { apiBase: string }) {
   const canPrev = offset > 0;
   const canNext = offset + limit < total;
   const visibleColumns = rowsPayload?.columns || schema.map((column) => column.name);
+  const streamRepairEnabled = Boolean(window.hebeDev?.enabled);
+
+  function streamSessionLabel(session: Record<string, unknown> | null | undefined) {
+    if (!session) return "-";
+    const id = session.id ? `#${session.id}` : "";
+    const game = displayValue(session.game || session.category, "unknown");
+    const status = displayValue(session.status, "unknown");
+    return [id, game, status].filter(Boolean).join(" · ");
+  }
+
+  function streamSummaryLabel(summary: Record<string, unknown> | null | undefined) {
+    if (!summary) return "-";
+    const id = summary.id ? `#${summary.id}` : "";
+    const game = displayValue(summary.game || summary.category, "unknown");
+    const created = displayValue(summary.created_at || summary.summary_created_at, "");
+    return [id, game, created].filter(Boolean).join(" · ");
+  }
 
   function setColumnWidth(column: string, width: number) {
     const next = { ...columnWidths, [column]: Math.max(80, Math.min(720, Math.round(width))) };
@@ -2598,6 +2685,45 @@ function DatabaseInspector({ apiBase }: { apiBase: string }) {
           <button className="btn compact" onClick={refreshAll} disabled={loadingTables || loadingRows}>
             Refresh
           </button>
+        </div>
+
+        <div className="streamDataHealthPanel">
+          <div className="streamDataHealthTop">
+            <div>
+              <div className="streamDataTitle">Stream data health</div>
+              <div className="panelMeta">{streamHealthLoading ? "checking" : "session integrity"}</div>
+            </div>
+            <button className="btn compact" onClick={loadStreamHealth} disabled={streamHealthLoading}>
+              Check
+            </button>
+          </div>
+          {streamHealthError && <div className="errorBox compact">{streamHealthError}</div>}
+          <div className="statusList compact">
+            <StatusLine label="Active" value={streamSessionLabel(streamHealth?.active_session)} tone={streamHealth?.active_session ? "ok" : "idle"} />
+            <StatusLine label="Latest session" value={streamSessionLabel(streamHealth?.latest_session)} tone={streamHealth?.latest_session ? "ok" : "idle"} />
+            <StatusLine label="Latest summary" value={streamSummaryLabel(streamHealth?.latest_summary)} tone={streamHealth?.latest_summary ? "ok" : "idle"} />
+            <StatusLine label="Missing metadata" value={String(streamHealth?.sessions_missing_metadata ?? "-")} tone={(streamHealth?.sessions_missing_metadata || 0) > 0 ? "warn" : "ok"} />
+            <StatusLine label="No summary" value={String(streamHealth?.sessions_without_summary ?? "-")} tone={(streamHealth?.sessions_without_summary || 0) > 0 ? "warn" : "ok"} />
+            <StatusLine label="Dup events" value={String(streamHealth?.possible_duplicate_events ?? "-")} tone={(streamHealth?.possible_duplicate_events || 0) > 0 ? "warn" : "ok"} />
+            <StatusLine label="Dev/sim" value={String(streamHealth?.dev_simulation_sessions ?? "-")} tone={(streamHealth?.dev_simulation_sessions || 0) > 0 ? "warn" : "idle"} />
+          </div>
+          <div className="streamRepairActions">
+            <button className="btn compact" disabled={Boolean(streamRepairBusy) || !streamRepairEnabled} onClick={() => runStreamRepair("dry")}>
+              {streamRepairBusy === "dry" ? "Checking..." : "Repair dry run"}
+            </button>
+            <button className="btn compact danger" disabled={Boolean(streamRepairBusy) || !streamRepairEnabled} onClick={() => runStreamRepair("execute")}>
+              {streamRepairBusy === "execute" ? "Repairing..." : "Repair execute"}
+            </button>
+          </div>
+          {!streamRepairEnabled && <div className="muted small">Repair requires dev controls.</div>}
+          {streamRepairResult && (
+            <div className="streamRepairResult mono">
+              checked={streamRepairResult.sessions_checked ?? 0} repaired={streamRepairResult.sessions_repaired ?? 0} summaries={streamRepairResult.summaries_regenerated ?? 0} duplicates={streamRepairResult.duplicate_events_found ?? 0}
+            </div>
+          )}
+          {(streamHealth?.warnings || streamRepairResult?.warnings || []).slice(0, 2).map((warning, idx) => (
+            <div className="muted small" key={`${warning}-${idx}`}>{warning}</div>
+          ))}
         </div>
 
         <input

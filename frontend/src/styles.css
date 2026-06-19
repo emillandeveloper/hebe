@@ -1182,6 +1182,68 @@ input[type="range"]{
   flex:0 0 auto;
 }
 
+.streamDataHealthPanel{
+  flex:0 0 auto;
+  margin-bottom:10px;
+  padding:10px;
+  border-radius:12px;
+  border:1px solid rgba(255,255,255,0.08);
+  background:rgba(0,0,0,0.20);
+}
+
+.streamDataHealthTop{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:8px;
+  margin-bottom:8px;
+}
+
+.streamDataTitle{
+  font-size:12px;
+  font-weight:950;
+}
+
+.statusList.compact{
+  gap:5px;
+}
+
+.statusList.compact .statusLine{
+  font-size:11px;
+  align-items:flex-start;
+}
+
+.statusList.compact .statusValue{
+  max-width:56%;
+  justify-content:flex-end;
+  text-align:right;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+}
+
+.streamRepairActions{
+  display:flex;
+  gap:7px;
+  flex-wrap:wrap;
+  margin-top:9px;
+}
+
+.streamRepairResult{
+  margin-top:8px;
+  padding:7px 8px;
+  border-radius:8px;
+  background:rgba(255,255,255,0.045);
+  color:rgba(245,247,250,0.82);
+  line-height:1.45;
+}
+
+.errorBox.compact{
+  margin:6px 0;
+  padding:7px 8px;
+  font-size:11px;
+}
+
 .dbTableList{
   min-height:0;
   overflow:auto;
