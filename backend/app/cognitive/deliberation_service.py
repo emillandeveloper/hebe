@@ -70,13 +70,30 @@ class DeliberationService:
             self.capability_matcher = None
 
     def deliberate(self, context: BuiltContext) -> DeliberationResult:
+        decision = getattr(context, "cognitive_decision", None)
+        if decision is None:
+            decision = self.cognitive_router.route(context)
+            context.cognitive_decision = decision
         if context.internal_event:
-            return self._handle_internal_event(context)
+            return self._attach_decision(self._handle_internal_event(context), decision)
 
         if context.input_text:
             return self._handle_user_input(context)
 
         return DeliberationResult(plan=Plan(steps=[]))
+
+    @staticmethod
+    def _attach_decision(result: DeliberationResult, decision) -> DeliberationResult:
+        plan = result.plan
+        if decision.should_stop_pipeline:
+            plan.steps = [PlanStep(type="noop")]
+        else:
+            plan.steps = [step for step in plan.steps if step.type in decision.allowed_step_types]
+        plan.selected_capabilities = list(dict.fromkeys(
+            list(decision.allowed_capabilities) + list(plan.selected_capabilities)
+        ))
+        plan.metadata = {**(plan.metadata or {}), "cognitive_decision": decision.to_dict(), "selected_route": decision.intent}
+        return result
 
     def _handle_internal_event(self, context: BuiltContext) -> DeliberationResult:
         event = context.internal_event
@@ -91,6 +108,7 @@ class DeliberationService:
                                 "mode": "reminder",
                                 "payload": event.payload,
                             },
+                            capability_id="reminder.notify",
                         )
                     ],
                     reasoning="Reminder due -> notify user",
@@ -188,6 +206,9 @@ class DeliberationService:
         if pending and not decision.uses_pending_task:
             print("[HEBE][ROUTER_GUARD] blocked_subsystem=appointment_pending reason=pending_not_allowed_by_decision", flush=True)
 
+        if not decision.allows_capability("hebe.chat_reply"):
+            print("[HEBE][ROUTER_GUARD] blocked_subsystem=fallback_chat reason=capability_not_authorized", flush=True)
+            return finish(DeliberationResult(plan=Plan(steps=[PlanStep(type="noop")], reasoning="Fallback chat not authorized")))
         return finish(self._plan_with_llm(context))
 
     def _plan_current_time(self) -> DeliberationResult:
@@ -745,6 +766,7 @@ class DeliberationService:
                             "mode": event.event_type,
                             "payload": event.payload,
                         },
+                        capability_id="twitch.reply",
                     )
                 ],
                 reasoning=f"Stream event: {event.event_type}",

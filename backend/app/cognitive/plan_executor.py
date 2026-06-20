@@ -8,6 +8,10 @@ from app.cognitive.models import (
     StepExecutionResult,
 )
 from app.cognitive.action_runtime import ActionRuntime
+from app.cognitive.cognitive_router import (
+    CAP_APPOINTMENT, CAP_OPEN_APP, CAP_REMINDER, CAP_TWITCH_ACTION,
+    CAP_TWITCH_PROMOTION, CAP_TWITCH_REPLY,
+)
 
 
 PASSIVE_STEP_TYPES = {
@@ -43,26 +47,104 @@ class PlanExecutor:
     ):
         self.memory_store = memory_store
         self.action_runtime = action_runtime
+        self.last_guard_results: list[dict] = []
 
     # =========================
     # Entry point
     # =========================
 
     def execute(self, plan: Plan) -> ExecutionResult:
-        # TODO(CognitiveRouter): this subsystem must not act before CognitiveDecision authorizes it.
-        # The executor deliberately trusts its Plan; authorization must be proven by plan metadata
-        # or enforced at this boundary before any additional plan producer is connected.
         results: list[StepExecutionResult] = []
         context: dict = {}
+        self.last_guard_results = []
+        decision = (plan.metadata or {}).get("cognitive_decision")
 
         for step in plan.steps:
-            result = self._execute_step(step, context)
+            blocked_reason = self._guard_step(step, decision, plan)
+            if blocked_reason:
+                capability = self._step_capability(step)
+                guard = {"step_type": step.type, "capability_id": capability, "allowed": False, "reason": blocked_reason}
+                self.last_guard_results.append(guard)
+                print(
+                    f"[HEBE][PLAN_EXEC_GUARD] blocked step={step.type} capability={capability or 'none'} reason={blocked_reason}",
+                    flush=True,
+                )
+                result = StepExecutionResult(
+                    step_type=step.type, success=False,
+                    data={"blocked": True, "guard_reason": blocked_reason, "capability_id": capability},
+                    error=blocked_reason,
+                )
+            else:
+                self.last_guard_results.append({"step_type": step.type, "capability_id": self._step_capability(step), "allowed": True})
+                result = self._execute_step(step, context)
             results.append(result)
 
             if result.success:
                 self._merge_result_into_context(step, result, context)
 
         return ExecutionResult(results=results)
+
+    def _guard_step(self, step: PlanStep, decision: dict | None, plan: Plan) -> str | None:
+        if step.type == "noop":
+            return None
+        if not isinstance(decision, dict):
+            return "missing_cognitive_decision"
+        if bool(decision.get("should_stop_pipeline")):
+            return "pipeline_stopped_by_decision"
+        allowed_types = set(decision.get("allowed_step_types") or [])
+        blocked_types = set(decision.get("blocked_step_types") or [])
+        if step.type in blocked_types or (allowed_types and step.type not in allowed_types):
+            return "step_type_not_authorized"
+        capability = self._step_capability(step)
+        allowed_caps = set(decision.get("allowed_capabilities") or decision.get("required_capability_ids") or [])
+        blocked_caps = set(decision.get("blocked_capabilities") or decision.get("blocked_capability_ids") or [])
+        if capability and (capability in blocked_caps or capability not in allowed_caps):
+            return "capability_not_authorized"
+        if step.type in {"action", "memory", "reminder", "tool"} and not capability:
+            return "risky_step_missing_capability"
+        authority = str(decision.get("authority") or "")
+        source = str(decision.get("source") or "")
+        if capability in {CAP_OPEN_APP, CAP_REMINDER, CAP_APPOINTMENT, CAP_TWITCH_ACTION} and authority != "owner":
+            return "authority_not_authorized"
+        if capability in {CAP_OPEN_APP, CAP_REMINDER, CAP_APPOINTMENT, CAP_TWITCH_ACTION} and source not in {
+            "ui", "typed_ui", "owner_ui", "voice", "stt_voice",
+        }:
+            return "source_not_authorized"
+        if capability == CAP_TWITCH_REPLY and authority not in {"viewer", "system"}:
+            return "authority_not_authorized"
+        if capability in {CAP_TWITCH_REPLY, CAP_TWITCH_PROMOTION} and not source.startswith("twitch"):
+            return "source_not_authorized"
+        if capability == CAP_TWITCH_PROMOTION and authority != "system":
+            return "authority_not_authorized"
+        if capability in {CAP_TWITCH_REPLY, CAP_TWITCH_ACTION, CAP_TWITCH_PROMOTION}:
+            permission = decision.get("action_permission_summary") or {}
+            if not bool(permission.get("stream_live")):
+                return "stream_not_live"
+        risk = str(step.risk_level or plan.risk_level or "low").lower()
+        if risk in {"high", "critical"} and not (step.requires_confirmation or plan.requires_confirmation):
+            return "confirmation_required"
+        return None
+
+    @staticmethod
+    def _step_capability(step: PlanStep) -> str | None:
+        if step.capability_id:
+            return step.capability_id
+        data = step.data or {}
+        if step.type == "reminder":
+            return CAP_APPOINTMENT if data.get("kind") == "appointment" else CAP_REMINDER
+        if step.type == "memory":
+            return CAP_APPOINTMENT if data.get("kind") == "appointment" else None
+        if step.type == "action":
+            name = str(data.get("name") or "").lower()
+            if name in {"open_application", "open_app", "launch_application"}:
+                return CAP_OPEN_APP
+            if "shoutout" in name or "twitch" in name:
+                return CAP_TWITCH_ACTION
+        if step.type == "reply":
+            mode = str(data.get("mode") or "")
+            if mode.startswith("twitch_"):
+                return CAP_TWITCH_REPLY
+        return None
 
     # =========================
     # Step dispatch

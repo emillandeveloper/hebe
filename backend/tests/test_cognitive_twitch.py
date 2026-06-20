@@ -183,7 +183,11 @@ class CognitiveTwitchTests(unittest.TestCase):
             payload={"display_name": "Broadcaster"},
             created_at="2026-04-26T12:00:00Z",
         )
-        context = SimpleNamespace(internal_event=event, input_text=None)
+        context = SimpleNamespace(
+            internal_event=event, input_text=None, state_snapshot={},
+            source="twitch_system", authority="system", addressed_to_hebe=False,
+            firewall_decision="allow", stream_is_live=True,
+        )
 
         result = deliberation_service.deliberate(context)
 

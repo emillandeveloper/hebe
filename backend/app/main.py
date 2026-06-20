@@ -233,6 +233,18 @@ async def dev_simulate_ambient_stt(body: dict):
     return engine.simulate_ambient_stt(text)
 
 
+@app.post("/dev/simulate/internal-twitch-event")
+async def dev_simulate_internal_twitch_event(body: dict):
+    engine = _require_dev_engine()
+    event_type = str((body or {}).get("event_type") or "twitch_raid").strip()
+    if not event_type.startswith("twitch_"):
+        raise HTTPException(status_code=400, detail="event_type must be a Twitch event")
+    return engine.simulate_internal_twitch_event(
+        event_type=event_type,
+        stream_live=bool((body or {}).get("stream_live")),
+    )
+
+
 @app.post("/dev/policy/behavior-blocks/clear")
 async def dev_clear_behavior_blocks():
     engine = _require_dev_engine()

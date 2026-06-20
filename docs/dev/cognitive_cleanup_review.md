@@ -3,6 +3,18 @@
 Reviewed against the current pipeline on 2026-06-20. The repository already contains
 `CognitiveRouter`; this pass audits remaining decision owners without redesigning them.
 
+## Central router implementation status
+
+The high-risk follow-up is now implemented. Wake/sleep and owner manual command families require
+explicit router capabilities; `legacy_flow` delegates to `cognitive_flow`; Twitch internal events
+carry a decision after the input firewall and before policy/deliberation; and `PlanExecutor` rejects
+steps without decision, step-type, capability, authority, risk, and live-stream authorization.
+Safety policy remains veto-only and cannot grant a capability blocked by the router.
+
+Simulation now exposes the decision and executor guard and includes owner/pending, ambient, bot,
+viewer-authority, and live/offline raid scenarios. Compatibility entry points which are called
+directly in tests construct a decision locally rather than bypassing the router.
+
 ## Safe cleanup completed
 
 - Removed the first `DeliberationService._plan_twitch_event` definition. A later method with
@@ -26,13 +38,13 @@ Reviewed against the current pipeline on 2026-06-20. The repository already cont
 | `cognitive/deliberation_service.py` | `_parse_relative_reminder`, `_plan_appointment`, `_resolve_pending_appointment` | Parses/constructs authorized scheduling plans | Yes | Yes, currently selected by decision intent | Medium | Preserve temporal internals; require the decision grant on every new entry point. |
 | `cognitive/temporal/*` | parsers/interpreter/rules | Temporal facts, not user intent | Yes | Called only from an authorized scheduling route | Low | No routing logic should be added here. |
 | `cognitive/scheduler.py` | `poll_due_events`, `_fire_reminder`, `push_event` | Emits due/system events | Yes | Not user-intent routing | Low | Keep; event delivery still needs the central event adapter noted below. |
-| `cognitive/plan_executor.py` | `execute`, `_execute_*` | Performs plan side effects and trusts the plan producer | Yes | Indirectly; no independent decision verification | High | Add decision/capability proof validation before accepting additional plan producers. |
-| `hebe_engine.py` | `cognitive_flow` wake/sleep branch | Executes wake/sleep before ContextBuilder/router | Yes for behavior | Not yet | High | Move behind a small router-recognized system-control intent in a dedicated change. |
+| `cognitive/plan_executor.py` | `execute`, `_execute_*` | Performs plan side effects | Yes | Yes; validates the decision at execution | Low | Keep new capability mappings synchronized with new risky step types. |
+| `hebe_engine.py` | `cognitive_flow` wake/sleep branch | Applies authorized local wake state | Yes for behavior | Yes | Low | Keep resolver evidence subordinate to the router intent. |
 | `hebe_engine.py` | manual pending/TTS/stream handlers in `cognitive_flow` | Mutates pending, audio, stream state and can execute stream commands | Temporarily | Routed first, but handlers do not inspect grants | High | Convert each family to capabilities; until then preserve the added guard comment. |
 | `hebe_engine.py` | `_plan_and_execute_local_app_action` compatibility branch | Executes app actions for incomplete legacy/test engines | Compatibility only | Router runs first, but capability grant is not checked | Medium | Remove when all harnesses construct the real deliberation stack. |
-| `hebe_engine.py` | `legacy_flow` + `orchestrator/*` | Complete alternate intent/policy/tool pipeline | Flag; current `handle_command` does not call it | No | High | Deprecate explicitly, then remove after external callers are ruled out. |
+| `hebe_engine.py` | `legacy_flow` + `orchestrator/*` | Compatibility entry point | Entry point retained | Delegates to CognitiveRouter pipeline | Low | Remove the unused alternate implementation after external callers are ruled out. |
 | `orchestrator/gates.py` | `check`, `_handle_pending_clarification` | Consumes pending replies before semantic new-request checks | Only for legacy flow | No | Critical if re-enabled | Do not reconnect to `handle_command`; adapt it to `CognitiveDecision` before reuse. |
-| `hebe_engine.py` | `process_internal_event` | Twitch firewall, viewer policy, response decision, then event plan | Yes | No event decision adapter yet | High | Introduce an event-specific CognitiveDecision adapter; retain all safety gates. |
+| `hebe_engine.py` | `process_internal_event` | Twitch firewall, router, viewer-policy veto, then event plan | Yes | Yes | Medium | Preserve the firewall-before-router and offline-stream gates. |
 | `stream/input_firewall.py` | `InputAuthorityFirewall.decide` | Ingress trust, bot/media filtering, allowed output/action envelope | Yes; security boundary | Must remain before router | Low | Never merge this into language intent routing. |
 | `cognitive/wake_name_resolver.py` | `WakeNameResolver.resolve` | Addressing/wake-name evidence | Yes | Evidence should feed router | Medium | Stop executing wake actions directly from resolver output. |
 | `cognitive/stream_companion_flow.py` | classifiers and `ResponseDecisionResolver` | Conversation relevance and output recommendation | Yes, advisory | CognitiveDecision should dominate user routes | Medium | Rename/document as advisory when central event routing is added. |
@@ -72,7 +84,7 @@ Reviewed against the current pipeline on 2026-06-20. The repository already cont
 
 ## Next bounded cleanup
 
-1. Add a CognitiveDecision adapter for wake/sleep and the three manual command families.
-2. Add an event decision envelope for Twitch/system events while preserving firewall/policy vetoes.
-3. Add capability proof validation at `PlanExecutor.execute`.
-4. Confirm no external caller uses `legacy_flow`, then remove the alternate orchestrator pipeline.
+1. Confirm no external caller imports the alternate orchestrator package, then remove that package.
+2. Replace the remaining owner-manual route hints with registered capability matchers as each
+   command family is migrated; keep the current hints narrow and non-mutating until then.
+3. Add capability inference mappings whenever a new risky `PlanStep` kind is introduced.

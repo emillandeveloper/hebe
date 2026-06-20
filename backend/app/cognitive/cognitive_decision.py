@@ -12,20 +12,20 @@ class CognitiveDecision:
     source: str
     authority: str
     addressed_to_hebe: bool
-    input_text: str
+    raw_text: str
     normalized_text: str
     intent: str
     intent_confidence: float
     is_new_request: bool
     uses_pending_task: bool
-    pending_task_id: str | None = None
+    active_pending_task: dict[str, Any] | None = None
     pending_task_kind: str | None = None
     pending_resolution_allowed: bool = False
     pending_compatible: bool = False
     pending_reason: str = "no_active_pending"
     goal_type: str = "answer_question"
-    required_capability_ids: list[str] = field(default_factory=list)
-    blocked_capability_ids: list[str] = field(default_factory=list)
+    allowed_capabilities: list[str] = field(default_factory=list)
+    blocked_capabilities: list[str] = field(default_factory=list)
     allowed_step_types: list[str] = field(default_factory=list)
     blocked_step_types: list[str] = field(default_factory=list)
     should_reply: bool = True
@@ -34,12 +34,30 @@ class CognitiveDecision:
     response_intent: str = "answer_user"
     reason: str = "fallback_chat"
     personal_state: str | None = None
+    action_permission_summary: dict[str, Any] = field(default_factory=dict)
     debug_trace: list[str] = field(default_factory=list)
 
     def allows_capability(self, capability_id: str) -> bool:
-        if capability_id in self.blocked_capability_ids:
+        if capability_id in self.blocked_capabilities:
             return False
-        return not self.required_capability_ids or capability_id in self.required_capability_ids
+        return capability_id in self.allowed_capabilities
+
+    @property
+    def input_text(self) -> str:
+        return self.raw_text
+
+    @property
+    def pending_task_id(self) -> str | None:
+        pending = self.active_pending_task or {}
+        return str(pending.get("id") or pending.get("task_id") or "") or None
+
+    @property
+    def required_capability_ids(self) -> list[str]:
+        return self.allowed_capabilities
+
+    @property
+    def blocked_capability_ids(self) -> list[str]:
+        return self.blocked_capabilities
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

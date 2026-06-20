@@ -652,6 +652,25 @@ class HebeEngine:
         ))
         return self._simulation_debug_payload()
 
+    def simulate_internal_twitch_event(self, *, event_type: str = "twitch_raid", stream_live: bool = False) -> dict:
+        stream = self._get_stream_state()
+        old_live = getattr(stream, "is_live", False) if stream is not None else False
+        old_known = getattr(stream, "live_status_known", False) if stream is not None else False
+        if stream is not None:
+            stream.is_live = bool(stream_live)
+            stream.live_status_known = True
+        try:
+            self.process_internal_event(InternalEvent(
+                event_type=event_type,
+                payload={"display_name": "SimulatedRaider", "user_login": "simulatedraider", "viewer_count": 12, "_simulated": True},
+                created_at=datetime.now(timezone.utc).isoformat(),
+            ))
+            return self._simulation_debug_payload(extra={"simulated_stream_live": bool(stream_live)})
+        finally:
+            if stream is not None:
+                stream.is_live = old_live
+                stream.live_status_known = old_known
+
     def simulate_leo_message(self, text: str, *, source: str = "ui", pending_kind: str | None = None) -> dict:
         clean_source = source if source in {"ui", "stt_voice"} else "ui"
         if pending_kind == "appointment_datetime":
@@ -751,17 +770,19 @@ class HebeEngine:
             "final_response": cognitive.get("final_response") or trace.get("final_response") or trace.get("hebe_response") or "",
             "last_policy_decision": trace,
             "cognitive_route": cognitive,
-            "raw_input": cognitive.get("input_text"),
+            "raw_input": cognitive.get("raw_text") or cognitive.get("input_text"),
             "normalized_input": cognitive.get("normalized_text"),
-            "active_pending_task": cognitive.get("pending_task_id"),
+            "active_pending_task": cognitive.get("active_pending_task") or cognitive.get("pending_task_id"),
             "pending_compatibility": cognitive.get("pending_compatible"),
             "is_new_request": cognitive.get("is_new_request"),
             "uses_pending_task": cognitive.get("uses_pending_task"),
-            "allowed_capabilities": cognitive.get("required_capability_ids") or [],
-            "blocked_capabilities": cognitive.get("blocked_capability_ids") or [],
+            "allowed_capabilities": cognitive.get("allowed_capabilities") or cognitive.get("required_capability_ids") or [],
+            "blocked_capabilities": cognitive.get("blocked_capabilities") or cognitive.get("blocked_capability_ids") or [],
             "selected_route": cognitive.get("selected_route") or cognitive.get("intent"),
             "should_reply": cognitive.get("should_reply"),
             "final_plan_steps": cognitive.get("final_plan_steps") or [],
+            "should_stop_pipeline": cognitive.get("should_stop_pipeline"),
+            "plan_executor_guard": cognitive.get("plan_executor_guard") or [],
             "input_firewall": self._firewall_payload(),
             "is_simulation": True,
             "behavior_blocks": self.get_active_behavior_blocks(),
@@ -1395,38 +1416,8 @@ class HebeEngine:
         }
 
     def legacy_flow(self, command: str, source: str = "voice") -> str:
-        # TODO(CognitiveRouter): this subsystem must not act before CognitiveDecision authorizes it.
-        # Kept only as a compatibility entry point; handle_command uses cognitive_flow.
-        result = self.orchestrator.handle(
-            text=command,
-            source=source,
-        )
-
-        print(
-            "[HEBE] orchestrator result "
-            f"status={result.status.value!r} "
-            f"success={result.success!r} "
-            f"intent={result.intent!r} "
-            f"text={result.output_text!r} "
-            f"error={result.error!r}",
-            flush=True,
-        )
-
-        spoken_text = (result.output_text or "").strip()
-
-        if self._should_speak_result(result):
-            try:
-                self._deliver_voice_reply(spoken_text)
-            except Exception as e:
-                print(f"[HEBE] speak failed: {e!r}", flush=True)
-
-        if result.intent == "sleep_mode" and result.success:
-            return "sleep"
-
-        if result.intent == "stop_engine" and result.success:
-            return "stop"
-
-        return "continue"    
+        print("[HEBE][LEGACY_FLOW] delegated_to=cognitive_flow", flush=True)
+        return self.cognitive_flow(command, source=source)
 
     def _handle_wake_sleep_command(self, text: str) -> CommandResult | None:
         normalized = self._normalize_text(text)
@@ -1511,27 +1502,14 @@ class HebeEngine:
             f"current_pending={getattr(self.runtime.state, 'pending_clarification', None)!r}",
             flush=True,
         )
+        firewall = None
         if source in {"ui", "typed_ui"}:
-            self._input_firewall_decision(
+            firewall = self._input_firewall_decision(
                 source="owner_ui",
                 text=command,
                 addressed_to_hebe=True,
                 has_action_intent=False,
             )
-
-        # TODO(CognitiveRouter): this subsystem must not act before CognitiveDecision authorizes it.
-        # Wake/sleep currently precedes ContextBuilder and is the remaining direct-user bypass.
-        wake_result = self._handle_wake_sleep_command(command)
-        if wake_result is not None:
-            text = self._synthesize_command_result(wake_result, input_text=command)
-            self._deliver_manual_reply(text, source=source)
-            print("[HEBE][COG] decision=command", flush=True)
-            return "continue"
-
-        if bool(getattr(self.runtime.state, "hebe_sleeping", False)):
-            print("[HEBE][WAKE] sleeping; ignored input reason=not_wake_command", flush=True)
-            print("[HEBE][COG] decision=rejected reason=hebe_sleeping", flush=True)
-            return "continue"
 
         route_source = "ui" if source in {"ui", "typed_ui"} else source
         route_authority = "owner" if route_source in {"ui", "stt_voice", "voice"} else "system"
@@ -1560,14 +1538,54 @@ class HebeEngine:
                 context.authority = route_authority
                 context.addressed_to_hebe = route_authority == "owner"
         router = getattr(self, "cognitive_router", None) or CognitiveRouter()
+        context.firewall_decision = str(getattr(firewall, "firewall_decision", "") or "")
+        stream = self._get_stream_state()
+        context.stream_is_live = bool(
+            getattr(stream, "is_live", False)
+            or (getattr(stream, "enabled", False) and not getattr(stream, "live_status_known", False))
+        )
+        hints = []
+        normalized_route = self._normalize_text(command)
+        if hasattr(self, "_parse_tts_control_intent") and self._parse_tts_control_intent(normalized_route) is not None:
+            hints.append("tts_control")
+        route_tokens = set(normalized_route.split())
+        stream_domain = route_tokens & {"stream", "directo", "twitch", "shoutout", "promo", "raid", "chat", "stt", "ambiental"}
+        stream_control = route_tokens & {
+            "activa", "activar", "desactiva", "desactivar", "abre", "cierra", "inicia", "para",
+            "haz", "hazle", "manda", "envia", "dile", "di", "pausa", "reanuda", "cambia", "pon", "quita",
+            "enable", "disable", "start", "stop", "send", "pause", "resume",
+        }
+        if stream_domain and stream_control:
+            hints.append("stream_manual")
+        if route_tokens & {"chat"} and stream_control:
+            hints.append("stream_action")
+        if route_tokens & {"shoutout", "promo", "raid"} and stream_control:
+            hints.append("stream_action")
+            hints.append("stream_manual")
+        if re.search(r"\b(?:que|cual)\s+(?:toca|juego|directo|stream)\b", normalized_route):
+            hints.append("stream_manual")
+        context.route_hints = hints
         context.cognitive_decision = router.route(context)
         self._last_cognitive_trace = context.cognitive_decision.to_dict()
+        decision = context.cognitive_decision
+
+        if decision.intent in {"wake_control", "sleep_control"} and decision.allows_capability("hebe.wake_control"):
+            wake_result = self._handle_wake_sleep_command(command)
+            if wake_result is not None:
+                text = self._synthesize_command_result(wake_result, input_text=command)
+                self._deliver_manual_reply(text, source=source)
+                print("[HEBE][COG] decision=authorized_wake_control", flush=True)
+                return "continue"
+
+        if bool(getattr(self.runtime.state, "hebe_sleeping", False)):
+            print("[HEBE][WAKE] sleeping; ignored input reason=router_did_not_authorize_wake", flush=True)
+            return "continue"
 
         # Legacy harnesses do not construct the deliberation stack. Their
         # command planner remains a compatibility endpoint, but only after the
         # central route has classified the input.
         if not hasattr(self, "context_builder"):
-            local_app = self._plan_and_execute_local_app_action(command, source)
+            local_app = self._plan_and_execute_local_app_action(command, source) if decision.allows_capability("pc.open_application") else None
             if local_app is not None:
                 text = self._synthesize_command_result(local_app, input_text=command)
                 self._deliver_manual_reply(text, source=source)
@@ -1594,12 +1612,13 @@ class HebeEngine:
             print(f"[HEBE][COG] decision=owner_policy reason={owner_decision.reason}", flush=True)
             return "continue"
 
-        # TODO(CognitiveRouter): this subsystem must not act before CognitiveDecision authorizes it.
-        # These compatibility handlers run after routing, but still need explicit capability grants.
-        manual = self._handle_pending_manual_intent(command)
-        if manual is None:
+        manual = self._handle_pending_manual_intent(command) if decision.allows_capability("pending.cancel") else None
+        if manual is None and decision.allows_capability("audio.tts_control"):
             manual = self._handle_tts_manual_command(command)
-        if manual is None:
+        if manual is None and (
+            decision.allows_capability("stream.local_state_control")
+            or decision.allows_capability("twitch_action")
+        ):
             manual = self._handle_stream_manual_command(command)
         if manual is not None:
             force_ui = bool(getattr(self, "_manual_reply_ui_only", False))
@@ -1680,6 +1699,7 @@ class HebeEngine:
             "final_plan_steps": [step.type for step in deliberation.plan.steps],
         })
         execution = self.plan_executor.execute(deliberation.plan)
+        self._last_cognitive_trace["plan_executor_guard"] = list(getattr(self.plan_executor, "last_guard_results", []) or [])
         reply_text = self.response_synthesizer.synthesize(
             context=context,
             deliberation=deliberation,
@@ -1778,9 +1798,7 @@ class HebeEngine:
             return
         event_type = str(getattr(event, "event_type", "") or "")
         payload = getattr(event, "payload", {}) or {}
-        # TODO(CognitiveRouter): this subsystem must not act before CognitiveDecision authorizes it.
-        # Internal Twitch events intentionally use firewall/policy today and do not yet carry a
-        # CognitiveDecision; keep the safety gates until event routing has a central adapter.
+        event_decision = None
         if event_type.startswith("twitch_"):
             raw_text = str((payload or {}).get("message_text") or (payload or {}).get("text") or "")
             username = str((payload or {}).get("user_login") or (payload or {}).get("username") or "")
@@ -1812,8 +1830,28 @@ class HebeEngine:
                     authority=firewall.authority,
                 ))
                 return
+            stream = self._get_stream_state()
+            route_context = SimpleNamespace(
+                input_text=raw_text,
+                internal_event=event,
+                state_snapshot={"pending_clarification": None},
+                source=source,
+                authority=firewall.authority,
+                addressed_to_hebe=event_type == "twitch_chat_react" or self._message_mentions_hebe(raw_text),
+                firewall_decision=firewall.firewall_decision,
+                stream_is_live=bool(
+                    getattr(stream, "is_live", False)
+                    or (getattr(stream, "enabled", False) and not getattr(stream, "live_status_known", False))
+                ),
+                route_hints=[],
+            )
+            event_decision = (getattr(self, "cognitive_router", None) or CognitiveRouter()).route(route_context)
+            self._last_cognitive_trace = event_decision.to_dict()
+            if event_decision.should_stop_pipeline:
+                print(f"[HEBE][EVENT_ROUTER] blocked type={event_type} reason={event_decision.reason}", flush=True)
+                return
         if event_type == "twitch_raid":
-            self._handle_twitch_raid_event(event)
+            self._handle_twitch_raid_event(event, cognitive_decision=event_decision)
             return
 
         if event_type == "twitch_chat_react":
@@ -1858,6 +1896,12 @@ class HebeEngine:
             input_text=None,
             internal_event=event,
         )
+        stream = self._get_stream_state()
+        context.stream_is_live = bool(
+            getattr(stream, "is_live", False)
+            or (getattr(stream, "enabled", False) and not getattr(stream, "live_status_known", False))
+        )
+        context.cognitive_decision = event_decision
         try:
             live_context = self._get_live_session_brain().retrieve_context(str(payload), limit_events=12, limit_summaries=3)
             if isinstance(payload, dict):
@@ -1916,6 +1960,7 @@ class HebeEngine:
 
         deliberation = self.deliberation_service.deliberate(context)
         execution = self.plan_executor.execute(deliberation.plan)
+        self._last_cognitive_trace["plan_executor_guard"] = list(getattr(self.plan_executor, "last_guard_results", []) or [])
         reply_text = self.response_synthesizer.synthesize(
             context=context,
             deliberation=deliberation,
@@ -2025,7 +2070,7 @@ class HebeEngine:
             print(f"[HEBE][STREAM] Twitch live confirmed; stream mode already enabled source={source}", flush=True)
         return changed
 
-    def _handle_twitch_raid_event(self, event) -> None:
+    def _handle_twitch_raid_event(self, event, cognitive_decision=None) -> None:
         stream = self._get_stream_state()
         payload = getattr(event, "payload", {}) or {}
         username = payload.get("display_name") or payload.get("user_login") or "alguien"
@@ -2043,6 +2088,17 @@ class HebeEngine:
         if not self._firewall_allows_pipeline(firewall):
             print(f"[HEBE][TWITCH][RAID] blocked reason={firewall.reason}", flush=True)
             return
+        if cognitive_decision is None:
+            cognitive_decision = (getattr(self, "cognitive_router", None) or CognitiveRouter()).route(SimpleNamespace(
+                input_text="", internal_event=event, state_snapshot={}, source="twitch_system",
+                authority=firewall.authority, addressed_to_hebe=False,
+                firewall_decision=firewall.firewall_decision,
+                stream_is_live=bool(
+                    getattr(stream, "is_live", False)
+                    or (getattr(stream, "enabled", False) and not getattr(stream, "live_status_known", False))
+                ),
+                route_hints=[],
+            ))
         print(f"[HEBE][TWITCH][RAID] received from={username} viewers={viewers}", flush=True)
         is_simulated = bool(payload.get("_simulated"))
         if stream is not None:
@@ -2072,7 +2128,10 @@ class HebeEngine:
             return
 
         print("[HEBE][TWITCH][RAID] planned thank-you", flush=True)
-        reply_text = self._synthesize_internal_event_reply(event)
+        if cognitive_decision is None or not cognitive_decision.allows_capability("twitch.reply"):
+            print("[HEBE][TWITCH][RAID] blocked reason=cognitive_reply_not_authorized", flush=True)
+            return
+        reply_text = self._synthesize_internal_event_reply(event, cognitive_decision=cognitive_decision)
         if not reply_text:
             print("[HEBE][TWITCH][RAID] blocked reason=empty_reply", flush=True)
             return
@@ -2081,14 +2140,23 @@ class HebeEngine:
         if is_simulated:
             print("[HEBE][PROMOTION_GATE] blocked reason=simulation_mode target={}".format(payload.get("user_login") or username), flush=True)
             return
+        if not cognitive_decision.allows_capability("twitch.promotion"):
+            print("[HEBE][PROMOTION_GATE] blocked reason=cognitive_promotion_not_authorized", flush=True)
+            return
         self._maybe_auto_shoutout_raider(payload.get("user_login") or username, force=bool(payload.get("_force_shoutout")))
 
-    def _synthesize_internal_event_reply(self, event) -> str:
+    def _synthesize_internal_event_reply(self, event, cognitive_decision=None) -> str:
         context = self.context_builder.build(
             state=self.runtime.state,
             input_text=None,
             internal_event=event,
         )
+        stream = self._get_stream_state()
+        context.stream_is_live = bool(
+            getattr(stream, "is_live", False)
+            or (getattr(stream, "enabled", False) and not getattr(stream, "live_status_known", False))
+        )
+        context.cognitive_decision = cognitive_decision
 
         deliberation = self.deliberation_service.deliberate(context)
         execution = self.plan_executor.execute(deliberation.plan)
@@ -2192,7 +2260,6 @@ class HebeEngine:
             f"game={stream.user_today_game_override!r}",
             flush=True,
         )
-
     def _restore_user_today_game_override(self, stream) -> None:
         game = str(getattr(stream, "user_today_game_override", "") or "").strip()
         if not game:

@@ -55,6 +55,9 @@ class BuiltContext:
     addressed_to_hebe: bool = True
     message_id: str = ""
     cognitive_decision: CognitiveDecision | None = None
+    firewall_decision: str = ""
+    stream_is_live: bool = False
+    route_hints: list[str] = field(default_factory=list)
 
 
 class ContextBuilder:
