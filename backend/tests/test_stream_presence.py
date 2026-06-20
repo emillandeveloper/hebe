@@ -14,6 +14,7 @@ from app.stream.game_profiles import GameProfileStore
 from app.stream import memory as stream_memory
 from app.stream.state import StreamSessionState
 from app.stream.spontaneity import StreamSpontaneityConfig, StreamSpontaneityService
+from app.cognitive.scheduler import InternalEvent
 
 
 class FakeTwitch:
@@ -302,6 +303,30 @@ class StreamPresenceTests(unittest.TestCase):
 
         self.assertEqual(engine.runtime.state.stream.last_chat_activity_ts, 0.0)
         self.assertEqual(engine.runtime.state.stream.recent_chat_messages, [])
+
+    def test_bot_reaction_event_stops_before_context_or_model_pipeline(self):
+        stream = StreamSessionState(enabled=True)
+        stream.is_live = True
+        stream.live_status_known = True
+        engine = make_engine(stream)
+        engine._last_input_firewall = {}
+        engine._last_policy_trace = {}
+        engine.input_authority_firewall = engine._build_input_firewall()
+        engine.context_builder = Mock()
+        engine.deliberation_service = Mock()
+
+        engine.process_internal_event(InternalEvent(
+            event_type="twitch_chat_react",
+            payload={
+                "user_login": "Nightbot",
+                "display_name": "Nightbot",
+                "message_text": "automated channel status",
+            },
+            created_at="2026-06-20T00:00:00Z",
+        ))
+
+        engine.context_builder.build.assert_not_called()
+        engine.deliberation_service.deliberate.assert_not_called()
 
     def test_manual_completed_marker_updates_run_context(self):
         engine = make_engine(StreamSessionState(enabled=True))

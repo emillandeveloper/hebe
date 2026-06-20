@@ -101,6 +101,8 @@ class OrchestratorGates:
 
         pending_clarification = getattr(state, "pending_clarification", None)
         if pending_clarification:
+            # TODO(CognitiveRouter): this subsystem must not act before CognitiveDecision authorizes it.
+            # legacy_flow can otherwise consume an unrelated new request as a slot value.
             return self._handle_pending_clarification(
                 user_input=user_input,
                 normalized_text=normalized,

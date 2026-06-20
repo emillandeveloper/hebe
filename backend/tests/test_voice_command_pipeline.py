@@ -1181,6 +1181,19 @@ class VoiceCommandPipelineTests(unittest.TestCase):
         self.assertIn("[HEBE][RESPONSE_DECISION] should_reply=false reason=no_ignore", joined)
         self.assertIn("[HEBE][COG] decision=ambient_ignored_low_value reason=ambient_context_only", joined)
 
+    def test_ambient_stt_ignored_by_firewall_never_enters_cognitive_flow_or_actions(self):
+        engine = make_engine(["nuria"])
+        engine.runtime.state.stream.enabled = False
+        engine.stream_ambient_stt_enabled = False
+        engine.cognitive_flow = Mock()
+        engine.action_runtime.execute = Mock()
+
+        result = engine._process_stt_voice_transcript("Estoy comentando algo al fondo")
+
+        self.assertEqual(result, "continue")
+        engine.cognitive_flow.assert_not_called()
+        engine.action_runtime.execute.assert_not_called()
+
     def test_stt_shoutout_without_wakeword_still_has_action_intent(self):
         engine = make_engine(["nuria"])
         normalization = engine._normalize_stt_input("Haz una promo a Nuria")

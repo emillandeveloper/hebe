@@ -49,6 +49,9 @@ class PlanExecutor:
     # =========================
 
     def execute(self, plan: Plan) -> ExecutionResult:
+        # TODO(CognitiveRouter): this subsystem must not act before CognitiveDecision authorizes it.
+        # The executor deliberately trusts its Plan; authorization must be proven by plan metadata
+        # or enforced at this boundary before any additional plan producer is connected.
         results: list[StepExecutionResult] = []
         context: dict = {}
 

@@ -28,7 +28,6 @@ from app.cognitive.cognitive_router import (
 
 
 CAPABILITY_BACKLOG_QUERY = "hebe.capability_backlog_query"
-CAPABILITY_OPEN_APPLICATION = "pc.open_application"
 REPLY_MODE_CAPABILITY_CATALOGUE_QUERY = "capability_catalogue_query"
 
 
@@ -103,22 +102,6 @@ class DeliberationService:
             return self._plan_twitch_event(event)
 
         return DeliberationResult(plan=Plan(steps=[]))
-
-    def _plan_twitch_event(self, event) -> DeliberationResult:
-        return DeliberationResult(
-            plan=Plan(
-                steps=[
-                    PlanStep(
-                        type="reply",
-                        data={
-                            "mode": event.event_type,
-                            "payload": event.payload,
-                        },
-                    )
-                ],
-                reasoning=f"Twitch event {event.event_type} -> stream reply",
-            )
-        )
 
     def _handle_user_input(self, context: BuiltContext) -> DeliberationResult:
         text = (context.input_text or "").strip().lower()
@@ -583,23 +566,6 @@ class DeliberationService:
     # Helpers: detección
     # =========================
 
-    def _looks_like_appointment(self, text: str) -> bool:
-        keywords = [
-            "psicóloga",
-            "psicologa",
-            "médico",
-            "medico",
-            "dentista",
-            "cita",
-            "reuniÃ³n",
-            "reunion",
-            "appointment",
-            "consulta",
-            "reserva",
-            "agenda",
-        ]
-        return any(k in text for k in keywords)
-
     def _parse_relative_reminder(self, text: str) -> dict[str, str] | None:
         raw = (text or "").strip()
         normalized = self._normalize_text(raw)
@@ -741,7 +707,7 @@ class DeliberationService:
                             "name": "open_application",
                             "params": {"app_name": app_name},
                         },
-                        capability_id=CAPABILITY_OPEN_APPLICATION,
+                        capability_id=CAP_OPEN_APP,
                         risk_level="medium",
                     ),
                     PlanStep(

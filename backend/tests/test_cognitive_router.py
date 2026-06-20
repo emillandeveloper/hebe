@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from app.cognitive.cognitive_router import CognitiveRouter
 from app.cognitive.deliberation_service import DeliberationService
@@ -106,6 +107,24 @@ class CognitiveRouterTests(unittest.TestCase):
         plan = self.service.deliberate(value).plan
         self.assertEqual(decision.intent, "current_date_query")
         self.assertEqual(plan.steps[0].data["mode"], "date_answer")
+
+    def test_known_structured_routes_never_call_fallback_chat_planner(self):
+        samples = (
+            "Hebe, dime la hora actual",
+            "Hebe, inicia Discord",
+            "Hebe, tengo hambre",
+        )
+        with patch.object(
+            self.service,
+            "_plan_with_llm",
+            side_effect=AssertionError("structured intent reached fallback chat"),
+        ):
+            for text in samples:
+                with self.subTest(text=text):
+                    value = context(text)
+                    self.route(value)
+                    plan = self.service.deliberate(value).plan
+                    self.assertNotEqual(plan.steps[0].data.get("mode"), "chat")
 
     def test_open_app_is_not_stolen_by_pending(self):
         value = context("Hebe, abre Discord", active_pending())

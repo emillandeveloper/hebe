@@ -1395,6 +1395,8 @@ class HebeEngine:
         }
 
     def legacy_flow(self, command: str, source: str = "voice") -> str:
+        # TODO(CognitiveRouter): this subsystem must not act before CognitiveDecision authorizes it.
+        # Kept only as a compatibility entry point; handle_command uses cognitive_flow.
         result = self.orchestrator.handle(
             text=command,
             source=source,
@@ -1517,6 +1519,8 @@ class HebeEngine:
                 has_action_intent=False,
             )
 
+        # TODO(CognitiveRouter): this subsystem must not act before CognitiveDecision authorizes it.
+        # Wake/sleep currently precedes ContextBuilder and is the remaining direct-user bypass.
         wake_result = self._handle_wake_sleep_command(command)
         if wake_result is not None:
             text = self._synthesize_command_result(wake_result, input_text=command)
@@ -1590,6 +1594,8 @@ class HebeEngine:
             print(f"[HEBE][COG] decision=owner_policy reason={owner_decision.reason}", flush=True)
             return "continue"
 
+        # TODO(CognitiveRouter): this subsystem must not act before CognitiveDecision authorizes it.
+        # These compatibility handlers run after routing, but still need explicit capability grants.
         manual = self._handle_pending_manual_intent(command)
         if manual is None:
             manual = self._handle_tts_manual_command(command)
@@ -1772,6 +1778,9 @@ class HebeEngine:
             return
         event_type = str(getattr(event, "event_type", "") or "")
         payload = getattr(event, "payload", {}) or {}
+        # TODO(CognitiveRouter): this subsystem must not act before CognitiveDecision authorizes it.
+        # Internal Twitch events intentionally use firewall/policy today and do not yet carry a
+        # CognitiveDecision; keep the safety gates until event routing has a central adapter.
         if event_type.startswith("twitch_"):
             raw_text = str((payload or {}).get("message_text") or (payload or {}).get("text") or "")
             username = str((payload or {}).get("user_login") or (payload or {}).get("username") or "")
