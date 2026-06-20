@@ -8,6 +8,8 @@ from .models import (
     ExecutionResult,
 )
 from .plan_executor import PlanExecutor
+from .cognitive_decision import CognitiveDecision
+from .cognitive_router import CognitiveRouter
 
 __all__ = [
     "MemoryStore",
@@ -21,4 +23,6 @@ __all__ = [
     "StepExecutionResult",
     "ExecutionResult",
     "PlanExecutor",
+    "CognitiveDecision",
+    "CognitiveRouter",
 ]

@@ -5,6 +5,11 @@ from typing import Any
 
 
 GOAL_TYPES = (
+    "answer_current_time",
+    "answer_current_date",
+    "respond_to_personal_state",
+    "create_reminder",
+    "create_appointment",
     "answer_question",
     "analyze_chat_activity",
     "research_game_strategy",

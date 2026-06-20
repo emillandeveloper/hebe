@@ -138,7 +138,27 @@ class ResponseSynthesizer:
             if mode == "capability_catalogue_query":
                 return self._generate_capability_catalogue_reply(reply_step.data)
 
+            if mode == "time_answer":
+                return f"Son las {reply_step.data.get('time')} en Madrid."
+
+            if mode == "date_answer":
+                return f"Hoy es {reply_step.data.get('date')}."
+
+            if mode == "companion_reaction":
+                return self._generate_personal_state_reply(context, reply_step.data)
+
         return self._fallback_text("No tengo suficiente contexto para responder con seguridad.")
+
+    def _generate_personal_state_reply(self, context: BuiltContext, data: dict) -> str:
+        state = str(data.get("state") or "unknown")
+        system = (
+            "Respond as Hebe, Leo's close companion. React naturally to the personal state he shared. "
+            "Be concise and warm. You may offer one practical suggestion, but do not schedule, remind, "
+            "diagnose, or claim to have performed an action."
+        )
+        user = f"Personal state category: {state}\nUser message: {context.input_text or ''}"
+        fallback = "Te escucho, Leo. CuÃ­date un poco ahora mismo."
+        return clean_jarvis_reply(self._call_model(system, user, fallback=fallback)) or fallback
 
     # =========================
     # Internal events

@@ -1,5 +1,65 @@
 version: 1
 capabilities:
+  - id: time.get_current_time
+    category: time
+    name: Current local time
+    description: Read the current wall-clock time in the configured local timezone.
+    status: implemented
+    enabled: true
+    risk_level: low
+    requires_confirmation: false
+    available_in_modes: [private, stream, any]
+    implemented_by: [app.cognitive.deliberation_service.DeliberationService._plan_current_time]
+    tests: [backend.tests.test_cognitive_router]
+    output_policy: {reply_mode: time_answer}
+    memory_policy: {read: none, write: none}
+    goal_types: [answer_current_time]
+
+  - id: time.get_current_date
+    category: time
+    name: Current local date
+    description: Read the current calendar date in the configured local timezone.
+    status: implemented
+    enabled: true
+    risk_level: low
+    requires_confirmation: false
+    available_in_modes: [private, stream, any]
+    implemented_by: [app.cognitive.deliberation_service.DeliberationService._plan_current_date]
+    tests: [backend.tests.test_cognitive_router]
+    output_policy: {reply_mode: date_answer}
+    memory_policy: {read: none, write: none}
+    goal_types: [answer_current_date]
+
+  - id: appointment.create
+    category: schedule
+    name: Create appointment
+    description: Store an explicitly requested appointment after its datetime is resolved.
+    status: implemented
+    enabled: true
+    risk_level: medium
+    requires_confirmation: false
+    available_in_modes: [private]
+    implemented_by: [app.cognitive.deliberation_service.DeliberationService._plan_appointment]
+    tests: [backend.tests.test_cognitive_router]
+    output_policy: {reply_mode: appointment}
+    memory_policy: {read: relevant, write: appointment}
+    goal_types: [create_appointment]
+
+  - id: reminder.create
+    category: schedule
+    name: Create reminder
+    description: Create a reminder only from an explicit reminder request.
+    status: implemented
+    enabled: true
+    risk_level: medium
+    requires_confirmation: false
+    available_in_modes: [private]
+    implemented_by: [app.cognitive.deliberation_service.DeliberationService._plan_relative_reminder]
+    tests: [backend.tests.test_cognitive_router]
+    output_policy: {reply_mode: reminder}
+    memory_policy: {read: none, write: reminder}
+    goal_types: [create_reminder]
+
   - id: hebe.chat_reply
     category: hebe
     name: Direct chat reply
@@ -35,7 +95,7 @@ capabilities:
       write: none
     spoiler_policy:
       default: avoid_unrequested_spoilers
-    goal_types: [answer_question]
+    goal_types: [answer_question, respond_to_personal_state]
     backlog:
       priority: P3
       effort: S

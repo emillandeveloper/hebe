@@ -6,6 +6,7 @@ import unicodedata
 import hashlib
 import uuid
 from dataclasses import replace
+from types import SimpleNamespace
 from queue import Empty
 from difflib import SequenceMatcher
 from datetime import datetime, timedelta, timezone
@@ -50,6 +51,7 @@ from app.cognitive.stream_companion_flow import (
 )
 from app.cognitive.wake_name_resolver import WakeNameResolver
 from app.cognitive.context_builder import ContextBuilder
+from app.cognitive.cognitive_router import CognitiveRouter
 from app.cognitive.deliberation_service import DeliberationService
 from app.cognitive.local_app_planner import LocalAppActionPlanner
 from app.cognitive.plan_executor import PlanExecutor
@@ -152,6 +154,7 @@ class HebeEngine:
         self.memory_store = MemoryStore()
         self.scheduler = SchedulerService(self.memory_store)
         self.context_builder = ContextBuilder(self.memory_store)
+        self.cognitive_router = CognitiveRouter()
         self.wake_name_resolver = WakeNameResolver()
 
         # Conectar Twitch events al scheduler
@@ -349,6 +352,7 @@ class HebeEngine:
         self.input_authority_firewall = self._build_input_firewall()
         self._last_input_firewall: dict = {}
         self._last_policy_trace: dict = {}
+        self._last_cognitive_trace: dict = {}
         self._current_input_event: InputEvent | None = None
 
     def _build_input_firewall(self) -> InputAuthorityFirewall:
@@ -648,8 +652,18 @@ class HebeEngine:
         ))
         return self._simulation_debug_payload()
 
-    def simulate_leo_message(self, text: str, *, source: str = "ui") -> dict:
+    def simulate_leo_message(self, text: str, *, source: str = "ui", pending_kind: str | None = None) -> dict:
         clean_source = source if source in {"ui", "stt_voice"} else "ui"
+        if pending_kind == "appointment_datetime":
+            now_ts = time.time()
+            self.runtime.state.pending_clarification = {
+                "id": f"simulation_pending_{uuid.uuid4().hex}",
+                "kind": "appointment_datetime",
+                "authority": "owner",
+                "created_at": now_ts,
+                "expires_at": now_ts + 300,
+                "draft": {"title": "Consulta", "source_text": "simulated appointment request"},
+            }
         before_event_id = self.get_last_policy_trace().get("event_id")
         self.cognitive_flow(str(text or "").strip(), source=clean_source)
         after_event_id = self.get_last_policy_trace().get("event_id")
@@ -704,6 +718,7 @@ class HebeEngine:
     def _simulation_debug_payload(self, *, extra: dict | None = None) -> dict:
         stream = self._get_stream_state()
         trace = self.get_last_policy_trace()
+        cognitive = dict(getattr(self, "_last_cognitive_trace", {}) or {})
         game_state = {
             "game": getattr(stream, "current_game", None) or getattr(stream, "current_category", None) if stream is not None else None,
             "current_activity": getattr(stream, "current_activity", None) if stream is not None else None,
@@ -719,22 +734,34 @@ class HebeEngine:
             "display_name": trace.get("speaker"),
             "authority": trace.get("authority"),
             "addressed_to_hebe": trace.get("addressed_to_hebe"),
-            "intent": trace.get("intent"),
+            "intent": cognitive.get("intent") or trace.get("intent"),
             "requested_behavior": trace.get("requested_behavior"),
             "behavior_family": trace.get("behavior_family"),
             "target": trace.get("target"),
             "matched_by": trace.get("matched_by"),
             "policy_decision": trace.get("policy_decision"),
-            "reason": trace.get("reason"),
-            "response_mode": trace.get("response_mode"),
+            "reason": cognitive.get("reason") or trace.get("reason"),
+            "response_mode": cognitive.get("response_mode") or trace.get("response_mode"),
             "response_source": trace.get("response_source"),
             "allow_free_llm": trace.get("allow_free_llm"),
             "execute_as_command": trace.get("execute_as_command"),
             "style_guard_triggered": trace.get("style_guard_triggered"),
             "was_generic_refusal_rewritten": trace.get("was_generic_refusal_rewritten"),
             "hebe_response": trace.get("hebe_response") or "",
-            "final_response": trace.get("final_response") or trace.get("hebe_response") or "",
+            "final_response": cognitive.get("final_response") or trace.get("final_response") or trace.get("hebe_response") or "",
             "last_policy_decision": trace,
+            "cognitive_route": cognitive,
+            "raw_input": cognitive.get("input_text"),
+            "normalized_input": cognitive.get("normalized_text"),
+            "active_pending_task": cognitive.get("pending_task_id"),
+            "pending_compatibility": cognitive.get("pending_compatible"),
+            "is_new_request": cognitive.get("is_new_request"),
+            "uses_pending_task": cognitive.get("uses_pending_task"),
+            "allowed_capabilities": cognitive.get("required_capability_ids") or [],
+            "blocked_capabilities": cognitive.get("blocked_capability_ids") or [],
+            "selected_route": cognitive.get("selected_route") or cognitive.get("intent"),
+            "should_reply": cognitive.get("should_reply"),
+            "final_plan_steps": cognitive.get("final_plan_steps") or [],
             "input_firewall": self._firewall_payload(),
             "is_simulation": True,
             "behavior_blocks": self.get_active_behavior_blocks(),
@@ -1502,6 +1529,46 @@ class HebeEngine:
             print("[HEBE][COG] decision=rejected reason=hebe_sleeping", flush=True)
             return "continue"
 
+        route_source = "ui" if source in {"ui", "typed_ui"} else source
+        route_authority = "owner" if route_source in {"ui", "stt_voice", "voice"} else "system"
+        if not hasattr(self, "context_builder"):
+            context = SimpleNamespace(
+                input_text=command, internal_event=None,
+                state_snapshot={"pending_clarification": getattr(self.runtime.state, "pending_clarification", None)},
+                source=route_source, authority=route_authority,
+                addressed_to_hebe=route_authority == "owner",
+            )
+        else:
+            try:
+                context = self.context_builder.build(
+                    state=self.runtime.state,
+                    input_text=command,
+                    internal_event=None,
+                    source=route_source,
+                    authority=route_authority,
+                    addressed_to_hebe=route_authority == "owner",
+                )
+            except TypeError:
+                context = self.context_builder.build(
+                    state=self.runtime.state, input_text=command, internal_event=None
+                )
+                context.source = route_source
+                context.authority = route_authority
+                context.addressed_to_hebe = route_authority == "owner"
+        router = getattr(self, "cognitive_router", None) or CognitiveRouter()
+        context.cognitive_decision = router.route(context)
+        self._last_cognitive_trace = context.cognitive_decision.to_dict()
+
+        # Legacy harnesses do not construct the deliberation stack. Their
+        # command planner remains a compatibility endpoint, but only after the
+        # central route has classified the input.
+        if not hasattr(self, "context_builder"):
+            local_app = self._plan_and_execute_local_app_action(command, source)
+            if local_app is not None:
+                text = self._synthesize_command_result(local_app, input_text=command)
+                self._deliver_manual_reply(text, source=source)
+                return "continue"
+
         owner_decision = self._owner_policy_decision(command, source=source)
         if owner_decision is not None and not owner_decision.allow_llm:
             if owner_decision.allow_reply:
@@ -1521,13 +1588,6 @@ class HebeEngine:
                     )
                     self._deliver_manual_reply(policy_reply, source=source)
             print(f"[HEBE][COG] decision=owner_policy reason={owner_decision.reason}", flush=True)
-            return "continue"
-
-        local_app = self._plan_and_execute_local_app_action(command, source)
-        if local_app is not None:
-            text = self._synthesize_command_result(local_app, input_text=command)
-            self._deliver_manual_reply(text, source=source)
-            print("[HEBE][COG] decision=command", flush=True)
             return "continue"
 
         manual = self._handle_pending_manual_intent(command)
@@ -1600,11 +1660,6 @@ class HebeEngine:
                 response_decision=response_decision,
             ).as_dict()
 
-        context = self.context_builder.build(
-            state=self.runtime.state,
-            input_text=command,
-            internal_event=None,
-        )
         context.response_frame = response_frame_payload
 
         print(
@@ -1614,12 +1669,17 @@ class HebeEngine:
         )
 
         deliberation = self.deliberation_service.deliberate(context)
+        self._last_cognitive_trace.update({
+            "selected_route": context.cognitive_decision.intent,
+            "final_plan_steps": [step.type for step in deliberation.plan.steps],
+        })
         execution = self.plan_executor.execute(deliberation.plan)
         reply_text = self.response_synthesizer.synthesize(
             context=context,
             deliberation=deliberation,
             execution=execution,
         )
+        self._last_cognitive_trace["final_response"] = reply_text
 
         reply_step = execution.first_result_of_type("reply")
 
@@ -1634,9 +1694,14 @@ class HebeEngine:
             )
 
             if mode == "clarify_appointment_datetime":
+                now_ts = time.time()
                 self.runtime.state.pending_clarification = {
+                    "id": f"pending_{uuid.uuid4().hex}",
                     "kind": "appointment_datetime",
                     "draft": reply_step.data.get("draft", {}),
+                    "authority": "owner",
+                    "created_at": now_ts,
+                    "expires_at": now_ts + float(os.getenv("HEBE_PENDING_TASK_TTL_SECONDS", "900") or 900),
                 }
                 self.runtime.state.pending_reminder = self.runtime.state.pending_clarification
 

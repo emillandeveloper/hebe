@@ -216,7 +216,11 @@ async def dev_simulate_leo_message(body: dict):
     print(f"[HEBE][SIM] leo_message source={source} text={text!r}", flush=True)
     if not text:
         raise HTTPException(status_code=400, detail="missing text")
-    return engine.simulate_leo_message(text, source=source)
+    return engine.simulate_leo_message(
+        text,
+        source=source,
+        pending_kind=str((body or {}).get("pending_kind") or "").strip() or None,
+    )
 
 
 @app.post("/dev/simulate/ambient-stt")

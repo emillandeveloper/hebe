@@ -17,6 +17,14 @@ from app.cognitive.capabilities import (
 from app.cognitive.context_builder import BuiltContext
 from app.cognitive.models import PlanStep, Plan, DeliberationResult
 from app.cognitive.temporal import TemporalInterpreter
+from app.cognitive.cognitive_router import (
+    CAP_APPOINTMENT,
+    CAP_DATE,
+    CAP_OPEN_APP,
+    CAP_REMINDER,
+    CAP_TIME,
+    CognitiveRouter,
+)
 
 
 CAPABILITY_BACKLOG_QUERY = "hebe.capability_backlog_query"
@@ -54,6 +62,7 @@ class DeliberationService:
                 self.capability_registry = None
                 self.capability_catalogue_error = f"{type(exc).__name__}: {exc}"
         self.goal_extractor = goal_extractor or GoalExtractor()
+        self.cognitive_router = CognitiveRouter()
         if capability_matcher is not None:
             self.capability_matcher = capability_matcher
         elif self.capability_registry is not None:
@@ -113,58 +122,111 @@ class DeliberationService:
 
     def _handle_user_input(self, context: BuiltContext) -> DeliberationResult:
         text = (context.input_text or "").strip().lower()
+        decision = getattr(context, "cognitive_decision", None)
+        if decision is None:
+            decision = self.cognitive_router.route(context)
+            context.cognitive_decision = decision
         goal, match = self._extract_goal_and_match(context)
 
-        catalogue_query = goal.slots.get("catalogue_query")
-        if catalogue_query:
-            return self._with_capability_metadata(
-                self._plan_capability_catalogue_query(str(catalogue_query)),
-                goal,
-                match,
+        def finish(result: DeliberationResult) -> DeliberationResult:
+            result = self._with_capability_metadata(result, goal, match)
+            plan = result.plan
+            if not decision.should_stop_pipeline and decision.allowed_step_types:
+                guarded_steps = []
+                for step in plan.steps:
+                    if step.type in decision.allowed_step_types:
+                        guarded_steps.append(step)
+                    else:
+                        print(
+                            f"[HEBE][ROUTER_GUARD] blocked_step_type={step.type} "
+                            "reason=step_type_blocked_by_decision",
+                            flush=True,
+                        )
+                plan.steps = guarded_steps
+            plan.goal = {**(plan.goal or {}), "goal_type": decision.goal_type}
+            plan.selected_capabilities = list(dict.fromkeys(
+                list(decision.required_capability_ids) + list(plan.selected_capabilities)
+            ))
+            plan.metadata = {
+                **(plan.metadata or {}),
+                "cognitive_decision": decision.to_dict(),
+                "selected_route": decision.intent,
+            }
+            print(
+                f"[HEBE][PLAN_ROUTE] intent={decision.intent} "
+                f"steps={[step.type for step in plan.steps]!r} mode={decision.response_mode}",
+                flush=True,
             )
+            return result
 
-        reminder = self._parse_relative_reminder(context.input_text or "")
-        if reminder is not None:
-            return self._with_capability_metadata(
-                self._plan_relative_reminder(
+        if decision.should_stop_pipeline:
+            return finish(DeliberationResult(plan=Plan(
+                steps=[PlanStep(type="noop")], reasoning=f"Router stopped pipeline: {decision.reason}"
+            )))
+
+        if decision.intent == "current_time_query":
+            return finish(self._plan_current_time())
+
+        if decision.intent == "current_date_query":
+            return finish(self._plan_current_date())
+
+        if decision.intent == "owner_personal_state":
+            return finish(self._plan_personal_state(decision.personal_state))
+
+        if decision.intent == "command_open_app":
+            app_name = self._extract_open_app_target(text)
+            return finish(self._plan_open_app(app_name)) if app_name else finish(self._plan_with_llm(context))
+
+        pending = (getattr(context, "state_snapshot", {}) or {}).get("pending_clarification")
+        if decision.uses_pending_task and decision.pending_resolution_allowed and pending:
+            return finish(self._resolve_pending_appointment(context, pending))
+
+        catalogue_query = goal.slots.get("catalogue_query")
+        if decision.intent == "capability_catalogue_query" and catalogue_query:
+            return finish(self._plan_capability_catalogue_query(str(catalogue_query)))
+
+        if decision.intent == "reminder_create_request":
+            reminder = self._parse_relative_reminder(context.input_text or "")
+            if reminder is not None:
+                return finish(self._plan_relative_reminder(
                     title=reminder["title"],
                     message=reminder["message"],
                     due_at=reminder["due_at"],
                     relative_label=reminder["relative_label"],
                     source_text=context.input_text,
-                ),
-                goal,
-                match,
-            )
+                ))
 
-        pending = (getattr(context, "state_snapshot", {}) or {}).get("pending_clarification")
-        if pending and pending.get("kind") == "appointment_datetime":
-            return self._with_capability_metadata(
-                self._resolve_pending_appointment(context, pending),
-                goal,
-                match,
-            )
+        if decision.intent == "appointment_create_request":
+            if CAP_APPOINTMENT in decision.blocked_capability_ids:
+                print("[HEBE][ROUTER_GUARD] blocked_subsystem=appointment reason=capability_blocked_by_decision", flush=True)
+            else:
+                return finish(self._plan_appointment(context))
 
-        if self._looks_like_appointment(text):
-            return self._with_capability_metadata(
-                self._plan_appointment(context),
-                goal,
-                match,
-            )
+        if pending and not decision.uses_pending_task:
+            print("[HEBE][ROUTER_GUARD] blocked_subsystem=appointment_pending reason=pending_not_allowed_by_decision", flush=True)
 
-        app_name = self._extract_open_app_target(text)
-        if app_name:
-            return self._with_capability_metadata(
-                self._plan_open_app(app_name),
-                goal,
-                match,
-            )
+        return finish(self._plan_with_llm(context))
 
-        return self._with_capability_metadata(
-            self._plan_with_llm(context),
-            goal,
-            match,
-        )
+    def _plan_current_time(self) -> DeliberationResult:
+        now = datetime.now(ZoneInfo("Europe/Madrid"))
+        return DeliberationResult(plan=Plan(steps=[PlanStep(
+            type="reply",
+            data={"mode": "time_answer", "timezone": "Europe/Madrid", "iso": now.isoformat(), "time": now.strftime("%H:%M")},
+            capability_id=CAP_TIME,
+        )], reasoning="Current local time requested"))
+
+    def _plan_current_date(self) -> DeliberationResult:
+        now = datetime.now(ZoneInfo("Europe/Madrid"))
+        return DeliberationResult(plan=Plan(steps=[PlanStep(
+            type="reply",
+            data={"mode": "date_answer", "timezone": "Europe/Madrid", "iso": now.isoformat(), "date": now.date().isoformat()},
+            capability_id=CAP_DATE,
+        )], reasoning="Current local date requested"))
+
+    def _plan_personal_state(self, state: str | None) -> DeliberationResult:
+        return DeliberationResult(plan=Plan(steps=[PlanStep(
+            type="reply", data={"mode": "companion_reaction", "state": state or "unknown"}
+        )], reasoning="Owner shared a personal state"))
 
     def _extract_goal_and_match(self, context: BuiltContext) -> tuple[Goal, CapabilityMatchResult]:
         goal = self.goal_extractor.extract(context)
@@ -529,7 +591,12 @@ class DeliberationService:
             "medico",
             "dentista",
             "cita",
-            "hora",
+            "reuniÃ³n",
+            "reunion",
+            "appointment",
+            "consulta",
+            "reserva",
+            "agenda",
         ]
         return any(k in text for k in keywords)
 

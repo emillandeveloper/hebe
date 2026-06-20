@@ -23,8 +23,19 @@ class GoalExtractor:
         requires_confirmation = False
         spoiler_sensitivity = "normal"
 
+        decision = getattr(context, "cognitive_decision", None)
+        if decision is not None:
+            goal_type = decision.goal_type
+            confidence = decision.intent_confidence
+            reasoning = f"CognitiveRouter decision: {decision.reason}"
+            if decision.personal_state:
+                slots["personal_state"] = decision.personal_state
+
         catalogue_query = self._detect_catalogue_query(normalized)
-        if catalogue_query:
+        if decision is not None:
+            if catalogue_query:
+                slots["catalogue_query"] = catalogue_query
+        elif catalogue_query:
             goal_type = "analyze_data"
             confidence = 0.9
             reasoning = "capability backlog/catalogue query detected"

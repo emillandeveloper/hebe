@@ -1304,9 +1304,18 @@ type SimulationPreset = {
   leoText?: string;
   ambientText?: string;
   todo?: boolean;
+  pendingKind?: "appointment_datetime";
 };
 
 const SIMULATION_PRESETS: SimulationPreset[] = [
+  { label: "Current clock", source: "leo", leoText: "Hebe, dime la hora actual" },
+  { label: "Clock overrides pending", source: "leo", leoText: "Hebe, me dices la hora de ahora", pendingKind: "appointment_datetime" },
+  { label: "Pending datetime reply", source: "leo", leoText: "maÃ±ana sobre las seis", pendingKind: "appointment_datetime" },
+  { label: "Owner hunger state", source: "leo", leoText: "Hebe, me ha entrado hambre" },
+  { label: "Owner fatigue state", source: "leo", leoText: "Hebe, me siento agotado" },
+  { label: "Appointment needs date", source: "leo", leoText: "Hebe, quiero reservar consulta con el dentista" },
+  { label: "Dated appointment", source: "leo", leoText: "Hebe, agenda una consulta dental para maÃ±ana a las seis" },
+  { label: "Owner app command", source: "leo", leoText: "Hebe, inicia Discord" },
   { label: "Viewer praise boundary", source: "twitch", viewerName: "cibernoman", displayName: "Ciber", messageText: "Hebe, envia una flor verbal para Leo" },
   { label: "Owner blocks praise", source: "leo", leoText: "Hebe, apaga el tono empalagoso conmigo" },
   { label: "Viewer repeats blocked praise", source: "twitch", viewerName: "cibernoman", displayName: "Ciber", messageText: "Hebe, pasa una flor verbal para Leo" },
@@ -1461,7 +1470,7 @@ function SimulationView({
       return;
     }
     if (preset.source === "leo") {
-      postDev("/dev/simulate/leo-message", { source: "ui", text: preset.leoText || leoText });
+      postDev("/dev/simulate/leo-message", { source: "ui", text: preset.leoText || leoText, pending_kind: preset.pendingKind });
       return;
     }
     if (preset.source === "ambient") {
@@ -1631,6 +1640,8 @@ function SimulationView({
             <div className="verdictReason">{simValue(trace.reason)}</div>
           </div>
           <div className="resultGrid">
+            <SimulationFact label="Raw input" value={trace.raw_input} />
+            <SimulationFact label="Normalized input" value={trace.normalized_input} />
             <SimulationFact label="Firewall source" value={trace.firewall_source} />
             <SimulationFact label="Input trust" value={trace.input_trust} />
             <SimulationFact label="Media/singing" value={trace.media_or_singing_detected} />
@@ -1659,6 +1670,15 @@ function SimulationView({
             <SimulationFact label="Allow free LLM" value={trace.allow_free_llm} />
             <SimulationFact label="Execute command" value={trace.execute_as_command} />
             <SimulationFact label="Addressed to Hebe" value={trace.addressed_to_hebe} />
+            <SimulationFact label="Active pending" value={trace.active_pending_task} />
+            <SimulationFact label="Pending compatible" value={trace.pending_compatibility} />
+            <SimulationFact label="New request" value={trace.is_new_request} />
+            <SimulationFact label="Uses pending" value={trace.uses_pending_task} />
+            <SimulationFact label="Allowed capabilities" value={trace.allowed_capabilities} />
+            <SimulationFact label="Blocked capabilities" value={trace.blocked_capabilities} />
+            <SimulationFact label="Selected route" value={trace.selected_route} />
+            <SimulationFact label="Should reply" value={trace.should_reply} />
+            <SimulationFact label="Final plan steps" value={trace.final_plan_steps} />
           </div>
           <div className="hebeWouldSay">
             <div className="resultSectionHeader">
@@ -1770,6 +1790,17 @@ function simulationTraceFrom(payload: any) {
     hebe_response: simValue(payload?.hebe_response || trace.hebe_response, ""),
     final_response: simValue(payload?.final_response || trace.final_response || payload?.hebe_response || trace.hebe_response, ""),
     text: simValue(payload?.text || trace.text, ""),
+    raw_input: simValue(payload?.raw_input, ""),
+    normalized_input: simValue(payload?.normalized_input, ""),
+    active_pending_task: simValue(payload?.active_pending_task, ""),
+    pending_compatibility: payload?.pending_compatibility,
+    is_new_request: payload?.is_new_request,
+    uses_pending_task: payload?.uses_pending_task,
+    allowed_capabilities: Array.isArray(payload?.allowed_capabilities) ? payload.allowed_capabilities.join(", ") : simValue(payload?.allowed_capabilities, ""),
+    blocked_capabilities: Array.isArray(payload?.blocked_capabilities) ? payload.blocked_capabilities.join(", ") : simValue(payload?.blocked_capabilities, ""),
+    selected_route: simValue(payload?.selected_route, ""),
+    should_reply: payload?.should_reply,
+    final_plan_steps: Array.isArray(payload?.final_plan_steps) ? payload.final_plan_steps.join(", ") : simValue(payload?.final_plan_steps, ""),
   };
 }
 

@@ -11,6 +11,7 @@ from app.cognitive.entity_resolver import EntityResolver
 from app.cognitive.memory_store import MemoryStore, MemoryFact, Reminder
 from app.cognitive.scheduler import InternalEvent
 from app.core.state import HebeState
+from app.cognitive.cognitive_decision import CognitiveDecision
 
 
 @dataclass(slots=True)
@@ -49,6 +50,11 @@ class BuiltContext:
     context_policy: dict[str, Any] = field(default_factory=dict)
     resolved_entities: list[dict[str, Any]] = field(default_factory=list)
     response_frame: dict[str, Any] = field(default_factory=dict)
+    source: str = "ui"
+    authority: str = "owner"
+    addressed_to_hebe: bool = True
+    message_id: str = ""
+    cognitive_decision: CognitiveDecision | None = None
 
 
 class ContextBuilder:
@@ -73,6 +79,10 @@ class ContextBuilder:
         state: HebeState,
         input_text: Optional[str] = None,
         internal_event: Optional[InternalEvent] = None,
+        source: str = "ui",
+        authority: str = "owner",
+        addressed_to_hebe: bool = True,
+        message_id: str = "",
     ) -> BuiltContext:
         """
         Construye contexto tanto para:
@@ -186,6 +196,10 @@ class ContextBuilder:
             inject_memory=inject_memory,
             context_policy=context_policy,
             resolved_entities=resolved_entities,
+            source=source,
+            authority=authority,
+            addressed_to_hebe=addressed_to_hebe,
+            message_id=message_id,
         )
 
     # =========================
