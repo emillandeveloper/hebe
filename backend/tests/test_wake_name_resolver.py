@@ -74,6 +74,13 @@ class WakeNameResolverTests(unittest.TestCase):
                 self.assertTrue(result.addressed_to_hebe)
                 self.assertEqual(result.canonical, "hebe")
 
+    def test_trusted_command_without_name_is_command_evidence_not_addressing(self):
+        result = self.resolve("pon stt ambiental")
+
+        self.assertFalse(result.addressed_to_hebe)
+        self.assertIsNone(result.matched_name)
+        self.assertEqual(result.reason, "trusted_source_command_evidence_without_wake")
+
 
 if __name__ == "__main__":
     unittest.main()

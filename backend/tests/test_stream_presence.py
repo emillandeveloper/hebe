@@ -118,6 +118,13 @@ def make_engine(stream=None):
     engine.shoutout_cooldown_seconds = 120
     engine.shoutout_allow_bots = False
     engine.shoutout_blocked_users = engine._load_shoutout_blocked_users()
+    capabilities = {"audio.tts_control", "pending.cancel", "stream.local_state_control", "twitch_action", "hebe.wake_control"}
+    engine._active_cognitive_decision = SimpleNamespace(
+        authority="owner", source="ui", should_stop_pipeline=False,
+        allowed_step_types=["state_update", "action", "reply"],
+        action_permission_summary={"stream_live": True},
+        allows_capability=lambda capability: capability in capabilities,
+    )
     return engine
 
 

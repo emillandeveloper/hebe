@@ -38,7 +38,7 @@ from app.orchestrator.tool_handlers import build_tool_handlers
 from app.cognitive import MemoryStore, SchedulerService
 from app.cognitive.scheduler import InternalEvent
 from app.cognitive.command_result import CommandResult
-from app.cognitive.input_event import InputEvent
+from app.cognitive.input_event import InputEnvelope, InputEvent
 from app.cognitive.action_plan import ActionPlan
 from app.cognitive.stream_companion_flow import (
     ConversationState,
@@ -684,7 +684,12 @@ class HebeEngine:
                 "draft": {"title": "Consulta", "source_text": "simulated appointment request"},
             }
         before_event_id = self.get_last_policy_trace().get("event_id")
-        self.cognitive_flow(str(text or "").strip(), source=clean_source)
+        previous_simulation_mode = bool(getattr(self, "_manual_simulation_mode", False))
+        self._manual_simulation_mode = True
+        try:
+            self.cognitive_flow(str(text or "").strip(), source=clean_source)
+        finally:
+            self._manual_simulation_mode = previous_simulation_mode
         after_event_id = self.get_last_policy_trace().get("event_id")
         if before_event_id == after_event_id:
             self._record_policy_trace(policy_trace(
@@ -1419,7 +1424,44 @@ class HebeEngine:
         print("[HEBE][LEGACY_FLOW] delegated_to=cognitive_flow", flush=True)
         return self.cognitive_flow(command, source=source)
 
-    def _handle_wake_sleep_command(self, text: str) -> CommandResult | None:
+    def _manual_handler_guard(
+        self, *, handler: str, cognitive_decision, capabilities: set[str],
+        source: str | None = None, require_live: bool = False,
+    ) -> bool:
+        decision = cognitive_decision or getattr(self, "_active_cognitive_decision", None)
+        reason = "authorized"
+        allowed = True
+        if decision is None:
+            allowed, reason = False, "missing_cognitive_decision"
+        elif bool(getattr(decision, "should_stop_pipeline", False)):
+            allowed, reason = False, "pipeline_stopped"
+        elif str(getattr(decision, "authority", "")) != "owner":
+            allowed, reason = False, "owner_authority_required"
+        elif source and str(getattr(decision, "source", "")) not in {
+            source, "ui" if source == "typed_ui" else source,
+        }:
+            allowed, reason = False, "source_mismatch"
+        elif not any(decision.allows_capability(capability) for capability in capabilities):
+            allowed, reason = False, "capability_not_authorized"
+        elif not set(getattr(decision, "allowed_step_types", []) or []) & {"state_update", "action", "reply"}:
+            allowed, reason = False, "step_type_not_authorized"
+        elif require_live:
+            permissions = getattr(decision, "action_permission_summary", {}) or {}
+            if not bool(permissions.get("stream_live")) and not bool(permissions.get("is_simulation")):
+                allowed, reason = False, "stream_offline"
+        print(
+            f"[HEBE][MANUAL_HANDLER_GUARD] {'allowed' if allowed else 'blocked'} "
+            f"handler={handler} capabilities={sorted(capabilities)!r} reason={reason}",
+            flush=True,
+        )
+        return allowed
+
+    def _handle_wake_sleep_command(self, text: str, *, cognitive_decision=None, source: str | None = None) -> CommandResult | None:
+        if not self._manual_handler_guard(
+            handler="wake_sleep", cognitive_decision=cognitive_decision,
+            capabilities={"hebe.wake_control"}, source=source,
+        ):
+            return None
         normalized = self._normalize_text(text)
         resolver = getattr(self, "wake_name_resolver", None) or WakeNameResolver()
         self.wake_name_resolver = resolver
@@ -1511,14 +1553,25 @@ class HebeEngine:
                 has_action_intent=False,
             )
 
-        route_source = "ui" if source in {"ui", "typed_ui"} else source
-        route_authority = "owner" if route_source in {"ui", "stt_voice", "voice"} else "system"
+        stt_firewall_payload = {}
+        current_event = getattr(self, "_current_input_event", None)
+        current_metadata = getattr(current_event, "stt_metadata", None)
+        if source == "stt_voice" and isinstance(current_metadata, dict):
+            stt_firewall_payload = current_metadata.get("input_firewall") or {}
+        route_source = str(stt_firewall_payload.get("source") or ("ui" if source in {"ui", "typed_ui"} else source))
+        route_authority = str(stt_firewall_payload.get("authority") or (
+            "owner" if route_source in {"ui", "stt_voice", "owner_stt_direct", "owner_stt_followup", "voice"} else "system"
+        ))
+        route_addressed = bool(
+            route_source == "owner_stt_direct"
+            or route_authority == "owner" and route_source in {"ui", "voice", "stt_voice"}
+        )
         if not hasattr(self, "context_builder"):
             context = SimpleNamespace(
                 input_text=command, internal_event=None,
                 state_snapshot={"pending_clarification": getattr(self.runtime.state, "pending_clarification", None)},
                 source=route_source, authority=route_authority,
-                addressed_to_hebe=route_authority == "owner",
+                addressed_to_hebe=route_addressed,
             )
         else:
             try:
@@ -1528,7 +1581,7 @@ class HebeEngine:
                     internal_event=None,
                     source=route_source,
                     authority=route_authority,
-                    addressed_to_hebe=route_authority == "owner",
+                    addressed_to_hebe=route_addressed,
                 )
             except TypeError:
                 context = self.context_builder.build(
@@ -1536,9 +1589,13 @@ class HebeEngine:
                 )
                 context.source = route_source
                 context.authority = route_authority
-                context.addressed_to_hebe = route_authority == "owner"
+                context.addressed_to_hebe = route_addressed
         router = getattr(self, "cognitive_router", None) or CognitiveRouter()
-        context.firewall_decision = str(getattr(firewall, "firewall_decision", "") or "")
+        context.firewall_decision = str(
+            stt_firewall_payload.get("firewall_decision")
+            or getattr(firewall, "firewall_decision", "")
+            or ""
+        )
         stream = self._get_stream_state()
         context.stream_is_live = bool(
             getattr(stream, "is_live", False)
@@ -1548,6 +1605,11 @@ class HebeEngine:
         normalized_route = self._normalize_text(command)
         if hasattr(self, "_parse_tts_control_intent") and self._parse_tts_control_intent(normalized_route) is not None:
             hints.append("tts_control")
+        if (
+            getattr(self.runtime.state, "pending_tts_scope", None)
+            and self._parse_tts_scope_followup(normalized_route) is not None
+        ):
+            hints.append("pending_tts_reply")
         route_tokens = set(normalized_route.split())
         stream_domain = route_tokens & {"stream", "directo", "twitch", "shoutout", "promo", "raid", "chat", "stt", "ambiental"}
         stream_control = route_tokens & {
@@ -1566,11 +1628,13 @@ class HebeEngine:
             hints.append("stream_manual")
         context.route_hints = hints
         context.cognitive_decision = router.route(context)
+        if bool(getattr(self, "_manual_simulation_mode", False)):
+            context.cognitive_decision.action_permission_summary["is_simulation"] = True
         self._last_cognitive_trace = context.cognitive_decision.to_dict()
         decision = context.cognitive_decision
 
         if decision.intent in {"wake_control", "sleep_control"} and decision.allows_capability("hebe.wake_control"):
-            wake_result = self._handle_wake_sleep_command(command)
+            wake_result = self._handle_wake_sleep_command(command, cognitive_decision=decision, source=route_source)
             if wake_result is not None:
                 text = self._synthesize_command_result(wake_result, input_text=command)
                 self._deliver_manual_reply(text, source=source)
@@ -1612,14 +1676,16 @@ class HebeEngine:
             print(f"[HEBE][COG] decision=owner_policy reason={owner_decision.reason}", flush=True)
             return "continue"
 
-        manual = self._handle_pending_manual_intent(command) if decision.allows_capability("pending.cancel") else None
+        manual = self._handle_pending_manual_intent(
+            command, cognitive_decision=decision, source=route_source,
+        ) if (decision.allows_capability("pending.cancel") or decision.allows_capability("audio.tts_control")) else None
         if manual is None and decision.allows_capability("audio.tts_control"):
-            manual = self._handle_tts_manual_command(command)
+            manual = self._handle_tts_manual_command(command, cognitive_decision=decision, source=route_source)
         if manual is None and (
             decision.allows_capability("stream.local_state_control")
             or decision.allows_capability("twitch_action")
         ):
-            manual = self._handle_stream_manual_command(command)
+            manual = self._handle_stream_manual_command(command, cognitive_decision=decision, source=route_source)
         if manual is not None:
             force_ui = bool(getattr(self, "_manual_reply_ui_only", False))
             self._manual_reply_ui_only = False
@@ -3193,46 +3259,45 @@ class HebeEngine:
         )
         voice_type, mood_hint = self._classify_voice_event(command)
         has_action_intent = self._input_event_has_action_intent(getattr(self, "_current_input_event", None))
-        is_direct_command = voice_type == "direct_command_to_hebe"
         media_detected, _media_reason = looks_like_media_or_singing(command)
-        if media_detected and not is_direct_command:
-            firewall = self._input_firewall_decision(
-                source="ambient_stt",
-                text=command,
-                event_type=voice_type,
-                addressed_to_hebe=False,
-                has_action_intent=has_action_intent,
-            )
-            if self._current_input_event is not None:
-                self._current_input_event.stt_metadata["input_firewall"] = firewall.as_dict()
-            self._current_input_event = None
-            return "continue"
         try:
             possible_reply_to_hebe = self._get_live_session_brain().is_possible_reply_to_hebe(command)
         except Exception:
             possible_reply_to_hebe = False
         pending_match = self._pending_conversation_matches(source="stt_voice", text=command, event_type=voice_type)
-        pending_followup = (
+        conversation_followup = (
             not has_action_intent
-            and not is_direct_command
+            and voice_type != "direct_command_to_hebe"
             and self._stt_has_meaningful_conversation_content(transcript_for_cognition, command)
             and (
                 pending_match
                 or possible_reply_to_hebe
             )
         )
-        firewall_source = (
-            "owner_stt_direct"
-            if is_direct_command
-            else "owner_stt_followup"
-            if pending_followup
-            else "ambient_stt"
+        envelope = self._build_stt_input_envelope(
+            self._current_input_event,
+            voice_type=voice_type,
+            conversation_followup=conversation_followup,
         )
+        pending_followup = envelope.is_followup_candidate
+        is_direct_command = envelope.source in {"owner_stt_direct", "owner_stt_command"}
+        if media_detected and envelope.source == "ambient_stt":
+            firewall = self._input_firewall_decision(
+                source=envelope.source,
+                text=command,
+                event_type=voice_type,
+                addressed_to_hebe=envelope.addressed_to_hebe,
+                has_action_intent=has_action_intent,
+            )
+            if self._current_input_event is not None:
+                self._current_input_event.stt_metadata["input_firewall"] = firewall.as_dict()
+            self._current_input_event = None
+            return "continue"
         firewall = self._input_firewall_decision(
-            source=firewall_source,
+            source=envelope.source,
             text=command,
             event_type=voice_type,
-            addressed_to_hebe=is_direct_command,
+            addressed_to_hebe=envelope.addressed_to_hebe,
             pending_followup=pending_followup,
             has_action_intent=has_action_intent,
         )
@@ -3289,11 +3354,24 @@ class HebeEngine:
             self._current_input_event = None
             return "continue"
         pending_turn_for_frame = self._get_pending_conversation_turn()
-        conversation_state = self._get_conversation_state_resolver().from_pending_turn(
-            pending_turn_for_frame,
-            matched=bool(pending_followup),
-            reason="active_conversation_state" if pending_followup else "no_matching_active_conversation",
-        )
+        if envelope.pending_compatible:
+            conversation_state = ConversationState(
+                active=True,
+                topic=str((envelope.active_pending or {}).get("kind") or "pending_task"),
+                source="cognitive_pending_task",
+                expected_reply_type=envelope.expected_reply_type,
+                allow_no_wakeword=True,
+                output_target=[OUTPUT_TARGET_LOCAL_UI, self._direct_voice_tts_target()],
+                confidence=0.95,
+                matched=True,
+                reason="pending_compatible_input_envelope",
+            )
+        else:
+            conversation_state = self._get_conversation_state_resolver().from_pending_turn(
+                pending_turn_for_frame,
+                matched=bool(pending_followup),
+                reason="active_conversation_state" if pending_followup else "no_matching_active_conversation",
+            )
         if possible_reply_to_hebe and pending_followup and not conversation_state.active:
             last_utterance = getattr(self._get_live_session_brain().state, "last_hebe_utterance", {}) or {}
             conversation_state = ConversationState(
@@ -3329,25 +3407,25 @@ class HebeEngine:
             )
         except Exception as exc:
             print(f"[HEBE][LIVE_SESSION] stt observe failed: {exc!r}", flush=True)
-        if is_direct_command and not has_action_intent and not self._stt_has_meaningful_conversation_content(
-            transcript_for_cognition,
-            command,
-        ):
-            self._emit_stt_rejection(
-                original_raw_text,
-                script="latin",
-                reason="no_user_intent",
-                details={"voice_type": voice_type},
+        if is_direct_command and self._firewall_allows_pipeline(firewall):
+            gate_reason = (
+                "owner_direct_addressed_to_hebe"
+                if envelope.addressed_to_hebe
+                else "high_confidence_local_command"
             )
-            self._current_input_event = None
-            return "continue"
+            print(f"[HEBE][STT_GATE] passed reason={gate_reason}", flush=True)
         stream_enabled = self._is_stream_enabled()
         if pending_followup:
-            self._current_input_event.stt_metadata["message_type"] = "conversation_followup"
-            self._current_input_event.stt_metadata["conversation_followup"] = True
+            self._current_input_event.stt_metadata["message_type"] = (
+                "pending_reply" if envelope.pending_compatible else "conversation_followup"
+            )
+            self._current_input_event.stt_metadata["conversation_followup"] = not envelope.pending_compatible
             self._current_input_event.stt_metadata["jarvis_allowed"] = True
-            self._consume_pending_conversation_turn()
-            print("[HEBE][COG] decision=conversation_followup", flush=True)
+            if envelope.pending_compatible:
+                print("[HEBE][COG] decision=pending_datetime_followup", flush=True)
+            else:
+                self._consume_pending_conversation_turn()
+                print("[HEBE][COG] decision=conversation_followup", flush=True)
         elif stream_enabled:
             if is_direct_command or not pending_followup:
                 relevance = self._record_voice_event(command, voice_type, mood_hint)
@@ -3395,7 +3473,9 @@ class HebeEngine:
             self._log_stt_non_command_decision(command, "ambient_ignored_low_value", reason="not_direct_command")
             self._current_input_event = None
             return "continue"
-        if not pending_followup:
+        if envelope.input_type == "local_app_command" and envelope.addressed_to_hebe:
+            command = str(envelope.wake_evidence.get("stripped_text") or command).strip()
+        elif not pending_followup:
             handled, stream_command = self._extract_stream_command(command)
             if handled:
                 if not stream_command:
@@ -3459,6 +3539,146 @@ class HebeEngine:
             flush=True,
         )
         return event
+
+    def _build_stt_input_envelope(
+        self, event: InputEvent, *, voice_type: str, conversation_followup: bool,
+    ) -> InputEnvelope:
+        normalized = self._normalize_text(event.normalized_text)
+        resolver = getattr(self, "wake_name_resolver", None) or WakeNameResolver()
+        self.wake_name_resolver = resolver
+        wake = resolver.resolve(
+            raw_text=event.raw_text,
+            normalized_text=normalized,
+            source="stt_voice",
+            is_sleeping=bool(getattr(self.runtime.state, "hebe_sleeping", False)),
+            command_markers=set(self._get_local_app_planner().command_markers()),
+        )
+        # A trusted command marker is command evidence, not wake-name evidence.
+        # WakeNameResolver intentionally accepts that context, but the unified
+        # envelope keeps the two facts separate so no-wake commands are routed
+        # as owner_stt_command rather than pretending a name was spoken.
+        addressed = bool(wake.matched_name or voice_type == "direct_command_to_hebe")
+        command_mode = bool((event.stt_metadata or {}).get("command_mode", True))
+
+        local_plan = self._get_local_app_planner().plan(
+            event,
+            is_awake=not bool(getattr(self.runtime.state, "hebe_sleeping", False)),
+        )
+        app_result: dict = {}
+        intent_candidates: list[str] = []
+        app_target = None
+        if local_plan is not None and local_plan.action_type == "open_application":
+            app_target = local_plan.target or (local_plan.slots or {}).get("application_target")
+            intent_candidates.append("open_application")
+            app_result = {
+                "status": local_plan.status,
+                "confidence": float(local_plan.confidence or 0.0),
+                "reason": local_plan.reason,
+                "target": app_target,
+                "whitelisted": bool((local_plan.context_checks or {}).get("whitelisted")),
+            }
+
+        pending = getattr(self.runtime.state, "pending_clarification", None)
+        active_pending = pending if isinstance(pending, dict) else None
+        if active_pending:
+            try:
+                if float(active_pending.get("expires_at") or 0) and float(active_pending["expires_at"]) <= time.time():
+                    active_pending = None
+            except (TypeError, ValueError):
+                active_pending = None
+        pending_kind = str((active_pending or {}).get("kind") or "")
+        expected_reply_type = "datetime" if pending_kind == "appointment_datetime" else ""
+        router = getattr(self, "cognitive_router", None) or CognitiveRouter()
+        stronger_request = bool(
+            router._is_current_time_query(normalized)
+            or router._is_current_date_query(normalized)
+            or router._open_app_target(normalized)
+            or router._is_reminder_request(normalized)
+            or router._personal_state(normalized)
+        )
+        pending_compatible = bool(
+            active_pending
+            and str(active_pending.get("authority") or "owner") == "owner"
+            and pending_kind == "appointment_datetime"
+            and router._is_datetime_answer(normalized)
+            and not stronger_request
+        )
+
+        high_confidence_local_app = bool(
+            command_mode
+            and app_result.get("whitelisted")
+            and float(app_result.get("confidence") or 0.0) >= 0.8
+        )
+        if pending_compatible:
+            source, authority, trust = "owner_stt_followup", "owner", "trusted_followup"
+            input_type, reason = "pending_reply", "datetime_answer"
+        elif addressed:
+            source, authority, trust = "owner_stt_direct", "owner", "trusted_direct"
+            input_type = (
+                "local_app_command" if app_target
+                else "explicit_question" if router._looks_like_question(normalized)
+                else "direct_to_hebe"
+            )
+            reason = "wake_or_addressing_evidence"
+        elif high_confidence_local_app:
+            source, authority, trust = "owner_stt_command", "owner", "trusted_direct"
+            input_type, reason = "local_app_command", "high_confidence_local_command"
+        elif conversation_followup:
+            source, authority, trust = "owner_stt_followup", "owner", "trusted_followup"
+            input_type, reason = "active_conversation_followup", "active_conversation_state"
+        else:
+            source, authority, trust = "ambient_stt", "ambient", "untrusted_ambient"
+            input_type, reason = "ambient_stream_context", "no_wake_no_pending_no_command"
+
+        envelope = InputEnvelope(
+            raw_text=event.raw_text,
+            normalized_text=normalized,
+            source=source,
+            authority=authority,
+            trust=trust,
+            addressed_to_hebe=addressed,
+            matched_wake_name=getattr(wake, "matched_name", None),
+            wake_evidence={
+                "reason": getattr(wake, "reason", ""),
+                "confidence": float(getattr(wake, "confidence", 0.0) or 0.0),
+                "canonical": getattr(wake, "canonical", None),
+                "stripped_text": getattr(wake, "stripped_text", ""),
+            },
+            command_mode=command_mode,
+            intent_candidates=intent_candidates,
+            app_target=app_target,
+            app_resolver_result=app_result,
+            active_pending=active_pending,
+            pending_compatible=pending_compatible,
+            expected_reply_type=expected_reply_type,
+            is_followup_candidate=bool(pending_compatible or conversation_followup),
+            input_type=input_type,
+            reason=reason,
+        )
+        event.envelope = envelope
+        self._last_input_envelope = envelope
+        event.stt_metadata["input_envelope"] = envelope.as_dict()
+        print(
+            "[HEBE][INPUT_ENVELOPE] "
+            f"source={source} authority={authority} trust={trust} "
+            f"addressed={str(addressed).lower()} pending_compatible={str(pending_compatible).lower()} "
+            f"intent_candidates={intent_candidates!r}",
+            flush=True,
+        )
+        if active_pending:
+            print(
+                "[HEBE][PENDING_FOLLOWUP_GATE] active=true "
+                f"compatible={str(pending_compatible).lower()} "
+                f"source={source if pending_compatible else 'none'} "
+                f"reason={'datetime_answer' if pending_compatible else 'not_datetime_or_new_request'}",
+                flush=True,
+            )
+        print(
+            f"[HEBE][SOURCE_CLASSIFY] source={source} reason={reason}"
+            + (f" app={app_target}" if app_target else ""),
+            flush=True,
+        )
+        return envelope
 
     def _input_event_has_action_intent(self, event: InputEvent | None) -> bool:
         if event is None:
@@ -4331,7 +4551,13 @@ class HebeEngine:
             f"* Temas: {', '.join(topics[:8]) if topics else 'sin temas clasificados'}."
         )
 
-    def _handle_stream_manual_command(self, text: str) -> str | CommandResult | None:
+    def _handle_stream_manual_command(self, text: str, *, cognitive_decision=None, source: str | None = None) -> str | CommandResult | None:
+        if not self._manual_handler_guard(
+            handler="stream", cognitive_decision=cognitive_decision,
+            capabilities={"stream.local_state_control", "twitch_action"},
+            source=source, require_live=True,
+        ):
+            return None
         stream = self._get_stream_state()
         if not stream:
             return None
@@ -5789,7 +6015,12 @@ class HebeEngine:
             f"* Last SO error: {getattr(stream, 'last_shoutout_error', None) or 'ninguno'}"
         )
 
-    def _handle_tts_manual_command(self, text: str) -> str | CommandResult | None:
+    def _handle_tts_manual_command(self, text: str, *, cognitive_decision=None, source: str | None = None) -> str | CommandResult | None:
+        if not self._manual_handler_guard(
+            handler="tts", cognitive_decision=cognitive_decision,
+            capabilities={"audio.tts_control"}, source=source,
+        ):
+            return None
         priority = self._handle_priority_tts_command(text)
         if priority is not None:
             return priority
@@ -5975,8 +6206,14 @@ class HebeEngine:
             return "global_on"
         return None
 
-    def _handle_pending_manual_intent(self, text: str) -> CommandResult | str | None:
+    def _handle_pending_manual_intent(self, text: str, *, cognitive_decision=None, source: str | None = None) -> CommandResult | str | None:
         normalized = self._normalize_voice_command_text(text)
+        capability = "pending.cancel" if self._is_cancel_pending_reminder(normalized) else "audio.tts_control"
+        if not self._manual_handler_guard(
+            handler="pending", cognitive_decision=cognitive_decision,
+            capabilities={capability}, source=source,
+        ):
+            return None
         if self._is_cancel_pending_reminder(normalized):
             if getattr(self.runtime.state, "pending_clarification", None) or getattr(self.runtime.state, "pending_reminder", None):
                 self.runtime.state.pending_clarification = None

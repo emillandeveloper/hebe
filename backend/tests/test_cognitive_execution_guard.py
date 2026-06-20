@@ -54,6 +54,17 @@ class CognitiveExecutionGuardTests(unittest.TestCase):
         self.assertFalse(decision.should_reply)
         self.assertNotIn("twitch.reply", decision.allowed_capabilities)
 
+    def test_live_internal_twitch_event_carries_reply_grant(self):
+        context = SimpleNamespace(
+            input_text="", internal_event=SimpleNamespace(event_type="twitch_raid"),
+            state_snapshot={}, source="twitch_system", authority="system",
+            addressed_to_hebe=False, firewall_decision="allow", stream_is_live=True,
+        )
+        decision = CognitiveRouter().route(context)
+        self.assertEqual(decision.intent, "twitch_internal_event")
+        self.assertFalse(decision.should_stop_pipeline)
+        self.assertTrue(decision.allows_capability("twitch.reply"))
+
     @staticmethod
     def _decision(intent, capabilities, step_types, *, authority="owner"):
         return {

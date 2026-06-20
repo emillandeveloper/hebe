@@ -130,7 +130,7 @@ class ResponseSynthesizer:
                 return self._generate_confirm_action(context, execution)
 
             if mode == "chat":
-                return self._generate_chat_reply(context)
+                return self._generate_chat_reply(context, execution)
 
             if mode == "clarify_appointment_datetime":
                 return self._generate_clarification_reply(context, reply_step.data)
@@ -324,7 +324,7 @@ class ResponseSynthesizer:
         fallback = reply_data.get("question") or "No me ha quedado clara la fecha."
         return clean_jarvis_reply(self._call_model(system, user, fallback=fallback)) or fallback
 
-    def _generate_chat_reply(self, context: BuiltContext) -> str:
+    def _generate_chat_reply(self, context: BuiltContext, execution: ExecutionResult) -> str:
         """
         Respuesta de Hebe en modo JARVIS (conversacion directa con Leo desde la UI).
 
@@ -442,6 +442,7 @@ class ResponseSynthesizer:
             allow_minimal_fallback=getattr(context, "source", "") == "stt_voice",
         )
         reply = self._guard_hostile_direct_insult_greeting(reply, context)
+        reply = self._guard_unexecuted_action_claim(reply, context, execution)
         self._mark_conversation_turn(reply, context)
 
         print(
@@ -450,6 +451,54 @@ class ResponseSynthesizer:
         )
 
         return reply or self._fallback_text("No tengo una respuesta util ahora mismo.")
+
+    def _guard_unexecuted_action_claim(
+        self, reply: str, context: BuiltContext, execution: ExecutionResult,
+    ) -> str:
+        decision = getattr(context, "cognitive_decision", None)
+        route = str(getattr(decision, "intent", "") or "")
+        if route not in {"unknown_chat", "direct_question", ""}:
+            return reply
+        executed = any(
+            result.success and result.step_type in {"action", "reminder", "memory", "tool"}
+            for result in (execution.results or [])
+        )
+        if executed or not self._looks_like_action_completion_claim(reply):
+            return reply
+        print(
+            "[HEBE][FALLBACK_GUARD] blocked_action_claim=true reason=no_execution_result",
+            flush=True,
+        )
+        pending = (getattr(context, "state_snapshot", {}) or {}).get("pending_clarification")
+        if isinstance(pending, dict) and pending:
+            return "La respuesta parece corresponder a la tarea pendiente, pero no se ejecutó ninguna operación."
+        return "No se ejecutó ninguna operación; necesito una petición estructurada para confirmarla."
+
+    @staticmethod
+    def _looks_like_action_completion_claim(text: str) -> bool:
+        normalized = "".join(
+            char for char in unicodedata.normalize("NFKD", str(text or "").casefold())
+            if not unicodedata.combining(char)
+        )
+        completed_action = re.compile(
+            r"\b(?:apuntad[oa]|anotad[oa]|guardad[oa]|cread[oa]|agendad[oa]|programad[oa]|"
+            r"registrad[oa]|abiert[oa]|lanzad[oa]|iniciad[oa]|enviad[oa]|publicad[oa]|"
+            r"actualizad[oa]|configurad[oa]|hecho|completad[oa]|listo)\b"
+        )
+        first_person_completion = re.compile(
+            r"\b(?:he|hemos|ya he|ya hemos|queda|quedo|esta)\s+(?:guardado|creado|agendado|"
+            r"programado|abierto|lanzado|iniciado|enviado|actualizado|configurado|hecho)\b"
+        )
+        action_object = re.compile(
+            r"\b(?:cita|recordatorio|aplicacion|app|archivo|mensaje|shoutout|raid|memoria|calendario)\b"
+        )
+        leading_completion = re.compile(
+            r"^(?:ya\s+)?(?:hecho|listo|apuntad[oa]|anotad[oa]|guardad[oa]|cread[oa]|"
+            r"agendad[oa]|programad[oa]|abiert[oa]|lanzad[oa]|enviad[oa]|actualizad[oa])\b"
+        )
+        return bool(first_person_completion.search(normalized) or leading_completion.search(normalized) or (
+            completed_action.search(normalized) and action_object.search(normalized)
+        ))
 
     # =========================
     # Prompt builders  devuelven (system, user)

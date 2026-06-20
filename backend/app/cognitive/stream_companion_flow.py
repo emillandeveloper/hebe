@@ -111,6 +111,20 @@ class InputClassifier:
         pending_followup: bool = False,
         valid: bool = True,
     ) -> InputClassification:
+        envelope = getattr(event, "envelope", None)
+        if envelope is not None:
+            return InputClassification(
+                source=envelope.source,
+                input_type=envelope.input_type,
+                purpose="pending_resolution" if envelope.pending_compatible else "local_command" if envelope.app_target else "",
+                addressed_to_hebe=envelope.addressed_to_hebe,
+                confidence=float((envelope.app_resolver_result or {}).get("confidence") or (
+                    .95 if envelope.pending_compatible else .55 if envelope.source == "ambient_stt" else .9
+                )),
+                reason=envelope.reason,
+                voice_event_type=voice_event_type,
+                has_action_intent=has_action_intent,
+            )
         source = _canonical_source(event.source)
         if not valid:
             return InputClassification(source=source, input_type="noise/rejected", reason="failed_validity_gate")

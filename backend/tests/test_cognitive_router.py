@@ -52,6 +52,8 @@ class CognitiveRouterTests(unittest.TestCase):
         self.assertEqual(decision.intent, "current_time_query")
         self.assertFalse(decision.uses_pending_task)
         self.assertIn("appointment.create", decision.blocked_capability_ids)
+        self.assertFalse(decision.allows_capability("pending.cancel"))
+        self.assertFalse(decision.allows_capability("audio.tts_control"))
         self.assertEqual(plan.steps[0].data["mode"], "time_answer")
 
     def test_current_time_overrides_active_pending(self):
@@ -80,6 +82,9 @@ class CognitiveRouterTests(unittest.TestCase):
         self.assertEqual(decision.personal_state, "hunger")
         self.assertEqual(plan.steps[0].data["mode"], "companion_reaction")
         self.assertIn("scheduler.create", decision.blocked_capability_ids)
+        self.assertFalse(decision.allows_capability("pending.cancel"))
+        self.assertFalse(decision.allows_capability("audio.tts_control"))
+        self.assertFalse(decision.allows_capability("reminder.create"))
 
     def test_generic_time_term_does_not_mean_appointment(self):
         decision = self.route(context("Hebe, la hora actual"))

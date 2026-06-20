@@ -95,6 +95,20 @@ class InputAuthorityFirewallTests(unittest.TestCase):
         self.assertTrue(decision.allows_action("local_reply"))
         self.assertTrue(decision.blocks_action(ACTION_TWITCH_REPLY))
 
+    def test_owner_stt_command_is_local_offline_and_twitch_remains_blocked(self):
+        decision = self.firewall.decide(
+            source="owner_stt_command",
+            text="abre obs",
+            stream_is_live=False,
+            addressed_to_hebe=False,
+            has_action_intent=True,
+        )
+
+        self.assertEqual(decision.firewall_decision, "allow")
+        self.assertEqual(decision.authority, "owner")
+        self.assertTrue(decision.allows_action("app_control"))
+        self.assertTrue(decision.blocks_action(ACTION_TWITCH_REPLY))
+
     def test_owner_ui_local_chat_is_allowed_offline(self):
         decision = self.firewall.decide(
             source="owner_ui",

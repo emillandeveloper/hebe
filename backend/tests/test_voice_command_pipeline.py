@@ -93,10 +93,11 @@ class FakeContextBuilder:
 
     def build(self, state, input_text=None, internal_event=None):
         self.inputs.append(input_text)
+        pending = getattr(state, "pending_clarification", None)
         return SimpleNamespace(
             input_text=input_text,
             internal_event=internal_event,
-            state_snapshot={},
+            state_snapshot={"pending_clarification": pending} if pending else {},
             relevant_facts=[],
             relevant_chunks=[],
             conversation_history=[],
@@ -162,6 +163,13 @@ def make_engine(chatters=None, *, live=True):
     engine._current_input_event = None
     engine.spontaneous_twitch_chat_enabled = False
     engine.stream_action_planner = engine._build_stream_action_planner()
+    capabilities = {"audio.tts_control", "pending.cancel", "stream.local_state_control", "twitch_action", "hebe.wake_control"}
+    engine._active_cognitive_decision = SimpleNamespace(
+        authority="owner", source="ui", should_stop_pipeline=False,
+        allowed_step_types=["state_update", "action", "reply"],
+        action_permission_summary={"stream_live": bool(live)},
+        allows_capability=lambda capability: capability in capabilities,
+    )
     return engine
 
 
@@ -711,6 +719,170 @@ class VoiceCommandPipelineTests(unittest.TestCase):
         log_chat_mock.assert_called_once()
         self.assertTrue(any(event_type == "chat.user" and data.get("text") == "Hebe, como estas?" for event_type, data in emitted))
 
+    def test_owner_direct_personal_state_reaches_cognitive_router(self):
+        samples = (
+            ("Hebe, tengo hambre", "hunger"),
+            ("Hebe, estoy cansado", "fatigue"),
+        )
+        for spoken, expected_state in samples:
+            with self.subTest(spoken=spoken):
+                engine = make_engine(["nuria"])
+                engine.runtime.state.stream.enabled = False
+                engine.context_builder = FakeContextBuilder()
+                engine.deliberation_service = FakeDeliberationService()
+                engine.plan_executor = FakePlanExecutor()
+                engine.response_synthesizer = FixedResponseSynth("Te escucho, Leo.")
+                engine.memory_extractor = Mock()
+                delivered = []
+                logs = []
+                engine._deliver_voice_reply = lambda text, **kwargs: delivered.append(text)
+
+                with patch("builtins.print", lambda *args, **kwargs: logs.append(" ".join(str(arg) for arg in args))), \
+                     patch("app.hebe_engine.emit"), \
+                     patch("app.hebe_engine.log_chat"):
+                    result = engine._process_stt_voice_transcript(spoken)
+
+                joined = "\n".join(logs)
+                trace = engine._last_cognitive_trace
+                self.assertEqual(result, "continue")
+                self.assertEqual(delivered, ["Te escucho, Leo."])
+                self.assertIn("[HEBE][STT_GATE] passed reason=owner_direct_addressed_to_hebe", joined)
+                self.assertNotIn("[HEBE][STT_REJECTED]", joined)
+                self.assertEqual(trace["source"], "owner_stt_direct")
+                self.assertEqual(trace["authority"], "owner")
+                self.assertTrue(trace["addressed_to_hebe"])
+                self.assertEqual(trace["intent"], "owner_personal_state")
+                self.assertEqual(trace["personal_state"], expected_state)
+                self.assertFalse(trace["uses_pending_task"])
+                self.assertTrue(trace["should_reply"])
+                self.assertEqual(trace["response_mode"], "companion_reaction")
+
+    def test_pending_appointment_datetime_without_wake_is_unified_owner_followup(self):
+        engine = make_engine()
+        engine.runtime.state.stream.enabled = False
+        engine.runtime.state.pending_clarification = {
+            "id": "appointment-1",
+            "kind": "appointment_datetime",
+            "authority": "owner",
+            "expires_at": time.time() + 300,
+        }
+        engine.context_builder = FakeContextBuilder()
+        engine.deliberation_service = FakeDeliberationService()
+        engine.plan_executor = FakePlanExecutor()
+        engine.response_synthesizer = FixedResponseSynth("Fecha recibida.")
+        engine.memory_extractor = Mock()
+        delivered = []
+        logs = []
+        engine._deliver_voice_reply = lambda text, **kwargs: delivered.append(text)
+
+        with patch("builtins.print", lambda *args, **kwargs: logs.append(" ".join(str(arg) for arg in args))), \
+             patch("app.hebe_engine.emit"), patch("app.hebe_engine.log_chat"):
+            result = engine._process_stt_voice_transcript("el 16 de septiembre a las 10")
+
+        trace = engine._last_cognitive_trace
+        envelope = engine._last_input_envelope
+        self.assertEqual(result, "continue")
+        self.assertEqual(delivered, ["Fecha recibida."])
+        self.assertEqual(envelope.source, "owner_stt_followup")
+        self.assertTrue(envelope.pending_compatible)
+        self.assertEqual(trace["intent"], "pending_datetime_answer")
+        self.assertTrue(trace["uses_pending_task"])
+        self.assertTrue(trace["should_reply"])
+        self.assertIn("[HEBE][CONVERSATION_STATE] active=true matched=true", "\n".join(logs))
+        self.assertIn("reason=pending_compatible_input_envelope", "\n".join(logs))
+
+    def test_pending_appointment_with_wake_remains_pending_followup(self):
+        engine = make_engine()
+        engine.runtime.state.stream.enabled = False
+        engine.runtime.state.pending_clarification = {
+            "id": "appointment-2", "kind": "appointment_datetime", "authority": "owner",
+            "expires_at": time.time() + 300,
+        }
+        engine.context_builder = FakeContextBuilder()
+        engine.deliberation_service = FakeDeliberationService()
+        engine.plan_executor = FakePlanExecutor()
+        engine.response_synthesizer = FixedResponseSynth("Fecha recibida.")
+        engine.memory_extractor = Mock()
+        engine._deliver_voice_reply = lambda text, **kwargs: None
+
+        with patch("app.hebe_engine.emit"), patch("app.hebe_engine.log_chat"):
+            engine._process_stt_voice_transcript("Hebe, el 16 de septiembre a las 10")
+
+        self.assertTrue(engine._last_input_envelope.addressed_to_hebe)
+        self.assertEqual(engine._last_input_envelope.source, "owner_stt_followup")
+        self.assertEqual(engine._last_cognitive_trace["intent"], "pending_datetime_answer")
+
+    def test_current_time_with_pending_appointment_is_new_direct_request(self):
+        engine = make_engine()
+        engine.runtime.state.stream.enabled = False
+        engine.runtime.state.pending_clarification = {
+            "id": "appointment-3", "kind": "appointment_datetime", "authority": "owner",
+            "expires_at": time.time() + 300,
+        }
+        engine.context_builder = FakeContextBuilder()
+        engine.deliberation_service = FakeDeliberationService()
+        engine.plan_executor = FakePlanExecutor()
+        engine.response_synthesizer = FixedResponseSynth("Son las doce.")
+        engine.memory_extractor = Mock()
+        engine._deliver_voice_reply = lambda text, **kwargs: None
+
+        with patch("app.hebe_engine.emit"), patch("app.hebe_engine.log_chat"):
+            engine._process_stt_voice_transcript("Hebe, que hora es")
+
+        envelope = engine._last_input_envelope
+        trace = engine._last_cognitive_trace
+        self.assertEqual(envelope.source, "owner_stt_direct")
+        self.assertFalse(envelope.pending_compatible)
+        self.assertEqual(trace["intent"], "current_time_query")
+        self.assertFalse(trace["uses_pending_task"])
+
+    def test_no_wake_whitelisted_app_command_routes_while_stream_offline(self):
+        engine = make_engine(live=False)
+        engine.runtime.state.stream.enabled = False
+        delivered = []
+        engine._deliver_manual_reply = lambda text, *, source: delivered.append((source, text))
+
+        with patch.dict(os.environ, {"HEBE_APP_OBS_PATH": r"C:\Tools\OBS\obs64.exe"}), \
+             patch("app.hebe_engine.emit"), patch("app.hebe_engine.log_chat"):
+            result = engine._process_stt_voice_transcript("Abre OBS")
+
+        envelope = engine._last_input_envelope
+        trace = engine._last_cognitive_trace
+        self.assertEqual(result, "continue")
+        self.assertEqual(envelope.source, "owner_stt_command")
+        self.assertEqual(envelope.app_target, "obs")
+        self.assertEqual(trace["intent"], "command_open_app")
+        self.assertIn("pc.open_application", trace["allowed_capabilities"])
+        self.assertEqual(engine.runtime.win.opened[0]["app_id"], "obs")
+        self.assertTrue(delivered)
+
+    def test_ambient_personal_state_without_wake_does_not_reach_cognition(self):
+        engine = make_engine(["nuria"])
+        engine.runtime.state.stream.enabled = False
+        handled = []
+        logs = []
+        engine.handle_command = lambda command, source="voice": handled.append((source, command)) or "continue"
+
+        with patch("builtins.print", lambda *args, **kwargs: logs.append(" ".join(str(arg) for arg in args))), \
+             patch("app.hebe_engine.emit"):
+            result = engine._process_stt_voice_transcript("tengo hambre")
+
+        self.assertEqual(result, "continue")
+        self.assertEqual(handled, [])
+        self.assertIn("[HEBE][STT_GATE] ambient_only reason=no_wake_no_valid_pending", "\n".join(logs))
+
+    def test_random_unaddressed_noise_remains_safely_ignored(self):
+        engine = make_engine(["nuria"])
+        engine.runtime.state.stream.enabled = False
+        handled = []
+        engine.handle_command = lambda command, source="voice": handled.append((source, command)) or "continue"
+
+        with patch("app.hebe_engine.emit"):
+            result = engine._process_stt_voice_transcript("blargh krzzzt mmm")
+
+        self.assertEqual(result, "continue")
+        self.assertEqual(handled, [])
+
     def test_eve_stt_question_enters_direct_cognition_and_stays_local(self):
         engine = make_engine(["nuria"])
         engine.runtime.state.stream.enabled = True
@@ -863,7 +1035,7 @@ class VoiceCommandPipelineTests(unittest.TestCase):
         self.assertEqual(delivered, [])
         self.assertEqual(engine.context_builder.inputs, [])
         self.assertEqual(engine.runtime.state.stream.current_run_objective, "ahora toca salir de la ciudad vieja")
-        self.assertIn("[HEBE][INPUT_CLASSIFY] source=stt_voice input_type=ambient_stream_context", joined)
+        self.assertIn("[HEBE][INPUT_CLASSIFY] source=ambient_stt input_type=ambient_stream_context", joined)
         self.assertIn("[HEBE][CONTEXT_RELEVANCE] useful=true", joined)
         self.assertIn("[HEBE][SESSION_CONTEXT] updated=true", joined)
         self.assertIn("[HEBE][RESPONSE_DECISION] should_reply=false reason=no_context_only", joined)
@@ -899,7 +1071,7 @@ class VoiceCommandPipelineTests(unittest.TestCase):
         self.assertEqual(result, "continue")
         self.assertEqual(engine.runtime.twitch.sent, [])
         self.assertIn("input_type=direct_stt output_target=local_ui+stream_tts", joined)
-        self.assertIn("[HEBE][INPUT_CLASSIFY] source=stt_voice input_type=explicit_question", joined)
+        self.assertIn("[HEBE][INPUT_CLASSIFY] source=owner_stt_direct input_type=explicit_question", joined)
         self.assertIn("[HEBE][RESPONSE_DECISION] should_reply=true reason=direct_question", joined)
 
     def test_direct_stt_can_post_to_twitch_only_via_stream_chat_action_plan(self):
@@ -1177,7 +1349,7 @@ class VoiceCommandPipelineTests(unittest.TestCase):
         self.assertEqual(result, "continue")
         self.assertIn("[HEBE][INPUT] source=stt_voice raw='Estoy hablando solo'", joined)
         self.assertIn("[HEBE][INPUT_FIREWALL] source=ambient_stt", joined)
-        self.assertIn("[HEBE][INPUT_CLASSIFY] source=stt_voice input_type=ambient_stream_context", joined)
+        self.assertIn("[HEBE][INPUT_CLASSIFY] source=ambient_stt input_type=ambient_stream_context", joined)
         self.assertIn("[HEBE][RESPONSE_DECISION] should_reply=false reason=no_ignore", joined)
         self.assertIn("[HEBE][COG] decision=ambient_ignored_low_value reason=ambient_context_only", joined)
 

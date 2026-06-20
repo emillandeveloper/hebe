@@ -194,6 +194,39 @@ class ContextMessageTypeTests(unittest.TestCase):
         self.assertNotIn("We talked about old project context", prompt_text)
         self.assertNotIn("hablamos de", reply.lower())
 
+    def test_fallback_chat_cannot_claim_pending_action_without_execution(self):
+        model = CapturingModel(reply="Apuntado: cita el 16 de septiembre.")
+        synthesizer = ResponseSynthesizer(conversation_model=model)
+        context = BuiltContext(
+            input_text="el 16 de septiembre",
+            internal_event=None,
+            relevant_facts=[],
+            recent_appointments=[],
+            pending_reminders=[],
+            state_snapshot={"pending_clarification": {"kind": "appointment_datetime"}},
+            relevant_chunks=[],
+            conversation_history=[],
+            message_type="small_talk",
+            inject_memory=False,
+            context_policy={"memory": "limited"},
+        )
+        context.cognitive_decision = SimpleNamespace(intent="unknown_chat")
+        execution = ExecutionResult(results=[
+            StepExecutionResult(step_type="reply", success=True, data={"mode": "chat"})
+        ])
+        logs = []
+
+        with patch("builtins.print", lambda *args, **kwargs: logs.append(" ".join(str(arg) for arg in args))):
+            reply = synthesizer.synthesize(
+                context=context,
+                deliberation=DeliberationResult(plan=Plan(steps=[])),
+                execution=execution,
+            )
+
+        self.assertNotIn("apuntado", reply.casefold())
+        self.assertIn("no se ejecut", reply.casefold())
+        self.assertIn("[HEBE][FALLBACK_GUARD] blocked_action_claim=true", "\n".join(logs))
+
     def test_banter_prompt_blocks_planning_topic_shift(self):
         model = CapturingModel(reply="Perfecto, zombi creativo. Sufrimiento premium, pero con estilo.")
         synthesizer = ResponseSynthesizer(conversation_model=model)

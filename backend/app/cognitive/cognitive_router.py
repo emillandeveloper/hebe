@@ -272,7 +272,7 @@ class CognitiveRouter:
 
     @staticmethod
     def _authority(source: str) -> str:
-        if source in {"ui", "typed_ui", "voice", "stt_voice", "owner_ui"}:
+        if source in {"ui", "typed_ui", "voice", "stt_voice", "owner_ui", "owner_stt_direct", "owner_stt_command", "owner_stt_followup"}:
             return "owner"
         if source in {"ambient", "ambient_stt"}:
             return "ambient"
@@ -371,7 +371,9 @@ class CognitiveRouter:
         date = bool(re.search(
             r"\b(?:hoy|manana|pasado manana|lunes|martes|miercoles|jueves|viernes|sabado|domingo|"
             r"today|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday|"
-            r"el\s+dia\s+\d{1,2}|\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?)\b", text
+            r"el\s+dia\s+\d{1,2}|el\s+\d{1,2}\s+de\s+(?:enero|febrero|marzo|abril|mayo|junio|"
+            r"julio|agosto|septiembre|octubre|noviembre|diciembre)|"
+            r"\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?)\b", text
         ))
         meridiem = bool(re.search(r"\b(?:por la|de la)\s+(?:manana|tarde|noche)\b", text))
         return clock or date or meridiem
@@ -396,7 +398,8 @@ class CognitiveRouter:
             f"new_request={str(decision.is_new_request).lower()} "
             f"uses_pending={str(decision.uses_pending_task).lower()} "
             f"should_reply={str(decision.should_reply).lower()} "
-            f"stop={str(decision.should_stop_pipeline).lower()} reason={decision.reason}", flush=True,
+            f"stop={str(decision.should_stop_pipeline).lower()} "
+            f"state={decision.personal_state or 'none'} reason={decision.reason}", flush=True,
         )
         print(
             "[HEBE][PENDING_ROUTER] "

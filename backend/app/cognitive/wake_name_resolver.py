@@ -105,13 +105,13 @@ class WakeNameResolver:
         trusted_source = source in {"stt_voice", "voice", "ui", "typed_ui"}
         if trusted_source and has_command_context:
             return WakeNameResolution(
-                addressed_to_hebe=True,
+                addressed_to_hebe=False,
                 wake_command=False,
                 sleep_command=has_sleep,
                 matched_name=None,
                 stripped_text=normalized,
                 confidence=0.72,
-                reason="trusted_source_command_context",
+                reason="trusted_source_command_evidence_without_wake",
             )
 
         return WakeNameResolution(stripped_text=normalized)

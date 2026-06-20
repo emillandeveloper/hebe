@@ -42,7 +42,7 @@ KNOWN_BOT_USERNAMES = {
     "wizebot",
 }
 
-OWNER_SOURCES = {"owner_ui", "owner_stt_direct"}
+OWNER_SOURCES = {"owner_ui", "owner_stt_direct", "owner_stt_command"}
 FOLLOWUP_SOURCES = {"owner_stt_followup"}
 TWITCH_SOURCES = {"twitch_viewer", "twitch_bot", "twitch_system"}
 
@@ -500,8 +500,8 @@ class InputAuthorityFirewall:
         value = str(source or "").strip().lower()
         if value in {"ui", "typed_ui", "owner"}:
             return "owner_ui"
-        if value in {"stt_direct", "direct_stt", "owner_stt_direct"}:
-            return "owner_stt_direct"
+        if value in {"stt_direct", "direct_stt", "owner_stt_direct", "owner_stt_command"}:
+            return "owner_stt_command" if value == "owner_stt_command" else "owner_stt_direct"
         if value in {"stt_followup", "direct_stt_followup", "owner_stt_followup"}:
             return "owner_stt_followup"
         if value in {"stt_voice", "voice", "ambient", "ambient_stt"}:

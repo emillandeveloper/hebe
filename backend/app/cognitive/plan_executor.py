@@ -107,7 +107,7 @@ class PlanExecutor:
         if capability in {CAP_OPEN_APP, CAP_REMINDER, CAP_APPOINTMENT, CAP_TWITCH_ACTION} and authority != "owner":
             return "authority_not_authorized"
         if capability in {CAP_OPEN_APP, CAP_REMINDER, CAP_APPOINTMENT, CAP_TWITCH_ACTION} and source not in {
-            "ui", "typed_ui", "owner_ui", "voice", "stt_voice",
+            "ui", "typed_ui", "owner_ui", "voice", "stt_voice", "owner_stt_direct", "owner_stt_command", "owner_stt_followup",
         }:
             return "source_not_authorized"
         if capability == CAP_TWITCH_REPLY and authority not in {"viewer", "system"}:
