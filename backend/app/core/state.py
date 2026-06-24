@@ -1,6 +1,7 @@
 from dataclasses import dataclass, field
 from typing import Optional, Any
 from app.stream.state import StreamSessionState
+from app.cognitive.game_guidance import GameRunState
 
 @dataclass
 class HebeState:
@@ -21,6 +22,7 @@ class HebeState:
 
     current_task: Optional[str] = None
     current_context: dict[str, Any] = field(default_factory=dict)
+    game_run_state: GameRunState = field(default_factory=GameRunState)
 
     stream: StreamSessionState = field(default_factory=StreamSessionState)
     

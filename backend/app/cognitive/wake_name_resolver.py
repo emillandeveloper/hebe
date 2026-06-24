@@ -37,6 +37,8 @@ class WakeNameResolver:
         "eb",
         "e b",
         "jebe",
+        "heba",
+        "h",
     )
     wake_concepts = {"despierta", "levanta", "wake", "awake"}
     sleep_concepts = {"duerme", "descansa", "dormir", "sleep", "espera", "standby"}

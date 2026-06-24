@@ -1,0 +1,21 @@
+{
+  "final_fantasy_vii": {
+    "game_aliases": ["final fantasy vii", "final fantasy 7", "ffvii", "ff7"],
+    "locations": {
+      "Midgar": ["midgar", "mikdar", "migdar", "milgar", "migar", "midgard"]
+    },
+    "characters": {
+      "Cloud": ["cloud"],
+      "Tifa": ["tifa"],
+      "Yuffie": ["yuffie", "yuffi", "yufi"],
+      "Barret": ["barret", "barrett", "baret"]
+    }
+  },
+  "final_fantasy_ix": {
+    "game_aliases": ["final fantasy ix", "final fantasy 9", "ffix", "ff9"],
+    "locations": {
+      "Alexandria": ["alexandria", "alejandria"]
+    },
+    "characters": {}
+  }
+}

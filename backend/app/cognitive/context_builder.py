@@ -12,6 +12,8 @@ from app.cognitive.memory_store import MemoryStore, MemoryFact, Reminder
 from app.cognitive.scheduler import InternalEvent
 from app.core.state import HebeState
 from app.cognitive.cognitive_decision import CognitiveDecision
+from app.cognitive.game_guidance import GameRunState
+from app.cognitive.game_guidance import GameGuidanceDecision
 
 
 @dataclass(slots=True)
@@ -55,6 +57,7 @@ class BuiltContext:
     addressed_to_hebe: bool = True
     message_id: str = ""
     cognitive_decision: CognitiveDecision | None = None
+    game_guidance_decision: GameGuidanceDecision | None = None
     firewall_decision: str = ""
     stream_is_live: bool = False
     route_hints: list[str] = field(default_factory=list)
@@ -674,6 +677,19 @@ class ContextBuilder:
 
     def _build_state_snapshot(self, state: HebeState) -> dict[str, Any]:
         stream = getattr(state, "stream", None)
+        game_run_state = GameRunState.from_value(getattr(state, "game_run_state", None))
+        if not game_run_state.game and stream is not None:
+            game_run_state.game = str(
+                getattr(stream, "current_game", None) or getattr(stream, "current_category", None) or ""
+            )
+            game_run_state.current_location = str(getattr(stream, "current_location", None) or "")
+            game_run_state.current_objective = str(getattr(stream, "current_objective", None) or "")
+            game_run_state.last_confirmed_progress = str(
+                (getattr(stream, "recent_progress_markers", None) or [""])[-1] or ""
+            )
+            game_run_state.spoiler_policy = str(getattr(stream, "spoiler_policy", None) or "spoiler_safe_hints")
+            game_run_state.provenance = "current_live_session"
+            game_run_state.confidence = 0.7 if game_run_state.game else 0.0
 
         return {
             "now_iso": __import__("datetime").datetime.now().astimezone().isoformat(),
@@ -684,6 +700,7 @@ class ContextBuilder:
             "pending_clarification": getattr(state, "pending_clarification", None),
             "stream_enabled": getattr(stream, "enabled", False) if stream else False,
             "stream_armed": getattr(stream, "armed", False) if stream else False,
+            "game_run_state": game_run_state.to_dict(),
         }
 
     def _normalize_for_compare(self, text: Optional[str]) -> str:

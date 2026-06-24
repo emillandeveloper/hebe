@@ -37,6 +37,11 @@ without a wake name use `owner_stt_command`; neither is treated as ambient strea
 - Removed `backend/app/cognitive/service.py`. No import or dynamic reference exists in the
   repository. It was an older copy of `PlanExecutor` with duplicate result models and a fake
   `open_app` success fallback. The active implementation is `cognitive/plan_executor.py`.
+- Game Guidance clarification replies now use a real pending contract. Compatible UI and owner-STT
+  follow-ups route through `CognitiveRouter`, update `GameRunState` through an authorized
+  `state_update`, and re-evaluate the original question without asking for already supplied fields.
+  Assistant aliases are stripped before party parsing, known entities use a data-backed alias
+  catalogue with conservative fuzzy matching, and cross-game RAG chunks are excluded.
 
 ## Decision ownership inventory
 
@@ -45,6 +50,7 @@ without a wake name use `owner_stt_command`; neither is treated as ambient strea
 | `cognitive/cognitive_router.py` | `CognitiveRouter.route` | User intent priority, pending compatibility, capability and step grants | Yes; central owner | It is the owner | Low | Extend contracts here, not in downstream handlers. |
 | `cognitive/context_builder.py` | `_classify_message_type`, `_build_context_policy` | Memory/history retrieval depth | Yes; advisory context selection | No action authority | Low | Keep read-only; never let message type authorize tools. |
 | `cognitive/capabilities/goal_extractor.py` | `GoalExtractor.extract` | Goal metadata and slots | Yes | Already defers to `context.cognitive_decision` | Medium | Keep as assistant to routing; do not restore independent route priority. |
+| `cognitive/game_guidance.py` | `GameGuidanceCapability.evaluate` | Resolves game/run context, ambiguity, spoiler depth and source tier after router authorization | Yes | Yes; requires `game.guidance` | Low | Keep walkthrough claims grounded in RAG/web results and clarify ambiguous progression first. |
 | `cognitive/deliberation_service.py` | `_handle_user_input` | Converts a decision into a plan and guards step types | Yes | Yes, currently enforced | Low | Keep fallback router adapter only for direct unit callers. |
 | `cognitive/deliberation_service.py` | `_parse_relative_reminder`, `_plan_appointment`, `_resolve_pending_appointment` | Parses/constructs authorized scheduling plans | Yes | Yes, currently selected by decision intent | Medium | Preserve temporal internals; require the decision grant on every new entry point. |
 | `cognitive/temporal/*` | parsers/interpreter/rules | Temporal facts, not user intent | Yes | Called only from an authorized scheduling route | Low | No routing logic should be added here. |
@@ -88,6 +94,11 @@ without a wake name use `owner_stt_command`; neither is treated as ambient strea
 - Fallback chat cannot claim an appointment, reminder, app launch, memory write, or similar action
   succeeded unless execution contains a successful action-like result. Unsupported completion claims
   are blocked and logged by `FALLBACK_GUARD`.
+- Game progression, item, boss, build, and mechanics questions route through `game_guidance_query`.
+  Ambiguous run state produces a persisted clarification. Compatible answers route as
+  `game_guidance_clarification_answer`, mutate run state only through the authorized executor step,
+  and leave unrelated/new requests untouched. Generic fallback chat is not authorized to invent
+  walkthrough instructions, and concrete guidance requires a same-game local RAG or web source.
 - Response/persona fallbacks remain because they are failure output, not intent classifiers. Some
   are stylistically template-like; changing them is a persona refactor and is intentionally deferred.
 

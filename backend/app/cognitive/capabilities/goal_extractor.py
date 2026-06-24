@@ -6,9 +6,13 @@ import uuid
 from typing import Any
 
 from app.cognitive.capabilities.goal import Goal, GOAL_TYPES
+from app.cognitive.game_guidance import GameGuidanceCapability
 
 
 class GoalExtractor:
+    def __init__(self, game_guidance: GameGuidanceCapability | None = None):
+        self.game_guidance = game_guidance or GameGuidanceCapability()
+
     def extract(self, context: Any) -> Goal:
         raw_text = str(getattr(context, "input_text", "") or "")
         normalized = self._normalize(raw_text)
@@ -30,6 +34,16 @@ class GoalExtractor:
             reasoning = f"CognitiveRouter decision: {decision.reason}"
             if decision.personal_state:
                 slots["personal_state"] = decision.personal_state
+            if decision.intent == "game_guidance_query":
+                guidance_decision = self.game_guidance.evaluate(context)
+                context.game_guidance_decision = guidance_decision
+                guidance = guidance_decision.context
+                slots.update({
+                    "game": guidance.game,
+                    "spoiler_policy": guidance.spoiler_policy,
+                    "run_state": guidance.source_context.get("GameRunState") or {},
+                })
+                spoiler_sensitivity = guidance.spoiler_policy
 
         catalogue_query = self._detect_catalogue_query(normalized)
         if decision is not None:
@@ -50,12 +64,14 @@ class GoalExtractor:
                 "exclude_bots": True,
             })
         elif self._looks_like_game_strategy(normalized):
+            guidance_decision = self.game_guidance.evaluate(context)
+            context.game_guidance_decision = guidance_decision
             goal_type = "research_game_strategy"
             confidence = 0.84
             reasoning = "game strategy research request detected"
             slots.update({
-                "game": self._extract_game_name(raw_text, normalized),
-                "strategy_mode": "break_the_game",
+                "game": guidance_decision.context.normalized_game,
+                "strategy_mode": guidance_decision.context.playthrough_type,
             })
             if not slots["game"]:
                 missing_slots.append("game")
@@ -212,13 +228,5 @@ class GoalExtractor:
         return any(token in normalized for token in ("diagnostica", "debug", "por que no", "no responde", "fallo", "error"))
 
     def _extract_game_name(self, raw_text: str, normalized: str) -> str:
-        known_games = (
-            "kingdom hearts chain of memories",
-            "kingdom hearts",
-            "chain of memories",
-        )
-        for game in known_games:
-            if game in normalized:
-                return game
         match = re.search(r"(?:juego|game)\s+(.+)$", raw_text, flags=re.IGNORECASE)
         return match.group(1).strip(" .,:;") if match else ""

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+import copy
 from datetime import datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -16,6 +17,7 @@ from app.cognitive.capabilities import (
 )
 from app.cognitive.context_builder import BuiltContext
 from app.cognitive.models import PlanStep, Plan, DeliberationResult
+from app.cognitive.game_guidance import CAP_GAME_GUIDANCE, GameGuidanceCapability, GameRunState
 from app.cognitive.temporal import TemporalInterpreter
 from app.cognitive.cognitive_router import (
     CAP_APPOINTMENT,
@@ -62,6 +64,7 @@ class DeliberationService:
                 self.capability_catalogue_error = f"{type(exc).__name__}: {exc}"
         self.goal_extractor = goal_extractor or GoalExtractor()
         self.cognitive_router = CognitiveRouter()
+        self.game_guidance = self.cognitive_router.game_guidance
         if capability_matcher is not None:
             self.capability_matcher = capability_matcher
         elif self.capability_registry is not None:
@@ -173,6 +176,50 @@ class DeliberationService:
 
         if decision.intent == "owner_personal_state":
             return finish(self._plan_personal_state(decision.personal_state))
+
+        if decision.intent == "game_guidance_clarification_answer":
+            pending = (getattr(context, "state_snapshot", {}) or {}).get("pending_clarification") or {}
+            updates = self.game_guidance.parse_clarification_answer(pending, context.input_text or "")
+            run = GameRunState.from_value((getattr(context, "state_snapshot", {}) or {}).get("game_run_state"))
+            for field_name, value in updates.items():
+                if field_name in GameRunState.__dataclass_fields__:
+                    setattr(run, field_name, value)
+            continuation = copy.copy(context)
+            continuation.input_text = str(pending.get("original_question") or context.input_text or "")
+            continuation.state_snapshot = {**(getattr(context, "state_snapshot", {}) or {}), "game_run_state": run.to_dict()}
+            continuation.game_guidance_decision = None
+            guidance = self.game_guidance.evaluate(continuation)
+            before = list(pending.get("missing_fields") or [])
+            after = self.game_guidance.missing_fields(guidance.context)
+            print(f"[HEBE][GAME_CLARIFICATION] missing_fields_before={before!r} missing_fields_after={after!r}", flush=True)
+            return finish(DeliberationResult(plan=Plan(
+                steps=[
+                    PlanStep(
+                        type="state_update",
+                        data={"kind": "game_run_state", "updates": updates, "pending_id": pending.get("id")},
+                        capability_id=CAP_GAME_GUIDANCE,
+                    ),
+                    PlanStep(
+                        type="reply",
+                        data={"mode": guidance.response_mode, "game_guidance": guidance.to_dict()},
+                        capability_id=CAP_GAME_GUIDANCE,
+                    ),
+                ],
+                reasoning="Consumed game guidance clarification and continued with updated run state",
+                metadata={"game_guidance": guidance.to_dict()},
+            )))
+
+        if decision.intent == "game_guidance_query":
+            guidance = getattr(context, "game_guidance_decision", None) or self.game_guidance.evaluate(context)
+            return finish(DeliberationResult(plan=Plan(
+                steps=[PlanStep(
+                    type="reply",
+                    data={"mode": guidance.response_mode, "game_guidance": guidance.to_dict()},
+                    capability_id=CAP_GAME_GUIDANCE,
+                )],
+                reasoning=guidance.reason,
+                metadata={"game_guidance": guidance.to_dict()},
+            )))
 
         if decision.intent == "command_open_app":
             app_name = self._extract_open_app_target(text)

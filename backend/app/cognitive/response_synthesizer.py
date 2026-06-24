@@ -11,6 +11,7 @@ from app.cognitive.context_builder import BuiltContext
 from app.cognitive.command_result import CommandResult
 from app.cognitive.entity_resolver import entity_prompt_lines
 from app.cognitive.models import DeliberationResult, ExecutionResult
+from app.cognitive.game_guidance import GameGuidanceCapability
 from app.cognitive.persona.chatter_names import normalize_chatter_name
 from app.cognitive.persona.hebe_voice import (
     build_chat_react_examples,
@@ -101,6 +102,7 @@ class ResponseSynthesizer:
         self._stream_stats = StreamReplyStats()
         self._dataset_logger = StreamDatasetLogger()
         self._style_guard_fallback_counts: dict[str, int] = {}
+        self._game_guidance_classifier = GameGuidanceCapability()
 
     # =========================
     # Entry point
@@ -147,6 +149,9 @@ class ResponseSynthesizer:
             if mode == "companion_reaction":
                 return self._generate_personal_state_reply(context, reply_step.data)
 
+            if mode in {"game_guidance", "game_guidance_clarification"}:
+                return self._generate_game_guidance_reply(context, reply_step.data)
+
         return self._fallback_text("No tengo suficiente contexto para responder con seguridad.")
 
     def _generate_personal_state_reply(self, context: BuiltContext, data: dict) -> str:
@@ -158,6 +163,42 @@ class ResponseSynthesizer:
         )
         user = f"Personal state category: {state}\nUser message: {context.input_text or ''}"
         fallback = "Te escucho, Leo. CuÃ­date un poco ahora mismo."
+        return clean_jarvis_reply(self._call_model(system, user, fallback=fallback)) or fallback
+
+    def _generate_game_guidance_reply(self, context: BuiltContext, data: dict) -> str:
+        decision = dict(data.get("game_guidance") or {})
+        guidance = dict(decision.get("context") or {})
+        game = str(guidance.get("game") or "").strip()
+        ambiguity = list(guidance.get("ambiguity_reasons") or [])
+        needs_clarification = bool(guidance.get("needs_clarification"))
+        sources = list(decision.get("rag_chunks") or []) + list(decision.get("web_results") or [])
+        if needs_clarification:
+            missing = "permission to discuss story spoilers" if "major_spoiler_permission_required" in ambiguity else (
+                "current character" if "character_unknown" in ambiguity else (
+                    "latest confirmed event or objective" if "story_phase_unknown" in ambiguity else "current area"
+                )
+            )
+            system = (
+                "You are Hebe speaking briefly to Leo. Ask exactly one useful game-state clarification. "
+                "Be playful but do not provide route steps, item locations, boss facts, or story claims."
+            )
+            user = f"Game: {game or 'unknown'}\nMissing state: {missing}\nUser message: {context.input_text or ''}"
+            fallback = f"Necesito confirmar {missing} antes de orientarte sin inventar la ruta."
+            return clean_jarvis_reply(self._call_model(system, user, fallback=fallback)) or fallback
+        if not sources:
+            print("[HEBE][GAME_SOURCE] tier=all status=skipped reason=no_grounded_guidance_source", flush=True)
+            return "No tengo una fuente de guía fiable para concretar ese paso; necesito más contexto o consultar una fuente antes de afirmarlo."
+        system = (
+            "Answer as Hebe, concise and streamer-friendly. Use only the supplied game sources. "
+            "Respect the spoiler policy and allowed depth. State uncertainty where sources do not settle a claim. "
+            "Never add walkthrough facts from general model memory."
+        )
+        user = (
+            f"Game guidance context: {guidance}\n"
+            f"Grounding sources: {sources[:6]}\n"
+            f"Leo: {context.input_text or ''}"
+        )
+        fallback = "Tengo contexto de la partida, pero las fuentes disponibles no bastan para darte una indicación segura."
         return clean_jarvis_reply(self._call_model(system, user, fallback=fallback)) or fallback
 
     # =========================
@@ -443,6 +484,7 @@ class ResponseSynthesizer:
         )
         reply = self._guard_hostile_direct_insult_greeting(reply, context)
         reply = self._guard_unexecuted_action_claim(reply, context, execution)
+        reply = self._guard_ungrounded_game_walkthrough(reply, context)
         self._mark_conversation_turn(reply, context)
 
         print(
@@ -451,6 +493,36 @@ class ResponseSynthesizer:
         )
 
         return reply or self._fallback_text("No tengo una respuesta util ahora mismo.")
+
+    def _guard_ungrounded_game_walkthrough(self, reply: str, context: BuiltContext) -> str:
+        decision = getattr(context, "cognitive_decision", None)
+        if str(getattr(decision, "intent", "") or "") not in {"unknown_chat", "direct_question", ""}:
+            return reply
+        pending = (getattr(context, "state_snapshot", {}) or {}).get("pending_clarification") or {}
+        if str(pending.get("kind") or "") == "game_guidance_clarification":
+            print("[HEBE][FALLBACK_GUARD] blocked reason=active_game_guidance_pending", flush=True)
+            return "La respuesta pertenece a la aclaración de partida pendiente; no la voy a tratar como charla genérica."
+        if not self._game_guidance_classifier.looks_like_query(
+            str(getattr(context, "input_text", "") or ""), getattr(context, "state_snapshot", {}) or {}
+        ):
+            return reply
+        normalized = self._normalize_guard_text(reply)
+        concrete = bool(re.search(
+            r"\b(?:ve|dirigete|entra|sal|habla|busca|consigue|equipa|usa|derrota|mata|"
+            r"siguiente\s+objetivo|debes\s+ir|tienes\s+que\s+ir)\b",
+            normalized,
+        ))
+        if not concrete:
+            return reply
+        print("[HEBE][FALLBACK_GUARD] blocked_game_walkthrough=true reason=no_game_guidance_source", flush=True)
+        return "No voy a darte una ruta concreta sin contexto de partida y una fuente fiable; primero necesito ubicar tu progreso."
+
+    @staticmethod
+    def _normalize_guard_text(text: str) -> str:
+        return "".join(
+            char for char in unicodedata.normalize("NFKD", str(text or "").casefold())
+            if not unicodedata.combining(char)
+        )
 
     def _guard_unexecuted_action_claim(
         self, reply: str, context: BuiltContext, execution: ExecutionResult,

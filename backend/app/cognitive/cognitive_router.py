@@ -8,6 +8,7 @@ from dataclasses import replace
 from typing import Any
 
 from app.cognitive.cognitive_decision import CognitiveDecision
+from app.cognitive.game_guidance import CAP_GAME_GUIDANCE, GameGuidanceCapability
 
 
 CAP_TIME = "time.get_current_time"
@@ -31,6 +32,9 @@ CREATE_CAPABILITIES = [CAP_APPOINTMENT, CAP_REMINDER, CAP_SCHEDULER]
 
 class CognitiveRouter:
     """Owns intent priority and grants downstream subsystems permission to run."""
+
+    def __init__(self, game_guidance: GameGuidanceCapability | None = None):
+        self.game_guidance = game_guidance or GameGuidanceCapability()
 
     def route(self, context: Any) -> CognitiveDecision:
         raw = str(getattr(context, "input_text", "") or "")
@@ -56,6 +60,7 @@ class CognitiveRouter:
             event_type=event_type,
             stream_is_live=stream_is_live,
             route_hints=route_hints,
+            state_snapshot=getattr(context, "state_snapshot", {}) or {},
         )
         decision = self._apply_pending_contract(decision, pending)
         decision.debug_trace.extend([
@@ -82,7 +87,7 @@ class CognitiveRouter:
     def _classify(
         self, *, message_id: str, source: str, authority: str,
         addressed: bool, raw: str, normalized: str, firewall_decision: str,
-        event_type: str, stream_is_live: bool, route_hints: list[str],
+        event_type: str, stream_is_live: bool, route_hints: list[str], state_snapshot: dict[str, Any],
     ) -> CognitiveDecision:
         base = dict(
             message_id=message_id, source=source, authority=authority,
@@ -186,6 +191,13 @@ class CognitiveRouter:
                 "response_mode": "companion_reaction", "response_intent": "react_to_personal_state",
                 "reason": f"owner_state_signal:{state}", "personal_state": state})
 
+        if self.game_guidance.looks_like_query(raw, state_snapshot):
+            return CognitiveDecision(**{**base, "intent": "game_guidance_query", "intent_confidence": .91,
+                "goal_type": "research_game_strategy", "allowed_capabilities": [CAP_GAME_GUIDANCE],
+                "blocked_capabilities": CREATE_CAPABILITIES + [CAP_FALLBACK_CHAT],
+                "allowed_step_types": ["reply"], "response_mode": "game_guidance",
+                "response_intent": "provide_grounded_game_guidance", "reason": "structured_game_guidance_request"})
+
         app_target = self._open_app_target(normalized)
         if app_target:
             return CognitiveDecision(**{**base, "intent": "command_open_app", "intent_confidence": .95,
@@ -229,10 +241,29 @@ class CognitiveRouter:
         if not self._authority_may_answer(decision, pending):
             return replace(decision, **common, pending_reason="authority_mismatch")
 
+        if kind == "game_guidance_clarification" and decision.intent != "game_guidance_query":
+            updates = self.game_guidance.parse_clarification_answer(pending, decision.raw_text)
+            if updates:
+                return replace(
+                    decision, **common,
+                    intent="game_guidance_clarification_answer", intent_confidence=.96,
+                    is_new_request=False, uses_pending_task=True,
+                    pending_resolution_allowed=True, pending_compatible=True,
+                    pending_reason="compatible_game_guidance_answer",
+                    goal_type="research_game_strategy",
+                    allowed_capabilities=[CAP_GAME_GUIDANCE],
+                    blocked_capabilities=CREATE_CAPABILITIES + [CAP_FALLBACK_CHAT],
+                    allowed_step_types=["state_update", "reply"],
+                    response_mode="game_guidance",
+                    response_intent="continue_game_guidance",
+                    reason="compatible_game_guidance_clarification_answer",
+                )
+
         high_priority = decision.intent in {
             "current_time_query", "current_date_query", "owner_personal_state",
             "direct_question", "command_open_app", "reminder_create_request",
             "appointment_create_request", "capability_catalogue_query",
+            "game_guidance_query",
             "cancel_pending", "wake_control", "sleep_control", "owner_manual_command",
         }
         if high_priority:

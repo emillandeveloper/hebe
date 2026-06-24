@@ -39,6 +39,7 @@ from app.cognitive import MemoryStore, SchedulerService
 from app.cognitive.scheduler import InternalEvent
 from app.cognitive.command_result import CommandResult
 from app.cognitive.input_event import InputEnvelope, InputEvent
+from app.cognitive.game_guidance import GameGuidanceCapability, GameRunState
 from app.cognitive.action_plan import ActionPlan
 from app.cognitive.stream_companion_flow import (
     ConversationState,
@@ -223,6 +224,15 @@ class HebeEngine:
             store=self.game_profiles,
             config=GameKnowledgeResearchConfig.from_env(),
         )
+        game_guidance = GameGuidanceCapability(
+            profile_store=self.game_profiles,
+            search_provider=getattr(self.game_research, "search_provider", None),
+        )
+        self.cognitive_router.game_guidance = game_guidance
+        self.deliberation_service.cognitive_router.game_guidance = game_guidance
+        self.deliberation_service.game_guidance = game_guidance
+        self.deliberation_service.goal_extractor.game_guidance = game_guidance
+        self.response_synthesizer._game_guidance_classifier = game_guidance
         self.game_knowledge = GameKnowledgeResolver(
             profile_store=self.game_profiles,
             research_service=self.game_research,
@@ -682,6 +692,22 @@ class HebeEngine:
                 "created_at": now_ts,
                 "expires_at": now_ts + 300,
                 "draft": {"title": "Consulta", "source_text": "simulated appointment request"},
+            }
+        elif pending_kind == "game_guidance_clarification":
+            now_ts = time.time()
+            self.runtime.state.pending_clarification = {
+                "id": f"simulation_pending_{uuid.uuid4().hex}",
+                "kind": "game_guidance_clarification",
+                "game": "Final Fantasy VII",
+                "location_or_area": "Midgar",
+                "expected_reply_type": "game_party_or_character",
+                "missing_fields": ["current_character", "party_members", "story_phase", "recent_event"],
+                "original_question": "Necesito orientación de progreso en la zona actual de FFVII.",
+                "authority": "owner",
+                "source": clean_source,
+                "spoiler_policy": "no_story_spoilers",
+                "created_at": now_ts,
+                "expires_at": now_ts + 300,
             }
         before_event_id = self.get_last_policy_trace().get("event_id")
         previous_simulation_mode = bool(getattr(self, "_manual_simulation_mode", False))
@@ -1766,6 +1792,8 @@ class HebeEngine:
         })
         execution = self.plan_executor.execute(deliberation.plan)
         self._last_cognitive_trace["plan_executor_guard"] = list(getattr(self.plan_executor, "last_guard_results", []) or [])
+        state_update = execution.first_result_of_type("state_update")
+        self._apply_game_run_state_execution(state_update)
         reply_text = self.response_synthesizer.synthesize(
             context=context,
             deliberation=deliberation,
@@ -1812,6 +1840,12 @@ class HebeEngine:
                     flush=True,
                 )
 
+            elif mode == "game_guidance_clarification":
+                self._apply_game_guidance_reply_state(reply_step.data, decision, context, route_source)
+
+            elif mode == "game_guidance" and decision.intent == "game_guidance_clarification_answer":
+                self._apply_game_guidance_reply_state(reply_step.data, decision, context, route_source)
+
         print(
             "[HEBE][COG] "
             f"reasoning={deliberation.plan.reasoning!r} "
@@ -1857,6 +1891,62 @@ class HebeEngine:
             return "stop"
 
         return "continue"
+
+    def _apply_game_guidance_reply_state(self, reply_data, decision, context, route_source: str) -> None:
+        mode = str((reply_data or {}).get("mode") or "")
+        if mode == "game_guidance" and getattr(decision, "intent", "") == "game_guidance_clarification_answer":
+            self.runtime.state.pending_clarification = None
+            return
+        if mode != "game_guidance_clarification":
+            return
+        guidance_decision = dict((reply_data or {}).get("game_guidance") or {})
+        guidance = dict(guidance_decision.get("context") or {})
+        missing_fields = self.deliberation_service.game_guidance.missing_fields(guidance)
+        now_ts = time.time()
+        pending_id = f"pending_{uuid.uuid4().hex}"
+        self.runtime.state.pending_clarification = {
+            "id": pending_id,
+            "kind": "game_guidance_clarification",
+            "game": guidance.get("game"),
+            "location_or_area": guidance.get("location_or_area"),
+            "expected_reply_type": (
+                "game_party_or_character"
+                if {"current_character", "party_members"} & set(missing_fields)
+                else "game_progress_state"
+            ),
+            "missing_fields": missing_fields,
+            "original_question": (
+                (guidance.get("source_context") or {}).get("user_input") or context.input_text
+            ),
+            "created_at": now_ts,
+            "expires_at": now_ts + float(os.getenv("HEBE_PENDING_TASK_TTL_SECONDS", "900") or 900),
+            "authority": "owner",
+            "source": route_source,
+            "spoiler_policy": guidance.get("spoiler_policy"),
+        }
+        print(
+            f"[HEBE][GAME_PENDING] created id={pending_id} "
+            f"expected_reply_type={self.runtime.state.pending_clarification['expected_reply_type']}",
+            flush=True,
+        )
+
+    def _apply_game_run_state_execution(self, state_update) -> None:
+        if not state_update or not state_update.success or state_update.data.get("kind") != "game_run_state":
+            return
+        updates = dict(state_update.data.get("updates") or {})
+        run = GameRunState.from_value(getattr(self.runtime.state, "game_run_state", None))
+        for field_name, value in updates.items():
+            if field_name in GameRunState.__dataclass_fields__:
+                setattr(run, field_name, value)
+        self.runtime.state.game_run_state = run
+        pending_id = state_update.data.get("pending_id")
+        print(f"[HEBE][GAME_PENDING] consumed id={pending_id} fields_updated={sorted(updates)!r}", flush=True)
+        print(
+            f"[HEBE][GAME_RUN_STATE] updated game={run.game or 'unknown'} "
+            f"location={run.current_location or 'unknown'} character={run.current_character or 'unknown'} "
+            f"party={run.party_members!r}",
+            flush=True,
+        )
     
     def process_internal_event(self, event) -> None:
         if getattr(event, "event_type", None) in {"stream_online", "stream_offline"}:
@@ -2308,6 +2398,7 @@ class HebeEngine:
             elif was_live:
                 self._close_stream_memory_session_safe(stream, reason="context_sync_offline")
             self._maybe_research_game_after_context_sync(stream)
+            self._sync_game_run_state(stream, provenance="stream_context_sync")
             self._apply_stream_performance_profile()
             try:
                 self._get_live_session_brain().observe_stream_metadata(stream, source="context_sync")
@@ -2339,6 +2430,29 @@ class HebeEngine:
                 f"restored_game={game!r}",
                 flush=True,
             )
+        self._sync_game_run_state(stream, provenance="manual_update")
+
+    def _sync_game_run_state(self, stream, *, provenance: str) -> None:
+        current = GameRunState.from_value(getattr(self.runtime.state, "game_run_state", None))
+        game = str(getattr(stream, "current_game", None) or getattr(stream, "current_category", None) or "").strip()
+        if not game:
+            return
+        if current.game and CognitiveRouter.normalize(current.game) != CognitiveRouter.normalize(game):
+            current.current_location = ""
+            current.current_character = ""
+            current.last_confirmed_progress = ""
+            current.current_objective = ""
+        current.game = game
+        current.current_location = str(getattr(stream, "current_location", None) or current.current_location or "")
+        current.current_objective = str(getattr(stream, "current_objective", None) or current.current_objective or "")
+        markers = getattr(stream, "recent_progress_markers", None) or []
+        if markers:
+            current.last_confirmed_progress = str(markers[-1] or current.last_confirmed_progress)
+        current.spoiler_policy = str(getattr(stream, "spoiler_policy", None) or current.spoiler_policy)
+        current.provenance = provenance
+        current.confidence = max(current.confidence, 0.75)
+        current.last_updated = time.time()
+        self.runtime.state.game_run_state = current
 
     def _maybe_research_game_after_context_sync(self, stream) -> None:
         service = getattr(self, "game_research", None)
@@ -2903,6 +3017,7 @@ class HebeEngine:
                     f"reason=not_tts_echo text=\"{safe_text}\"",
                     flush=True,
                 )
+
             return False
         safe_text = str(raw_text or "").replace('"', '\\"')
         print(
@@ -3587,22 +3702,37 @@ class HebeEngine:
             except (TypeError, ValueError):
                 active_pending = None
         pending_kind = str((active_pending or {}).get("kind") or "")
-        expected_reply_type = "datetime" if pending_kind == "appointment_datetime" else ""
+        expected_reply_type = (
+            "datetime" if pending_kind == "appointment_datetime"
+            else str((active_pending or {}).get("expected_reply_type") or "")
+        )
         router = getattr(self, "cognitive_router", None) or CognitiveRouter()
+        game_snapshot = {
+            "game_run_state": GameRunState.from_value(
+                getattr(self.runtime.state, "game_run_state", None)
+            ).to_dict()
+        }
         stronger_request = bool(
             router._is_current_time_query(normalized)
             or router._is_current_date_query(normalized)
             or router._open_app_target(normalized)
             or router._is_reminder_request(normalized)
             or router._personal_state(normalized)
+            or router.game_guidance.looks_like_query(event.raw_text, game_snapshot)
         )
-        pending_compatible = bool(
+        appointment_pending_compatible = bool(
             active_pending
             and str(active_pending.get("authority") or "owner") == "owner"
             and pending_kind == "appointment_datetime"
             and router._is_datetime_answer(normalized)
             and not stronger_request
         )
+        game_pending_updates = (
+            router.game_guidance.parse_clarification_answer(active_pending, event.raw_text)
+            if active_pending and pending_kind == "game_guidance_clarification" and not stronger_request
+            else {}
+        )
+        pending_compatible = bool(appointment_pending_compatible or game_pending_updates)
 
         high_confidence_local_app = bool(
             command_mode
@@ -3611,7 +3741,8 @@ class HebeEngine:
         )
         if pending_compatible:
             source, authority, trust = "owner_stt_followup", "owner", "trusted_followup"
-            input_type, reason = "pending_reply", "datetime_answer"
+            input_type = "pending_reply"
+            reason = "game_guidance_answer" if game_pending_updates else "datetime_answer"
         elif addressed:
             source, authority, trust = "owner_stt_direct", "owner", "trusted_direct"
             input_type = (
@@ -3670,7 +3801,7 @@ class HebeEngine:
                 "[HEBE][PENDING_FOLLOWUP_GATE] active=true "
                 f"compatible={str(pending_compatible).lower()} "
                 f"source={source if pending_compatible else 'none'} "
-                f"reason={'datetime_answer' if pending_compatible else 'not_datetime_or_new_request'}",
+                f"reason={reason if pending_compatible else 'not_datetime_or_new_request'}",
                 flush=True,
             )
         print(

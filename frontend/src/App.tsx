@@ -1304,7 +1304,7 @@ type SimulationPreset = {
   leoText?: string;
   ambientText?: string;
   todo?: boolean;
-  pendingKind?: "appointment_datetime";
+  pendingKind?: "appointment_datetime" | "game_guidance_clarification";
   internalLive?: boolean;
 };
 
@@ -1324,6 +1324,16 @@ const SIMULATION_PRESETS: SimulationPreset[] = [
   { label: "Appointment needs date", source: "leo", leoText: "Hebe, quiero reservar consulta con el dentista" },
   { label: "Dated appointment", source: "leo", leoText: "Hebe, agenda una consulta dental para maÃ±ana a las seis" },
   { label: "Owner app command", source: "leo", leoText: "Hebe, inicia Discord" },
+  { label: "Game: ambiguous FFIX area", source: "leo", leoText: "Hebe, en Final Fantasy IX que toca ahora, estoy en Alexandria" },
+  { label: "Game: concrete FFIX item", source: "leo", leoText: "Hebe, en FFIX donde se consigue este objeto?" },
+  { label: "Game: mechanics optimization", source: "leo", leoText: "Hebe, quiero optimizar Chain of Memories, que baraja preparo?" },
+  { label: "Game: spoiler-safe Persona day", source: "leo", leoText: "Hebe, que actividad conviene hoy en Persona 5?" },
+  { label: "Game: BG3 boss strategy", source: "leo", leoText: "Hebe, como planteo el combate contra Myrkul?" },
+  { label: "Game: FFVII clarification", source: "leo", leoText: "Hebe, en FFVII he llegado a Midgar y no ubico el siguiente objetivo" },
+  { label: "Game follow-up: character", source: "leo", leoText: "Voy con Cloud", pendingKind: "game_guidance_clarification" },
+  { label: "Game follow-up: wake alias", source: "leo", leoText: "Hebe, estoy con Cloud, Eve", pendingKind: "game_guidance_clarification" },
+  { label: "Game follow-up: party aliases", source: "leo", leoText: "Heba, Tifa, Cloud, Yufi, Eve", pendingKind: "game_guidance_clarification" },
+  { label: "Game follow-up: fuzzy area", source: "leo", leoText: "Acabo de llegar a Mikdar", pendingKind: "game_guidance_clarification" },
   { label: "Viewer praise boundary", source: "twitch", viewerName: "cibernoman", displayName: "Ciber", messageText: "Hebe, envia una flor verbal para Leo" },
   { label: "Owner blocks praise", source: "leo", leoText: "Hebe, apaga el tono empalagoso conmigo" },
   { label: "Viewer repeats blocked praise", source: "twitch", viewerName: "cibernoman", displayName: "Ciber", messageText: "Hebe, pasa una flor verbal para Leo" },

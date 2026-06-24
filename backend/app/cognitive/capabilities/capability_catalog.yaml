@@ -454,6 +454,61 @@ capabilities:
       recommended_next: true
       todo_owner: Hebe
 
+  - id: game.guidance
+    category: game
+    name: Grounded game guidance
+    description: Resolve run context, source depth, and spoiler boundaries before giving game guidance.
+    status: implemented
+    enabled: true
+    risk_level: low
+    requires_confirmation: false
+    available_in_modes: [private, stream]
+    input_schema:
+      required: [game, spoiler_policy]
+      properties:
+        game:
+          type: string
+        spoiler_policy:
+          type: string
+        run_state:
+          type: object
+    output_schema:
+      properties:
+        guidance_context:
+          type: object
+        needs_clarification:
+          type: boolean
+    dependencies:
+      - game profiles
+      - memory RAG
+      - optional search provider
+    implemented_by:
+      - app.cognitive.game_guidance
+    tests:
+      - backend.tests.test_game_guidance_routing
+    notes: Concrete claims require local RAG or retrieved sources; ambiguous progression asks one clarifier.
+    output_policy:
+      reply_mode: game_guidance
+      avoid_story_spoilers: true
+    memory_policy:
+      read: relevant
+      write: cached_retrieval_only
+    spoiler_policy:
+      mechanics: conditional
+      story: avoid_unrequested
+    goal_types: [research_game_strategy]
+    backlog:
+      priority: P0
+      effort: L
+      unblocked: true
+      blocked_by: []
+      next_actions: []
+      acceptance_criteria:
+        - Ambiguous progression never reaches generic chat.
+        - Concrete guidance is grounded in an approved source tier.
+      recommended_next: false
+      todo_owner: Hebe
+
   - id: game.strategy_research
     category: game
     name: Game strategy research
