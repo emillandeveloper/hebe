@@ -18,6 +18,7 @@ backend/audio_tmp/
 
 # Logs
 *.log
+backend/logs/
 backend/models/qwen2.5-3b-instruct-q4_k_m.gguf
 backend/models/ModelFile
 backend/.env

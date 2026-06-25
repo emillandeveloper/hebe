@@ -26,6 +26,7 @@ from app.core.ui_bridge import emit
 from app.core.input_bus import submit_text_from_ui, submit_text_from_voice, get_ui_inbox, get_voice_inbox
 from app.core.stt_worker import STTWorker
 from app.core.runtime import build_runtime, HebeRuntime
+from app.core.persistent_logs import log_jsonl_event
 
 from app.orchestrator.orchestrator import Orchestrator
 from app.orchestrator.executor import OrchestratorExecutor
@@ -1895,6 +1896,13 @@ class HebeEngine:
     def _apply_game_guidance_reply_state(self, reply_data, decision, context, route_source: str) -> None:
         mode = str((reply_data or {}).get("mode") or "")
         if mode == "game_guidance" and getattr(decision, "intent", "") == "game_guidance_clarification_answer":
+            log_jsonl_event("pending", {
+                "event": "pending_consumed",
+                "kind": "game_guidance_clarification",
+                "source": route_source,
+                "authority": getattr(decision, "authority", "owner"),
+                "compatibility_reason": getattr(decision, "pending_reason", ""),
+            })
             self.runtime.state.pending_clarification = None
             return
         if mode != "game_guidance_clarification":
@@ -1929,6 +1937,30 @@ class HebeEngine:
             f"expected_reply_type={self.runtime.state.pending_clarification['expected_reply_type']}",
             flush=True,
         )
+        log_jsonl_event("pending", {
+            "event": "pending_created",
+            "id": pending_id,
+            "kind": "game_guidance_clarification",
+            "expected_reply_type": self.runtime.state.pending_clarification["expected_reply_type"],
+            "source": route_source,
+            "authority": "owner",
+            "missing_fields": missing_fields,
+            "compatibility_reason": "game_guidance_missing_run_context",
+        })
+        log_jsonl_event("game_guidance", {
+            "game": guidance.get("game"),
+            "location": guidance.get("location_or_area"),
+            "current_character": guidance.get("current_character"),
+            "party_members": guidance.get("party_members"),
+            "game_run_state": GameRunState.from_value(getattr(self.runtime.state, "game_run_state", None)).to_dict(),
+            "rag_used": bool(guidance_decision.get("rag_used")),
+            "rag_skipped": not bool(guidance_decision.get("rag_used")),
+            "web_used": bool(guidance_decision.get("web_used")),
+            "web_skipped": not bool(guidance_decision.get("web_used")),
+            "needs_clarification": True,
+            "clarification_pending_created": True,
+            "reason": guidance_decision.get("reason") or "missing_run_context",
+        })
 
     def _apply_game_run_state_execution(self, state_update) -> None:
         if not state_update or not state_update.success or state_update.data.get("kind") != "game_run_state":
@@ -1947,6 +1979,23 @@ class HebeEngine:
             f"party={run.party_members!r}",
             flush=True,
         )
+        log_jsonl_event("pending", {
+            "event": "pending_consumed",
+            "id": pending_id,
+            "kind": "game_guidance_clarification",
+            "compatibility_reason": "authorized_state_update",
+            "fields_updated": sorted(updates),
+        })
+        log_jsonl_event("game_guidance", {
+            "game": run.game,
+            "location": run.current_location,
+            "current_character": run.current_character,
+            "party_members": run.party_members,
+            "game_run_state": run.to_dict(),
+            "needs_clarification": False,
+            "clarification_pending_created": False,
+            "reason": "game_run_state_updated",
+        })
     
     def process_internal_event(self, event) -> None:
         if getattr(event, "event_type", None) in {"stream_online", "stream_offline"}:
@@ -2709,6 +2758,15 @@ class HebeEngine:
             f"normalized_candidates={result.normalized_candidates!r}",
             flush=True,
         )
+        log_jsonl_event("stt", {
+            "raw_text": result.raw_text,
+            "normalized_text": result.normalized_text,
+            "normalized_candidates": result.normalized_candidates,
+            "confidence": result.confidence,
+            "status": "normalized",
+            "selected_input_device": (debug_metadata or {}).get("selected_input_device"),
+            "command_mode": (debug_metadata or {}).get("command_mode"),
+        })
         stream = self._get_stream_state()
         if stream is not None:
             stream.last_voice_raw_transcript = result.raw_text
@@ -2794,6 +2852,13 @@ class HebeEngine:
         }
         if details:
             event.update(details)
+        log_jsonl_event("stt", {
+            **event,
+            "rejected": True,
+            "passed": False,
+            "rejection_reason": reason,
+            "voice_type": (details or {}).get("voice_type", ""),
+        })
         emit("voice.command", event)
         emit("status", {"last_rejected_stt": event})
 
@@ -3529,6 +3594,21 @@ class HebeEngine:
                 else "high_confidence_local_command"
             )
             print(f"[HEBE][STT_GATE] passed reason={gate_reason}", flush=True)
+            log_jsonl_event("stt", {
+                "raw_text": original_raw_text,
+                "normalized_text": command,
+                "status": "passed",
+                "passed": True,
+                "rejected": False,
+                "rejection_reason": "",
+                "voice_type": voice_type,
+                "source": envelope.source,
+                "authority": envelope.authority,
+                "addressed_to_hebe": envelope.addressed_to_hebe,
+                "matched_wake_name": envelope.matched_wake_name,
+                "command_mode": envelope.command_mode,
+                "reason": gate_reason,
+            })
         stream_enabled = self._is_stream_enabled()
         if pending_followup:
             self._current_input_event.stt_metadata["message_type"] = (
@@ -3796,6 +3876,22 @@ class HebeEngine:
             f"intent_candidates={intent_candidates!r}",
             flush=True,
         )
+        log_jsonl_event("input_firewall", {
+            "raw_text": event.raw_text,
+            "normalized_text": normalized,
+            "source": source,
+            "authority": authority,
+            "trust": trust,
+            "addressed_to_hebe": addressed,
+            "matched_wake_name": getattr(wake, "matched_name", None),
+            "pending_compatible": pending_compatible,
+            "pending_kind": pending_kind,
+            "intent_candidates": intent_candidates,
+            "input_type": input_type,
+            "reason": reason,
+            "allowed_actions": [],
+            "blocked_actions": [],
+        })
         if active_pending:
             print(
                 "[HEBE][PENDING_FOLLOWUP_GATE] active=true "

@@ -9,6 +9,7 @@ from typing import Any
 
 from app.cognitive.cognitive_decision import CognitiveDecision
 from app.cognitive.game_guidance import CAP_GAME_GUIDANCE, GameGuidanceCapability
+from app.core.persistent_logs import log_jsonl_event
 
 
 CAP_TIME = "time.get_current_time"
@@ -423,6 +424,43 @@ class CognitiveRouter:
 
     @staticmethod
     def _log(decision: CognitiveDecision, pending: Any) -> None:
+        log_jsonl_event("cognitive_router", {
+            "message_id": decision.message_id,
+            "raw_text": decision.raw_text,
+            "normalized_text": decision.normalized_text,
+            "source": decision.source,
+            "authority": decision.authority,
+            "addressed_to_hebe": decision.addressed_to_hebe,
+            "intent": decision.intent,
+            "confidence": decision.intent_confidence,
+            "is_new_request": decision.is_new_request,
+            "uses_pending_task": decision.uses_pending_task,
+            "pending_kind": decision.pending_task_kind,
+            "pending_compatible": decision.pending_compatible,
+            "should_reply": decision.should_reply,
+            "should_stop_pipeline": decision.should_stop_pipeline,
+            "response_mode": decision.response_mode,
+            "allowed_capabilities": decision.allowed_capabilities,
+            "blocked_capabilities": decision.blocked_capabilities,
+            "allowed_step_types": decision.allowed_step_types,
+            "blocked_step_types": decision.blocked_step_types,
+            "personal_state": decision.personal_state,
+            "reason": decision.reason,
+        })
+        if isinstance(pending, dict) and pending:
+            event_name = "pending_consumed" if decision.uses_pending_task else "pending_rejected"
+            if decision.pending_reason == "expired":
+                event_name = "pending_expired"
+            log_jsonl_event("pending", {
+                "event": event_name,
+                "message_id": decision.message_id,
+                "kind": decision.pending_task_kind or pending.get("kind"),
+                "expected_reply_type": pending.get("expected_reply_type"),
+                "source": decision.source,
+                "authority": decision.authority,
+                "pending_compatible": decision.pending_compatible,
+                "compatibility_reason": decision.pending_reason,
+            })
         print(
             "[HEBE][COGNITIVE_ROUTER] "
             f"intent={decision.intent} confidence={decision.intent_confidence:.2f} "

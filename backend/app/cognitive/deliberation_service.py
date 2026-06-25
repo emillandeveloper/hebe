@@ -27,6 +27,7 @@ from app.cognitive.cognitive_router import (
     CAP_TIME,
     CognitiveRouter,
 )
+from app.core.persistent_logs import log_jsonl_event
 
 
 CAPABILITY_BACKLOG_QUERY = "hebe.capability_backlog_query"
@@ -189,6 +190,7 @@ class DeliberationService:
             continuation.state_snapshot = {**(getattr(context, "state_snapshot", {}) or {}), "game_run_state": run.to_dict()}
             continuation.game_guidance_decision = None
             guidance = self.game_guidance.evaluate(continuation)
+            self._log_game_guidance_event(guidance)
             before = list(pending.get("missing_fields") or [])
             after = self.game_guidance.missing_fields(guidance.context)
             print(f"[HEBE][GAME_CLARIFICATION] missing_fields_before={before!r} missing_fields_after={after!r}", flush=True)
@@ -211,6 +213,7 @@ class DeliberationService:
 
         if decision.intent == "game_guidance_query":
             guidance = getattr(context, "game_guidance_decision", None) or self.game_guidance.evaluate(context)
+            self._log_game_guidance_event(guidance)
             return finish(DeliberationResult(plan=Plan(
                 steps=[PlanStep(
                     type="reply",
@@ -257,6 +260,29 @@ class DeliberationService:
             print("[HEBE][ROUTER_GUARD] blocked_subsystem=fallback_chat reason=capability_not_authorized", flush=True)
             return finish(DeliberationResult(plan=Plan(steps=[PlanStep(type="noop")], reasoning="Fallback chat not authorized")))
         return finish(self._plan_with_llm(context))
+
+    @staticmethod
+    def _log_game_guidance_event(guidance) -> None:
+        guidance_context = getattr(guidance, "context", {}) or {}
+        if hasattr(guidance_context, "to_dict"):
+            context = guidance_context.to_dict()
+        else:
+            context = dict(guidance_context or {})
+        needs_clarification = bool(context.get("needs_clarification") or getattr(guidance, "response_mode", "") == "game_guidance_clarification")
+        log_jsonl_event("game_guidance", {
+            "game": context.get("game"),
+            "location": context.get("location_or_area"),
+            "current_character": context.get("current_character"),
+            "party_members": context.get("party_members"),
+            "game_run_state": context.get("game_run_state") or context.get("run_state"),
+            "rag_used": bool(getattr(guidance, "rag_chunks", []) or []),
+            "rag_skipped": not bool(getattr(guidance, "rag_chunks", []) or []),
+            "web_used": bool(getattr(guidance, "web_results", []) or []),
+            "web_skipped": not bool(getattr(guidance, "web_results", []) or []),
+            "needs_clarification": bool(needs_clarification),
+            "clarification_pending_created": bool(getattr(guidance, "response_mode", "") == "game_guidance_clarification"),
+            "reason": getattr(guidance, "reason", ""),
+        })
 
     def _plan_current_time(self) -> DeliberationResult:
         now = datetime.now(ZoneInfo("Europe/Madrid"))

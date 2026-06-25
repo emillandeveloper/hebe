@@ -16,6 +16,7 @@ from .api.debug import router as debug_router
 from .api.audio import router as audio_router
 from .api.capabilities import router as capabilities_router
 from .core.log_bus import get_recent_logs, install_log_capture
+from .core.persistent_logs import ensure_log_dirs, log_jsonl_event
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -89,6 +90,15 @@ def _prepare_ws_payload(payload: dict) -> dict:
             f"message_id={message['message_id']} role={message['role']} text={message['text']!r}",
             flush=True,
         )
+        log_jsonl_event("ui_events", {
+            "event_id": message_event["event_id"],
+            "message_id": message["message_id"],
+            "role": message["role"],
+            "source": message["source"],
+            "output_target": message["output_target"],
+            "text": message["text"],
+            "ui_broadcast": True,
+        })
         return message_event
     return event
 
@@ -385,6 +395,7 @@ def debug_memory():
 async def startup():
     # NO arrancar el motor aquí (XTTS/Whisper pueden tardar bastante)
     loop = asyncio.get_running_loop()
+    ensure_log_dirs()
 
     def _broadcast_backend_log(entry: dict) -> None:
         try:

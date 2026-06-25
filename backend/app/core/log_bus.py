@@ -6,6 +6,8 @@ import time
 from collections import deque
 from typing import Callable, TextIO
 
+from app.core.persistent_logs import record_console_log
+
 
 MAX_LOG_LINES = 5000
 _buffer: deque[dict] = deque(maxlen=MAX_LOG_LINES)
@@ -75,6 +77,10 @@ def _publish(line: str, source: str) -> None:
     with _lock:
         _buffer.append(entry)
         callback = _callback
+    try:
+        record_console_log(entry)
+    except Exception:
+        pass
     if callback is not None:
         try:
             callback(entry)

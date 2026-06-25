@@ -5,6 +5,8 @@ import unicodedata
 from dataclasses import dataclass, field
 from typing import Iterable
 
+from app.core.persistent_logs import log_jsonl_event
+
 
 ACTION_LOCAL_REPLY = "local_reply"
 ACTION_LOCAL_UI_MESSAGE = "local_ui_message"
@@ -551,7 +553,7 @@ class InputAuthorityFirewall:
     ) -> InputFirewallDecision:
         allowed = list(dict.fromkeys(action for action in allowed_actions if action in ACTION_CATEGORIES))
         blocked = [action for action in ACTION_CATEGORIES if action not in set(allowed)]
-        return InputFirewallDecision(
+        decision = InputFirewallDecision(
             source=source,
             authority=authority,
             input_trust=input_trust,
@@ -570,3 +572,12 @@ class InputAuthorityFirewall:
             event_type=str(event_type or ""),
             is_simulation=bool(is_simulation),
         )
+        log_jsonl_event("input_firewall", {
+            **decision.as_dict(),
+            "raw_text": text if "text" in locals() else "",
+            "addressed_to_hebe": False,
+            "matched_wake_name": "",
+            "pending_compatible": bool(followup_window_used),
+            "intent_candidates": [],
+        })
+        return decision

@@ -5,6 +5,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi.responses import FileResponse
 
 from app.api.capabilities import (
     capability_backlog_payload,
@@ -18,6 +19,12 @@ from app.api.capabilities import (
 )
 from app.services import db_sqlite
 from app.core.log_bus import get_recent_logs
+from app.core.persistent_logs import (
+    create_debug_bundle,
+    prune_debug_bundles,
+    read_jsonl_recent,
+    read_text_recent,
+)
 from app.stream.live_session import latest_live_session_debug
 from app.stream import memory as stream_memory
 
@@ -158,6 +165,47 @@ def list_db_tables():
 @router.get("/logs")
 def list_backend_logs(limit: int = Query(1000, ge=1, le=5000)):
     return {"logs": get_recent_logs(limit=limit)}
+
+
+@router.get("/logs/recent")
+def preview_recent_logs(minutes: int = Query(10, ge=1, le=240)):
+    return {
+        "minutes": minutes,
+        "errors": read_text_recent("errors.log", minutes=minutes, max_lines=120),
+        "cognitive_router": read_jsonl_recent("cognitive_router", minutes=minutes, limit=120),
+        "stt": read_jsonl_recent("stt", minutes=minutes, limit=120),
+    }
+
+
+@router.get("/export-logs")
+def export_logs(
+    request: Request,
+    minutes: int = Query(30, ge=1, le=240),
+    include_db_snapshot: bool = Query(False),
+    include_config: bool = Query(False),
+    include_recent_state: bool = Query(True),
+    include_recent_ui: bool = Query(True),
+):
+    adapter = getattr(request.app.state, "adapter", None)
+    engine = getattr(adapter, "_engine", None) if adapter is not None else None
+    try:
+        bundle_path = create_debug_bundle(
+            minutes=minutes,
+            include_db_snapshot=include_db_snapshot,
+            include_config=include_config,
+            include_recent_state=include_recent_state,
+            include_recent_ui=include_recent_ui,
+            engine=engine,
+        )
+        prune_debug_bundles()
+    except Exception as exc:
+        _log_db_error(f"export logs failed: {type(exc).__name__}: {exc}")
+        raise HTTPException(status_code=500, detail="Debug bundle export failed")
+    return FileResponse(
+        str(bundle_path),
+        media_type="application/zip",
+        filename=bundle_path.name,
+    )
 
 
 @router.get("/stream-data/health")

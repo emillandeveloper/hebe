@@ -12,6 +12,7 @@ from app.cognitive.cognitive_router import (
     CAP_APPOINTMENT, CAP_OPEN_APP, CAP_REMINDER, CAP_TWITCH_ACTION,
     CAP_TWITCH_PROMOTION, CAP_TWITCH_REPLY,
 )
+from app.core.persistent_logs import log_jsonl_event
 
 
 PASSIVE_STEP_TYPES = {
@@ -65,6 +66,16 @@ class PlanExecutor:
                 capability = self._step_capability(step)
                 guard = {"step_type": step.type, "capability_id": capability, "allowed": False, "reason": blocked_reason}
                 self.last_guard_results.append(guard)
+                log_jsonl_event("plan_executor", {
+                    "plan_id": plan.message_id or (plan.metadata or {}).get("message_id") or "",
+                    "message_id": (decision or {}).get("message_id") if isinstance(decision, dict) else "",
+                    "step_type": step.type,
+                    "capability_id": capability,
+                    "authorized": False,
+                    "execution_success": False,
+                    "guard_reason": blocked_reason,
+                    "error": blocked_reason,
+                })
                 print(
                     f"[HEBE][PLAN_EXEC_GUARD] blocked step={step.type} capability={capability or 'none'} reason={blocked_reason}",
                     flush=True,
@@ -75,8 +86,19 @@ class PlanExecutor:
                     error=blocked_reason,
                 )
             else:
-                self.last_guard_results.append({"step_type": step.type, "capability_id": self._step_capability(step), "allowed": True})
+                capability = self._step_capability(step)
+                self.last_guard_results.append({"step_type": step.type, "capability_id": capability, "allowed": True})
                 result = self._execute_step(step, context)
+                log_jsonl_event("plan_executor", {
+                    "plan_id": plan.message_id or (plan.metadata or {}).get("message_id") or "",
+                    "message_id": (decision or {}).get("message_id") if isinstance(decision, dict) else "",
+                    "step_type": step.type,
+                    "capability_id": capability,
+                    "authorized": True,
+                    "execution_success": bool(result.success),
+                    "error": result.error,
+                    "guard_reason": "",
+                })
             results.append(result)
 
             if result.success:

@@ -2397,6 +2397,12 @@ function LogsView({ apiBase, logs, onClearVisible }: { apiBase: string; logs: { 
   const [autoScroll, setAutoScroll] = useState(true);
   const [wrap, setWrap] = useState(true);
   const [hiddenKeys, setHiddenKeys] = useState<Set<string>>(() => new Set());
+  const [bundleMinutes, setBundleMinutes] = useState(30);
+  const [includeDbSnapshot, setIncludeDbSnapshot] = useState(false);
+  const [includeCurrentState, setIncludeCurrentState] = useState(true);
+  const [exportBusy, setExportBusy] = useState(false);
+  const [preview, setPreview] = useState<{ errors: string[]; cognitive_router: any[]; stt: any[] } | null>(null);
+  const [previewError, setPreviewError] = useState("");
   const listRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -2472,6 +2478,51 @@ function LogsView({ apiBase, logs, onClearVisible }: { apiBase: string; logs: { 
     await navigator.clipboard.writeText(text);
   }
 
+  async function exportDebugBundle() {
+    setExportBusy(true);
+    try {
+      const params = new URLSearchParams({
+        minutes: String(bundleMinutes),
+        include_db_snapshot: includeDbSnapshot ? "true" : "false",
+        include_recent_state: includeCurrentState ? "true" : "false",
+        include_recent_ui: "true",
+      });
+      const res = await fetch(`${apiBase}/debug/export-logs?${params.toString()}`);
+      if (!res.ok) throw new Error(`Export failed (${res.status})`);
+      const blob = await res.blob();
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+      link.href = url;
+      link.download = `hebe-debug-${stamp}.zip`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(url);
+    } catch (error) {
+      setPreviewError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setExportBusy(false);
+    }
+  }
+
+  async function loadRecentPreview() {
+    setPreviewError("");
+    try {
+      const res = await fetch(`${apiBase}/debug/logs/recent?minutes=${bundleMinutes}`);
+      if (!res.ok) throw new Error(`Preview failed (${res.status})`);
+      const payload = await res.json();
+      setPreview({
+        errors: Array.isArray(payload?.errors) ? payload.errors : [],
+        cognitive_router: Array.isArray(payload?.cognitive_router) ? payload.cognitive_router : [],
+        stt: Array.isArray(payload?.stt) ? payload.stt : [],
+      });
+    } catch (error) {
+      setPreview(null);
+      setPreviewError(error instanceof Error ? error.message : String(error));
+    }
+  }
+
   const filters: LogFilter[] = ["all", "chat.assistant", "chat.user", "twitch", "stream_context", "stt", "tts", "memory", "routing", "dev", "spontaneity", "db", "errors"];
 
   return (
@@ -2501,6 +2552,35 @@ function LogsView({ apiBase, logs, onClearVisible }: { apiBase: string; logs: { 
               Limpiar visibles
             </button>
           </div>
+        </div>
+        <div className="debugBundleBar">
+          <div className="debugBundleControls">
+            <span className="muted small">Debug bundle</span>
+            <select className="select compactSelect" value={bundleMinutes} onChange={(e) => setBundleMinutes(Number(e.target.value))}>
+              {[5, 15, 30, 60].map((minutes) => <option value={minutes} key={minutes}>Ãšltimos {minutes} min</option>)}
+            </select>
+            <label className="toggle mini"><input type="checkbox" checked={includeDbSnapshot} onChange={(e) => setIncludeDbSnapshot(e.target.checked)} /><span className="toggleLabel">DB sanitizada</span></label>
+            <label className="toggle mini"><input type="checkbox" checked={includeCurrentState} onChange={(e) => setIncludeCurrentState(e.target.checked)} /><span className="toggleLabel">Estado actual</span></label>
+            <button className="btn compact" disabled={exportBusy} onClick={exportDebugBundle}>{exportBusy ? "Exportando..." : "Export debug bundle"}</button>
+            <button className="btn compact" onClick={loadRecentPreview}>Preview recientes</button>
+          </div>
+          {previewError && <div className="micError">{previewError}</div>}
+          {preview && (
+            <div className="debugPreviewGrid">
+              <div>
+                <div className="muted small">Errores recientes</div>
+                <pre className="debugPreviewBox">{preview.errors.slice(-8).join("\n") || "Sin errores recientes."}</pre>
+              </div>
+              <div>
+                <div className="muted small">CognitiveRouter</div>
+                <pre className="debugPreviewBox">{preview.cognitive_router.slice(-5).map((item) => `${item.intent || "-"} ${item.reason || ""}`).join("\n") || "Sin decisiones recientes."}</pre>
+              </div>
+              <div>
+                <div className="muted small">STT</div>
+                <pre className="debugPreviewBox">{preview.stt.slice(-5).map((item) => `${item.status || item.final_decision || "-"} ${item.reason || item.rejection_reason || ""}`).join("\n") || "Sin eventos STT recientes."}</pre>
+              </div>
+            </div>
+          )}
         </div>
         <div className={"logsFullBox " + (wrap ? "wrap" : "nowrap")} ref={listRef}>
           {filtered.map(({ id, ev }) => (

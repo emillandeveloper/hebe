@@ -688,6 +688,49 @@ textarea{
   width:160px;
 }
 
+.compactSelect{
+  width:auto;
+  min-width:130px;
+}
+
+.debugBundleBar{
+  display:flex;
+  flex-direction:column;
+  gap:10px;
+  margin:10px 0;
+  padding:10px;
+  border-radius:14px;
+  border:1px solid rgba(255,255,255,0.08);
+  background:rgba(0,0,0,0.18);
+}
+
+.debugBundleControls{
+  display:flex;
+  align-items:center;
+  gap:8px;
+  flex-wrap:wrap;
+}
+
+.debugPreviewGrid{
+  display:grid;
+  grid-template-columns:repeat(3, minmax(0, 1fr));
+  gap:10px;
+}
+
+.debugPreviewBox{
+  min-height:72px;
+  max-height:150px;
+  overflow:auto;
+  margin:4px 0 0;
+  padding:8px;
+  border-radius:10px;
+  border:1px solid rgba(255,255,255,0.08);
+  background:rgba(0,0,0,0.24);
+  color:var(--muted);
+  font-size:11px;
+  white-space:pre-wrap;
+}
+
 .toggle.mini{
   min-height:34px;
   display:flex;

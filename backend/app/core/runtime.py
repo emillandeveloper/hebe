@@ -11,6 +11,7 @@ load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), '..', '..', '.en
 
 from app.core.ui_bridge import emit
 from app.core.state import HebeState
+from app.core.persistent_logs import log_jsonl_event
 from app.services.db_sqlite import get_setting, log_chat
 from app.services.interaction_actions import InteractionActions
 from app.services.llm_factory import create_conversation_llm
@@ -37,21 +38,48 @@ def build_speak(state: HebeState) -> Callable[..., None]:
             if emit_chat:
                 emit("chat.assistant", {"text": text})
             print("[HEBE][TTS] skipped reason=global_disabled", flush=True)
+            log_jsonl_event("tts", {
+                "output_target": "local_tts",
+                "tts_started": False,
+                "tts_completed": False,
+                "text": text,
+                "reason": "global_disabled",
+            })
             return
 
         safe_text = str(text or "").replace('"', '\\"')
         print(f"[HEBE][TTS] speaking text=\"{safe_text}\"", flush=True)
+        log_jsonl_event("tts", {
+            "output_target": "local_tts",
+            "tts_started": True,
+            "tts_completed": False,
+            "text": text,
+        })
         try:
-            return _speak(
+            result = _speak(
                 text=text,
                 language=language,
                 emit=emit,
                 log_chat=log_chat,
                 emit_chat=emit_chat,
             )
+            log_jsonl_event("tts", {
+                "output_target": "local_tts",
+                "tts_started": True,
+                "tts_completed": True,
+                "text": text,
+            })
+            return result
         except Exception as exc:
             safe_error = str(exc).replace('"', '\\"')
             print(f"[HEBE][TTS] failed error=\"{safe_error}\"", flush=True)
+            log_jsonl_event("tts", {
+                "output_target": "local_tts",
+                "tts_started": True,
+                "tts_completed": False,
+                "text": text,
+                "error": safe_error,
+            })
             raise
 
     return speak
