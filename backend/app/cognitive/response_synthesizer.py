@@ -28,6 +28,13 @@ from app.cognitive.persona.reply_cleaner import (
 )
 from app.cognitive.persona.stream_metrics import StreamReplyStats
 from app.cognitive.persona.stream_dataset_logger import StreamDatasetLogger
+from app.cognitive.speech_act_pipeline import (
+    build_persona_renderer_messages,
+    build_repair_renderer_messages,
+    build_twitch_speech_act_bundle,
+    final_response_guard,
+    safe_local_fallback,
+)
 from app.core.ui_bridge import emit
 from app.stream.game_advice_gate import GameAdviceGate
 
@@ -1745,57 +1752,11 @@ class ResponseSynthesizer:
         # scheduler con un trace de mayor nivel), salo.
         trace_id = payload.get("trace_id") or uuid.uuid4().hex[:8]
 
-        # Bloque de contexto reciente, si lo hay.
-        recent_block = ""
-        if recent:
-            lines = [
-                f"- {m.get('display_name', '')}: {m.get('text', '')}"
-                for m in recent[-6:]
-            ]
-            recent_block = "Contexto del chat reciente:\n" + "\n".join(lines)
-
-        # Aviso sobre quien estu hablando. Va al user, no al system,
-        # para no romper el cache del system prompt.
-        speaker_block = (
-            "IMPORTANTE: quien escribe este mensaje ES Leo, tu companero y broadcaster. "
-            "No lo trates como un viewer cualquiera. Puedes vacilarle con confianza."
-            if is_broadcaster
-            else ""
+        bundle = build_twitch_speech_act_bundle(payload, context, is_broadcaster=is_broadcaster)
+        system, user = build_persona_renderer_messages(
+            bundle,
+            include_examples=f"{self._build_stream_style_block()}\n\n{build_chat_react_examples()}",
         )
-
-        # System: SOLO identidad + few-shots (siempre identico  cacheable).
-        system = (
-            f"{self._build_stream_style_block()}\n\n"
-            f"{build_chat_react_examples()}"
-        )
-
-        # Si hay viewer_facts para este chatter, anadir perfil compacto al system.
-        # Nota: esto rompe el cache de OpenAI solo cuando existen facts del viewer.
-        # Para la mayoria de viewers (sin facts) el system sigue siendo identico.
-        if context is not None and context.relevant_chunks:
-            profile_bits: list[str] = []
-            for ch in context.relevant_chunks:
-                text = ch.get("text", "")
-                if text:
-                    profile_bits.append(text)
-            if profile_bits:
-                profile_line = "; ".join(profile_bits)
-                system = system + f"\n\nSobre este viewer: {profile_line}"
-
-        # User: parte variable (contexto + mensaje). El modelo completa
-        # despues de [tu]:. Siempre usamos el nombre limpio del chatter.
-        chatter_tag = (
-            "[chatter Leo]:"
-            if is_broadcaster
-            else f"[chatter {chatter_clean}]:"
-        )
-        user_parts: list[str] = []
-        if speaker_block:
-            user_parts.append(speaker_block)
-        if recent_block:
-            user_parts.append(recent_block)
-        user_parts.append(f"{chatter_tag} {message}\n[tu]:")
-        user = "\n\n".join(user_parts)
 
         print(
             f"[HEBE][REPLY][BEGIN] trace={trace_id} "
@@ -1803,11 +1764,15 @@ class ResponseSynthesizer:
             f"is_broadcaster={is_broadcaster} msg={message!r}",
             flush=True,
         )
+        self._log_speech_act_pipeline(trace_id, bundle)
 
         helper_hits: list[str] = []
         final_reply = ""
         final_raw = ""
         final_helper: str | None = None
+        guard_result = None
+        response_source = "persona_generated"
+        repair_attempts: list[dict[str, Any]] = []
 
         for attempt in range(MAX_HELPER_RETRIES + 1):
             # Seed distinto en cada intento para que el retry no regenere
@@ -1828,12 +1793,34 @@ class ResponseSynthesizer:
 
             helper = detect_helper_pattern(cleaned)
             if helper is None:
-                # Respuesta limpia (o vacia, que tambin estu bien  el
-                # caller publicar "" como silencio).
-                final_reply = cleaned
-                final_raw = raw
-                final_helper = None
-                break
+                guard_result = final_response_guard(
+                    cleaned,
+                    bundle,
+                    game_advice_gate=self.game_advice_gate,
+                    previous_responses=[],
+                )
+                self._log_final_response_guard(trace_id, guard_result)
+                if guard_result.passed:
+                    final_reply = cleaned
+                    final_raw = raw
+                    final_helper = None
+                    response_source = "persona_generated"
+                    break
+                repaired = self._repair_speech_act_response(
+                    bundle,
+                    previous_response=cleaned,
+                    guard_result=guard_result,
+                    source_message=message,
+                    trace_id=trace_id,
+                    repair_attempts=repair_attempts,
+                )
+                if repaired:
+                    final_reply = repaired
+                    final_raw = raw
+                    final_helper = None
+                    response_source = "persona_repair_generated"
+                    break
+                helper = "final_response_guard"
 
             # Engancha un patron helper.
             helper_hits.append(helper)
@@ -1852,6 +1839,12 @@ class ResponseSynthesizer:
                     message=message,
                     is_broadcaster=is_broadcaster,
                 )
+                guard_result = final_response_guard(final_reply, bundle, game_advice_gate=self.game_advice_gate)
+                if not guard_result.passed:
+                    final_reply = safe_local_fallback(bundle)
+                    response_source = "local_safe_fallback"
+                else:
+                    response_source = "boundary_generated" if bundle.policy_decision.needs_boundary_response else "local_safe_fallback"
                 final_raw = raw
                 final_helper = helper
                 print(
@@ -1868,12 +1861,18 @@ class ResponseSynthesizer:
             message=message,
             is_broadcaster=is_broadcaster,
         )
+        final_guard = final_response_guard(final_reply, bundle, game_advice_gate=self.game_advice_gate)
+        self._log_final_response_guard(trace_id, final_guard)
+        if not final_guard.passed:
+            final_reply = safe_local_fallback(bundle)
+            response_source = "local_safe_fallback"
 
         print(
             f"[HEBE][REPLY][END] trace={trace_id} helper_hits={helper_hits} "
             f"retried={retried} salvaged={salvaged} final={final_reply!r}",
             flush=True,
         )
+        print(f"[HEBE][RESPONSE_SOURCE] source={response_source}", flush=True)
 
         # Registrar en metricas acumuladas del stream.
         self._stream_stats.record(
@@ -1901,7 +1900,18 @@ class ResponseSynthesizer:
             retried=retried,
             salvaged=salvaged,
             model_meta=model_meta,
-            full_prompt={"system": system, "user": user},
+            full_prompt={
+                "system": system,
+                "user": user,
+                "scene_context": bundle.scene.to_dict(),
+                "retrieved_memory": bundle.memory.to_dict(),
+                "cognitive_decision": bundle.cognitive_decision.to_dict(),
+                "policy_decision": bundle.policy_decision.to_dict(),
+                "speech_act_plan": bundle.speech_act.to_dict(),
+                "guard_result": final_guard.to_dict(),
+                "repair_attempts": repair_attempts,
+                "response_source": response_source,
+            },
         )
 
         # Avisar a la UI de que esta respuesta tiene ejemplo de dataset
@@ -1919,6 +1929,18 @@ class ResponseSynthesizer:
                     "message": message,
                     "response": final_reply,
                     "model": model_meta,
+                    "debug_contract": {
+                        "scene_context": bundle.scene.to_dict(),
+                        "retrieved_memory": bundle.memory.to_dict(),
+                        "cognitive_decision": bundle.cognitive_decision.to_dict(),
+                        "policy_decision": bundle.policy_decision.to_dict(),
+                        "speech_act_plan": bundle.speech_act.to_dict(),
+                        "generated_response": final_raw,
+                        "guard_result": final_guard.to_dict(),
+                        "repair_attempts": repair_attempts,
+                        "final_response": final_reply,
+                        "response_source": response_source,
+                    },
                     "curation": {
                         "status": None,
                         "approved": None,
@@ -1932,6 +1954,103 @@ class ResponseSynthesizer:
             print(f"[HEBE][DATASET][UI_EVENT_ERROR] {exc!r}", flush=True)
 
         return final_reply
+
+    def _repair_speech_act_response(
+        self,
+        bundle,
+        *,
+        previous_response: str,
+        guard_result,
+        source_message: str,
+        trace_id: str,
+        repair_attempts: list[dict[str, Any]],
+    ) -> str:
+        for repair_attempt in range(1, 3):
+            system, user = build_repair_renderer_messages(
+                bundle,
+                previous_response=previous_response,
+                guard_result=guard_result,
+                include_examples=self._build_stream_style_block(),
+            )
+            print(
+                f"[HEBE][REPAIR_RENDERER] trace={trace_id} attempt={repair_attempt} "
+                f"violations={[item.type for item in guard_result.violations]}",
+                flush=True,
+            )
+            raw = self._call_model(system, user, fallback="", seed=random.randint(0, 1_000_000))
+            cleaned = clean_twitch_reply(raw, source_message=source_message)
+            repaired_guard = final_response_guard(cleaned, bundle, game_advice_gate=self.game_advice_gate)
+            repair_attempts.append(
+                {
+                    "attempt": repair_attempt,
+                    "raw": raw,
+                    "cleaned": cleaned,
+                    "guard_result": repaired_guard.to_dict(),
+                }
+            )
+            self._log_final_response_guard(trace_id, repaired_guard)
+            if repaired_guard.passed:
+                return cleaned
+            guard_result = repaired_guard
+            previous_response = cleaned
+        return ""
+
+    def _log_speech_act_pipeline(self, trace_id: str, bundle) -> None:
+        scene = bundle.scene.to_dict()
+        memory = bundle.memory.to_dict()
+        policy = bundle.policy_decision.to_dict()
+        speech = bundle.speech_act.to_dict()
+        print(
+            "[HEBE][SCENE_CONTEXT] "
+            f"trace={trace_id} mode={scene.get('mode')} speaker={scene.get('speaker')} "
+            f"authority={scene.get('speaker_authority')} game={scene.get('current_game') or 'unknown'} "
+            f"sanitized_topic={scene.get('sanitized_topic') or 'none'}",
+            flush=True,
+        )
+        print(
+            "[HEBE][MEMORY_RETRIEVAL] "
+            f"trace={trace_id} viewer={scene.get('speaker')} "
+            f"items={memory.get('recent_chat_summary', {}).get('recent_count') or 0} "
+            f"usage=tone/context/familiarity_not_authority",
+            flush=True,
+        )
+        print(
+            "[HEBE][SPEECH_ACT_PLAN] "
+            f"trace={trace_id} type={speech.get('speech_act_type')} goal={speech.get('goal')!r} "
+            f"forbidden={speech.get('must_not_do') or policy.get('forbidden_actions')}",
+            flush=True,
+        )
+        print(
+            "[HEBE][PERSONA_RENDERER] "
+            f"trace={trace_id} source=persona_generated attempt=1 policy={policy.get('result')}",
+            flush=True,
+        )
+
+    def _log_final_response_guard(self, trace_id: str, guard_result) -> None:
+        violations = [item.type for item in getattr(guard_result, "violations", [])]
+        print(
+            "[HEBE][FINAL_RESPONSE_GUARD] "
+            f"trace={trace_id} passed={str(guard_result.passed).lower()} "
+            f"violations={violations} action={guard_result.recommended_action}",
+            flush=True,
+        )
+        print(
+            "[HEBE][VIEWER_MESSENGER_GUARD] "
+            f"trace={trace_id} leaked={str('viewer_messenger_leak' in violations).lower()}",
+            flush=True,
+        )
+        print(
+            "[HEBE][MEMORY_CREEP_GUARD] "
+            f"trace={trace_id} triggered={str('memory_creep' in violations).lower()}",
+            flush=True,
+        )
+        validation = getattr(guard_result, "game_advice_validation", None) or {}
+        print(
+            "[HEBE][GAME_ADVICE_GATE] "
+            f"trace={trace_id} required={str(bool(validation.get('mechanics'))).lower()} "
+            f"validated={str(bool(validation and not validation.get('blocked'))).lower()}",
+            flush=True,
+        )
 
     def _model_meta(self) -> dict[str, Any]:
         model = self.conversation_model

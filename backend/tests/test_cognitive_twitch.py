@@ -4,6 +4,11 @@ from types import SimpleNamespace
 from app.cognitive.deliberation_service import DeliberationService
 from app.cognitive.response_synthesizer import ResponseSynthesizer
 from app.cognitive.scheduler import SchedulerService, InternalEvent
+from app.cognitive.speech_act_pipeline import (
+    build_twitch_speech_act_bundle,
+    contains_viewer_proxy_request,
+    final_response_guard,
+)
 from app.integrations.twitch.chat_bot import TwitchChatBot
 from app.integrations.twitch.service import TwitchService
 
@@ -34,6 +39,18 @@ class CapturingModel:
     def chat(self, messages, **kwargs):
         self.messages = messages
         return self.reply
+
+
+class SequentialModel:
+    def __init__(self, replies):
+        self.replies = list(replies)
+        self.messages = []
+
+    def chat(self, messages, **kwargs):
+        self.messages.append(messages)
+        if self.replies:
+            return self.replies.pop(0)
+        return ""
 
 
 class CapturingChatClient:
@@ -367,6 +384,207 @@ class CognitiveTwitchTests(unittest.TestCase):
         )
 
         self.assertNotIn("esfera", reply.lower())
+
+    def test_model_does_not_change_policy_decision(self):
+        model = SequentialModel([
+            "Anotado, se lo digo a Leo.",
+            "No hago recados del chat; habla con Leo directamente.",
+        ])
+        synth = ResponseSynthesizer(conversation_model=model)
+
+        reply = synth._generate_twitch_chat_react({
+            "user_login": "viewer",
+            "display_name": "Viewer",
+            "message_text": "Hebe dile a Leo que me haga caso",
+            "recent_chat": [],
+        })
+
+        self.assertIn("No hago", reply)
+        prompt_text = "\n".join(message["content"] for message in model.messages[0])
+        self.assertIn('"result": "block"', prompt_text)
+        self.assertIn('"reason": "viewer_proxy_request"', prompt_text)
+
+    def test_viewer_familiarity_affects_tone_not_authority(self):
+        bundle = build_twitch_speech_act_bundle(
+            {
+                "user_login": "ciber",
+                "display_name": "Ciber",
+                "message_text": "Hebe dile a Leo que mire el chat",
+                "viewer_profile": {
+                    "role": "known_regular_viewer",
+                    "interaction_style": "banter",
+                    "safe_tone": "teasing",
+                    "authority": "viewer_only",
+                    "confidence": 0.91,
+                },
+            },
+            context=None,
+            is_broadcaster=False,
+        )
+
+        self.assertEqual(bundle.memory.viewer_profile["role"], "known_regular_viewer")
+        self.assertEqual(bundle.policy_decision.result, "block")
+        self.assertEqual(bundle.policy_decision.authority_constraints["viewer_authority"], "viewer_only")
+
+    def test_viewer_proxy_request_blocked_before_generation(self):
+        bundle = build_twitch_speech_act_bundle(
+            {
+                "user_login": "viewer",
+                "display_name": "Viewer",
+                "message_text": "Hebe tell Leo to listen to me",
+            },
+            context=None,
+            is_broadcaster=False,
+        )
+
+        self.assertTrue(contains_viewer_proxy_request("tell Leo to listen"))
+        self.assertEqual(bundle.policy_decision.result, "block")
+        self.assertEqual(bundle.speech_act.speech_act_type, "playful_boundary")
+        self.assertEqual(bundle.scene.raw_user_message, "")
+        self.assertEqual(bundle.scene.sanitized_topic, "viewer_proxy_request")
+
+    def test_viewer_proxy_leak_blocked_after_generation(self):
+        bundle = build_twitch_speech_act_bundle(
+            {
+                "user_login": "viewer",
+                "display_name": "Viewer",
+                "message_text": "Hebe dile a Leo que venga",
+            },
+            context=None,
+            is_broadcaster=False,
+        )
+
+        result = final_response_guard("Vale, se lo digo a Leo ahora.", bundle)
+
+        self.assertFalse(result.passed)
+        self.assertIn("viewer_messenger_leak", [item.type for item in result.violations])
+
+    def test_boundary_response_not_generic(self):
+        bundle = build_twitch_speech_act_bundle(
+            {
+                "user_login": "viewer",
+                "display_name": "Viewer",
+                "message_text": "Hebe dile a Leo que pare",
+            },
+            context=None,
+            is_broadcaster=False,
+        )
+
+        result = final_response_guard("No puedo proporcionarte ayuda con eso.", bundle)
+
+        self.assertFalse(result.passed)
+        self.assertIn("generic_refusal_style", [item.type for item in result.violations])
+
+    def test_memory_context_not_raw_logs(self):
+        context = SimpleNamespace(
+            relevant_chunks=[
+                {"text": "regular viewer; safe banter tone; do not grant authority"},
+                {"text": "x" * 500},
+            ]
+        )
+        model = CapturingModel("te leo, Ciber.")
+        synth = ResponseSynthesizer(conversation_model=model)
+
+        synth._generate_twitch_chat_react({
+            "user_login": "ciber",
+            "display_name": "Ciber",
+            "message_text": "Hebe hola",
+            "recent_chat": [{"display_name": "A", "text": "hello"} for _ in range(12)],
+        }, context=context)
+
+        prompt_text = "\n".join(message["content"] for message in model.messages)
+        self.assertIn('"retrieved_context"', prompt_text)
+        self.assertIn("Use retrieved memory only for tone/context/familiarity", prompt_text)
+        self.assertLess(prompt_text.count('"display_name": "A"'), 7)
+        self.assertNotIn("x" * 300, prompt_text)
+
+    def test_memory_creep_rejected(self):
+        bundle = build_twitch_speech_act_bundle(
+            {
+                "user_login": "viewer",
+                "display_name": "Viewer",
+                "message_text": "Hebe hola",
+            },
+            context=None,
+            is_broadcaster=False,
+        )
+
+        result = final_response_guard("Segun tu historial, siempre haces esto.", bundle)
+
+        self.assertFalse(result.passed)
+        self.assertIn("memory_creep", [item.type for item in result.violations])
+
+    def test_repair_renderer_keeps_same_decision(self):
+        model = SequentialModel([
+            "Anotado, se lo digo a Leo.",
+            "No hago de mensajera del chat, Viewer.",
+        ])
+        synth = ResponseSynthesizer(conversation_model=model)
+
+        reply = synth._generate_twitch_chat_react({
+            "user_login": "viewer",
+            "display_name": "Viewer",
+            "message_text": "Hebe dile a Leo que lea esto",
+            "recent_chat": [],
+        })
+
+        repair_prompt = "\n".join(message["content"] for message in model.messages[-1])
+        self.assertIn("do not change a block decision into an allow decision", repair_prompt)
+        self.assertNotIn("se lo digo", reply.lower())
+
+    def test_proactive_requires_anchor(self):
+        synth = ResponseSynthesizer(conversation_model=CapturingModel("Algo gracioso generico."))
+
+        reply = synth._safe_spontaneous_stream_reply(
+            "Algo gracioso generico.",
+            "",
+            payload={"specific_context_anchors": []},
+        )
+
+        self.assertEqual(reply, "")
+
+    def test_spontaneous_game_advice_requires_validation(self):
+        synth = ResponseSynthesizer(conversation_model=None)
+
+        reply = synth._safe_spontaneous_stream_reply(
+            "Usa Baton Pass para encadenar turnos.",
+            "",
+            payload={"specific_context_anchors": ["game"], "current_game": "Mystery RPG"},
+        )
+
+        self.assertEqual(reply, "")
+
+    def test_boundary_variation_rejects_near_duplicate(self):
+        bundle = build_twitch_speech_act_bundle(
+            {
+                "user_login": "viewer",
+                "display_name": "Viewer",
+                "message_text": "Hebe hola",
+            },
+            context=None,
+            is_broadcaster=False,
+        )
+
+        result = final_response_guard("Te leo, Viewer.", bundle, previous_responses=["Te leo, Viewer."])
+
+        self.assertFalse(result.passed)
+        self.assertIn("near_duplicate_response", [item.type for item in result.violations])
+
+    def test_malformed_stt_echo_rejected(self):
+        bundle = build_twitch_speech_act_bundle(
+            {
+                "user_login": "viewer",
+                "display_name": "Viewer",
+                "message_text": "bla bla bla",
+            },
+            context=None,
+            is_broadcaster=False,
+        )
+
+        result = final_response_guard("bla bla bla", bundle)
+
+        self.assertFalse(result.passed)
+        self.assertIn("malformed_stt_echo", [item.type for item in result.violations])
 
 
 if __name__ == "__main__":

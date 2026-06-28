@@ -21,6 +21,7 @@ type ChatMsg = {
   sourceMessage?: string;
   sourceUser?: string;
   curation?: CurationStatus;
+  debugContract?: any;
 };
 
 type LangMode = "auto" | "es" | "en";
@@ -574,6 +575,7 @@ export default function App() {
     const sourceMessage = String(data?.message ?? "").trim();
     const sourceUser = String(data?.chatter_clean || data?.display_name || data?.user_login || "").trim();
     const status = (data?.curation?.status ?? null) as CurationStatus;
+    const debugContract = data?.debug_contract || null;
 
     setMessages((prev) => {
       const next = [...prev];
@@ -588,6 +590,7 @@ export default function App() {
           sourceMessage,
           sourceUser,
           curation: status,
+          debugContract,
         };
         rememberMessage(messageId);
         return next;
@@ -602,6 +605,7 @@ export default function App() {
           sourceMessage,
           sourceUser,
           curation: status,
+          debugContract,
         };
         return next;
       }
@@ -617,6 +621,7 @@ export default function App() {
             sourceMessage,
             sourceUser,
             curation: status,
+            debugContract,
           };
           return next;
         }
@@ -634,6 +639,7 @@ export default function App() {
         sourceMessage,
         sourceUser,
         curation: status,
+        debugContract,
       });
       rememberMessage(messageId);
       logAppend(messageId, "assistant", response);
@@ -1098,7 +1104,7 @@ export default function App() {
           <main className="grid chatGrid">
             <section className="glass panel chat chatMainPanel">
               <div className="panelHeader"><div><div className="panelTitle">Conversacion</div><div className="panelMeta">{messages.length} mensajes</div></div></div>
-              <div className="chatList" ref={listRef}>{messages.map((m) => (<div key={m.id} className={"bubbleRow " + (m.role === "user" ? "right" : "left")}><div className={"bubble " + (m.role === "user" ? "user" : "assistant") + (m.traceId ? " datasetLinked" : "")}><div className="bubbleTop"><span className="bubbleName">{m.role === "user" ? "Tu" : "Hebe"}</span><span className="bubbleTime">{fmtTime(m.ts)}</span></div>{m.role === "assistant" && m.sourceMessage && <div className="replyContext"><div className="replyContextLabel">Responde a {m.sourceUser || "chat"}</div><div className="replyContextText">{m.sourceMessage}</div></div>}<div className={"bubbleText " + (m.partial ? "partial" : "")}>{m.role === "assistant" && m.partial && !m.text ? <span className="thinkingDots" aria-label="Hebe esta pensando">...</span> : m.text}</div>{m.role === "assistant" && m.traceId && !m.partial && <div className="curationBar"><button className={"curationBtn ok " + (m.curation === "ok" ? "active" : "")} onClick={() => markCuration(m.id, m.traceId!, "ok")} title="Guardar como ejemplo bueno">OK</button><button className={"curationBtn bad " + (m.curation === "no_ok" ? "active" : "")} onClick={() => markCuration(m.id, m.traceId!, "no_ok")} title="Marcar como mal ejemplo">No OK</button><button className={"curationBtn warn " + (m.curation === "needs_enhancement" ? "active" : "")} onClick={() => markCuration(m.id, m.traceId!, "needs_enhancement")} title="La idea sirve, pero necesita mejorar">Mejorar</button></div>}</div></div>))}</div>
+              <div className="chatList" ref={listRef}>{messages.map((m) => (<div key={m.id} className={"bubbleRow " + (m.role === "user" ? "right" : "left")}><div className={"bubble " + (m.role === "user" ? "user" : "assistant") + (m.traceId ? " datasetLinked" : "")}><div className="bubbleTop"><span className="bubbleName">{m.role === "user" ? "Tu" : "Hebe"}</span><span className="bubbleTime">{fmtTime(m.ts)}</span></div>{m.role === "assistant" && m.sourceMessage && <div className="replyContext"><div className="replyContextLabel">Responde a {m.sourceUser || "chat"}</div><div className="replyContextText">{m.sourceMessage}</div></div>}<div className={"bubbleText " + (m.partial ? "partial" : "")}>{m.role === "assistant" && m.partial && !m.text ? <span className="thinkingDots" aria-label="Hebe esta pensando">...</span> : m.text}</div>{m.role === "assistant" && m.traceId && !m.partial && <div className="curationBar"><button className={"curationBtn ok " + (m.curation === "ok" ? "active" : "")} onClick={() => markCuration(m.id, m.traceId!, "ok")} title="Guardar como ejemplo bueno">OK</button><button className={"curationBtn bad " + (m.curation === "no_ok" ? "active" : "")} onClick={() => markCuration(m.id, m.traceId!, "no_ok")} title="Marcar como mal ejemplo">No OK</button><button className={"curationBtn warn " + (m.curation === "needs_enhancement" ? "active" : "")} onClick={() => markCuration(m.id, m.traceId!, "needs_enhancement")} title="La idea sirve, pero necesita mejorar">Mejorar</button></div>}{m.role === "assistant" && m.debugContract && !m.partial && <details className="speechActDebug"><summary>Scene pipeline</summary><pre>{JSON.stringify(m.debugContract, null, 2)}</pre></details>}</div></div>))}</div>
               <div className="composer"><input className="input" placeholder="Escribe a Hebe..." value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { sendText(input); setInput(""); } }} /><button className="btn primary" onClick={() => { sendText(input); setInput(""); }}>Enviar</button></div>
               <div className="hint muted">Tip: <span className="mono">Ctrl+Enter</span> para enviar.</div>
             </section>
