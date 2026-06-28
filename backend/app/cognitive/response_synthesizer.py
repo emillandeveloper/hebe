@@ -29,9 +29,13 @@ from app.cognitive.persona.reply_cleaner import (
 from app.cognitive.persona.stream_metrics import StreamReplyStats
 from app.cognitive.persona.stream_dataset_logger import StreamDatasetLogger
 from app.cognitive.speech_act_pipeline import (
+    ChatModelPersonaRendererProvider,
+    HebeResponsePipeline,
+    PipelineResponse,
     build_persona_renderer_messages,
     build_repair_renderer_messages,
     build_twitch_speech_act_bundle,
+    build_universal_speech_act_bundle,
     final_response_guard,
     safe_local_fallback,
 )
@@ -112,6 +116,105 @@ class ResponseSynthesizer:
         self.game_advice_gate = GameAdviceGate()
         self._style_guard_fallback_counts: dict[str, int] = {}
         self._game_guidance_classifier = GameGuidanceCapability()
+        self.last_response_debug_contract: dict[str, Any] | None = None
+        self.last_response_source: str = ""
+
+    def _universal_pipeline(self) -> HebeResponsePipeline:
+        return HebeResponsePipeline(
+            ChatModelPersonaRendererProvider(self.conversation_model),
+            game_advice_gate=self.game_advice_gate,
+            max_repair_attempts=2,
+            num_predict=int(os.getenv("HEBE_REPLY_NUM_PREDICT", "120")),
+        )
+
+    def _run_universal_response(
+        self,
+        *,
+        route: str,
+        speech_act_type: str,
+        context: BuiltContext | None = None,
+        input_text: str = "",
+        source: str = "ui_text",
+        output_target: str = "local_ui",
+        goal: str = "",
+        policy_result: str = "allow",
+        policy_reason: str = "allowed",
+        allowed_action: str = "respond",
+        execution_result: dict[str, Any] | None = None,
+        required_facts: list[str] | None = None,
+        allowed_content: list[str] | None = None,
+        forbidden_content: list[str] | None = None,
+        must_do: list[str] | None = None,
+        must_not_do: list[str] | None = None,
+        memory: dict[str, Any] | None = None,
+        current_game: str = "",
+        current_activity: str = "",
+        stream_live: bool = False,
+        technical_state: dict[str, Any] | None = None,
+        fallback: str = "",
+        cleaner: Any | None = clean_jarvis_reply,
+        max_length_chars: int = 260,
+    ) -> PipelineResponse:
+        source_value = source or str(getattr(context, "source", "") or "ui_text")
+        input_value = input_text or str(getattr(context, "input_text", "") or "")
+        bundle = build_universal_speech_act_bundle(
+            route=route,
+            speech_act_type=speech_act_type,
+            input_text=input_value,
+            source=source_value,
+            output_target=output_target,
+            speaker="Leo",
+            authority="owner",
+            mode="stream" if stream_live else "private",
+            goal=goal,
+            policy_result=policy_result,
+            policy_reason=policy_reason,
+            allowed_action=allowed_action,
+            execution_result=execution_result,
+            required_facts=required_facts,
+            allowed_content=allowed_content,
+            forbidden_content=forbidden_content,
+            must_do=must_do,
+            must_not_do=must_not_do,
+            memory=memory or self._scene_memory_for_context(context),
+            current_game=current_game,
+            current_activity=current_activity,
+            stream_live=stream_live,
+            technical_state=technical_state,
+            max_length_chars=max_length_chars,
+        )
+        response = self._universal_pipeline().render(
+            bundle,
+            include_examples=build_private_mode_style(),
+            cleaner=cleaner,
+            fallback=fallback,
+            route=route,
+        )
+        self.last_response_debug_contract = response.debug_contract
+        self.last_response_source = response.response_source
+        return response
+
+    def _scene_memory_for_context(self, context: BuiltContext | None) -> dict[str, Any]:
+        if context is None:
+            return {}
+        leo_memory: list[str] = []
+        for fact in getattr(context, "relevant_facts", []) or []:
+            leo_memory.append(str(getattr(fact, "payload", ""))[:220])
+        for chunk in getattr(context, "relevant_chunks", []) or []:
+            if isinstance(chunk, dict) and chunk.get("text"):
+                leo_memory.append(str(chunk.get("text"))[:220])
+        response_frame = getattr(context, "response_frame", {}) or {}
+        game_context = {}
+        if isinstance(response_frame, dict):
+            game_context = dict(response_frame.get("current_session_context") or {})
+        return {
+            "channel_context": {
+                "leo_memory_summary": "; ".join(leo_memory[:4]),
+                "allowed_use": "tone/context/familiarity",
+            },
+            "current_stream_state": game_context,
+            "game_knowledge": game_context if game_context else {},
+        }
 
     # =========================
     # Entry point
@@ -123,6 +226,8 @@ class ResponseSynthesizer:
         deliberation: DeliberationResult,
         execution: ExecutionResult,
     ) -> str:
+        self.last_response_debug_contract = None
+        self.last_response_source = ""
         if context.internal_event:
             return self._handle_internal_event(context, execution)
 
@@ -150,10 +255,28 @@ class ResponseSynthesizer:
                 return self._generate_capability_catalogue_reply(reply_step.data)
 
             if mode == "time_answer":
-                return f"Son las {reply_step.data.get('time')} en Madrid."
+                response = self._run_universal_response(
+                    route="time_answer",
+                    speech_act_type="direct_answer",
+                    context=context,
+                    goal="answer the current time from the provided exact value",
+                    required_facts=[f"time={reply_step.data.get('time')}"],
+                    allowed_content=[f"Exact time: {reply_step.data.get('time')}"],
+                    fallback=f"Son las {reply_step.data.get('time')} en Madrid.",
+                )
+                return response.text
 
             if mode == "date_answer":
-                return f"Hoy es {reply_step.data.get('date')}."
+                response = self._run_universal_response(
+                    route="date_answer",
+                    speech_act_type="direct_answer",
+                    context=context,
+                    goal="answer today's date from the provided exact value",
+                    required_facts=[f"date={reply_step.data.get('date')}"],
+                    allowed_content=[f"Exact date: {reply_step.data.get('date')}"],
+                    fallback=f"Hoy es {reply_step.data.get('date')}.",
+                )
+                return response.text
 
             if mode == "companion_reaction":
                 return self._generate_personal_state_reply(context, reply_step.data)
@@ -161,10 +284,28 @@ class ResponseSynthesizer:
             if mode in {"game_guidance", "game_guidance_clarification"}:
                 return self._generate_game_guidance_reply(context, reply_step.data)
 
-        return self._fallback_text("No tengo suficiente contexto para responder con seguridad.")
+        response = self._run_universal_response(
+            route="fallback_clarification",
+            speech_act_type="fallback_clarification",
+            context=context,
+            goal="ask for the missing context without generic fallback wording",
+            fallback="Necesito un poco mas de contexto para responder con criterio.",
+        )
+        return response.text
 
     def _generate_personal_state_reply(self, context: BuiltContext, data: dict) -> str:
         state = str(data.get("state") or "unknown")
+        response = self._run_universal_response(
+            route="owner_personal_state",
+            speech_act_type="owner_supportive_reaction",
+            context=context,
+            goal="react naturally to Leo's personal state without turning it into a task",
+            required_facts=[f"personal_state={state}"],
+            allowed_content=[f"Personal state category: {state}", f"Leo message: {context.input_text or ''}"],
+            must_not_do=["do not diagnose", "do not schedule anything", "do not claim an action"],
+            fallback="Te escucho, Leo. Baja un poco el ritmo y seguimos.",
+        )
+        return response.text
         system = (
             "Respond as Hebe, Leo's close companion. React naturally to the personal state he shared. "
             "Be concise and warm. You may offer one practical suggestion, but do not schedule, remind, "
@@ -187,6 +328,19 @@ class ResponseSynthesizer:
                     "latest confirmed event or objective" if "story_phase_unknown" in ambiguity else "current area"
                 )
             )
+            response = self._run_universal_response(
+                route="game_guidance_clarification",
+                speech_act_type="game_guidance_clarification",
+                context=context,
+                goal="ask exactly one useful game-state clarification",
+                current_game=game,
+                required_facts=[f"missing_state={missing}", f"game={game or 'unknown'}"],
+                allowed_content=[f"Missing state: {missing}", f"User message: {context.input_text or ''}"],
+                forbidden_content=["route steps", "item locations", "boss facts", "story claims"],
+                must_do=["ask one clarification"],
+                fallback=f"Necesito confirmar {missing} antes de orientarte sin inventar la ruta.",
+            )
+            return response.text
             system = (
                 "You are Hebe speaking briefly to Leo. Ask exactly one useful game-state clarification. "
                 "Be playful but do not provide route steps, item locations, boss facts, or story claims."
@@ -196,7 +350,31 @@ class ResponseSynthesizer:
             return clean_jarvis_reply(self._call_model(system, user, fallback=fallback)) or fallback
         if not sources:
             print("[HEBE][GAME_SOURCE] tier=all status=skipped reason=no_grounded_guidance_source", flush=True)
+            response = self._run_universal_response(
+                route="game_guidance_no_source",
+                speech_act_type="game_guidance_clarification",
+                context=context,
+                goal="explain that grounded game guidance needs a source or more context",
+                current_game=game,
+                required_facts=[f"game={game or 'unknown'}", "sources=none"],
+                forbidden_content=["unsupported walkthrough facts"],
+                fallback="Necesito una fuente fiable o mas contexto de partida antes de concretar ese paso.",
+            )
+            return response.text
             return "No tengo una fuente de guía fiable para concretar ese paso; necesito más contexto o consultar una fuente antes de afirmarlo."
+        response = self._run_universal_response(
+            route="game_guidance_answer",
+            speech_act_type="game_guidance_answer",
+            context=context,
+            goal="answer using only supplied game guidance sources",
+            current_game=game,
+            required_facts=[f"game={game or 'unknown'}", f"guidance_context={guidance}", f"sources={sources[:6]}"],
+            allowed_content=[f"Game guidance context: {guidance}", f"Grounding sources: {sources[:6]}"],
+            forbidden_content=["general model memory walkthrough facts", "future story spoilers", "unsupported mechanics"],
+            memory={"game_knowledge": {"source_evidence": [str(item) for item in sources[:6]], "guidance": guidance}},
+            fallback="Tengo contexto de la partida, pero las fuentes disponibles no bastan para darte una indicacion segura.",
+        )
+        return response.text
         system = (
             "Answer as Hebe, concise and streamer-friendly. Use only the supplied game sources. "
             "Respect the spoiler policy and allowed depth. State uncertainty where sources do not settle a claim. "
@@ -222,6 +400,19 @@ class ResponseSynthesizer:
             title = payload.get("title") or "Cita"
             due_at = payload.get("due_at")
             timezone = payload.get("timezone") or "Europe/Madrid"
+            response = self._run_universal_response(
+                route="reminder_due",
+                speech_act_type="proactive_nudge",
+                context=context,
+                source="system_event",
+                output_target="local_tts",
+                goal="deliver the due reminder now from exact reminder data",
+                required_facts=[f"title={title}", f"due_at={self._format_datetime(due_at)}", f"timezone={timezone}"],
+                allowed_content=[f"Reminder title: {title}", f"Due at: {self._format_datetime(due_at)}"],
+                execution_result={"step_type": "reminder", "action": "reminder_due", "success": True, "data": payload},
+                fallback=self._fallback_reminder_text(payload),
+            )
+            return response.text
 
             system, user = self._build_event_prompt(
                 event_type="reminder_due",
@@ -259,6 +450,28 @@ class ResponseSynthesizer:
                 title = payload.get("title", title)
                 due_at = payload.get("due_at")
 
+        response = self._run_universal_response(
+            route="confirm_appointment",
+            speech_act_type="action_confirmation" if memory_result and memory_result.success else "action_failure",
+            context=context,
+            goal="confirm the appointment only after the memory/reminder execution result",
+            required_facts=[f"title={title}", f"due_at={self._format_datetime(due_at)}"],
+            allowed_content=[f"Appointment title: {title}", f"Date/time: {self._format_datetime(due_at)}"],
+            execution_result={
+                "step_type": "memory",
+                "action": "confirm_appointment",
+                "success": bool(memory_result and memory_result.success),
+                "data": {"title": title, "due_at": due_at},
+                "error": getattr(memory_result, "error", None) if memory_result else "missing_memory_result",
+            },
+            fallback=(
+                f"Vale, te lo guardo: {title} el {self._format_datetime(due_at)}. Te avisare cuando toque."
+                if due_at and memory_result and memory_result.success
+                else f"No he podido guardar la cita {title} con seguridad."
+            ),
+        )
+        return response.text
+
         system, user = self._build_confirm_appointment_prompt(
             title=title,
             due_at=due_at,
@@ -292,6 +505,28 @@ class ResponseSynthesizer:
             if result_obj is not None:
                 action_payload = getattr(result_obj, "data", {}) or {}
 
+        response = self._run_universal_response(
+            route="confirm_action",
+            speech_act_type="action_confirmation" if action_success else "action_failure",
+            context=context,
+            goal="report the completed action result without inventing success",
+            required_facts=[f"action_name={action_name or 'unknown'}", f"success={action_success}", f"payload={action_payload}"],
+            allowed_content=[f"Action: {action_name or 'unknown'}", f"Success: {action_success}", f"Payload: {action_payload}"],
+            execution_result={
+                "step_type": "action",
+                "action": action_name or "unknown",
+                "success": action_success,
+                "data": action_payload,
+                "error": getattr(action_result, "error", None) if action_result else "missing_action_result",
+            },
+            fallback=self._fallback_action_text(
+                action_name=action_name,
+                action_success=action_success,
+                action_payload=action_payload,
+            ),
+        )
+        return response.text
+
         system, user = self._build_confirm_action_prompt(
             user_text=context.input_text,
             action_name=action_name,
@@ -323,6 +558,26 @@ class ResponseSynthesizer:
                 due_at = getattr(reminder, "due_at", due_at)
                 message = getattr(reminder, "message", None) or getattr(reminder, "title", message)
 
+        response = self._run_universal_response(
+            route="confirm_reminder",
+            speech_act_type="action_confirmation" if reminder_result and reminder_result.success else "action_failure",
+            context=context,
+            goal="confirm the reminder only from the reminder execution result",
+            required_facts=[f"message={message}", f"due_at={due_at}", f"relative_label={relative_label}"],
+            allowed_content=[f"Reminder message: {message}", f"Due at: {due_at}", f"Relative label: {relative_label}"],
+            execution_result={
+                "step_type": "reminder",
+                "action": "confirm_reminder",
+                "success": bool(reminder_result and reminder_result.success),
+                "data": {"message": message, "due_at": due_at, "relative_label": relative_label},
+                "error": getattr(reminder_result, "error", None) if reminder_result else "missing_reminder_result",
+            },
+            fallback=(
+                f"Vale, Leo. Te aviso en {relative_label}." if relative_label else f"Vale, Leo. Te aviso: {message}."
+            ),
+        )
+        return response.text
+
         if relative_label:
             return f"Vale, Leo. Te aviso en {relative_label}."
 
@@ -334,6 +589,29 @@ class ResponseSynthesizer:
         return f"Vale, Leo. Te aviso: {message}."
 
     def _generate_capability_catalogue_reply(self, reply_data: dict) -> str:
+        payload = reply_data.get("payload") or {}
+        query_type = reply_data.get("query_type") or payload.get("query_type") or "summary"
+        response = self._run_universal_response(
+            route="capability_catalogue_query",
+            speech_act_type="diagnostic_summary",
+            input_text=str(query_type),
+            source="system/tool_result",
+            output_target="local_ui",
+            goal="summarize the capability catalogue result from deterministic data",
+            required_facts=[f"query_type={query_type}", f"payload={payload}"],
+            allowed_content=[str(payload)],
+            execution_result={
+                "step_type": "diagnostic",
+                "action": "capability_catalogue_query",
+                "success": not bool(payload.get("catalogue_unavailable")),
+                "data": payload,
+            },
+            fallback=self._fallback_capability_catalogue_reply(reply_data),
+            max_length_chars=420,
+        )
+        return response.text
+
+    def _fallback_capability_catalogue_reply(self, reply_data: dict) -> str:
         payload = reply_data.get("payload") or {}
         query_type = reply_data.get("query_type") or payload.get("query_type") or "summary"
         if payload.get("catalogue_unavailable"):
@@ -367,6 +645,18 @@ class ResponseSynthesizer:
         context: BuiltContext,
         reply_data: dict,
     ) -> str:
+        response = self._run_universal_response(
+            route="appointment_clarification",
+            speech_act_type="clarification_question",
+            context=context,
+            goal="ask only the missing appointment date/time clarification",
+            required_facts=[f"reply_data={reply_data}"],
+            allowed_content=[f"Clarification data: {reply_data}"],
+            must_do=["ask only the missing detail"],
+            fallback=reply_data.get("question") or "No me ha quedado clara la fecha.",
+        )
+        return response.text
+
         system, user = self._build_clarification_prompt(
             reply_data=reply_data,
         )
@@ -387,6 +677,31 @@ class ResponseSynthesizer:
           current_user: mensaje de Leo PRIMERO, bloque de memoria al FINAL
         """
         msg = (context.input_text or "").strip()
+        message_type = getattr(context, "message_type", "unknown")
+        speech_act = "owner_supportive_reaction" if message_type in {"small_talk", "banter"} else "direct_answer"
+        response = self._run_universal_response(
+            route="owner_private_chat",
+            speech_act_type=speech_act,
+            context=context,
+            input_text=msg,
+            source=str(getattr(context, "source", "") or "ui_text"),
+            output_target="local_ui" if str(getattr(context, "source", "") or "") == "ui" else "local_tts",
+            goal="answer Leo in private mode from the scene contract",
+            allowed_content=[f"Message type: {message_type}", f"Leo message: {msg}"],
+            must_not_do=[
+                "do not offer to save, publish, configure, remember, or use a line unless execution_result exists",
+                "do not end with a service-style follow-up question",
+            ],
+            fallback="Te leo, Leo. Dame un poco mas de contexto y lo aterrizo.",
+            max_length_chars=360,
+        )
+        reply = self._guard_hostile_direct_insult_greeting(response.text, context)
+        self._mark_conversation_turn(reply, context)
+        print(
+            f"[HEBE][JARVIS][REPLY] source=universal_pipeline cleaned={reply!r}",
+            flush=True,
+        )
+        return reply
 
         system = (
             f"{build_hebe_core_identity()}\n\n"
@@ -929,6 +1244,33 @@ class ResponseSynthesizer:
 
     def synthesize_command_result(self, result: CommandResult, *, input_text: str | None = None, state: Any | None = None) -> str:
         fallback = result.fallback_text or result.user_visible_summary or "Hecho."
+        response = self._run_universal_response(
+            route=f"command_result:{result.action_type}",
+            speech_act_type="action_confirmation" if result.success else "action_failure",
+            input_text=input_text or "",
+            source="manual_command",
+            output_target="local_ui",
+            goal="render the deterministic command result in Hebe voice without changing it",
+            required_facts=[
+                f"action_type={result.action_type}",
+                f"success={result.success}",
+                f"user_visible_summary={result.user_visible_summary}",
+                f"state_changes={result.state_changes}",
+            ],
+            allowed_content=[result.user_visible_summary, str(result.state_changes), str(result.constraints)],
+            forbidden_content=list(result.constraints or []),
+            execution_result={
+                "step_type": "command_result",
+                "action": result.action_type,
+                "success": bool(result.success),
+                "data": result.state_changes,
+                "error": result.metadata.get("error"),
+            },
+            fallback=fallback,
+        )
+        if self._valid_command_reply(response.text, result):
+            return response.text
+        return fallback
         if not result.requires_model_response:
             return fallback
 
@@ -985,6 +1327,28 @@ class ResponseSynthesizer:
             "response_source": "fallback_template",
             "style_guard_triggered": False,
             "was_generic_refusal_rewritten": False,
+        }
+        response = self._run_universal_response(
+            route=f"policy_boundary:{reason or response_intent}",
+            speech_act_type="policy_boundary",
+            input_text=input_text,
+            source=source or "policy_gate",
+            output_target="twitch_chat" if source.startswith("twitch") else "local_ui",
+            goal="render the policy boundary without changing the policy decision",
+            policy_result="block",
+            policy_reason=reason or response_intent,
+            allowed_content=[f"sanitized policy reason: {reason}", f"speaker: {speaker}"],
+            forbidden_content=["blocked content details", "generic assistant refusal", "policy lecture"],
+            must_do=["keep it short", "stay in Hebe voice"],
+            fallback=fallback,
+            cleaner=clean_twitch_reply if source.startswith("twitch") else clean_jarvis_reply,
+            max_length_chars=180,
+        )
+        return {
+            **base,
+            "text": response.text,
+            "response_source": response.response_source,
+            "debug_contract": response.debug_contract,
         }
         if self.conversation_model is None:
             print("[HEBE][PERSONA_RESPONSE] source=fallback_template intent=%s" % response_intent, flush=True)
@@ -1214,6 +1578,7 @@ class ResponseSynthesizer:
 
         seed: util para retry en Twitch  cambia la generacion entre intentos.
         """
+        print("[HEBE][RESPONSE_PIPELINE_BYPASS] allowed=false reason=legacy_direct_model_call", flush=True)
         if self.conversation_model is None:
             return fallback
 
@@ -1452,7 +1817,33 @@ class ResponseSynthesizer:
             "Generate only Hebe's Twitch chat message."
         )
         fallback = ""
-        reply = clean_twitch_reply(self._call_model(system, user, fallback=fallback))[:220]
+        bundle = build_universal_speech_act_bundle(
+            route="twitch_idle_prompt",
+            speech_act_type="proactive_nudge",
+            input_text=str(payload),
+            source="scheduler/spontaneity",
+            output_target="twitch_chat",
+            mode="stream",
+            goal="make one anchored proactive stream companion line",
+            current_game=str(category or ""),
+            current_activity=str(idle_topic or ""),
+            stream_live=True,
+            required_facts=[f"stream_context={payload}"],
+            allowed_content=[user, "No spoilers" if str(spoiler_policy).lower() in {"no_spoilers", "no spoilers"} else f"spoiler_policy={spoiler_policy}"],
+            forbidden_content=["silence commentary", "viewer count commentary", "unsupported mechanics", "spoilers"],
+            memory={"game_knowledge": {"source_evidence": [str(game_profile), str(run_context), str(live_session_context)]}},
+            max_length_chars=220,
+        )
+        response = self._universal_pipeline().render(
+            bundle,
+            include_examples=self._build_stream_style_block(),
+            cleaner=clean_twitch_reply,
+            fallback=fallback,
+            route="twitch_idle_prompt",
+        )
+        self.last_response_debug_contract = response.debug_contract
+        self.last_response_source = response.response_source
+        reply = response.text[:220]
         return self._safe_spontaneous_stream_reply(reply, fallback, payload=payload)
 
     def generate_twitch_idle_prompt_preview(self, payload: dict) -> str:
@@ -1662,8 +2053,22 @@ class ResponseSynthesizer:
         )
         user = "Genera SOLO el mensaje final de Hebe para enviar al chat de Twitch."
         fallback = f"Gracias por la sub, {display_name}."
-        reply = self._call_model(system, user, fallback=fallback)
-        return clean_twitch_reply(reply)
+        bundle = build_universal_speech_act_bundle(
+            route="twitch_sub",
+            speech_act_type="stream_banter",
+            input_text=situation,
+            source="twitch_event",
+            output_target="twitch_chat",
+            mode="stream",
+            goal="thank the subscription naturally and briefly",
+            required_facts=[situation, f"display_name={display_name}", f"cumulative_months={cumulative_months}"],
+            allowed_content=[situation],
+            max_length_chars=120,
+        )
+        response = self._universal_pipeline().render(bundle, include_examples=self._build_stream_style_block(), cleaner=clean_twitch_reply, fallback=fallback, route="twitch_sub")
+        self.last_response_debug_contract = response.debug_contract
+        self.last_response_source = response.response_source
+        return response.text
 
     def _generate_twitch_raid(self, payload: dict) -> str:
         display_name = payload.get("display_name") or payload.get("user_login") or "alguien"
@@ -1681,8 +2086,22 @@ class ResponseSynthesizer:
         )
         user = "Genera SOLO el mensaje final de Hebe para enviar al chat de Twitch."
         fallback = f"Bienvenidos los del raid de {display_name}."
-        reply = self._call_model(system, user, fallback=fallback)
-        return clean_twitch_reply(reply)
+        bundle = build_universal_speech_act_bundle(
+            route="twitch_raid",
+            speech_act_type="stream_banter",
+            input_text=situation,
+            source="twitch_event",
+            output_target="twitch_chat",
+            mode="stream",
+            goal="welcome the raid naturally and briefly",
+            required_facts=[situation, f"display_name={display_name}", f"viewer_count={viewer_count}"],
+            allowed_content=[situation],
+            max_length_chars=160,
+        )
+        response = self._universal_pipeline().render(bundle, include_examples=self._build_stream_style_block(), cleaner=clean_twitch_reply, fallback=fallback, route="twitch_raid")
+        self.last_response_debug_contract = response.debug_contract
+        self.last_response_source = response.response_source
+        return response.text
 
     def _generate_twitch_follow_batch(self, payload: dict) -> str:
         names = payload.get("display_names") or []
@@ -1709,8 +2128,22 @@ class ResponseSynthesizer:
         )
         user = "Genera SOLO el mensaje final de Hebe para enviar al chat de Twitch."
         fallback = f"Gracias por el follow, {names[0]}."
-        reply = self._call_model(system, user, fallback=fallback)
-        return clean_twitch_reply(reply)
+        bundle = build_universal_speech_act_bundle(
+            route="twitch_follow_batch",
+            speech_act_type="stream_banter",
+            input_text=situation,
+            source="twitch_event",
+            output_target="twitch_chat",
+            mode="stream",
+            goal="welcome the follow event naturally and briefly",
+            required_facts=[situation, f"names={names}", f"count={count}"],
+            allowed_content=[situation],
+            max_length_chars=120,
+        )
+        response = self._universal_pipeline().render(bundle, include_examples=self._build_stream_style_block(), cleaner=clean_twitch_reply, fallback=fallback, route="twitch_follow_batch")
+        self.last_response_debug_contract = response.debug_contract
+        self.last_response_source = response.response_source
+        return response.text
 
     def _generate_twitch_chat_react(self, payload: dict, context: BuiltContext | None = None) -> str:
         """
@@ -1753,6 +2186,84 @@ class ResponseSynthesizer:
         trace_id = payload.get("trace_id") or uuid.uuid4().hex[:8]
 
         bundle = build_twitch_speech_act_bundle(payload, context, is_broadcaster=is_broadcaster)
+        pipeline_response = self._universal_pipeline().render(
+            bundle,
+            include_examples=f"{self._build_stream_style_block()}\n\n{build_chat_react_examples()}",
+            cleaner=lambda value: clean_twitch_reply(value, source_message=message),
+            fallback=self._fallback_twitch_chat_react(
+                chatter=chatter_clean,
+                message=message,
+                is_broadcaster=is_broadcaster,
+            ),
+            route="twitch_chat_react",
+        )
+        final_reply = self._guard_twitch_reply(
+            pipeline_response.text,
+            chatter=chatter_clean,
+            message=message,
+            is_broadcaster=is_broadcaster,
+        )
+        self.last_response_debug_contract = pipeline_response.debug_contract
+        self.last_response_source = pipeline_response.response_source
+
+        print(
+            f"[HEBE][REPLY][END] trace={trace_id} helper_hits=[] "
+            f"retried={bool(pipeline_response.repair_attempts)} salvaged={bool(pipeline_response.repair_attempts)} "
+            f"final={final_reply!r}",
+            flush=True,
+        )
+        print(f"[HEBE][RESPONSE_SOURCE] source={pipeline_response.response_source}", flush=True)
+
+        self._stream_stats.record(
+            chatter=chatter_clean,
+            helper_hits=[],
+            retried=bool(pipeline_response.repair_attempts),
+            salvaged=bool(pipeline_response.repair_attempts),
+        )
+        if self._stream_stats.total > 0 and self._stream_stats.total % 50 == 0:
+            self._stream_stats.log_summary()
+
+        model_meta = self._model_meta()
+        self._dataset_logger.log_twitch_chat_react(
+            trace_id=trace_id,
+            payload=payload,
+            chatter_clean=chatter_clean,
+            is_broadcaster=is_broadcaster,
+            raw_response=pipeline_response.raw_response,
+            cleaned_response=final_reply,
+            helper_hits=[],
+            retried=bool(pipeline_response.repair_attempts),
+            salvaged=bool(pipeline_response.repair_attempts),
+            model_meta=model_meta,
+            full_prompt=pipeline_response.debug_contract,
+        )
+        try:
+            emit(
+                "dataset.example",
+                {
+                    "trace_id": trace_id,
+                    "event_type": "twitch_chat_react",
+                    "user_login": user_login,
+                    "display_name": display_name_raw,
+                    "chatter_clean": chatter_clean,
+                    "is_broadcaster": is_broadcaster,
+                    "message": message,
+                    "response": final_reply,
+                    "model": model_meta,
+                    "debug_contract": pipeline_response.debug_contract,
+                    "curation": {
+                        "status": None,
+                        "approved": None,
+                        "corrected_response": None,
+                        "notes": None,
+                        "tags": [],
+                    },
+                },
+            )
+        except Exception as exc:
+            print(f"[HEBE][DATASET][UI_EVENT_ERROR] {exc!r}", flush=True)
+        return final_reply
+
         system, user = build_persona_renderer_messages(
             bundle,
             include_examples=f"{self._build_stream_style_block()}\n\n{build_chat_react_examples()}",

@@ -1870,7 +1870,7 @@ class HebeEngine:
                 reason="typed_input_reply",
             )
             log_chat("assistant", reply_text, source="ui")
-            emit("chat.assistant", {"text": reply_text, "source": "ui", "output_target": OUTPUT_TARGET_LOCAL_UI})
+            emit("chat.assistant", {**{"text": reply_text, "source": "ui", "output_target": OUTPUT_TARGET_LOCAL_UI}, **self._latest_response_debug_payload()})
             self._record_assistant_reply_for_conversation(reply_text, source=source, synthesizer=getattr(self, "response_synthesizer", None))
 
         if reply_text and self._should_extract_memory(source=source, execution=execution):
@@ -7007,7 +7007,7 @@ class HebeEngine:
                 if output_mode == "silent":
                     print("[HEBE][SPONTANEITY] skipped reason=stream_output_mode_silent", flush=True)
                     return
-                emit("chat.assistant", {"text": text, "source": "spontaneity", "output_target": OUTPUT_TARGET_LOCAL_UI})
+                emit("chat.assistant", {**{"text": text, "source": "spontaneity", "output_target": OUTPUT_TARGET_LOCAL_UI}, **self._latest_response_debug_payload()})
                 try:
                     self._get_live_session_brain().observe_hebe_utterance(
                         text,
@@ -7019,7 +7019,7 @@ class HebeEngine:
                 except Exception as exc:
                     print(f"[HEBE][LIVE_SESSION] hebe spontaneity record failed: {exc!r}", flush=True)
         elif is_simulated or output_mode == "ui_only":
-            emit("chat.assistant", {"text": text, "source": "simulation" if is_simulated else "twitch", "output_target": OUTPUT_TARGET_LOCAL_UI})
+            emit("chat.assistant", {**{"text": text, "source": "simulation" if is_simulated else "twitch", "output_target": OUTPUT_TARGET_LOCAL_UI}, **self._latest_response_debug_payload()})
             try:
                 self._get_live_session_brain().observe_hebe_utterance(
                     text,
@@ -7085,7 +7085,7 @@ class HebeEngine:
                 reason="voice_reply",
             )
         if emit_ui:
-            emit("chat.assistant", {"text": text, "source": input_type, "output_target": OUTPUT_TARGET_LOCAL_UI})
+            emit("chat.assistant", {**{"text": text, "source": input_type, "output_target": OUTPUT_TARGET_LOCAL_UI}, **self._latest_response_debug_payload()})
         try:
             targets_for_brain = [OUTPUT_TARGET_LOCAL_UI] if emit_ui else []
             if self._local_tts_output_enabled():
@@ -7113,6 +7113,13 @@ class HebeEngine:
             safe_error = str(e).replace('"', '\\"')
             print(f"[HEBE][TTS] failed error=\"{safe_error}\"", flush=True)
 
+    def _latest_response_debug_payload(self) -> dict:
+        synthesizer = getattr(self, "response_synthesizer", None)
+        debug_contract = getattr(synthesizer, "last_response_debug_contract", None)
+        if isinstance(debug_contract, dict) and debug_contract:
+            return {"debug_contract": debug_contract}
+        return {}
+
     def _deliver_manual_reply(self, text: str, *, source: str) -> None:
         if source == "ui":
             self._declare_output_route(
@@ -7121,7 +7128,7 @@ class HebeEngine:
                 reason="typed_input_reply",
             )
             log_chat("assistant", text, source="ui")
-            emit("chat.assistant", {"text": text, "source": "ui", "output_target": OUTPUT_TARGET_LOCAL_UI})
+            emit("chat.assistant", {**{"text": text, "source": "ui", "output_target": OUTPUT_TARGET_LOCAL_UI}, **self._latest_response_debug_payload()})
             try:
                 self._get_live_session_brain().observe_hebe_utterance(
                     text,

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import unicodedata
+import random
 from dataclasses import asdict, dataclass, field
 from difflib import SequenceMatcher
 from typing import Any
@@ -56,6 +57,19 @@ MEMORY_CREEP_PATTERNS = (
     r"\bsiempre\s+haces\s+esto\b",
     r"\bte\s+tengo\s+fichad[oa]\b",
     r"\bya\s+se\s+que\s+eres\b",
+)
+
+ACTION_CLAIM_PATTERNS = (
+    r"\bhecho\b",
+    r"\blisto\b",
+    r"\babiert[oa]\b",
+    r"\bya\s+esta\b",
+    r"\bya\s+lo\s+(?:tengo|he)\b",
+    r"\blo\s+he\s+(?:apuntado|anotado|guardado|creado|abierto|enviado|activado)\b",
+    r"\brecordatorio\s+cread[oa]\b",
+    r"\bmensaje\s+enviad[oa]\b",
+    r"\bmodo\s+stream\s+activad[oa]\b",
+    r"\bse\s+lo\s+(?:dire|digo|cuento|paso)\b",
 )
 
 
@@ -175,6 +189,31 @@ class SpeechActPlan:
         return asdict(self)
 
 
+UNIVERSAL_SPEECH_ACT_TYPES = {
+    "direct_answer",
+    "owner_supportive_reaction",
+    "action_started",
+    "action_confirmation",
+    "action_failure",
+    "action_denial",
+    "confirmation_required",
+    "clarification_question",
+    "pending_task_followup",
+    "game_guidance_answer",
+    "game_guidance_clarification",
+    "stream_banter",
+    "proactive_nudge",
+    "stream_prep_status",
+    "technical_status",
+    "diagnostic_summary",
+    "viewer_boundary",
+    "owner_boundary",
+    "policy_boundary",
+    "fallback_clarification",
+    "no_output",
+}
+
+
 @dataclass(frozen=True)
 class GuardViolation:
     type: str
@@ -206,6 +245,7 @@ class SpeechActBundle:
     cognitive_decision: CognitiveDecision
     policy_decision: PolicyDecision
     speech_act: SpeechActPlan
+    execution_result: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -217,7 +257,70 @@ class SpeechActBundle:
                 "policy": self.policy_decision.to_dict(),
             },
             "speech_act": self.speech_act.to_dict(),
+            "execution_result": self.execution_result,
         }
+
+
+@dataclass(frozen=True)
+class PipelineResponse:
+    text: str
+    raw_response: str = ""
+    response_source: str = "persona_generated"
+    guard_result: FinalResponseGuardResult | None = None
+    repair_attempts: list[dict[str, Any]] = field(default_factory=list)
+    debug_contract: dict[str, Any] = field(default_factory=dict)
+
+
+class PersonaRendererProvider:
+    provider_name = "base"
+
+    def render(self, *, system: str, user: str, seed: int | None = None, num_predict: int | None = None) -> str:
+        raise NotImplementedError
+
+
+class ChatModelPersonaRendererProvider(PersonaRendererProvider):
+    provider_name = "chat_model"
+
+    def __init__(self, model: Any | None):
+        self.model = model
+
+    def render(self, *, system: str, user: str, seed: int | None = None, num_predict: int | None = None) -> str:
+        if self.model is None:
+            return ""
+        kwargs: dict[str, Any] = {}
+        if num_predict is not None:
+            kwargs["num_predict"] = num_predict
+        if seed is not None:
+            kwargs["seed"] = seed
+        if hasattr(self.model, "chat") and callable(self.model.chat):
+            return str(self.model.chat([{"role": "system", "content": system}, {"role": "user", "content": user}], **kwargs) or "").strip()
+        if hasattr(self.model, "complete") and callable(self.model.complete):
+            return str(self.model.complete(f"{system}\n\n{user}", **kwargs) or "").strip()
+        return ""
+
+
+class LocalModelProvider(ChatModelPersonaRendererProvider):
+    provider_name = "local_model"
+
+
+class OllamaProvider(LocalModelProvider):
+    provider_name = "ollama"
+
+
+class OpenAIProvider(ChatModelPersonaRendererProvider):
+    provider_name = "openai"
+
+
+class TestFakeProvider(PersonaRendererProvider):
+    provider_name = "test_fake"
+
+    def __init__(self, replies: list[str] | tuple[str, ...]):
+        self.replies = list(replies)
+        self.calls: list[dict[str, Any]] = []
+
+    def render(self, *, system: str, user: str, seed: int | None = None, num_predict: int | None = None) -> str:
+        self.calls.append({"system": system, "user": user, "seed": seed, "num_predict": num_predict})
+        return self.replies.pop(0) if self.replies else ""
 
 
 def build_twitch_speech_act_bundle(payload: dict, context: Any | None, *, is_broadcaster: bool) -> SpeechActBundle:
@@ -361,6 +464,156 @@ def build_twitch_speech_act_bundle(payload: dict, context: Any | None, *, is_bro
     return SpeechActBundle(envelope, scene, memory, cognitive, policy, speech_act)
 
 
+def build_universal_speech_act_bundle(
+    *,
+    route: str,
+    speech_act_type: str,
+    input_text: str = "",
+    source: str = "ui_text",
+    output_target: str = "local_ui",
+    speaker: str = "Leo",
+    authority: str = "owner",
+    mode: str = "private",
+    goal: str = "",
+    policy_result: str = "allow",
+    policy_reason: str = "allowed",
+    allowed_action: str = "respond",
+    execution_result: dict[str, Any] | None = None,
+    required_facts: list[str] | None = None,
+    allowed_content: list[str] | None = None,
+    forbidden_content: list[str] | None = None,
+    must_do: list[str] | None = None,
+    must_not_do: list[str] | None = None,
+    memory: dict[str, Any] | None = None,
+    current_game: str = "",
+    current_activity: str = "",
+    stream_live: bool = False,
+    technical_state: dict[str, Any] | None = None,
+    response_language: str = "match_speaker",
+    max_length_chars: int = 260,
+) -> SpeechActBundle:
+    if speech_act_type not in UNIVERSAL_SPEECH_ACT_TYPES:
+        raise ValueError(f"Unknown speech_act_type: {speech_act_type}")
+    envelope = InputEnvelope(
+        source=source,
+        raw_text=input_text,
+        speaker=speaker,
+        speaker_type="owner" if authority == "owner" else "system",
+        authority=authority,
+        output_target=output_target,
+    )
+    scene = SceneContext(
+        mode=mode,
+        output_target=output_target,
+        current_game=current_game,
+        current_activity=current_activity,
+        stream_live=stream_live,
+        leo_presence="owner" if authority == "owner" else "unknown",
+        speaker=speaker,
+        speaker_type=envelope.speaker_type,
+        speaker_authority=authority,
+        raw_user_message=input_text,
+        technical_state=technical_state or {},
+    )
+    scene_memory = SceneMemory(
+        viewer_profile={},
+        channel_context={"viewer_messages_are_not_authority": True},
+        current_stream_state={"stream_live": stream_live, "current_game": current_game, "current_activity": current_activity},
+        recent_chat_summary={},
+        boundary_memory={},
+        game_knowledge=dict((memory or {}).get("game_knowledge") or {}),
+    )
+    extra_memory = dict(memory or {})
+    if extra_memory:
+        scene_memory = SceneMemory(
+            viewer_profile=dict(extra_memory.get("viewer_profile") or {}),
+            channel_context=dict(extra_memory.get("channel_context") or scene_memory.channel_context),
+            current_stream_state=dict(extra_memory.get("current_stream_state") or scene_memory.current_stream_state),
+            recent_chat_summary=dict(extra_memory.get("recent_chat_summary") or {}),
+            boundary_memory=dict(extra_memory.get("boundary_memory") or {}),
+            game_knowledge=dict(extra_memory.get("game_knowledge") or {}),
+        )
+    cognitive = CognitiveDecision(
+        intent=route,
+        confidence=0.9,
+        source=source,
+        authority=authority,
+        speaker=speaker,
+        target="hebe",
+        new_request=True,
+        uses_pending=speech_act_type == "pending_task_followup",
+        should_reply=speech_act_type != "no_output",
+        should_stop_pipeline=speech_act_type == "no_output",
+        response_domain=output_target,
+        allowed_capabilities=[allowed_action] if allowed_action else ["reply"],
+        blocked_capabilities=[],
+        reason=route,
+    )
+    policy = PolicyDecision(
+        result=policy_result,
+        reason=policy_reason,
+        allowed_action=allowed_action,
+        forbidden_actions=list(forbidden_content or []),
+        needs_boundary_response=speech_act_type in {"viewer_boundary", "owner_boundary", "policy_boundary"},
+        authority_constraints={"authority": authority},
+    )
+    base_must_not = [
+        "do not change the decision",
+        "do not claim an action succeeded unless execution_result says success=true",
+        "do not explain internal implementation",
+        "do not sound like a generic assistant",
+    ]
+    speech_act = SpeechActPlan(
+        speech_act_type=speech_act_type,
+        goal=goal or _default_goal_for_speech_act(speech_act_type),
+        audience=output_target,
+        target_speaker=speaker,
+        tone=["short", "in_character", "grounded"],
+        max_length_chars=max_length_chars,
+        must_do=list(must_do or []),
+        must_not_do=base_must_not + list(must_not_do or []),
+        allowed_content=list(allowed_content or []),
+        forbidden_content=list(forbidden_content or []),
+        required_facts=list(required_facts or []),
+        knowledge_source_summary=_knowledge_summary_for(execution_result, required_facts or []),
+        memory_usage_rule=scene_memory.usage_rule,
+        response_language=response_language,
+        avoid_phrases=["como IA", "puedo ayudarte", "no tengo una respuesta util ahora mismo"],
+        risk_notes=["action_claim_guard_required"] if speech_act_type.startswith("action_") or execution_result else [],
+    )
+    return SpeechActBundle(envelope, scene, scene_memory, cognitive, policy, speech_act, execution_result=execution_result)
+
+
+def _default_goal_for_speech_act(speech_act_type: str) -> str:
+    return {
+        "direct_answer": "answer the owner directly from verified facts",
+        "owner_supportive_reaction": "react to Leo's state with warmth and brevity",
+        "action_started": "acknowledge that an action has started without claiming completion",
+        "action_confirmation": "confirm the completed action without extra promises",
+        "action_failure": "explain the failed action briefly in Hebe's voice",
+        "action_denial": "deny an unavailable action without generic refusal tone",
+        "confirmation_required": "ask for the required confirmation",
+        "clarification_question": "ask only the missing clarification",
+        "pending_task_followup": "answer the pending task state with the execution result",
+        "game_guidance_answer": "answer with validated game guidance only",
+        "game_guidance_clarification": "ask one game-state clarification",
+        "proactive_nudge": "make one anchored proactive line",
+        "stream_prep_status": "summarize stream prep state and next useful action",
+        "technical_status": "state technical status briefly",
+        "diagnostic_summary": "summarize diagnostics without pretending to fix anything",
+        "policy_boundary": "set a short in-character policy boundary",
+    }.get(speech_act_type, "render Hebe's final line from the contract")
+
+
+def _knowledge_summary_for(execution_result: dict[str, Any] | None, required_facts: list[str]) -> str:
+    parts: list[str] = []
+    if execution_result:
+        parts.append(f"execution_result={execution_result}")
+    if required_facts:
+        parts.append(f"required_facts={required_facts}")
+    return " | ".join(parts)
+
+
 def build_persona_renderer_messages(bundle: SpeechActBundle, *, include_examples: str = "") -> tuple[str, str]:
     system = "\n\n".join(
         part for part in (
@@ -433,6 +686,9 @@ def final_response_guard(
         violations.append(GuardViolation("generic_refusal_style", "response sounds like a generic assistant refusal"))
     if _matches_any(lowered, MEMORY_CREEP_PATTERNS):
         violations.append(GuardViolation("memory_creep", "response exposes profile/history too directly"))
+    action_claim = action_claim_guard(response, bundle)
+    if not action_claim.passed:
+        violations.extend(action_claim.violations)
     if _looks_like_malformed_echo(response, bundle.envelope.raw_text):
         violations.append(GuardViolation("malformed_stt_echo", "response appears to echo malformed input"))
     for item in previous_responses or []:
@@ -465,6 +721,207 @@ def final_response_guard(
         recommended_action="emit" if passed else "repair",
         game_advice_validation=game_validation,
     )
+
+
+def action_claim_guard(text: str, bundle: SpeechActBundle) -> FinalResponseGuardResult:
+    response = str(text or "")
+    normalized = _normalize_text(response)
+    claims_action = any(re.search(pattern, normalized) for pattern in ACTION_CLAIM_PATTERNS)
+    if not claims_action:
+        return FinalResponseGuardResult(True)
+    if bundle.speech_act.speech_act_type == "action_failure" and re.search(
+        r"\bno\s+(?:ha|he|esta|lo|se)\s+\w{0,20}\s*(?:abiert|hecho|cread|enviad|activad|guardad|apuntad|anotad)",
+        normalized,
+    ):
+        return FinalResponseGuardResult(True)
+    execution = bundle.execution_result or {}
+    success = bool(execution.get("success"))
+    action = str(execution.get("action") or execution.get("action_name") or execution.get("step_type") or "").strip()
+    speech_act_allows = bundle.speech_act.speech_act_type in {
+        "action_confirmation",
+        "pending_task_followup",
+        "technical_status",
+        "stream_prep_status",
+    }
+    if success and speech_act_allows:
+        return FinalResponseGuardResult(True)
+    return FinalResponseGuardResult(
+        False,
+        [
+            GuardViolation(
+                "action_claim_without_execution_success",
+                f"response claims completion but execution_success={success} action={action or 'unknown'}",
+            )
+        ],
+        recommended_action="repair",
+    )
+
+
+class HebeResponsePipeline:
+    def __init__(
+        self,
+        provider: PersonaRendererProvider,
+        *,
+        game_advice_gate: Any | None = None,
+        max_repair_attempts: int = 2,
+        num_predict: int = 120,
+    ):
+        self.provider = provider
+        self.game_advice_gate = game_advice_gate
+        self.max_repair_attempts = max_repair_attempts
+        self.num_predict = num_predict
+
+    def render(
+        self,
+        bundle: SpeechActBundle,
+        *,
+        include_examples: str = "",
+        cleaner: Any | None = None,
+        fallback: str = "",
+        previous_responses: list[str] | None = None,
+        route: str = "",
+    ) -> PipelineResponse:
+        if bundle.speech_act.speech_act_type == "no_output" or not bundle.cognitive_decision.should_reply:
+            return PipelineResponse("", response_source="no_output", debug_contract=self._debug_contract(bundle, "", None, [], "no_output"))
+        print(
+            "[HEBE][RESPONSE_PIPELINE] "
+            f"route={route or bundle.cognitive_decision.intent} "
+            f"speech_act={bundle.speech_act.speech_act_type} output_target={bundle.scene.output_target}",
+            flush=True,
+        )
+        self._log_bundle(bundle)
+        system, user = build_persona_renderer_messages(bundle, include_examples=include_examples)
+        raw = self._render_once(system, user, attempt=1)
+        cleaned = self._clean(raw, cleaner)
+        guard = final_response_guard(cleaned, bundle, game_advice_gate=self.game_advice_gate, previous_responses=previous_responses)
+        self._log_guard(bundle, guard)
+        if guard.passed:
+            return PipelineResponse(
+                cleaned,
+                raw_response=raw,
+                response_source="persona_generated",
+                guard_result=guard,
+                debug_contract=self._debug_contract(bundle, raw, guard, [], "persona_generated", final_response=cleaned),
+            )
+        repair_attempts: list[dict[str, Any]] = []
+        previous = cleaned
+        for attempt in range(1, self.max_repair_attempts + 1):
+            repair_system, repair_user = build_repair_renderer_messages(
+                bundle,
+                previous_response=previous,
+                guard_result=guard,
+                include_examples=include_examples,
+            )
+            print(
+                f"[HEBE][REPAIR_RENDERER] provider={self.provider.provider_name} attempt={attempt} "
+                f"violations={[item.type for item in guard.violations]}",
+                flush=True,
+            )
+            repair_raw = self._render_once(repair_system, repair_user, attempt=attempt + 1)
+            repair_clean = self._clean(repair_raw, cleaner)
+            repair_guard = final_response_guard(repair_clean, bundle, game_advice_gate=self.game_advice_gate, previous_responses=previous_responses)
+            self._log_guard(bundle, repair_guard)
+            repair_attempts.append({"attempt": attempt, "raw": repair_raw, "cleaned": repair_clean, "guard_result": repair_guard.to_dict()})
+            if repair_guard.passed:
+                return PipelineResponse(
+                    repair_clean,
+                    raw_response=repair_raw,
+                    response_source="persona_repair_generated",
+                    guard_result=repair_guard,
+                    repair_attempts=repair_attempts,
+                    debug_contract=self._debug_contract(bundle, repair_raw, repair_guard, repair_attempts, "persona_repair_generated", final_response=repair_clean),
+                )
+            previous = repair_clean
+            guard = repair_guard
+        fallback_text = fallback or safe_local_fallback(bundle)
+        fallback_guard = final_response_guard(fallback_text, bundle, game_advice_gate=self.game_advice_gate)
+        if not fallback_guard.passed:
+            fallback_text = safe_local_fallback(bundle)
+            fallback_guard = final_response_guard(fallback_text, bundle, game_advice_gate=self.game_advice_gate)
+        print("[HEBE][RESPONSE_SOURCE] source=local_safe_fallback", flush=True)
+        return PipelineResponse(
+            fallback_text,
+            raw_response=raw,
+            response_source="local_safe_fallback",
+            guard_result=fallback_guard,
+            repair_attempts=repair_attempts,
+            debug_contract=self._debug_contract(bundle, raw, fallback_guard, repair_attempts, "local_safe_fallback", final_response=fallback_text),
+        )
+
+    def _render_once(self, system: str, user: str, *, attempt: int) -> str:
+        print(f"[HEBE][PERSONA_RENDERER] provider={self.provider.provider_name} attempt={attempt}", flush=True)
+        try:
+            return self.provider.render(
+                system=system,
+                user=user,
+                seed=random.randint(0, 1_000_000),
+                num_predict=self.num_predict,
+            )
+        except Exception as exc:
+            print(f"[HEBE][PERSONA_RENDERER] provider={self.provider.provider_name} failed={exc!r}", flush=True)
+            return ""
+
+    def _clean(self, text: str, cleaner: Any | None) -> str:
+        value = str(text or "").strip()
+        if cleaner is None:
+            return value
+        return str(cleaner(value) or "").strip()
+
+    def _log_bundle(self, bundle: SpeechActBundle) -> None:
+        print(
+            "[HEBE][SCENE_CONTEXT] "
+            f"mode={bundle.scene.mode} speaker={bundle.scene.speaker} authority={bundle.scene.speaker_authority} "
+            f"game={bundle.scene.current_game or 'unknown'}",
+            flush=True,
+        )
+        print(
+            "[HEBE][SCENE_MEMORY] "
+            f"usage=tone/context/familiarity_not_authority game_knowledge={bool(bundle.memory.game_knowledge)}",
+            flush=True,
+        )
+        print(
+            "[HEBE][SPEECH_ACT_PLAN] "
+            f"type={bundle.speech_act.speech_act_type} goal={bundle.speech_act.goal!r}",
+            flush=True,
+        )
+
+    def _log_guard(self, bundle: SpeechActBundle, guard: FinalResponseGuardResult) -> None:
+        violations = [item.type for item in guard.violations]
+        print(
+            f"[HEBE][FINAL_RESPONSE_GUARD] passed={str(guard.passed).lower()} violations={violations}",
+            flush=True,
+        )
+        action_claim_passed = "action_claim_without_execution_success" not in violations
+        print(
+            "[HEBE][ACTION_CLAIM_GUARD] "
+            f"passed={str(action_claim_passed).lower()} action={bundle.policy_decision.allowed_action} "
+            f"execution_result={bundle.execution_result}",
+            flush=True,
+        )
+
+    def _debug_contract(
+        self,
+        bundle: SpeechActBundle,
+        generated_response: str,
+        guard: FinalResponseGuardResult | None,
+        repair_attempts: list[dict[str, Any]],
+        response_source: str,
+        *,
+        final_response: str = "",
+    ) -> dict[str, Any]:
+        return {
+            "scene_context": bundle.scene.to_dict(),
+            "scene_memory": bundle.memory.to_dict(),
+            "cognitive_decision": bundle.cognitive_decision.to_dict(),
+            "policy_decision": bundle.policy_decision.to_dict(),
+            "execution_result": bundle.execution_result,
+            "speech_act_plan": bundle.speech_act.to_dict(),
+            "generated_response": generated_response,
+            "guard_result": guard.to_dict() if guard else None,
+            "repair_attempts": repair_attempts,
+            "final_response": final_response,
+            "response_source": response_source,
+        }
 
 
 def safe_local_fallback(bundle: SpeechActBundle) -> str:

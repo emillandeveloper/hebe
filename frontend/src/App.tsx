@@ -470,17 +470,18 @@ export default function App() {
       rememberMessage(cleanId);
     }
     logAppend(cleanId, role, cleanText);
+    const debugContract = (payload as any)?.data?.debug_contract || (payload as any)?.debug_contract || null;
 
     setMessages((prev) => {
       if (role === "assistant") {
         const last = prev[prev.length - 1];
         if (last?.role === "assistant" && last.partial) {
-          const updated = { ...last, id: cleanId, messageId: cleanId, eventId, text: cleanText, ts: cleanTs, partial: false };
+          const updated = { ...last, id: cleanId, messageId: cleanId, eventId, text: cleanText, ts: cleanTs, partial: false, debugContract };
           return [...prev.slice(0, -1), updated];
         }
       }
 
-      const message: ChatMsg = { id: cleanId, messageId: cleanId, eventId, role, text: cleanText, ts: cleanTs };
+      const message: ChatMsg = { id: cleanId, messageId: cleanId, eventId, role, text: cleanText, ts: cleanTs, debugContract };
       if (role === "user") {
         return [
           ...prev,
