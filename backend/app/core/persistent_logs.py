@@ -36,6 +36,7 @@ JSONL_LOGS = {
     "pending": "pending_tasks.jsonl",
     "game_guidance": "game_guidance.jsonl",
     "plan_executor": "plan_executor.jsonl",
+    "proactive_decisions": "proactive_decisions.jsonl",
     "tts": "tts.jsonl",
     "ui_events": "ui_events.jsonl",
 }
@@ -255,6 +256,7 @@ def engine_state_summary(engine: Any) -> dict:
             "stream_output_mode": getattr(stream, "stream_output_mode", None),
             "current_game": getattr(stream, "current_game", None),
             "schedule_slot": getattr(stream, "schedule_slot", None),
+            "last_proactive_decision": getattr(stream, "last_proactive_decision", None),
         } if stream is not None else None,
         "last_policy_decision": None,
         "active_behavior_blocks": [],
@@ -337,6 +339,7 @@ def create_debug_bundle(
         _write_json(bundle, "recent/input_firewall.json", read_jsonl_recent("input_firewall", minutes=minutes, limit=500))
         _write_json(bundle, "recent/game_guidance.json", read_jsonl_recent("game_guidance", minutes=minutes, limit=500))
         _write_json(bundle, "recent/plan_executor.json", read_jsonl_recent("plan_executor", minutes=minutes, limit=500))
+        _write_json(bundle, "recent/proactive_decisions.json", read_jsonl_recent("proactive_decisions", minutes=minutes, limit=500))
         _write_json(bundle, "recent/errors.json", read_text_recent("errors.log", minutes=minutes, max_lines=500))
         if include_recent_ui:
             _write_json(bundle, "recent/ui_events.json", read_jsonl_recent("ui_events", minutes=minutes, limit=500))

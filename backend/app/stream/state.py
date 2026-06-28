@@ -88,6 +88,7 @@ class StreamSessionState:
     stream_spontaneity_grace_until_ts: float = 0.0
     last_stream_spontaneity_preview_ts: float = 0.0
     last_stream_spontaneity_blocked_reason: Optional[str] = None
+    last_proactive_decision: Optional[dict] = None
     idle_spontaneity_enabled: bool = True
     recent_idle_messages: list[dict] = field(default_factory=list)
     recent_style_motifs: list[dict] = field(default_factory=list)

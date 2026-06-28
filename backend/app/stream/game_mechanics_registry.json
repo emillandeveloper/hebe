@@ -1,0 +1,100 @@
+{
+  "games": [
+    {
+      "canonical_title": "Persona 5 Royal",
+      "aliases": ["persona 5 royal", "persona 5", "p5r", "p5"],
+      "allowed_mechanics": [
+        "hp_management",
+        "sp_management",
+        "weakness_system",
+        "baton_pass",
+        "guard",
+        "healing_items",
+        "healing_skills",
+        "persona_fusion",
+        "confidants",
+        "social_links",
+        "palace_deadlines",
+        "safe_rooms",
+        "stealth_security",
+        "personas",
+        "turn_economy",
+        "equipment_stats"
+      ],
+      "forbidden_mechanics": ["autopotion"],
+      "spoiler_policy_default": "no_story_spoilers",
+      "stream_notes": ["First playthrough; avoid future story or boss spoilers."]
+    },
+    {
+      "canonical_title": "Final Fantasy IX",
+      "aliases": ["final fantasy ix", "ffix", "ff9", "final fantasy 9"],
+      "allowed_mechanics": [
+        "hp_management",
+        "mp_management",
+        "abilities",
+        "equipment_stats",
+        "steal",
+        "trance",
+        "items",
+        "party_members",
+        "turn_economy"
+      ],
+      "forbidden_mechanics": ["persona_fusion", "confidants", "baton_pass"],
+      "spoiler_policy_default": "challenge_safe",
+      "stream_notes": ["Challenge context may be active; avoid stale title markers."]
+    },
+    {
+      "canonical_title": "Final Fantasy VII",
+      "aliases": ["final fantasy vii", "ffvii", "ff7", "final fantasy 7"],
+      "allowed_mechanics": [
+        "hp_management",
+        "mp_management",
+        "materia",
+        "limit_breaks",
+        "equipment_stats",
+        "items",
+        "party_members",
+        "turn_economy"
+      ],
+      "forbidden_mechanics": ["persona_fusion", "confidants", "baton_pass"],
+      "spoiler_policy_default": "no_story_spoilers",
+      "stream_notes": ["Avoid future story/location spoilers."]
+    },
+    {
+      "canonical_title": "Baldur's Gate 3",
+      "aliases": ["baldur's gate 3", "baldurs gate 3", "bg3"],
+      "allowed_mechanics": [
+        "hp_management",
+        "spell_slots",
+        "action_economy",
+        "bonus_actions",
+        "saving_throws",
+        "dice_rolls",
+        "positioning",
+        "party_members",
+        "equipment_stats",
+        "resting"
+      ],
+      "forbidden_mechanics": ["persona_fusion", "baton_pass", "materia"],
+      "spoiler_policy_default": "chat_safe",
+      "stream_notes": ["Chat may influence decisions; avoid unasked spoilers."]
+    },
+    {
+      "canonical_title": "Kingdom Hearts Chain of Memories",
+      "aliases": ["kingdom hearts chain of memories", "chain of memories", "kh com", "khcom"],
+      "allowed_mechanics": [
+        "hp_management",
+        "card_deck",
+        "card_values",
+        "sleights",
+        "enemy_cards",
+        "room_cards",
+        "reload_counter",
+        "equipment_stats"
+      ],
+      "forbidden_mechanics": ["persona_fusion", "confidants", "materia", "baton_pass"],
+      "spoiler_policy_default": "no_story_spoilers",
+      "stream_notes": ["Validate card-system advice; avoid story spoilers."]
+    }
+  ]
+}

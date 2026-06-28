@@ -29,6 +29,7 @@ from app.cognitive.persona.reply_cleaner import (
 from app.cognitive.persona.stream_metrics import StreamReplyStats
 from app.cognitive.persona.stream_dataset_logger import StreamDatasetLogger
 from app.core.ui_bridge import emit
+from app.stream.game_advice_gate import GameAdviceGate
 
 
 # Cuantas veces reintentamos la generacion si detectamos un patron helper.
@@ -101,6 +102,7 @@ class ResponseSynthesizer:
         # Metricas acumuladas del stream (en memoria, se pierden al reiniciar).
         self._stream_stats = StreamReplyStats()
         self._dataset_logger = StreamDatasetLogger()
+        self.game_advice_gate = GameAdviceGate()
         self._style_guard_fallback_counts: dict[str, int] = {}
         self._game_guidance_classifier = GameGuidanceCapability()
 
@@ -1513,7 +1515,48 @@ class ResponseSynthesizer:
 
         if not text or any(marker in lowered for marker in forbidden):
             return ""
+        validation = self._validate_spontaneous_game_advice(text, payload)
+        if not validation.allowed:
+            print(
+                "[HEBE][GAME_ADVICE_GATE] "
+                f"game={validation.game or 'unknown'} mechanics={validation.mechanics} "
+                f"validated={validation.validated} blocked={validation.blocked} reason={validation.reason}",
+                flush=True,
+            )
+            for mechanic in validation.blocked:
+                print(
+                    f"[HEBE][GAME_ADVICE_GATE] blocked mechanic={mechanic} "
+                    f"game={validation.game or 'unknown'} reason={validation.reason}",
+                    flush=True,
+                )
+            print("[HEBE][SPONTANEITY] skipped reason=game_advice_not_validated", flush=True)
+            return ""
+        print(
+            "[HEBE][GAME_ADVICE_GATE] "
+            f"game={validation.game or 'unknown'} mechanics={validation.mechanics} "
+            f"validated={validation.validated} blocked=[]",
+            flush=True,
+        )
         return text
+
+    def _validate_spontaneous_game_advice(self, text: str, payload: dict):
+        game_profile = payload.get("game_profile") or {}
+        run_context = payload.get("run_context") or {}
+        source_evidence = [
+            str(game_profile.get("gameplay_systems_non_spoiler") or ""),
+            str(game_profile.get("safe_comment_topics") or ""),
+            str(run_context.get("facts") or ""),
+            str(run_context.get("objective") or ""),
+            str(run_context.get("location") or ""),
+            str(payload.get("live_session_context") or ""),
+        ]
+        return self.game_advice_gate.validate(
+            current_game=payload.get("current_game") or payload.get("current_category") or game_profile.get("title"),
+            proposed_advice=text,
+            game_run_state={"game": payload.get("current_game") or payload.get("current_category")},
+            known_game_mechanics=list(game_profile.get("gameplay_systems_non_spoiler") or []),
+            source_evidence=source_evidence,
+        )
 
     def _has_specific_anchor(self, payload: dict) -> bool:
         if "specific_context_anchors" not in payload:

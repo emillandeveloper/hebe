@@ -240,6 +240,36 @@ class CognitiveTwitchTests(unittest.TestCase):
 
         self.assertEqual(reply, "")
 
+    def test_response_synthesizer_blocks_invalid_persona_mechanic(self):
+        synth = ResponseSynthesizer(conversation_model=None)
+
+        reply = synth._safe_spontaneous_stream_reply(
+            "Activa autopocion antes del jefe.",
+            "",
+            payload={
+                "specific_context_anchors": ["run_context"],
+                "current_game": "Persona 5 Royal",
+                "game_profile": {"title": "Persona 5 Royal", "gameplay_systems_non_spoiler": ["SP management"]},
+            },
+        )
+
+        self.assertEqual(reply, "")
+
+    def test_response_synthesizer_allows_valid_persona_mechanic(self):
+        synth = ResponseSynthesizer(conversation_model=None)
+
+        reply = synth._safe_spontaneous_stream_reply(
+            "Mira el SP antes de avanzar y guarda una sala segura en mente.",
+            "",
+            payload={
+                "specific_context_anchors": ["run_context"],
+                "current_game": "Persona 5 Royal",
+                "game_profile": {"title": "Persona 5 Royal", "gameplay_systems_non_spoiler": ["SP management", "safe rooms"]},
+            },
+        )
+
+        self.assertTrue(reply)
+
     def test_spontaneous_prompt_includes_stream_context(self):
         model = CapturingModel("Mi senor, revisa recursos antes de avanzar.")
         event = InternalEvent(

@@ -12,6 +12,7 @@ from app.stream.policy import (
     ACTIVITY_SOCIAL_LINKS,
     validate_spontaneity_anchor,
 )
+from app.stream.proactive import ProactiveDecision, cooldown_active, log_proactive_decision, semantic_cooldown_key
 from app.stream.state import StreamSessionState
 
 
@@ -119,6 +120,8 @@ class StreamSpontaneityService:
             "title_markers_fresh": [],
             "title_markers_stale": [],
             "specific_context_anchors": [],
+            "proactive_decision": None,
+            "spontaneity_score": {},
         }
         if not stream:
             return result
@@ -181,6 +184,13 @@ class StreamSpontaneityService:
             result["blocked_reason"] = "no_specific_context"
             print("[HEBE][SPONTANEITY] skipped reason=no_specific_context", flush=True)
             return result
+        anchor_quality = self._anchor_quality(stream, now, anchors)
+        if anchor_quality < 0.55:
+            result["blocked_reason"] = "weak_anchor"
+            self._log_score(0.0, anchor_quality=anchor_quality, usefulness=0.0, confidence=0.0, novelty=0.0)
+            self._log_decision(stream, result, now=now, anchor_quality=anchor_quality)
+            print("[HEBE][SPONTANEITY] skipped reason=weak_anchor", flush=True)
+            return result
 
         chat_snapshot = self._chat_activity_snapshot(stream, now)
         result["chat_active"] = chat_snapshot["active"]
@@ -238,12 +248,21 @@ class StreamSpontaneityService:
         topic = self._choose_topic(stream, now)
         if topic is None:
             result["blocked_reason"] = "topic_recently_used"
+            self._log_decision(stream, result, now=now, anchor_quality=anchor_quality)
+            return result
+        semantic_key = semantic_cooldown_key("", topic)
+        if cooldown_active(stream, semantic_key, now=now):
+            result["blocked_reason"] = "semantic_cooldown"
+            result["candidate_topic"] = topic
+            self._log_decision(stream, result, now=now, anchor_quality=anchor_quality, cooldown_key=semantic_key)
+            print(f"[HEBE][SPONTANEITY] skipped reason=semantic_cooldown cooldown_key={semantic_key}", flush=True)
             return result
         used_fact = self._recent_run_context_fact(stream, now)
         validation = validate_spontaneity_anchor(stream, topic=topic, fact=used_fact)
         if not validation.allow:
             result["blocked_reason"] = "activity_mismatch"
             print("[HEBE][SPONTANEITY_VALIDATOR] blocked reason=activity_mismatch", flush=True)
+            self._log_decision(stream, result, now=now, anchor_quality=anchor_quality)
             return result
         result["candidate_topic"] = topic
         used_fact_id = used_fact.get("id") if used_fact else None
@@ -257,9 +276,19 @@ class StreamSpontaneityService:
         print(f"[HEBE][SPONTANEITY] anchors={anchors}", flush=True)
         print(f"[HEBE][SPONTANEITY] generated topic={topic} used_fact_id={used_fact_id}", flush=True)
 
+        score = self._score_opportunity(stream, now, anchors=anchors, topic=topic, fact=used_fact)
+        result["spontaneity_score"] = score
+        if score["total"] < 0.62:
+            result["blocked_reason"] = "low_spontaneity_score"
+            self._log_score(**score)
+            self._log_decision(stream, result, now=now, anchor_quality=anchor_quality, cooldown_key=semantic_key)
+            print("[HEBE][SPONTANEITY] skipped reason=low_spontaneity_score", flush=True)
+            return result
+        self._log_score(**score)
         result["would_send"] = True
         result["blocked_reason"] = "ready"
         result["cooldown_ready"] = True
+        self._log_decision(stream, result, now=now, anchor_quality=anchor_quality, cooldown_key=semantic_key)
         return result
 
     def reset_spontaneity_cooldowns(self, stream: StreamSessionState | None) -> int:
@@ -342,6 +371,8 @@ class StreamSpontaneityService:
             },
             "specific_context_anchors": self._specific_context_anchors(stream, now, title_context=title_context, chat_snapshot=chat_snapshot),
             "used_fact_id": (self._recent_run_context_fact(stream, now) or {}).get("id"),
+            "proactive_type": "contextual_spontaneity",
+            "proactive_decision": getattr(stream, "last_proactive_decision", None),
             "recent_idle_topics": [item.get("topic") for item in recent_idle[-8:] if item.get("topic")],
             "recent_idle_messages": [item.get("text") for item in recent_idle[-5:] if item.get("text")],
             "recent_style_motifs": [
@@ -594,6 +625,113 @@ class StreamSpontaneityService:
         if getattr(stream, "last_raid_event", None):
             anchors.append("recent_event")
         return list(dict.fromkeys(anchors))
+
+    def _anchor_quality(self, stream: StreamSessionState, now: float, anchors: list[str]) -> float:
+        if self._recent_run_context_fact(stream, now):
+            return 0.92
+        if "recent_event" in anchors or "chat_topic" in anchors or "recent_voice_event" in anchors:
+            return 0.82
+        if "run_context" in anchors or "title_markers" in anchors or "session_primer" in anchors:
+            return 0.74
+        if getattr(stream, "last_chat_activity_ts", 0.0):
+            return 0.62
+        if "game" in anchors or "title" in anchors:
+            return 0.58
+        return 0.25
+
+    def _score_opportunity(
+        self,
+        stream: StreamSessionState,
+        now: float,
+        *,
+        anchors: list[str],
+        topic: str,
+        fact: dict | None,
+    ) -> dict[str, float]:
+        anchor_quality = self._anchor_quality(stream, now, anchors)
+        relevance = 0.84 if (getattr(stream, "current_game", None) or getattr(stream, "current_category", None)) else 0.55
+        usefulness = 0.86 if fact or topic in {"resource_management", "strategy_without_spoilers", "challenge_comment"} else 0.62
+        novelty = 0.85
+        recent_topics = [item.get("topic") for item in list(getattr(stream, "recent_idle_messages", []) or [])[-6:]]
+        if topic in recent_topics:
+            novelty -= 0.35
+        confidence = float((fact or {}).get("confidence", 0.76) or 0.76)
+        timing = 0.75
+        repetition_penalty = 0.25 if topic in recent_topics else 0.0
+        risk_penalty = 0.15 if topic in {"resource_management", "strategy_without_spoilers"} and not fact else 0.0
+        recent_similar_comment_penalty = 0.0
+        total = (
+            anchor_quality * 0.28
+            + relevance * 0.16
+            + usefulness * 0.18
+            + novelty * 0.14
+            + confidence * 0.14
+            + timing * 0.10
+            - repetition_penalty
+            - risk_penalty
+            - recent_similar_comment_penalty
+        )
+        return {
+            "total": round(max(0.0, min(1.0, total)), 3),
+            "anchor_quality": round(anchor_quality, 3),
+            "relevance_to_current_game": round(relevance, 3),
+            "usefulness": round(usefulness, 3),
+            "novelty": round(novelty, 3),
+            "confidence": round(confidence, 3),
+            "timing": round(timing, 3),
+            "repetition_penalty": round(repetition_penalty, 3),
+            "risk_penalty": round(risk_penalty, 3),
+            "recent_similar_comment_penalty": round(recent_similar_comment_penalty, 3),
+        }
+
+    def _log_score(self, total: float = 0.0, **score: float) -> None:
+        print(
+            "[HEBE][SPONTANEITY_SCORE] "
+            f"score={float(total or 0.0):.3f} "
+            f"novelty={float(score.get('novelty', 0.0) or 0.0):.3f} "
+            f"usefulness={float(score.get('usefulness', 0.0) or 0.0):.3f} "
+            f"confidence={float(score.get('confidence', 0.0) or 0.0):.3f}",
+            flush=True,
+        )
+
+    def _log_decision(
+        self,
+        stream: StreamSessionState,
+        result: dict,
+        *,
+        now: float,
+        anchor_quality: float,
+        cooldown_key: str | None = None,
+    ) -> None:
+        topic = result.get("candidate_topic") or "none"
+        score = result.get("spontaneity_score") or {}
+        decision = ProactiveDecision(
+            id=f"pro_{int(now * 1000)}",
+            proactive_type="contextual_spontaneity",
+            trigger="stream_idle_prompt",
+            anchor_type=",".join(result.get("specific_context_anchors") or []) or "stream_silence",
+            anchor_quality=float(anchor_quality or 0.0),
+            current_game=str(getattr(stream, "current_game", None) or getattr(stream, "current_category", None) or ""),
+            current_activity=str(getattr(stream, "current_activity", None) or "unknown"),
+            stream_state={
+                "enabled": result.get("stream_enabled"),
+                "twitch_live": result.get("twitch_live"),
+                "presence_mode": result.get("presence_mode"),
+            },
+            schedule_slot=None,
+            action_available=False,
+            suggested_action="",
+            knowledge_source="stream_context",
+            confidence=float(score.get("confidence", 0.0) or (0.82 if result.get("would_send") else 0.4)),
+            cooldown_key=cooldown_key or semantic_cooldown_key("", topic),
+            should_speak=bool(result.get("would_send")),
+            reason="ready" if result.get("would_send") else "",
+            blocked_reason="" if result.get("would_send") else str(result.get("blocked_reason") or "blocked"),
+            score={k: float(v) for k, v in score.items()} if score else {},
+        )
+        stream.last_proactive_decision = decision.to_dict()
+        result["proactive_decision"] = decision.to_dict()
+        log_proactive_decision(decision)
 
     def _missing_primer_and_run_context(self, stream: StreamSessionState, now: float, *, title_context: dict | None = None) -> bool:
         if getattr(stream, "session_primer", None):

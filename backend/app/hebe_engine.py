@@ -88,6 +88,13 @@ from app.stream.input_firewall import (
 )
 from app.stream import session_primer
 from app.stream.spontaneity import StreamSpontaneityConfig, StreamSpontaneityService
+from app.stream.proactive import (
+    StreamPreparationRoutine,
+    cooldown_active,
+    mark_cooldown,
+    scheduled_reminder_decision,
+    semantic_cooldown_key,
+)
 
 WAKE_WORDS = ["hebe despierta", "eve despierta", "jebe despierta"]
 STREAM_WAKE_ALIASES = {"hebe", "ebe", "eve", "ehbe", "heve", "ebi", "heb", "jebe"}
@@ -256,6 +263,7 @@ class HebeEngine:
                 suppress_when_chat_active=os.getenv("HEBE_IDLE_SUPPRESS_WHEN_CHAT_ACTIVE", "true").strip().lower() in ("1", "true", "yes", "on"),
             ),
         )
+        self.stream_preparation = StreamPreparationRoutine()
         self.stream_spontaneity.start_grace_period(getattr(self.runtime.state, "stream", None))
         self.stream_context_sync = StreamContextSyncService(
             twitch_api=getattr(self.runtime, "twitch", None),
@@ -2199,6 +2207,12 @@ class HebeEngine:
                 if motif:
                     print(f"[HEBE][SPONTANEITY] skipped reason=motif_cooldown motif={motif}", flush=True)
                     return
+                cooldown_key = semantic_cooldown_key(reply_text, (getattr(event, "payload", {}) or {}).get("idle_topic"))
+                if cooldown_active(stream, cooldown_key):
+                    print(f"[HEBE][SPONTANEITY] skipped reason=semantic_cooldown cooldown_key={cooldown_key}", flush=True)
+                    return
+                mark_cooldown(stream, cooldown_key)
+                print(f"[HEBE][SPONTANEITY] spoken reason=validated cooldown_key={cooldown_key}", flush=True)
 
         if event.event_type.startswith("twitch_"):
             self._deliver_twitch_reply(reply_text, event_type=event.event_type, payload=getattr(event, "payload", {}) or {})
@@ -2567,6 +2581,9 @@ class HebeEngine:
         if getattr(stream, "no_stream_today_date", None) == today:
             return
 
+        self._poll_stream_proactive_routine(stream, now=now, today=today)
+        return
+
         delay = int(getattr(stream, "stream_delay_minutes", 0) or 0)
         schedule = {
             "18:30": "Leo, en media hora tocaría preparar stream.",
@@ -2584,6 +2601,103 @@ class HebeEngine:
                 sent.add(key)
                 stream.routine_sent_keys = sent
                 self._deliver_voice_reply(message)
+
+    def _poll_stream_proactive_routine(self, stream, *, now: datetime, today: str) -> bool:
+        delay = int(getattr(stream, "stream_delay_minutes", 0) or 0)
+        windows = {
+            "18:30": "scheduled_reminder",
+            "18:50": "actionable_routine",
+            "19:00": "actionable_routine",
+        }
+        handled = False
+        for base_time, proactive_type in windows.items():
+            due = self._today_at(base_time) + timedelta(minutes=delay)
+            key = f"{today}:{base_time}:{delay}"
+            sent = getattr(stream, "routine_sent_keys", set())
+            if key in sent:
+                continue
+            if 0 <= (now - due).total_seconds() < self.routine_poll_interval_sec + 5:
+                handled = True
+                sent.add(key)
+                stream.routine_sent_keys = sent
+                if proactive_type == "scheduled_reminder":
+                    schedule_slot = session_primer.get_schedule_for_date(now) or {}
+                    decision = scheduled_reminder_decision(
+                        trigger=f"routine:{base_time}",
+                        schedule_slot=schedule_slot,
+                        current_game=str(schedule_slot.get("game") or getattr(stream, "current_game", "") or ""),
+                    )
+                    stream.last_proactive_decision = decision.to_dict()
+                    if decision.should_speak:
+                        self._deliver_voice_reply(self._build_scheduled_stream_reminder(decision))
+                    continue
+                decision = self._evaluate_stream_preparation_decision(stream, trigger=f"routine:{base_time}", now_dt=now)
+                stream.last_proactive_decision = decision.to_dict()
+                if not decision.should_speak:
+                    print(f"[HEBE][SPONTANEITY] skipped reason={decision.blocked_reason or 'stream_prep_not_needed'}", flush=True)
+                    continue
+                reply = self._build_stream_preparation_reply(decision)
+                if reply:
+                    self._deliver_voice_reply(reply)
+        return handled
+
+    def _evaluate_stream_preparation_decision(self, stream, *, trigger: str, now_dt: datetime):
+        schedule_slot = session_primer.get_schedule_for_date(now_dt) or {}
+        obs_running = bool(self._is_process_running_safe("obs64.exe") or self._is_process_running_safe("obs.exe"))
+        twitch = getattr(self.runtime, "twitch", None)
+        chat_bot = getattr(self.runtime, "twitch_chat_bot", None)
+        game_run = GameRunState.from_value(getattr(self.runtime.state, "game_run_state", None))
+        expected_game = str(schedule_slot.get("game") or getattr(stream, "current_game", "") or "")
+        game_run_ready = bool(game_run.game and (not expected_game or self._normalize_text(game_run.game) == self._normalize_text(expected_game)))
+        return self.stream_preparation.evaluate(
+            stream=stream,
+            schedule_slot=schedule_slot,
+            obs_running=obs_running,
+            expected_game_running=None,
+            twitch_connected=bool(twitch is not None and getattr(twitch, "is_available", lambda: False)()),
+            chat_connected=bool(chat_bot is not None and getattr(chat_bot, "enabled", False)),
+            stt_listening=bool(getattr(self.runtime, "stt_enabled", False)),
+            tts_ready=bool(getattr(self.runtime.state, "tts_enabled", False)),
+            vtube_connected=None,
+            title_category_known=bool(schedule_slot.get("category") or getattr(stream, "current_category", None)),
+            game_run_state_ready=game_run_ready,
+            trigger=trigger,
+        )
+
+    def _build_scheduled_stream_reminder(self, decision) -> str:
+        game = decision.current_game or "directo por confirmar"
+        slot = (decision.schedule_slot or {}).get("slot_name") or "stream"
+        return f"Recordatorio de stream: {slot}, {game}. Es solo aviso horario; para preparar cosas uso la rutina de estado."
+
+    def _build_stream_preparation_reply(self, decision) -> str:
+        state = decision.stream_state or {}
+        game = decision.current_game or "juego por confirmar"
+        checks: list[str] = [f"juego previsto: {game}"]
+        checks.append(f"modo stream: {'activo' if state.get('stream_mode') else 'apagado'}")
+        obs = state.get("obs_running")
+        checks.append("OBS: abierto" if obs is True else "OBS: cerrado" if obs is False else "OBS: sin dato")
+        if state.get("twitch_connected") is False:
+            checks.append("Twitch: revisar conexion")
+        if state.get("chat_connected") is False:
+            checks.append("chat: no confirmado")
+        if state.get("stt_listening") is False:
+            checks.append("STT: apagado")
+        if state.get("tts_ready") is False:
+            checks.append("TTS: apagado")
+        if state.get("game_run_state_ready") is False:
+            checks.append("GameRunState: pendiente")
+        actions = [item for item in str(decision.suggested_action or "").split(",") if item]
+        if actions:
+            checks.append("puedo hacer: " + ", ".join(actions))
+        return "Preparacion de stream: " + "; ".join(checks) + "."
+
+    def _is_process_running_safe(self, process_name: str) -> bool:
+        try:
+            from app.tools.windows_apps import is_process_running
+
+            return bool(is_process_running(process_name))
+        except Exception:
+            return False
 
     def start(self):
         if self._started:

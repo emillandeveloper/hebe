@@ -174,6 +174,7 @@ def preview_recent_logs(minutes: int = Query(10, ge=1, le=240)):
         "errors": read_text_recent("errors.log", minutes=minutes, max_lines=120),
         "cognitive_router": read_jsonl_recent("cognitive_router", minutes=minutes, limit=120),
         "stt": read_jsonl_recent("stt", minutes=minutes, limit=120),
+        "proactive_decisions": read_jsonl_recent("proactive_decisions", minutes=minutes, limit=120),
     }
 
 

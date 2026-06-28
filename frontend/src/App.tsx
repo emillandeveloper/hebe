@@ -1345,6 +1345,12 @@ const SIMULATION_PRESETS: SimulationPreset[] = [
   { label: "Leo corrects game context", source: "leo", leoText: "Hebe, no es combate, estamos en un vinculo social" },
   { label: "Ambient social link context", source: "ambient", ambientText: "fuera de combate, ahora toca social links" },
   { label: "Invalid combat spontaneity", source: "system", todo: true },
+  { label: "Proactive: Persona autopotion blocked", source: "system", todo: true },
+  { label: "Proactive: Persona SP allowed", source: "system", todo: true },
+  { label: "Proactive: prep OBS closed", source: "system", todo: true },
+  { label: "Proactive: prep already ready", source: "system", todo: true },
+  { label: "Proactive: weak anchor skip", source: "system", todo: true },
+  { label: "Proactive: repeated healing skip", source: "system", todo: true },
 ];
 
 function SimulationView({
@@ -2401,7 +2407,7 @@ function LogsView({ apiBase, logs, onClearVisible }: { apiBase: string; logs: { 
   const [includeDbSnapshot, setIncludeDbSnapshot] = useState(false);
   const [includeCurrentState, setIncludeCurrentState] = useState(true);
   const [exportBusy, setExportBusy] = useState(false);
-  const [preview, setPreview] = useState<{ errors: string[]; cognitive_router: any[]; stt: any[] } | null>(null);
+  const [preview, setPreview] = useState<{ errors: string[]; cognitive_router: any[]; stt: any[]; proactive_decisions: any[] } | null>(null);
   const [previewError, setPreviewError] = useState("");
   const listRef = useRef<HTMLDivElement | null>(null);
 
@@ -2516,6 +2522,7 @@ function LogsView({ apiBase, logs, onClearVisible }: { apiBase: string; logs: { 
         errors: Array.isArray(payload?.errors) ? payload.errors : [],
         cognitive_router: Array.isArray(payload?.cognitive_router) ? payload.cognitive_router : [],
         stt: Array.isArray(payload?.stt) ? payload.stt : [],
+        proactive_decisions: Array.isArray(payload?.proactive_decisions) ? payload.proactive_decisions : [],
       });
     } catch (error) {
       setPreview(null);
@@ -2578,6 +2585,10 @@ function LogsView({ apiBase, logs, onClearVisible }: { apiBase: string; logs: { 
               <div>
                 <div className="muted small">STT</div>
                 <pre className="debugPreviewBox">{preview.stt.slice(-5).map((item) => `${item.status || item.final_decision || "-"} ${item.reason || item.rejection_reason || ""}`).join("\n") || "Sin eventos STT recientes."}</pre>
+              </div>
+              <div>
+                <div className="muted small">Proactive</div>
+                <pre className="debugPreviewBox">{preview.proactive_decisions.slice(-5).map((item) => `${item.proactive_type || "-"} ${item.trigger || ""} speak=${item.should_speak ? "yes" : "no"} ${item.blocked_reason || item.reason || ""}`).join("\n") || "Sin decisiones proactivas recientes."}</pre>
               </div>
             </div>
           )}
