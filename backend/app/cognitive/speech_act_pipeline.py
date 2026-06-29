@@ -44,9 +44,13 @@ VIEWER_PROXY_PATTERNS = (
 GENERIC_REFUSAL_PATTERNS = (
     r"\bcomo\s+ia\b",
     r"\bsoy\s+(?:una\s+)?(?:ia|asistente)\b",
-    r"\bno\s+puedo\s+(?:proporcionar\w*|ayudarte|asistirte|cumplir)\b",
+    r"\bno\s+puedo\s+(?:proporcionar\w*|dar\s+instrucciones|ayudarte|asistirte|cumplir)\b",
     r"\blo\s+siento,\s+pero\s+no\s+puedo\b",
+    r"\bno\s+esta\s+permitid[oa]\b",
+    r"\bno\s+es\s+apropiad[oa]\b",
     r"\bconsulta\s+a\s+un\s+profesional\b",
+    r"\bconsulta\s+recursos\s+(?:fiables|confiables)\b",
+    r"\bsi\s+quieres,\s+puedo\s+(?:darte|ofrecerte|pasarte)\s+recursos\b",
     r"\bmantengamos\s+(?:un\s+)?(?:ambiente|entorno)\b",
 )
 
@@ -166,6 +170,125 @@ class PolicyDecision:
 
 
 @dataclass(frozen=True)
+class BoundaryStyleProfile:
+    name: str
+    tone: list[str]
+    allowed_content: list[str]
+    forbidden_content: list[str]
+    max_length_chars: int
+    humor_allowed: bool
+    educational_redirect_allowed: bool
+    topic_reset_required: bool
+    address_viewer_by_name: bool
+    mention_leo: bool
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+BOUNDARY_STYLE_PROFILES: dict[str, BoundaryStyleProfile] = {
+    "sharp_stream_boundary": BoundaryStyleProfile(
+        name="sharp_stream_boundary",
+        tone=["short", "sharp", "in_character", "stream_safe"],
+        allowed_content=["brief refusal", "topic reset", "sharp banter"],
+        forbidden_content=["tutorial content", "generic assistant refusal", "resource offer", "long safety lecture"],
+        max_length_chars=130,
+        humor_allowed=True,
+        educational_redirect_allowed=False,
+        topic_reset_required=True,
+        address_viewer_by_name=False,
+        mention_leo=False,
+    ),
+    "playful_stream_boundary": BoundaryStyleProfile(
+        name="playful_stream_boundary",
+        tone=["short", "playful", "stream_safe"],
+        allowed_content=["brief boundary", "light banter"],
+        forbidden_content=["policy lecture", "generic assistant refusal"],
+        max_length_chars=160,
+        humor_allowed=True,
+        educational_redirect_allowed=False,
+        topic_reset_required=False,
+        address_viewer_by_name=True,
+        mention_leo=False,
+    ),
+    "firm_stream_boundary": BoundaryStyleProfile(
+        name="firm_stream_boundary",
+        tone=["short", "firm", "stream_safe"],
+        allowed_content=["clear boundary", "topic reset"],
+        forbidden_content=["moralizing", "generic assistant refusal"],
+        max_length_chars=150,
+        humor_allowed=False,
+        educational_redirect_allowed=False,
+        topic_reset_required=True,
+        address_viewer_by_name=False,
+        mention_leo=False,
+    ),
+    "no_proxy_boundary": BoundaryStyleProfile(
+        name="no_proxy_boundary",
+        tone=["short", "cheeky", "loyal_to_leo", "stream_safe"],
+        allowed_content=["direct reply to viewer", "refuse messenger role"],
+        forbidden_content=["address Leo", "relay viewer message", "claim message delivery"],
+        max_length_chars=150,
+        humor_allowed=True,
+        educational_redirect_allowed=False,
+        topic_reset_required=False,
+        address_viewer_by_name=True,
+        mention_leo=True,
+    ),
+    "owner_loyalty_boundary": BoundaryStyleProfile(
+        name="owner_loyalty_boundary",
+        tone=["short", "loyal_to_leo", "firm", "playful"],
+        allowed_content=["owner order respected", "viewer boundary"],
+        forbidden_content=["perform blocked behavior", "compliment Leo on viewer request"],
+        max_length_chars=160,
+        humor_allowed=True,
+        educational_redirect_allowed=False,
+        topic_reset_required=False,
+        address_viewer_by_name=True,
+        mention_leo=True,
+    ),
+    "private_soft_boundary": BoundaryStyleProfile(
+        name="private_soft_boundary",
+        tone=["short", "warm", "private"],
+        allowed_content=["soft boundary", "brief alternative"],
+        forbidden_content=["policy lecture"],
+        max_length_chars=220,
+        humor_allowed=False,
+        educational_redirect_allowed=True,
+        topic_reset_required=False,
+        address_viewer_by_name=False,
+        mention_leo=True,
+    ),
+    "technical_safety_boundary": BoundaryStyleProfile(
+        name="technical_safety_boundary",
+        tone=["short", "clear", "technical"],
+        allowed_content=["state limitation", "safe next step"],
+        forbidden_content=["false action claim", "unsupported troubleshooting"],
+        max_length_chars=180,
+        humor_allowed=False,
+        educational_redirect_allowed=True,
+        topic_reset_required=False,
+        address_viewer_by_name=False,
+        mention_leo=False,
+    ),
+}
+
+
+def boundary_style_profile_for(blocked_behavior: str | None, reason: str | None = "") -> BoundaryStyleProfile:
+    behavior = _normalize_text(blocked_behavior)
+    reason_norm = _normalize_text(reason)
+    if behavior in {"message to leo", "viewer proxy request", "viewer uses hebe as messenger or proxy"} or reason_norm == "viewer repeat to leo request":
+        return BOUNDARY_STYLE_PROFILES["no_proxy_boundary"]
+    if behavior in {"compliments to leo", "owner behavior block"} or reason_norm in {"owner behavior block", "viewer behavior request"}:
+        return BOUNDARY_STYLE_PROFILES["owner_loyalty_boundary"]
+    if behavior == "sexual stream topic" or reason_norm == "sexual topic stream mode":
+        return BOUNDARY_STYLE_PROFILES["sharp_stream_boundary"]
+    if behavior in {"protected group joke", "viewer override", "viewer command"} or reason_norm in {"protected group joke", "viewer not authority"}:
+        return BOUNDARY_STYLE_PROFILES["firm_stream_boundary"]
+    return BOUNDARY_STYLE_PROFILES["playful_stream_boundary"]
+
+
+@dataclass(frozen=True)
 class SpeechActPlan:
     speech_act_type: str
     goal: str
@@ -184,6 +307,8 @@ class SpeechActPlan:
     response_language: str = "match_speaker"
     avoid_phrases: list[str] = field(default_factory=list)
     risk_notes: list[str] = field(default_factory=list)
+    style_profile: str = ""
+    style_profile_contract: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -478,6 +603,8 @@ def build_universal_speech_act_bundle(
     policy_result: str = "allow",
     policy_reason: str = "allowed",
     allowed_action: str = "respond",
+    blocked_behavior: str = "",
+    style_profile: str = "",
     execution_result: dict[str, Any] | None = None,
     required_facts: list[str] | None = None,
     allowed_content: list[str] | None = None,
@@ -498,7 +625,7 @@ def build_universal_speech_act_bundle(
         source=source,
         raw_text=input_text,
         speaker=speaker,
-        speaker_type="owner" if authority == "owner" else "system",
+        speaker_type="owner" if authority == "owner" else ("viewer" if authority == "viewer" else "system"),
         authority=authority,
         output_target=output_target,
     )
@@ -549,11 +676,13 @@ def build_universal_speech_act_bundle(
         blocked_capabilities=[],
         reason=route,
     )
+    profile = BOUNDARY_STYLE_PROFILES.get(style_profile) if style_profile else boundary_style_profile_for(blocked_behavior, policy_reason)
     policy = PolicyDecision(
         result=policy_result,
         reason=policy_reason,
         allowed_action=allowed_action,
         forbidden_actions=list(forbidden_content or []),
+        blocked_behavior=blocked_behavior,
         needs_boundary_response=speech_act_type in {"viewer_boundary", "owner_boundary", "policy_boundary"},
         authority_constraints={"authority": authority},
     )
@@ -568,18 +697,20 @@ def build_universal_speech_act_bundle(
         goal=goal or _default_goal_for_speech_act(speech_act_type),
         audience=output_target,
         target_speaker=speaker,
-        tone=["short", "in_character", "grounded"],
-        max_length_chars=max_length_chars,
+        tone=list(profile.tone or ["short", "in_character", "grounded"]),
+        max_length_chars=min(max_length_chars, profile.max_length_chars) if speech_act_type in {"viewer_boundary", "owner_boundary", "policy_boundary"} else max_length_chars,
         must_do=list(must_do or []),
-        must_not_do=base_must_not + list(must_not_do or []),
-        allowed_content=list(allowed_content or []),
-        forbidden_content=list(forbidden_content or []),
+        must_not_do=base_must_not + list(must_not_do or []) + list(profile.forbidden_content or []),
+        allowed_content=list(allowed_content or []) + list(profile.allowed_content or []),
+        forbidden_content=list(forbidden_content or []) + list(profile.forbidden_content or []),
         required_facts=list(required_facts or []),
         knowledge_source_summary=_knowledge_summary_for(execution_result, required_facts or []),
         memory_usage_rule=scene_memory.usage_rule,
         response_language=response_language,
         avoid_phrases=["como IA", "puedo ayudarte", "no tengo una respuesta util ahora mismo"],
         risk_notes=["action_claim_guard_required"] if speech_act_type.startswith("action_") or execution_result else [],
+        style_profile=profile.name,
+        style_profile_contract=profile.to_dict(),
     )
     return SpeechActBundle(envelope, scene, scene_memory, cognitive, policy, speech_act, execution_result=execution_result)
 
@@ -641,7 +772,11 @@ def build_repair_renderer_messages(
         "previous_response": previous_response,
         "violations": [item.to_dict() for item in guard_result.violations],
         "instruction": "Rewrite the line with the same speech act and same decision while removing every violation.",
-        "preserve": ["short", "Hebe voice", bundle.speech_act.speech_act_type],
+        "blocked_behavior": bundle.policy_decision.blocked_behavior,
+        "target_style_profile": bundle.speech_act.style_profile,
+        "style_profile_contract": bundle.speech_act.style_profile_contract,
+        "forbidden_actions": bundle.policy_decision.forbidden_actions,
+        "preserve": ["short", "Hebe voice", bundle.speech_act.style_profile or bundle.speech_act.speech_act_type],
         "remove": [
             "messenger wording",
             "implied compliance",
@@ -651,6 +786,7 @@ def build_repair_renderer_messages(
         ],
         "stricter_must_not": bundle.speech_act.must_not_do + [
             "do not change a block decision into an allow decision",
+            "do not perform the blocked behavior",
             "do not mention the repair process",
         ],
         "output_format": "one line only",
@@ -680,10 +816,22 @@ def final_response_guard(
     if bundle.policy_decision.result in {"block", "redirect", "clarify", "context_only"}:
         if _contains_blocked_content(response, bundle):
             violations.append(GuardViolation("blocked_content_leak", "response includes blocked or raw sanitized content"))
+        blocked_violation = _blocked_behavior_violation(response, bundle)
+        if blocked_violation is not None:
+            violations.append(blocked_violation)
     if bundle.scene.speaker_authority == "viewer" and _implies_proxy_behavior(response):
         violations.append(GuardViolation("viewer_messenger_leak", "response implies Hebe will relay or enforce a viewer message"))
     if _matches_any(lowered, GENERIC_REFUSAL_PATTERNS):
         violations.append(GuardViolation("generic_refusal_style", "response sounds like a generic assistant refusal"))
+    metadata_violation = _internal_metadata_violation(response)
+    if metadata_violation is not None:
+        violations.append(metadata_violation)
+    boundary_violation = _boundary_voice_violation(response, bundle)
+    if boundary_violation is not None:
+        violations.append(boundary_violation)
+    stream_violation = _stream_response_quality_violation(response, bundle)
+    if stream_violation is not None:
+        violations.append(stream_violation)
     if _matches_any(lowered, MEMORY_CREEP_PATTERNS):
         violations.append(GuardViolation("memory_creep", "response exposes profile/history too directly"))
     action_claim = action_claim_guard(response, bundle)
@@ -721,6 +869,58 @@ def final_response_guard(
         recommended_action="emit" if passed else "repair",
         game_advice_validation=game_validation,
     )
+
+
+def _internal_metadata_violation(text: str) -> GuardViolation | None:
+    normalized = _normalize_text(text)
+    patterns = (
+        r"\bconfidence\s*[:=]\s*\d",
+        r"\bconfianza\s*[:=]\s*\d",
+        r"\bcommand_sent\b",
+        r"\braw_(?:input|command)\b",
+        r"\bpolicy_(?:decision|reason)\b",
+        r"\bfirewall_(?:decision|reason)\b",
+        r"\binput_trust\b",
+        r"\btrace[_-]?id\b",
+        r"\bdebug\b",
+    )
+    hits = [pattern for pattern in patterns if re.search(pattern, normalized)]
+    if not hits:
+        return None
+    return GuardViolation("internal_metadata_leak", f"response exposes internal/debug metadata: {hits}")
+
+
+def _boundary_voice_violation(text: str, bundle: SpeechActBundle) -> GuardViolation | None:
+    if bundle.speech_act.speech_act_type not in {"viewer_boundary", "owner_boundary", "policy_boundary", "playful_boundary"}:
+        return None
+    normalized = _normalize_text(text)
+    patterns = (
+        r"\bno\s+puedo\b",
+        r"\bpor\s+pedido\s+de\s+un\s+(?:viewer|espectador)\b",
+        r"\bun\s+(?:viewer|espectador)\s+(?:pidio|pidio|quiere|dice)\b",
+        r"\bpolitica\b",
+        r"\bnormas?\s+del\s+canal\b",
+        r"\bsi\s+quieres\b",
+        r"\bpuedo\s+ayudarte\b",
+    )
+    hits = [pattern for pattern in patterns if re.search(pattern, normalized)]
+    if not hits:
+        return None
+    return GuardViolation("boundary_voice_guard", f"boundary wording is generic or leaks viewer-messenger framing: {hits}")
+
+
+def _stream_response_quality_violation(text: str, bundle: SpeechActBundle) -> GuardViolation | None:
+    if bundle.scene.mode != "stream" and bundle.envelope.output_target not in {"twitch_chat", "stream_tts"}:
+        return None
+    normalized = _normalize_text(text)
+    max_chars = int(bundle.speech_act.max_length_chars or 220)
+    if len(str(text or "").strip()) > max(120, min(max_chars, 240)):
+        return GuardViolation("stream_response_too_long", f"length={len(str(text or ''))} max={max_chars}")
+    if any(phrase in normalized for phrase in ("en que puedo ayudarte", "puedo ayudarte", "como asistente", "como ia")):
+        return GuardViolation("stream_generic_assistant_style", "stream response sounds like a generic assistant")
+    if any(phrase in normalized for phrase in ("para compensar", "a cambio", "de todas formas te ofrezco")):
+        return GuardViolation("stream_weird_compensation", "stream response adds irrelevant compensation")
+    return None
 
 
 def action_claim_guard(text: str, bundle: SpeechActBundle) -> FinalResponseGuardResult:
@@ -898,6 +1098,21 @@ class HebeResponsePipeline:
             f"execution_result={bundle.execution_result}",
             flush=True,
         )
+        boundary_passed = "boundary_voice_guard" not in violations
+        print(
+            f"[HEBE][BOUNDARY_VOICE_GUARD] passed={str(boundary_passed).lower()} violations={violations}",
+            flush=True,
+        )
+        metadata_passed = "internal_metadata_leak" not in violations
+        print(
+            f"[HEBE][INTERNAL_METADATA_GUARD] passed={str(metadata_passed).lower()} violations={violations}",
+            flush=True,
+        )
+        stream_quality = [item for item in violations if item.startswith("stream_")]
+        print(
+            f"[HEBE][STREAM_RESPONSE_QUALITY_GUARD] passed={str(not stream_quality).lower()} violations={stream_quality}",
+            flush=True,
+        )
 
     def _debug_contract(
         self,
@@ -988,6 +1203,54 @@ def _implies_proxy_behavior(text: str) -> bool:
         r"\bqueda\s+anotad[oa]\b",
     )
     return any(re.search(pattern, normalized) for pattern in proxy_output_patterns)
+
+
+def _blocked_behavior_violation(response: str, bundle: SpeechActBundle) -> GuardViolation | None:
+    normalized = _normalize_text(response)
+    blocked = _normalize_text(bundle.policy_decision.blocked_behavior or bundle.policy_decision.reason)
+    forbidden = " ".join(_normalize_text(item) for item in bundle.policy_decision.forbidden_actions)
+    combined = f"{blocked} {forbidden}"
+    if any(marker in combined for marker in ("message to leo", "viewer proxy", "messenger", "relay message to leo")):
+        if _implies_proxy_behavior(response) or re.search(r"\bleo\b.*\b(?:mensaje|chat|mira|lee|avisa|quiere|pide)\b", normalized):
+            return GuardViolation(
+                "blocked_behavior_performed",
+                "blocked_behavior=message_to_leo evidence=response addresses Leo or relays a viewer request",
+            )
+    if any(marker in combined for marker in ("compliments to leo", "owner behavior block", "affectionate", "flirtation")):
+        compliment_terms = (
+            "guapo", "guapa", "bonito", "bonita", "precioso", "preciosa", "irresistible",
+            "halago", "piropo", "flor", "amor", "cariño", "carino", "atractivo", "atractiva",
+        )
+        if "leo" in normalized and any(term in normalized for term in compliment_terms):
+            return GuardViolation(
+                "blocked_behavior_performed",
+                "blocked_behavior=compliments_to_leo evidence=response compliments Leo after a viewer request",
+            )
+    if "sexual stream topic" in combined:
+        tutorial_terms = (
+            "paso", "primero", "despues", "coloca", "poner", "usa", "utiliza", "abre",
+            "punta", "base", "aprieta", "desenroll", "condon", "preservativo", "sexo",
+        )
+        resource_terms = ("recursos fiables", "recursos confiables", "consulta", "profesional", "guia", "educacion")
+        if sum(1 for term in tutorial_terms if term in normalized) >= 2 or any(term in normalized for term in resource_terms):
+            return GuardViolation(
+                "blocked_behavior_performed",
+                "blocked_behavior=sexual_stream_topic evidence=response gives tutorial/resource content instead of a stream boundary",
+            )
+    if any(marker in combined for marker in ("viewer override", "viewer command", "viewer not authority")):
+        if any(term in normalized for term in ("obedec", "lo hago", "ahora mismo", "claro que si", "mandas tu")):
+            return GuardViolation(
+                "blocked_behavior_performed",
+                "blocked_behavior=viewer_override evidence=response implies viewer authority",
+            )
+    if "protected group joke" in combined and any(term in normalized for term in ("chiste", "broma")):
+        protected_terms = ("gitan", "judi", "musulman", "negro", "moro", "chino", "gay", "trans")
+        if any(term in normalized for term in protected_terms):
+            return GuardViolation(
+                "blocked_behavior_performed",
+                "blocked_behavior=protected_group_joke evidence=response continues targeted protected-group joke",
+            )
+    return None
 
 
 def _matches_any(text: str, patterns: tuple[str, ...]) -> bool:

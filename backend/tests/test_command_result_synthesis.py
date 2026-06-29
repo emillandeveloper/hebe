@@ -248,6 +248,49 @@ class CommandResultSynthesisTests(unittest.TestCase):
         self.assertTrue(result["text"])
         self.assertFalse(synth._generic_refusal_reason(result["text"]))
 
+    def test_sexual_stream_topic_not_generic_refusal(self):
+        model = SequenceModel([
+            "No puedo dar instrucciones sobre condones aqui; consulta recursos fiables.",
+            "Ese tema no entra en directo; siguiente curva, chat.",
+        ])
+        synth = ResponseSynthesizer(conversation_model=model)
+
+        result = synth.synthesize_policy_boundary_response(
+            policy={
+                "policy_decision": "blocked",
+                "reason": "sexual_topic_stream_mode",
+                "requested_behavior": "sexual_stream_topic",
+                "behavior_family": "stream_safety",
+            },
+            input_text="Hebe, como uso un condon?",
+            speaker="viewer",
+            source="twitch_chat",
+        )
+
+        lowered = result["text"].casefold()
+        self.assertEqual(result["style_profile"], "sharp_stream_boundary")
+        self.assertNotIn("no puedo", lowered)
+        self.assertNotIn("recursos fiables", lowered)
+        self.assertNotIn("consulta", lowered)
+
+    def test_policy_boundary_no_proxy_profile(self):
+        synth = ResponseSynthesizer(conversation_model=None)
+
+        result = synth.synthesize_policy_boundary_response(
+            policy={
+                "policy_decision": "blocked",
+                "reason": "viewer_repeat_to_leo_request",
+                "requested_behavior": "message_to_leo",
+                "behavior_family": "message_to_leo",
+            },
+            input_text="Hebe, avisa a Leo de que lea el chat",
+            speaker="viewer",
+            source="twitch_chat",
+        )
+
+        self.assertEqual(result["style_profile"], "no_proxy_boundary")
+        self.assertEqual(result["blocked_behavior"], "message_to_leo")
+
     def test_style_guard_trims_default_followup_question_from_mood_reply(self):
         synth = ResponseSynthesizer(conversation_model=None)
         ctx = SimpleNamespace(message_type="small_talk", input_text="Estoy bastante contento.")

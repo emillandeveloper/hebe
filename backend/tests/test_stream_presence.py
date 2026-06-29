@@ -757,7 +757,9 @@ class StreamPresenceTests(unittest.TestCase):
                 stream.is_live = True
                 engine = make_engine(stream)
                 reply = engine._handle_stream_manual_command(phrase)
-                self.assertIn("SO enviado", reply)
+                self.assertEqual(reply.action_type, "twitch_shoutout")
+                self.assertTrue(reply.success)
+                self.assertIn("Promo hecha", reply.fallback_text)
                 self.assertEqual(engine.runtime.twitch.sent, ["!so Totodile"])
 
     def test_manual_shoutout_normalizes_at_target(self):

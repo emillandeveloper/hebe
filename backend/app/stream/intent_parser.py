@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import re
+import unicodedata
 
 
 @dataclass(frozen=True)
@@ -10,6 +11,16 @@ class StreamIntentCandidate:
     confidence: float
     entities: dict[str, str] = field(default_factory=dict)
     reason: str = ""
+
+
+@dataclass(frozen=True)
+class PromotionRequest:
+    raw_text: str
+    target_phrase: str
+    stripped_trailing_text: str = ""
+    requested_by: str = "owner"
+    source: str = "owner_stt_direct"
+    confidence: float = 0.0
 
 
 class StreamIntentParser:
@@ -23,6 +34,27 @@ class StreamIntentParser:
     disable_concepts = {"desactiva", "apaga", "pausa", "quita", "disable", "pause", "off"}
     target_prepositions = {"a", "al", "para", "to"}
     filler = {"haz", "hazle", "dale", "manda", "pon", "un", "una", "el", "la", "de", "del", "give"}
+    wake_prefix_re = re.compile(r"^\s*(?:hebe|eve|ebe|e\s*[-.]?\s*b|eb|jebe|heve)[\s,;:.-]+", re.IGNORECASE)
+    promotion_patterns = (
+        re.compile(r"\b(?:haz(?:le)?|dale|tira)\s+(?:una?\s+)?promo\s+a\s+(.+)$", re.IGNORECASE),
+        re.compile(r"\bpromociona\s+a\s+(.+)$", re.IGNORECASE),
+        re.compile(r"\bshoutout\s+(?:a|to)\s+(.+)$", re.IGNORECASE),
+        re.compile(r"\b(?:haz(?:le)?|dale|manda|give)\s+(?:un\s+)?shoutout\s+(?:a|to)\s+(.+)$", re.IGNORECASE),
+        re.compile(r"\b(?:dale|haz)\s+so\s+a\s+(.+)$", re.IGNORECASE),
+    )
+    trailing_banter_patterns = (
+        r"\ba\s+ver\s+si\b.*$",
+        r"\bsi\s+ahora\s+lo\s+hace\b.*$",
+        r"\bque\s+lo\s+haga\b.*$",
+        r"\bpor\s*fa(?:vor)?\b.*$",
+        r"\bvenga\b.*$",
+        r"\bdale\b.*$",
+        r"\bque\s+esta\s+en\s+el\s+chat\b.*$",
+        r"\bque\s+acaba\s+de\s+(?:seguir|hablar)\b.*$",
+        r"\bel\s+que\s+acaba\s+de\s+hablar\b.*$",
+        r"\bel\s+nuevo\b.*$",
+        r"\bel\s+de\s+antes\b.*$",
+    )
 
     def parse(self, text: str, *, raw_text: str | None = None) -> list[StreamIntentCandidate]:
         normalized = self.normalize(text)
@@ -51,6 +83,18 @@ class StreamIntentParser:
         return None
 
     def _parse_shoutout(self, normalized: str, raw_text: str) -> StreamIntentCandidate | None:
+        request = self.parse_promotion_request(raw_text)
+        if request is not None:
+            return StreamIntentCandidate(
+                "twitch_shoutout",
+                request.confidence,
+                entities={
+                    "target_text": request.target_phrase,
+                    "stripped_trailing_text": request.stripped_trailing_text,
+                    "raw_promotion_text": request.raw_text,
+                },
+                reason="promotion_command_parser",
+            )
         tokens = normalized.split()
         if not tokens:
             return None
@@ -66,6 +110,56 @@ class StreamIntentParser:
             entities={"target_text": target_text or ""},
             reason="shoutout_concept",
         )
+
+    def parse_promotion_request(self, text: str, *, source: str = "owner_stt_direct") -> PromotionRequest | None:
+        raw = str(text or "").strip()
+        if not raw:
+            return None
+        command = self.wake_prefix_re.sub("", raw).strip()
+        normalized_command = self.normalize(command)
+        for pattern in self.promotion_patterns:
+            match = pattern.search(command) or pattern.search(normalized_command)
+            if not match:
+                continue
+            target_raw = str(match.group(1) or "").strip(" ,.;:")
+            target, trailing = self._strip_promotion_trailing_banter(target_raw)
+            print(
+                f"[HEBE][PROMOTION_PARSE] raw={raw!r} target_phrase={target!r} trailing_removed={trailing!r}",
+                flush=True,
+            )
+            return PromotionRequest(
+                raw_text=raw,
+                target_phrase=target,
+                stripped_trailing_text=trailing,
+                requested_by="owner",
+                source=source,
+                confidence=0.96 if target else 0.88,
+            )
+        return None
+
+    def _strip_promotion_trailing_banter(self, target_raw: str) -> tuple[str, str]:
+        original = str(target_raw or "").strip(" ,.;:")
+        if not original:
+            return "", ""
+        normalized = self.normalize(original)
+        cut_words: int | None = None
+        for pattern in self.trailing_banter_patterns:
+            match = re.search(pattern, normalized)
+            if not match:
+                continue
+            prefix = normalized[: match.start()].strip()
+            cut_words = len(prefix.split()) if prefix else 0
+            break
+        words = original.split()
+        if cut_words is not None:
+            target = " ".join(words[:cut_words]).strip(" ,.;:")
+            trailing = " ".join(words[cut_words:]).strip(" ,.;:")
+            return target, trailing
+        for separator in (",", ";", " - ", " -- "):
+            if separator in original:
+                target, trailing = original.split(separator, 1)
+                return target.strip(" ,.;:"), trailing.strip(" ,.;:")
+        return original, ""
 
     def _extract_target(self, tokens: list[str], concept_index: int, raw_text: str) -> str:
         tail = tokens[concept_index + 1 :]
@@ -131,7 +225,9 @@ class StreamIntentParser:
         return ""
 
     def normalize(self, text: str) -> str:
-        cleaned = "".join(ch if ch.isalnum() or ch.isspace() or ch == "_" else " " for ch in str(text or "").strip().lower())
+        lowered = str(text or "").strip().lower()
+        lowered = "".join(ch for ch in unicodedata.normalize("NFKD", lowered) if not unicodedata.combining(ch))
+        cleaned = "".join(ch if ch.isalnum() or ch.isspace() or ch == "_" else " " for ch in lowered)
         cleaned = cleaned.replace("á", "a").replace("é", "e").replace("í", "i").replace("ó", "o").replace("ú", "u")
         cleaned = cleaned.replace("ü", "u").replace("ñ", "n")
         return re.sub(r"\s+", " ", cleaned).strip()

@@ -2367,6 +2367,10 @@ input[type="range"]{
   overflow:hidden;
 }
 
+.simulationLab.simple{
+  grid-template-rows:auto auto minmax(0, 1fr);
+}
+
 .simulationTop{
   min-height:0;
   display:flex;
@@ -2374,6 +2378,12 @@ input[type="range"]{
   justify-content:space-between;
   gap:14px;
   padding:12px;
+}
+
+.simulationModeToggle{
+  display:flex;
+  gap:7px;
+  flex:0 0 auto;
 }
 
 .simulationStatusStrip{
@@ -2476,6 +2486,51 @@ input[type="range"]{
 .resultGrid{
   display:grid;
   grid-template-columns:1fr 1fr;
+  gap:8px;
+}
+
+.simpleResultGrid{
+  display:grid;
+  grid-template-columns:1fr;
+  gap:8px;
+}
+
+.simpleResultGrid .simulationFact strong{
+  white-space:normal;
+}
+
+.compactTimeline{
+  min-height:0;
+  display:grid;
+  gap:6px;
+  overflow:auto;
+  padding:8px;
+  border-radius:10px;
+  border:1px solid rgba(255,255,255,0.075);
+  background:rgba(0,0,0,0.16);
+  font-family:"JetBrains Mono", "SFMono-Regular", Menlo, Consolas, monospace;
+  font-size:11px;
+}
+
+.scenarioBox{
+  display:grid;
+  gap:8px;
+  padding:10px;
+  border-radius:10px;
+  border:1px solid rgba(98,199,216,0.16);
+  background:rgba(98,199,216,0.06);
+}
+
+.scenarioSteps{
+  display:grid;
+  gap:4px;
+  color:var(--muted);
+  font-size:11px;
+  overflow-wrap:anywhere;
+}
+
+.advancedDebugGrid{
+  display:grid;
   gap:8px;
 }
 

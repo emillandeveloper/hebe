@@ -17,6 +17,7 @@ from .api.audio import router as audio_router
 from .api.capabilities import router as capabilities_router
 from .core.log_bus import get_recent_logs, install_log_capture
 from .core.persistent_logs import ensure_log_dirs, log_jsonl_event
+from .services.vts_client import get_vts_status
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -380,6 +381,7 @@ def debug_memory():
         "tts_enabled": bool(getattr(state, "tts_enabled", False)),
         "stream_tts_enabled": bool(getattr(policies, "allow_tts_replies", False)),
         "stream_output_mode": str(getattr(stream, "stream_output_mode", "tts_enabled") if stream is not None else "tts_enabled"),
+        "vts_status": get_vts_status(),
         "stt_enabled": bool(getattr(runtime, "stt_enabled", False)),
         "facts_count": db_sqlite.count_memory_facts(active_only=True),
         "chunks_count": count_chunks(active_only=True),

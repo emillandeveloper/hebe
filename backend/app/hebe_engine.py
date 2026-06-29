@@ -398,6 +398,9 @@ class HebeEngine:
         return firewall
 
     def _current_stream_is_live(self) -> bool:
+        override = getattr(self, "_simulation_stream_live_override", None)
+        if override is not None:
+            return bool(override)
         stream = self._get_stream_state()
         return bool(stream and getattr(stream, "is_live", False))
 
@@ -554,6 +557,11 @@ class HebeEngine:
         response_source: str = "hybrid",
         style_guard_triggered: bool = False,
         was_generic_refusal_rewritten: bool = False,
+        style_profile: str = "",
+        blocked_behavior: str = "",
+        tts_route: dict | None = None,
+        speech_budget: dict | None = None,
+        quality_guard: dict | None = None,
     ) -> None:
         trace = self.get_last_policy_trace()
         if not trace:
@@ -565,6 +573,18 @@ class HebeEngine:
         updated["response_source"] = response_source
         updated["style_guard_triggered"] = bool(style_guard_triggered)
         updated["was_generic_refusal_rewritten"] = bool(was_generic_refusal_rewritten)
+        if style_profile:
+            updated["style_profile"] = style_profile
+        if blocked_behavior:
+            updated["blocked_behavior"] = blocked_behavior
+        if isinstance(tts_route, dict):
+            updated["tts_route"] = tts_route
+        if isinstance(speech_budget, dict):
+            updated["speech_budget"] = speech_budget
+            updated["speech_budget_reason"] = speech_budget.get("reason")
+        if isinstance(quality_guard, dict):
+            updated["quality_guard"] = quality_guard
+            updated["quality_guard_result"] = quality_guard.get("result")
         self._last_policy_trace = updated
         stream = self._get_stream_state()
         if stream is not None:
@@ -573,6 +593,31 @@ class HebeEngine:
             except Exception:
                 pass
         print(f"[HEBE][RESPONSE_SOURCE] source={response_source}", flush=True)
+
+    def _enrich_stream_payload(self, payload: dict | None) -> dict:
+        data = dict(payload or {})
+        stream = self._get_stream_state()
+        game = ""
+        activity = ""
+        title = ""
+        stream_live = False
+        if stream is not None:
+            game = str(getattr(stream, "current_game", None) or getattr(stream, "current_category", None) or "").strip()
+            activity = str(getattr(stream, "current_activity", None) or getattr(stream, "current_run_phase", None) or "").strip()
+            title = str(getattr(stream, "current_title", None) or getattr(stream, "title", None) or "").strip()
+            stream_live = bool(
+                getattr(stream, "is_live", False)
+                or (getattr(stream, "enabled", False) and not getattr(stream, "live_status_known", False))
+            )
+        data.setdefault("current_game", game)
+        data.setdefault("current_category", game)
+        data.setdefault("current_activity", activity)
+        data.setdefault("title", title)
+        data.setdefault("stream_live", stream_live)
+        data.setdefault("stream_output_mode", self._stream_output_mode())
+        run = GameRunState.from_value(getattr(self.runtime.state, "game_run_state", None))
+        data.setdefault("game_run_state", run.to_dict())
+        return data
 
     def _synthesize_policy_reply(
         self,
@@ -593,6 +638,7 @@ class HebeEngine:
             "intent": decision.intent,
             "requested_behavior": decision.requested_behavior,
             "behavior_family": decision.behavior_family,
+            "blocked_behavior": decision.requested_behavior or decision.behavior_family or decision.reason,
             "target": decision.target,
             "response_intent": decision.response_intent or "hebe_playful_boundary",
             "response_tone": decision.response_tone or "sarcastic_playful_stream_safe",
@@ -601,11 +647,16 @@ class HebeEngine:
         }
         synthesizer = getattr(self, "response_synthesizer", None)
         if synthesizer is not None and hasattr(synthesizer, "synthesize_policy_boundary_response"):
+            stream_payload = self._enrich_stream_payload({})
             return synthesizer.synthesize_policy_boundary_response(
                 policy=policy_payload,
                 input_text=input_text,
                 speaker=speaker,
                 source=source,
+                current_game=str(stream_payload.get("current_game") or ""),
+                current_activity=str(stream_payload.get("current_activity") or ""),
+                stream_live=bool(stream_payload.get("stream_live")),
+                output_mode=str(stream_payload.get("stream_output_mode") or ""),
             )
         print(
             f"[HEBE][POLICY] reply_generation_failed reason={decision.reason} source=no_persona_response_layer",
@@ -642,11 +693,27 @@ class HebeEngine:
         })
         return []
 
+    def _simulation_stream_live_from_payload(self, payload: dict | None) -> tuple[bool | None, str]:
+        payload = payload or {}
+        mode = str(payload.get("stream_live_mode") or "").strip().lower()
+        if bool(payload.get("force_stream_live")) or mode == "force_stream_live":
+            return True, "force_stream_live"
+        if bool(payload.get("force_stream_offline")) or mode == "force_stream_offline":
+            return False, "force_stream_offline"
+        if bool(payload.get("use_real_stream_state")) or mode == "use_real_stream_state":
+            return None, "use_real_stream_state"
+        if "stream_live" in payload:
+            return bool(payload.get("stream_live")), "explicit_stream_live"
+        return True, "force_stream_live"
+
     def simulate_twitch_message(self, payload: dict) -> dict:
+        self._last_cognitive_trace = {}
+        self._last_input_firewall = {}
         viewer_name = str((payload or {}).get("viewer_name") or (payload or {}).get("user_login") or (payload or {}).get("username") or "viewer").strip()
         display_name = str((payload or {}).get("display_name") or viewer_name).strip()
         text = str((payload or {}).get("text") or (payload or {}).get("message_text") or "").strip()
         channel = str((payload or {}).get("channel") or "").strip()
+        simulated_stream_live, stream_live_mode = self._simulation_stream_live_from_payload(payload)
         event_payload = {
             **(payload or {}),
             "display_name": display_name,
@@ -655,23 +722,40 @@ class HebeEngine:
             "message_text": text,
             "channel": channel,
             "_simulated": True,
+            "stream_live_mode": stream_live_mode,
         }
-        firewall = self._input_firewall_decision(
-            source="twitch_viewer",
-            text=text,
-            username=viewer_name,
-            event_type="twitch_chat_react",
-            addressed_to_hebe=self._message_mentions_hebe(text),
-        )
-        event_payload["input_firewall"] = firewall.as_dict()
-        self.process_internal_event(InternalEvent(
-            event_type="twitch_chat_react",
-            payload=event_payload,
-            created_at=datetime.now(timezone.utc).isoformat(),
-        ))
-        return self._simulation_debug_payload()
+        stream = self._get_stream_state()
+        old_live = getattr(stream, "is_live", False) if stream is not None else False
+        old_known = getattr(stream, "live_status_known", False) if stream is not None else False
+        old_override = getattr(self, "_simulation_stream_live_override", None)
+        if simulated_stream_live is not None:
+            self._simulation_stream_live_override = bool(simulated_stream_live)
+            if stream is not None:
+                stream.is_live = bool(simulated_stream_live)
+                stream.live_status_known = True
+        else:
+            self._simulation_stream_live_override = None
+        try:
+            self.process_internal_event(InternalEvent(
+                event_type="twitch_chat_react",
+                payload=event_payload,
+                created_at=datetime.now(timezone.utc).isoformat(),
+            ))
+            firewall = self._firewall_payload()
+            return self._simulation_debug_payload(extra={
+                "simulated_stream_live": bool(firewall.get("stream_is_live")) if firewall else bool(self._current_stream_is_live()),
+                "stream_live_mode": stream_live_mode,
+                "stream_live_used": bool(firewall.get("stream_is_live")) if firewall else bool(self._current_stream_is_live()),
+            })
+        finally:
+            self._simulation_stream_live_override = old_override
+            if stream is not None and simulated_stream_live is not None:
+                stream.is_live = old_live
+                stream.live_status_known = old_known
 
     def simulate_internal_twitch_event(self, *, event_type: str = "twitch_raid", stream_live: bool = False) -> dict:
+        self._last_cognitive_trace = {}
+        self._last_input_firewall = {}
         stream = self._get_stream_state()
         old_live = getattr(stream, "is_live", False) if stream is not None else False
         old_known = getattr(stream, "live_status_known", False) if stream is not None else False
@@ -691,6 +775,8 @@ class HebeEngine:
                 stream.live_status_known = old_known
 
     def simulate_leo_message(self, text: str, *, source: str = "ui", pending_kind: str | None = None) -> dict:
+        self._last_cognitive_trace = {}
+        self._last_input_firewall = {}
         clean_source = source if source in {"ui", "stt_voice"} else "ui"
         if pending_kind == "appointment_datetime":
             now_ts = time.time()
@@ -743,6 +829,8 @@ class HebeEngine:
         return self._simulation_debug_payload()
 
     def simulate_ambient_stt(self, text: str) -> dict:
+        self._last_cognitive_trace = {}
+        self._last_input_firewall = {}
         clean_text = str(text or "").strip()
         voice_type, mood_hint = self._classify_voice_event(clean_text)
         relevance = ContextRelevance(useful=False, category="none", reason="not_stream_enabled")
@@ -785,6 +873,9 @@ class HebeEngine:
             "last_owner_correction": getattr(stream, "last_owner_correction", None) if stream is not None else None,
             "blocked_comment_categories": list(getattr(stream, "blocked_comment_categories", []) or []) if stream is not None else [],
         }
+        response_debug = self._latest_response_debug_payload() if (trace.get("final_response") or trace.get("hebe_response")) else {}
+        debug_contract = response_debug.get("debug_contract") if isinstance(response_debug, dict) else {}
+        speech_act_plan = debug_contract.get("speech_act_plan") if isinstance(debug_contract, dict) else {}
         payload = {
             "ok": True,
             "event_id": trace.get("event_id"),
@@ -800,18 +891,26 @@ class HebeEngine:
             "matched_by": trace.get("matched_by"),
             "policy_decision": trace.get("policy_decision"),
             "reason": cognitive.get("reason") or trace.get("reason"),
+            "policy_reason": trace.get("reason"),
+            "blocked_behavior": trace.get("blocked_behavior") or trace.get("requested_behavior") or trace.get("behavior_family"),
+            "style_profile": trace.get("style_profile") or ((speech_act_plan or {}).get("style_profile") if isinstance(speech_act_plan, dict) else ""),
             "response_mode": cognitive.get("response_mode") or trace.get("response_mode"),
             "response_source": trace.get("response_source"),
             "allow_free_llm": trace.get("allow_free_llm"),
             "execute_as_command": trace.get("execute_as_command"),
             "style_guard_triggered": trace.get("style_guard_triggered"),
             "was_generic_refusal_rewritten": trace.get("was_generic_refusal_rewritten"),
+            "tts_route": trace.get("tts_route") or {},
+            "speech_budget": trace.get("speech_budget") or {},
+            "speech_budget_reason": trace.get("speech_budget_reason") or "",
+            "quality_guard": trace.get("quality_guard") or {},
+            "quality_guard_result": trace.get("quality_guard_result") or "",
             "hebe_response": trace.get("hebe_response") or "",
             "final_response": cognitive.get("final_response") or trace.get("final_response") or trace.get("hebe_response") or "",
             "last_policy_decision": trace,
             "cognitive_route": cognitive,
-            "raw_input": cognitive.get("raw_text") or cognitive.get("input_text"),
-            "normalized_input": cognitive.get("normalized_text"),
+            "raw_input": cognitive.get("raw_text") or cognitive.get("input_text") or trace.get("text") or "",
+            "normalized_input": cognitive.get("normalized_text") or self._normalize_text(trace.get("text") or ""),
             "active_pending_task": cognitive.get("active_pending_task") or cognitive.get("pending_task_id"),
             "pending_compatibility": cognitive.get("pending_compatible"),
             "is_new_request": cognitive.get("is_new_request"),
@@ -824,6 +923,9 @@ class HebeEngine:
             "should_stop_pipeline": cognitive.get("should_stop_pipeline"),
             "plan_executor_guard": cognitive.get("plan_executor_guard") or [],
             "input_firewall": self._firewall_payload(),
+            "stream_live_used": bool((self._firewall_payload() or {}).get("stream_is_live")),
+            "debug_contract": debug_contract if isinstance(debug_contract, dict) else {},
+            "speech_act": (speech_act_plan or {}).get("speech_act_type") if isinstance(speech_act_plan, dict) else "",
             "is_simulation": True,
             "behavior_blocks": self.get_active_behavior_blocks(),
             "game_state": game_state,
@@ -1659,6 +1761,10 @@ class HebeEngine:
         if route_tokens & {"shoutout", "promo", "raid"} and stream_control:
             hints.append("stream_action")
             hints.append("stream_manual")
+        pending = getattr(self.runtime.state, "pending_clarification", None)
+        if isinstance(pending, dict) and pending.get("kind") == "promotion_target_clarification":
+            hints.append("stream_action")
+            hints.append("stream_manual")
         if re.search(r"\b(?:que|cual)\s+(?:toca|juego|directo|stream)\b", normalized_route):
             hints.append("stream_manual")
         context.route_hints = hints
@@ -2011,6 +2117,9 @@ class HebeEngine:
             return
         event_type = str(getattr(event, "event_type", "") or "")
         payload = getattr(event, "payload", {}) or {}
+        if event_type.startswith("twitch_") and isinstance(payload, dict):
+            payload = self._enrich_stream_payload(payload)
+            event.payload = payload
         event_decision = None
         if event_type.startswith("twitch_"):
             raw_text = str((payload or {}).get("message_text") or (payload or {}).get("text") or "")
@@ -2086,6 +2195,8 @@ class HebeEngine:
                             response_source=str(policy_reply_result.get("response_source") or "hybrid"),
                             style_guard_triggered=bool(policy_reply_result.get("style_guard_triggered")),
                             was_generic_refusal_rewritten=bool(policy_reply_result.get("was_generic_refusal_rewritten")),
+                            style_profile=str(policy_reply_result.get("style_profile") or ""),
+                            blocked_behavior=str(policy_reply_result.get("blocked_behavior") or ""),
                         )
                         self._deliver_twitch_reply(
                             policy_reply,
@@ -3921,12 +4032,18 @@ class HebeEngine:
             and router._is_datetime_answer(normalized)
             and not stronger_request
         )
+        promotion_pending_compatible = bool(
+            active_pending
+            and str(active_pending.get("authority") or "owner") == "owner"
+            and pending_kind == "promotion_target_clarification"
+            and not stronger_request
+        )
         game_pending_updates = (
             router.game_guidance.parse_clarification_answer(active_pending, event.raw_text)
             if active_pending and pending_kind == "game_guidance_clarification" and not stronger_request
             else {}
         )
-        pending_compatible = bool(appointment_pending_compatible or game_pending_updates)
+        pending_compatible = bool(appointment_pending_compatible or promotion_pending_compatible or game_pending_updates)
 
         high_confidence_local_app = bool(
             command_mode
@@ -3936,7 +4053,11 @@ class HebeEngine:
         if pending_compatible:
             source, authority, trust = "owner_stt_followup", "owner", "trusted_followup"
             input_type = "pending_reply"
-            reason = "game_guidance_answer" if game_pending_updates else "datetime_answer"
+            reason = (
+                "game_guidance_answer" if game_pending_updates
+                else "promotion_target_answer" if promotion_pending_compatible
+                else "datetime_answer"
+            )
         elif addressed:
             source, authority, trust = "owner_stt_direct", "owner", "trusted_direct"
             input_type = (
@@ -4024,6 +4145,14 @@ class HebeEngine:
     def _input_event_has_action_intent(self, event: InputEvent | None) -> bool:
         if event is None:
             return False
+        pending = getattr(self.runtime.state, "pending_clarification", None)
+        if isinstance(pending, dict) and pending.get("kind") == "promotion_target_clarification":
+            try:
+                if float(pending.get("expires_at") or 0.0) > time.time():
+                    print("[HEBE][PROMOTION_PENDING] compatible_followup_probe=true", flush=True)
+                    return True
+            except (TypeError, ValueError):
+                pass
         try:
             local_plan = self._get_local_app_planner().plan(
                 event,
@@ -4940,6 +5069,10 @@ class HebeEngine:
         if alias_result is not None:
             return alias_result
 
+        pending_promo = self._resolve_pending_promotion_target(raw_command, normalized, stream)
+        if pending_promo is not None:
+            return pending_promo
+
         preview_result = self._handle_shoutout_preview_intent(raw_command, normalized)
         if preview_result is not None:
             return preview_result
@@ -5606,6 +5739,7 @@ class HebeEngine:
             else:
                 fallback = "Creo que me has pedido un SO, pero necesito confirmación."
                 goal = "Ask Leo to confirm the shoutout target before sending it."
+            self._create_promotion_pending(plan, fallback=fallback)
             return CommandResult(
                 action_type="twitch_shoutout_clarify",
                 success=False,
@@ -5637,6 +5771,11 @@ class HebeEngine:
 
         print(f"[HEBE][ACTION_EXECUTOR] executing action_type={plan.action_type} target={plan.target}", flush=True)
         ok, normalized_target, send_reason = self._send_shoutout(plan.target, source="manual", force=False)
+        if ok:
+            print(
+                f"[HEBE][PROMOTION_EXECUTE] target={normalized_target} command={self._build_shoutout_command_preview(normalized_target)}",
+                flush=True,
+            )
         print(
             "[HEBE][ACTION_EXECUTOR] "
             f"success={ok} action_type={plan.action_type} target={normalized_target} reason={send_reason}",
@@ -5658,8 +5797,8 @@ class HebeEngine:
                     "Do not ask for clarification.",
                 ],
                 suggested_tone="short Hebe stream-control reply",
-                fallback_text=f"SO enviado a {normalized_target}.",
-                requires_model_response=True,
+                fallback_text=f"Promo hecha para {normalized_target}.",
+                requires_model_response=False,
                 metadata={
                     "action_plan": plan.as_log_dict(),
                     "message_goal": f"Tell Leo that the promo/shoutout for {normalized_target} was sent.",
@@ -5681,6 +5820,119 @@ class HebeEngine:
             requires_model_response=False,
             metadata={"action_plan": plan.as_log_dict(), "message_goal": "Tell Leo the shoutout could not be sent."},
         )
+
+    def _create_promotion_pending(self, plan: ActionPlan, *, fallback: str) -> None:
+        now = time.time()
+        pending = {
+            "id": f"promotion_{uuid.uuid4().hex}",
+            "kind": "promotion_target_clarification",
+            "authority": "owner",
+            "expected_followup_type": "twitch_username_or_viewer_alias",
+            "created_at": now,
+            "expires_at": now + 60,
+            "target_raw": (plan.slots or {}).get("target_raw") or (plan.slots or {}).get("target_text") or "",
+            "candidates": list(plan.candidates or []),
+            "reason": plan.reason,
+            "fallback_text": fallback,
+        }
+        self.runtime.state.pending_clarification = pending
+        print(
+            f"[HEBE][PROMOTION_PENDING] created id={pending['id']} reason={plan.reason} candidates={pending['candidates']!r}",
+            flush=True,
+        )
+
+    def _resolve_pending_promotion_target(self, raw_command: str, normalized: str, stream) -> CommandResult | None:
+        pending = getattr(self.runtime.state, "pending_clarification", None)
+        if not isinstance(pending, dict) or pending.get("kind") != "promotion_target_clarification":
+            return None
+        try:
+            if float(pending.get("expires_at") or 0.0) <= time.time():
+                self.runtime.state.pending_clarification = None
+                print(f"[HEBE][PROMOTION_PENDING] expired id={pending.get('id')}", flush=True)
+                return None
+        except (TypeError, ValueError):
+            self.runtime.state.pending_clarification = None
+            print(f"[HEBE][PROMOTION_PENDING] expired id={pending.get('id')}", flush=True)
+            return None
+
+        answer = str(raw_command or normalized or "").strip()
+        answer_norm = self._normalize_text(answer)
+        if answer_norm in {"si", "sí", "ese", "si ese", "sí ese", "ese mismo"}:
+            candidates = list(pending.get("candidates") or [])
+            answer = candidates[0] if candidates else str(pending.get("target_raw") or "")
+        if answer_norm in {"el nuevo", "el de antes", "el que acaba de hablar"}:
+            answer = ""
+
+        pending_candidates = [str(candidate).strip() for candidate in (pending.get("candidates") or []) if str(candidate).strip()]
+        if answer_norm in {"si", "sÃ­", "ese", "si ese", "sÃ­ ese", "ese mismo"} and len(pending_candidates) > 1:
+            answer = ""
+        if not answer and answer_norm in {"el nuevo", "el de antes", "el que acaba de hablar"}:
+            contextual_target = self._promotion_contextual_target(answer_norm, pending_candidates)
+            if contextual_target:
+                answer = contextual_target
+
+        planner = self._get_stream_action_planner()
+        target, confidence, candidates, reason = planner._resolve_target(answer)
+        print(
+            "[HEBE][PROMOTION_RESOLVE] "
+            f"target_phrase={answer!r} candidates={candidates!r} selected={target!r} confidence={confidence:.3f} source={reason}",
+            flush=True,
+        )
+        if not target or confidence < 0.78 or reason in {"ambiguous_target", "medium_confidence", "unverified_username"}:
+            pending["candidates"] = candidates
+            pending["reason"] = reason
+            self.runtime.state.pending_clarification = pending
+            print(f"[HEBE][PROMOTION_CLARIFY] reason={reason or 'not_found'} candidates={candidates!r}", flush=True)
+            return CommandResult(
+                action_type="twitch_shoutout_clarify",
+                success=False,
+                user_visible_summary="Promotion target still unclear.",
+                state_changes={},
+                constraints=["Ask one concise follow-up question.", "Do not claim the shoutout was sent."],
+                fallback_text=(f"¿Te refieres a {candidates[0]}?" if candidates else "No ubico a ese usuario, Leo. Dame el login o alias."),
+                requires_model_response=False,
+                metadata={"pending": pending, "candidates": candidates, "confidence": confidence, "reason": reason},
+            )
+
+        self.runtime.state.pending_clarification = None
+        print(f"[HEBE][PROMOTION_PENDING] resolved id={pending.get('id')} target={target}", flush=True)
+        plan = ActionPlan(
+            action_type="twitch_shoutout",
+            status="complete",
+            confidence=confidence,
+            target=target,
+            command=self._build_shoutout_command_preview(target),
+            requires_stream=True,
+            reason="pending_resolved",
+            candidates=candidates or [target],
+            slots={"target_raw": answer, "resolved_username": target, "pending_id": pending.get("id")},
+        )
+        return self._execute_twitch_shoutout_plan(plan, stream)
+
+    def _promotion_contextual_target(self, answer_norm: str, pending_candidates: list[str]) -> str | None:
+        if len(pending_candidates) == 1:
+            return pending_candidates[0]
+        stream = self._get_stream_state()
+        twitch = getattr(self.runtime, "twitch", None)
+        resolver = getattr(twitch, "target_resolver", None)
+        event_memory = getattr(resolver, "event_memory", None)
+        if answer_norm == "el nuevo":
+            for attr in ("last_follow_username", "last_sub_username"):
+                username = str(getattr(event_memory, attr, "") or "").strip() if event_memory is not None else ""
+                if username:
+                    return username
+        if answer_norm in {"el de antes", "el que acaba de hablar"} and stream is not None:
+            messages = list(getattr(stream, "recent_chat_messages", []) or [])
+            for message in reversed(messages):
+                username = str((message or {}).get("username") or (message or {}).get("display_name") or "").strip()
+                if username:
+                    return username
+        if stream is not None:
+            raid = getattr(stream, "last_raid_event", None) or {}
+            username = str(raid.get("user_login") or raid.get("display_name") or "").strip()
+            if username:
+                return username
+        return None
 
     def _handle_shoutout_preview_intent(self, raw_command: str, normalized: str) -> str | None:
         tokens = set(str(normalized or "").split())
@@ -6894,6 +7146,128 @@ class HebeEngine:
             return False
         return True
 
+    def _stream_message_is_emote_only(self, text: str) -> bool:
+        value = str(text or "").strip()
+        if not value:
+            return True
+        words = [part for part in re.split(r"\s+", value) if part]
+        if len(words) > 4:
+            return False
+        allowed = {"lol", "lmao", "xd", "jaja", "haha", "gg", "pog", "kekw", "omegalul", "clap", "hearts"}
+        for word in words:
+            clean = re.sub(r"[^A-Za-z0-9_:-]", "", word).lower()
+            if not clean:
+                continue
+            if re.match(r"^[:;x=8][-']?[)dpo(/|\\]+$", clean):
+                continue
+            if clean in allowed:
+                continue
+            if re.match(r"^[a-z][a-z0-9_]{2,24}$", clean) and clean.upper() == word:
+                continue
+            return False
+        return True
+
+    def _stream_internal_metadata_guard(self, text: str) -> dict:
+        normalized = self._normalize_text(text)
+        patterns = (
+            r"\bconfidence\s*[:=]\s*\d",
+            r"\bconfianza\s*[:=]\s*\d",
+            r"\bcommand_sent\b",
+            r"\braw_(?:input|command)\b",
+            r"\bpolicy_(?:decision|reason)\b",
+            r"\bfirewall_(?:decision|reason)\b",
+            r"\bdebug\b",
+            r"\bjson\b",
+            r"\btrace[_-]?id\b",
+            r"\binput_trust\b",
+        )
+        violations = [pat for pat in patterns if re.search(pat, normalized)]
+        result = "allow" if not violations else "repair"
+        print(
+            f"[HEBE][INTERNAL_METADATA_GUARD] result={result} violations={violations}",
+            flush=True,
+        )
+        return {"result": result, "violations": violations}
+
+    def _stream_response_quality_guard(self, text: str, *, event_type: str | None, payload: dict | None) -> dict:
+        payload = payload or {}
+        raw = str(payload.get("message_text") or payload.get("text") or "")
+        normalized_reply = self._normalize_text(text)
+        violations: list[str] = []
+        action = "allow"
+        if len(str(text or "").strip()) > 240:
+            violations.append("too_long_for_stream")
+            action = "text_only"
+        if self._stream_message_is_emote_only(raw) and event_type == "twitch_chat_react":
+            violations.append("low_value_emote_only_input")
+            action = "suppress"
+        if any(phrase in normalized_reply for phrase in ("en que puedo ayudarte", "puedo ayudarte", "como asistente", "como ia")):
+            violations.append("generic_assistant_style")
+            action = "repair"
+        metadata = self._stream_internal_metadata_guard(text)
+        if metadata.get("violations"):
+            violations.append("internal_metadata")
+            action = "repair"
+        if "por pedido de un viewer" in normalized_reply or "por pedido de un espectador" in normalized_reply:
+            violations.append("viewer_messenger_wording")
+            action = "repair"
+        print(
+            f"[HEBE][STREAM_RESPONSE_QUALITY_GUARD] result={action} violations={violations}",
+            flush=True,
+        )
+        return {"result": action, "violations": violations, "metadata_guard": metadata}
+
+    def _stream_speech_budget_decision(
+        self,
+        text: str,
+        *,
+        event_type: str | None,
+        payload: dict | None,
+        tts_allowed: bool,
+        quality_guard: dict | None = None,
+    ) -> dict:
+        payload = payload or {}
+        source = "twitch_viewer" if event_type == "twitch_chat_react" else "twitch_system"
+        reason = "allowed"
+        allow_tts = bool(tts_allowed)
+        if not allow_tts:
+            reason = "stream_tts_disabled"
+        elif source == "twitch_viewer":
+            allow_tts = False
+            reason = "viewer_default_text_only"
+        if allow_tts and len(str(text or "").strip()) > 180:
+            allow_tts = False
+            reason = "max_spoken_length"
+        raw = str(payload.get("message_text") or payload.get("text") or "")
+        if allow_tts and raw.strip() and self._stream_message_is_emote_only(raw):
+            allow_tts = False
+            reason = "emote_only_text_only"
+        if allow_tts and isinstance(quality_guard, dict) and quality_guard.get("result") in {"text_only", "suppress", "repair"}:
+            allow_tts = False
+            reason = f"quality_guard_{quality_guard.get('result')}"
+        if source == "twitch_system" and event_type in {"twitch_raid", "twitch_follow", "twitch_sub", "twitch_cheer"} and tts_allowed:
+            allow_tts = True
+            reason = "important_stream_event"
+        route = "stream_tts" if allow_tts else "text_only"
+        decision = {
+            "allow_tts": allow_tts,
+            "route": route,
+            "reason": reason,
+            "source": source,
+            "event_type": event_type or "",
+            "max_spoken_length": 180,
+        }
+        print(
+            f"[HEBE][STREAM_SPEECH_BUDGET] route={route} allow_tts={str(allow_tts).lower()} "
+            f"reason={reason} source={source} event_type={event_type}",
+            flush=True,
+        )
+        print(
+            f"[HEBE][TTS_ROUTE] output_target={route} reason={reason} event_type={event_type}",
+            flush=True,
+        )
+        return decision
+
     def _deliver_twitch_reply(self, text: str, *, event_type: str | None = None, payload: dict | None = None) -> None:
         """
         Entrega un reply al chat de Twitch.
@@ -6901,6 +7275,7 @@ class HebeEngine:
         """
         twitch = getattr(self.runtime, "twitch", None)
         stream = getattr(self.runtime.state, "stream", None)
+        payload = self._enrich_stream_payload(payload)
         is_spontaneous = event_type == "twitch_idle_prompt"
         is_simulated = bool((payload or {}).get("_simulated"))
         if event_type and event_type.startswith("twitch_"):
@@ -6928,6 +7303,33 @@ class HebeEngine:
             return
         output_mode = self._stream_output_mode()
         tts_allowed = self._stream_tts_output_enabled_for_event(event_type)
+        quality_guard = self._stream_response_quality_guard(text, event_type=event_type, payload=payload)
+        if quality_guard.get("result") == "repair":
+            text = "Me quedo con la version corta: eso no sale al directo."
+            quality_guard = self._stream_response_quality_guard(text, event_type=event_type, payload=payload)
+        speech_budget = self._stream_speech_budget_decision(
+            text,
+            event_type=event_type,
+            payload=payload,
+            tts_allowed=tts_allowed,
+            quality_guard=quality_guard,
+        )
+        tts_allowed = bool(speech_budget.get("allow_tts"))
+        tts_route = {
+            "output_target": OUTPUT_TARGET_STREAM_TTS if tts_allowed else OUTPUT_TARGET_TWITCH_CHAT,
+            "route": speech_budget.get("route"),
+            "reason": speech_budget.get("reason"),
+            "event_type": event_type or "",
+        }
+        self._update_policy_trace_response(
+            text,
+            tts_route=tts_route,
+            speech_budget=speech_budget,
+            quality_guard=quality_guard,
+        )
+        if quality_guard.get("result") == "suppress":
+            print("[HEBE][EVENT][TWITCH] suppressed reason=stream_response_quality_guard", flush=True)
+            return
         spontaneous_chat_allowed = False
         spontaneous_chat_reason = ""
         if is_spontaneous:
@@ -7061,7 +7463,7 @@ class HebeEngine:
         if not tts_allowed:
             print("[HEBE][TTS] skipped reason=stream_tts_disabled", flush=True)
             return
-        self._deliver_voice_reply(text, output_target=OUTPUT_TARGET_STREAM_TTS, emit_ui=False, declare_route=False)
+        self._deliver_voice_reply(text, output_target=OUTPUT_TARGET_STREAM_TTS, emit_ui=False, input_type=event_type or "twitch_event", declare_route=False)
 
 
     def _deliver_voice_reply(
@@ -7075,9 +7477,14 @@ class HebeEngine:
     ) -> None:
         if not text:
             return
+        voice_enabled = (
+            self._stream_tts_output_enabled_for_event(input_type)
+            if output_target == OUTPUT_TARGET_STREAM_TTS
+            else self._local_tts_output_enabled()
+        )
         if declare_route:
             targets = [OUTPUT_TARGET_LOCAL_UI] if emit_ui else []
-            if self._local_tts_output_enabled():
+            if voice_enabled:
                 targets.append(output_target)
             self._declare_output_route(
                 input_type=input_type,
@@ -7088,7 +7495,7 @@ class HebeEngine:
             emit("chat.assistant", {**{"text": text, "source": input_type, "output_target": OUTPUT_TARGET_LOCAL_UI}, **self._latest_response_debug_payload()})
         try:
             targets_for_brain = [OUTPUT_TARGET_LOCAL_UI] if emit_ui else []
-            if self._local_tts_output_enabled():
+            if voice_enabled:
                 targets_for_brain.append(output_target)
             self._get_live_session_brain().observe_hebe_utterance(
                 text,
@@ -7101,7 +7508,7 @@ class HebeEngine:
         if not getattr(self.runtime.state, "tts_enabled", False):
             print("[HEBE][TTS] skipped reason=global_disabled", flush=True)
             return
-        if not self._local_tts_output_enabled():
+        if not voice_enabled:
             print("[HEBE][TTS] skipped reason=stream_output_mode", flush=True)
             return
         try:

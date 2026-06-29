@@ -168,6 +168,14 @@ class CognitiveRouter:
                 "allowed_step_types": ["state_update", "reply"], "response_mode": "command_result",
                 "reason": "explicit_wake_state_command"})
 
+        if authority == "owner" and self._is_promotion_command(normalized):
+            return CognitiveDecision(**{**base, "intent": "promotion_shoutout", "intent_confidence": .96,
+                "goal_type": "stream_promotion", "allowed_capabilities": [CAP_TWITCH_PROMOTION, CAP_TWITCH_ACTION],
+                "blocked_capabilities": CREATE_CAPABILITIES + [CAP_OPEN_APP],
+                "allowed_step_types": ["action", "reply"], "response_mode": "command_result",
+                "response_intent": "confirm_stream_promotion", "reason": "deterministic_promotion_command",
+                "action_permission_summary": {"stream_live": stream_is_live, "promotion": True}})
+
         hinted = self._hinted_owner_route(authority, addressed, route_hints, stream_is_live)
         if hinted:
             return CognitiveDecision(**{**base, **hinted})
@@ -270,6 +278,23 @@ class CognitiveRouter:
         if high_priority:
             return replace(decision, **common, pending_reason="new_request_override")
 
+        if kind == "promotion_target_clarification":
+            return replace(
+                decision, **common,
+                intent="promotion_shoutout", intent_confidence=.92,
+                is_new_request=False, uses_pending_task=True,
+                pending_resolution_allowed=True, pending_compatible=True,
+                pending_reason="promotion_target_answer",
+                goal_type="stream_action",
+                allowed_capabilities=[CAP_TWITCH_PROMOTION, CAP_TWITCH_ACTION],
+                blocked_capabilities=CREATE_CAPABILITIES + [CAP_FALLBACK_CHAT],
+                allowed_step_types=["action", "reply"],
+                response_mode="command_result",
+                response_intent="resolve_promotion_target",
+                should_reply=True,
+                reason="compatible_promotion_target_clarification",
+            )
+
         compatible = kind == "appointment_datetime" and self._is_datetime_answer(decision.normalized_text)
         if compatible:
             return replace(
@@ -311,6 +336,18 @@ class CognitiveRouter:
         if source in {"twitch", "twitch_viewer"}:
             return "viewer"
         return "system"
+
+    @staticmethod
+    def _is_promotion_command(text: str) -> bool:
+        value = f" {text or ''} "
+        patterns = (
+            r"\b(?:haz(?:le)?|dale|tira)\s+(?:una?\s+)?promo\s+a\b",
+            r"\bpromociona\s+a\b",
+            r"\bshoutout\s+(?:a|to)\b",
+            r"\b(?:haz(?:le)?|dale|manda|give)\s+(?:un\s+)?shoutout\s+(?:a|to)\b",
+            r"\b(?:dale|haz)\s+so\s+a\b",
+        )
+        return any(re.search(pattern, value) for pattern in patterns)
 
     @staticmethod
     def _is_current_time_query(text: str) -> bool:

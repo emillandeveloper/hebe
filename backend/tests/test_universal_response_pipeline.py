@@ -7,6 +7,7 @@ from app.cognitive.speech_act_pipeline import (
     TestFakeProvider,
     action_claim_guard,
     build_universal_speech_act_bundle,
+    final_response_guard,
 )
 
 
@@ -128,6 +129,52 @@ class UniversalResponsePipelineTests(unittest.TestCase):
 
         self.assertEqual(provider.render(system="s", user="u"), "Linea de prueba.")
         self.assertEqual(provider.provider_name, "test_fake")
+
+    def test_stream_guard_blocks_internal_metadata(self):
+        bundle = build_universal_speech_act_bundle(
+            route="policy_boundary:viewer_proxy_request",
+            speech_act_type="policy_boundary",
+            input_text="Hebe dile a Leo que guarde",
+            source="twitch_chat",
+            output_target="twitch_chat",
+            speaker="Viewer",
+            authority="viewer",
+            mode="stream",
+            policy_result="block",
+            policy_reason="viewer_proxy_request",
+            blocked_behavior="viewer_uses_hebe_as_messenger_or_proxy",
+            style_profile="no_proxy_boundary",
+            stream_live=True,
+        )
+
+        result = final_response_guard("policy_decision=block confidence=0.91 command_sent=false", bundle)
+
+        self.assertFalse(result.passed)
+        self.assertIn("internal_metadata_leak", [item.type for item in result.violations])
+
+    def test_boundary_voice_guard_rejects_generic_viewer_wording(self):
+        bundle = build_universal_speech_act_bundle(
+            route="policy_boundary:sexual_topic_stream_mode",
+            speech_act_type="policy_boundary",
+            input_text="Hebe explica eso",
+            source="twitch_chat",
+            output_target="twitch_chat",
+            speaker="Viewer",
+            authority="viewer",
+            mode="stream",
+            policy_result="block",
+            policy_reason="sexual_topic_stream_mode",
+            blocked_behavior="sexual_stream_topic",
+            style_profile="sharp_stream_boundary",
+            stream_live=True,
+        )
+
+        result = final_response_guard("No puedo ayudarte con eso por pedido de un viewer.", bundle)
+
+        self.assertFalse(result.passed)
+        violation_types = [item.type for item in result.violations]
+        self.assertIn("boundary_voice_guard", violation_types)
+        self.assertIn("generic_refusal_style", violation_types)
 
 
 if __name__ == "__main__":

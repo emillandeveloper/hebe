@@ -8,6 +8,7 @@ from app.cognitive.input_event import InputEvent
 from app.cognitive.action_runtime import ActionRuntime
 from app.cognitive.models import DeliberationResult, ExecutionResult, Plan, PlanStep, StepExecutionResult
 from app.cognitive.response_synthesizer import ResponseSynthesizer
+from app.cognitive.cognitive_router import CognitiveRouter
 from app.cognitive.wake_name_resolver import WakeNameResolver
 from app.core.state import HebeState
 from app.hebe_engine import HebeEngine
@@ -63,6 +64,8 @@ class FakeSynth:
 
     def synthesize_command_result(self, result, **kwargs):
         self.results.append((result, kwargs))
+        if not result.requires_model_response:
+            return result.fallback_text
         return f"modelo:{result.action_type}:{result.state_changes.get('target', result.state_changes.get('app_id', ''))}"
 
 
@@ -299,11 +302,10 @@ class VoiceCommandPipelineTests(unittest.TestCase):
         engine = make_engine()
         planner = engine._get_stream_action_planner()
         cases = {
-            "Hebe haz promo a Nuria": "Nuria",
-            "Haz una promo a Charlie": "Charlie",
+            "Hebe haz promo a Nuria": "nuriiia___",
+            "Haz una promo a Charlie": "er_tito_xarly",
             "Dale SO a Totodile": "Totodile",
             "Promociona a alguien_del_chat": "alguien_del_chat",
-            "Shoutout to randomUser": "randomUser",
         }
         for text, target in cases.items():
             with self.subTest(text=text):
@@ -312,6 +314,101 @@ class VoiceCommandPipelineTests(unittest.TestCase):
                 self.assertEqual(plan.action_type, "twitch_shoutout")
                 self.assertEqual(plan.status, "complete")
                 self.assertEqual(plan.target, target)
+
+    def test_promo_nuria_alias(self):
+        engine = make_engine([])
+
+        result = engine._handle_stream_manual_command("haz promo a Nuria")
+
+        self.assertEqual(result.action_type, "twitch_shoutout")
+        self.assertTrue(result.success)
+        self.assertEqual(result.state_changes["target"], "nuriiia___")
+        self.assertEqual(engine.runtime.twitch.sent, ["!so nuriiia___"])
+
+    def test_promo_charlie_alias_strip_suffix(self):
+        engine = make_engine([])
+
+        result = engine._handle_stream_manual_command("haz promo a Charlie, a ver si ahora lo hace")
+
+        self.assertEqual(result.action_type, "twitch_shoutout")
+        self.assertTrue(result.success)
+        self.assertEqual(result.state_changes["target"], "er_tito_xarly")
+        self.assertEqual(engine.runtime.twitch.sent, ["!so er_tito_xarly"])
+        self.assertNotIn("charlieaversiahoralohace", engine.runtime.twitch.sent[0].lower())
+
+    def test_promo_superdamu_active_viewer_fuzzy(self):
+        engine = make_engine([])
+        engine.observe_twitch_chat_message("superdamu", "SUPERDAMU", "hola", "#chan")
+
+        result = engine._handle_stream_manual_command("E-B, haz una promo a Super Dammu, a ver si lo hace")
+
+        self.assertEqual(result.action_type, "twitch_shoutout")
+        self.assertTrue(result.success)
+        self.assertEqual(result.state_changes["target"], "superdamu")
+        self.assertEqual(engine.runtime.twitch.sent, ["!so superdamu"])
+
+    def test_promo_superdamu_no_wake_followup_after_pending(self):
+        engine = make_engine([])
+        engine.observe_twitch_chat_message("superdamu", "SUPERDAMU", "hola", "#chan")
+
+        first = engine._handle_stream_manual_command("haz promo a usuario_inventado")
+        followup = engine._handle_stream_manual_command("Super Damu")
+
+        self.assertEqual(first.action_type, "twitch_shoutout_clarify")
+        self.assertEqual(followup.action_type, "twitch_shoutout")
+        self.assertTrue(followup.success)
+        self.assertEqual(followup.state_changes["target"], "superdamu")
+        self.assertEqual(engine.runtime.twitch.sent, ["!so superdamu"])
+
+    def test_promo_pending_contextual_recent_chatter_followup(self):
+        engine = make_engine([])
+        engine.observe_twitch_chat_message("superdamu", "SUPERDAMU", "hola", "#chan")
+
+        first = engine._handle_stream_manual_command("haz promo")
+        followup = engine._handle_stream_manual_command("el que acaba de hablar")
+
+        self.assertEqual(first.action_type, "twitch_shoutout_clarify")
+        self.assertEqual(followup.action_type, "twitch_shoutout")
+        self.assertTrue(followup.success)
+        self.assertEqual(followup.state_changes["target"], "superdamu")
+        self.assertEqual(engine.runtime.twitch.sent, ["!so superdamu"])
+
+    def test_promo_low_confidence_asks_clarification(self):
+        engine = make_engine([])
+
+        result = engine._handle_stream_manual_command("shoutout a usuario_inventado")
+
+        self.assertEqual(result.action_type, "twitch_shoutout_clarify")
+        self.assertFalse(result.success)
+        self.assertEqual(engine.runtime.twitch.sent, [])
+        self.assertEqual(engine.runtime.state.pending_clarification["kind"], "promotion_target_clarification")
+
+    def test_no_debug_metadata_in_spoken_promo_response(self):
+        engine = make_engine([])
+        result = engine._handle_stream_manual_command("haz promo a Nuria")
+        reply = engine._synthesize_command_result(result, input_text="haz promo a Nuria")
+
+        self.assertEqual(reply, "Promo hecha para nuriiia___.")
+        self.assertNotIn("confidence", reply.lower())
+        self.assertNotIn("!so", reply.lower())
+        self.assertNotIn("command", reply.lower())
+
+    def test_owner_promotion_command_not_dropped(self):
+        decision = CognitiveRouter().route(SimpleNamespace(
+            input_text="haz promo a Nuria",
+            source="owner_stt_direct",
+            authority="owner",
+            addressed_to_hebe=True,
+            firewall_decision="allow",
+            stream_is_live=True,
+            route_hints=[],
+            state_snapshot={},
+        ))
+
+        self.assertEqual(decision.intent, "promotion_shoutout")
+        self.assertTrue(decision.allows_capability("twitch.promotion"))
+        self.assertEqual(decision.response_mode, "command_result")
+        self.assertTrue(decision.should_reply)
 
     def test_noisy_stt_enters_planner_as_normalized_candidate(self):
         engine = make_engine(["nuria"])
@@ -323,7 +420,7 @@ class VoiceCommandPipelineTests(unittest.TestCase):
         self.assertEqual(normalization.normalized_text, "hebe haz promo a nuria")
         self.assertEqual(plan.action_type, "twitch_shoutout")
         self.assertEqual(plan.status, "complete")
-        self.assertEqual(plan.target, "nuria")
+        self.assertEqual(plan.target, "nuriiia___")
 
     def test_action_executor_sends_shoutout_and_result_goes_to_synthesizer(self):
         engine = make_engine(["nuria"])
@@ -339,8 +436,8 @@ class VoiceCommandPipelineTests(unittest.TestCase):
 
         self.assertEqual(result.action_type, "twitch_shoutout")
         self.assertTrue(result.success)
-        self.assertEqual(engine.runtime.twitch.sent, ["!so nuria"])
-        self.assertEqual(reply, "modelo:twitch_shoutout:nuria")
+        self.assertEqual(engine.runtime.twitch.sent, ["!so nuriiia___"])
+        self.assertEqual(reply, "Promo hecha para nuriiia___.")
 
     def test_recent_chatter_can_resolve_spoken_promo_target(self):
         engine = make_engine([])
@@ -1379,7 +1476,7 @@ class VoiceCommandPipelineTests(unittest.TestCase):
         self.assertTrue(engine._input_event_has_action_intent(event))
         plan = engine._get_stream_action_planner().plan(event)
         self.assertEqual(plan.action_type, "twitch_shoutout")
-        self.assertEqual(plan.target, "nuria")
+        self.assertEqual(plan.target, "nuriiia___")
 
     def test_awake_shoutout_without_despierta_enters_cognition(self):
         engine = make_engine(["nuria"])
@@ -1389,8 +1486,8 @@ class VoiceCommandPipelineTests(unittest.TestCase):
         result = engine.cognitive_flow("haz promo a nuria", source="stt_voice")
 
         self.assertEqual(result, "continue")
-        self.assertEqual(engine.runtime.twitch.sent, ["!so nuria"])
-        self.assertEqual(delivered, [("stt_voice", "modelo:twitch_shoutout:nuria")])
+        self.assertEqual(engine.runtime.twitch.sent, ["!so nuriiia___"])
+        self.assertEqual(delivered, [("stt_voice", "Promo hecha para nuriiia___.")])
 
     def test_awake_hebe_despierta_returns_already_awake(self):
         engine = make_engine(["nuria"])
@@ -1440,7 +1537,7 @@ class VoiceCommandPipelineTests(unittest.TestCase):
         self.assertEqual(wake, "continue")
         self.assertEqual(command, "continue")
         self.assertFalse(engine.runtime.state.hebe_sleeping)
-        self.assertEqual(engine.runtime.twitch.sent, ["!so nuria"])
+        self.assertEqual(engine.runtime.twitch.sent, ["!so nuriiia___"])
         self.assertEqual(delivered[0], ("stt_voice", "modelo:wake_from_sleep:"))
 
 

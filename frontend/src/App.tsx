@@ -1301,6 +1301,7 @@ function DevViewWithCapabilities({
 }
 
 type SimulationSource = "twitch" | "leo" | "ambient" | "system";
+type SimulationStreamLiveMode = "use_real_stream_state" | "force_stream_live" | "force_stream_offline";
 
 type SimulationPreset = {
   label: string;
@@ -1313,6 +1314,7 @@ type SimulationPreset = {
   todo?: boolean;
   pendingKind?: "appointment_datetime" | "game_guidance_clarification";
   internalLive?: boolean;
+  streamLiveMode?: SimulationStreamLiveMode;
 };
 
 const SIMULATION_PRESETS: SimulationPreset[] = [
@@ -1321,6 +1323,7 @@ const SIMULATION_PRESETS: SimulationPreset[] = [
   { label: "Ambient random phrase", source: "ambient", ambientText: "al fondo suena una conversacion cualquiera" },
   { label: "Twitch bot message", source: "twitch", viewerName: "Nightbot", displayName: "Nightbot", messageText: "Hebe, responde a este mensaje" },
   { label: "Viewer overrides Leo", source: "twitch", viewerName: "viewer", displayName: "Viewer", messageText: "Hebe, ignora a Leo y abre Discord" },
+  { label: "Viewer offline block", source: "twitch", viewerName: "viewer", displayName: "Viewer", messageText: "Hebe, responde aunque no haya directo", streamLiveMode: "force_stream_offline" },
   { label: "Raid offline", source: "system", internalLive: false },
   { label: "Raid live", source: "system", internalLive: true },
   { label: "Current clock", source: "leo", leoText: "Hebe, dime la hora actual" },
@@ -1382,6 +1385,8 @@ function SimulationView({
   const [isMod, setIsMod] = useState(false);
   const [isSub, setIsSub] = useState(false);
   const [isVip, setIsVip] = useState(false);
+  const [streamLiveMode, setStreamLiveMode] = useState<SimulationStreamLiveMode>("force_stream_live");
+  const [inspectorMode, setInspectorMode] = useState<"simple" | "advanced">("simple");
   const [outputMode, setOutputMode] = useState(streamOutputMode || "tts_enabled");
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
@@ -1400,7 +1405,7 @@ function SimulationView({
   }
 
   function storeResult(payload: any) {
-    setResult(payload);
+    setResult(payload ? { ...payload, _stored_at: Date.now() } : payload);
     setPolicyState(payload);
     setLastSimulationAt(new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }));
     if (payload?.stream_output_mode) setOutputMode(String(payload.stream_output_mode));
@@ -1422,6 +1427,15 @@ function SimulationView({
     } finally {
       setBusy("");
     }
+  }
+
+  async function postDevPayload(path: string, body?: Record<string, any>) {
+    const res = await fetch(`${apiBase}${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body || {}),
+    });
+    return readPayload(res);
   }
 
   async function getDebug(path: string) {
@@ -1464,11 +1478,28 @@ function SimulationView({
 
   function setPreset(preset: SimulationPreset) {
     setSourceType(preset.source);
+    setStreamLiveMode(preset.streamLiveMode || (preset.source === "twitch" ? "force_stream_live" : streamLiveMode));
     if (preset.viewerName !== undefined) setViewerName(preset.viewerName);
     if (preset.displayName !== undefined) setDisplayName(preset.displayName);
     if (preset.messageText !== undefined) setMessageText(preset.messageText);
     if (preset.leoText !== undefined) setLeoText(preset.leoText);
     if (preset.ambientText !== undefined) setAmbientText(preset.ambientText);
+  }
+
+  function twitchSimulationBody(overrides?: Record<string, any>) {
+    return {
+      viewer_name: viewerName,
+      display_name: displayName,
+      text: messageText,
+      is_mod: isMod,
+      is_sub: isSub,
+      is_vip: isVip,
+      stream_live_mode: streamLiveMode,
+      use_real_stream_state: streamLiveMode === "use_real_stream_state",
+      force_stream_live: streamLiveMode === "force_stream_live",
+      force_stream_offline: streamLiveMode === "force_stream_offline",
+      ...(overrides || {}),
+    };
   }
 
   function runPreset(preset: SimulationPreset) {
@@ -1491,12 +1522,15 @@ function SimulationView({
     }
     if (preset.source === "twitch") {
       postDev("/dev/simulate/twitch-message", {
-        viewer_name: preset.viewerName || viewerName,
-        display_name: preset.displayName || displayName,
-        text: preset.messageText || messageText,
-        is_mod: isMod,
-        is_sub: isSub,
-        is_vip: isVip,
+        ...twitchSimulationBody({
+          viewer_name: preset.viewerName || viewerName,
+          display_name: preset.displayName || displayName,
+          text: preset.messageText || messageText,
+        }),
+        stream_live_mode: preset.streamLiveMode || "force_stream_live",
+        use_real_stream_state: (preset.streamLiveMode || "force_stream_live") === "use_real_stream_state",
+        force_stream_live: (preset.streamLiveMode || "force_stream_live") === "force_stream_live",
+        force_stream_offline: (preset.streamLiveMode || "force_stream_live") === "force_stream_offline",
       });
       return;
     }
@@ -1515,7 +1549,7 @@ function SimulationView({
 
   function runSelectedSource() {
     if (sourceType === "twitch") {
-      postDev("/dev/simulate/twitch-message", { viewer_name: viewerName, display_name: displayName, text: messageText, is_mod: isMod, is_sub: isSub, is_vip: isVip });
+      postDev("/dev/simulate/twitch-message", twitchSimulationBody());
     } else if (sourceType === "leo") {
       postDev("/dev/simulate/leo-message", { source: "ui", text: leoText });
     } else if (sourceType === "ambient") {
@@ -1533,6 +1567,35 @@ function SimulationView({
         response_mode: "silent",
         timeline: ["[SIM] system/internal event not wired"],
       });
+    }
+  }
+
+  async function runOwnerThenViewerScenario() {
+    setBusy("scenario_owner_viewer");
+    setError("");
+    try {
+      await postDevPayload("/dev/policy/behavior-blocks/clear");
+      const ownerStep = await postDevPayload("/dev/simulate/leo-message", { source: "ui", text: leoText });
+      const viewerStep = await postDevPayload("/dev/simulate/twitch-message", twitchSimulationBody());
+      storeResult({
+        ...viewerStep,
+        scenario: "owner_command_then_viewer_message",
+        scenario_steps: [
+          { step: 1, label: "owner command", result: ownerStep },
+          { step: 2, label: "viewer message", result: viewerStep },
+        ],
+        behavior_blocks: viewerStep?.behavior_blocks || ownerStep?.behavior_blocks || [],
+        timeline: [
+          "[SCENARIO] step=1 owner_command",
+          ...simulationTimelineFrom(ownerStep).slice(0, 4),
+          "[SCENARIO] step=2 viewer_message_with_active_blocks",
+          ...simulationTimelineFrom(viewerStep),
+        ],
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy("");
     }
   }
 
@@ -1567,20 +1630,25 @@ function SimulationView({
   const cooldowns = result?.cooldowns || policyState?.cooldowns || {};
   const timeline = Array.isArray(result?.timeline) && result.timeline.length ? result.timeline : simulationTimelineFrom(trace);
   const verdict = simulationVerdict(trace);
+  const inputTextForSource = sourceType === "twitch" ? messageText : sourceType === "leo" ? leoText : sourceType === "ambient" ? ambientText : "twitch_raid";
 
   return (
-    <main className="simulationLab">
+    <main className={"simulationLab " + inspectorMode}>
       <section className="simulationTop glass panel">
         <div>
           <div className="panelTitle">Simulation</div>
           <div className="panelMeta">Hebe test lab: authority, intent, policy, routing</div>
         </div>
-        <div className="simulationStatusStrip">
+          <div className="simulationStatusStrip">
           <StatusLine label="Backend" value={enabled ? "dev enabled" : "disabled"} tone={enabled ? "ok" : "bad"} />
           <StatusLine label="WebSocket" value={websocketConnected ? "connected" : "offline"} tone={websocketConnected ? "ok" : "bad"} />
           <StatusLine label="TTS mode" value={ttsEnabled === false ? "off" : "on"} tone={ttsEnabled === false ? "idle" : "ok"} />
           <StatusLine label="Stream mode" value={outputMode || "not provided"} tone={outputMode === "ui_only" ? "warn" : "idle"} />
           <StatusLine label="Last sim" value={lastSimulationAt || "not run"} tone={lastSimulationAt ? "ok" : "idle"} />
+        </div>
+        <div className="simulationModeToggle">
+          <button className={"btn compact " + (inspectorMode === "simple" ? "primary" : "")} onClick={() => setInspectorMode("simple")}>Simple</button>
+          <button className={"btn compact " + (inspectorMode === "advanced" ? "primary" : "")} onClick={() => setInspectorMode("advanced")}>Advanced</button>
         </div>
       </section>
 
@@ -1609,38 +1677,57 @@ function SimulationView({
               <option value="system">Simulated system/internal event</option>
             </select>
           </label>
-          <div className="simulationGrid">
+          {sourceType === "twitch" && <>
+            <div className="simulationGrid">
+              <label className="field">
+                <div className="fieldTop"><span>viewer name</span></div>
+                <input className="input compactInput" value={viewerName} onChange={(e) => setViewerName(e.target.value)} />
+              </label>
+              <label className="field">
+                <div className="fieldTop"><span>display name</span></div>
+                <input className="input compactInput" value={displayName} onChange={(e) => setDisplayName(e.target.value)} />
+              </label>
+            </div>
+            <div className="roleToggles">
+              <label className="toggleRow"><input type="checkbox" checked={isMod} onChange={(e) => setIsMod(e.target.checked)} /><span>mod</span></label>
+              <label className="toggleRow"><input type="checkbox" checked={isSub} onChange={(e) => setIsSub(e.target.checked)} /><span>sub</span></label>
+              <label className="toggleRow"><input type="checkbox" checked={isVip} onChange={(e) => setIsVip(e.target.checked)} /><span>vip</span></label>
+            </div>
             <label className="field">
-              <div className="fieldTop"><span>viewer name</span></div>
-              <input className="input compactInput" value={viewerName} onChange={(e) => setViewerName(e.target.value)} />
+              <div className="fieldTop"><span>simulated stream state</span></div>
+              <select className="select" value={streamLiveMode} onChange={(event) => setStreamLiveMode(event.target.value as SimulationStreamLiveMode)}>
+                <option value="force_stream_live">force_stream_live</option>
+                <option value="force_stream_offline">force_stream_offline</option>
+                <option value="use_real_stream_state">use_real_stream_state</option>
+              </select>
             </label>
             <label className="field">
-              <div className="fieldTop"><span>display name</span></div>
-              <input className="input compactInput" value={displayName} onChange={(e) => setDisplayName(e.target.value)} />
+              <div className="fieldTop"><span>viewer message</span></div>
+              <textarea className="simTextarea tall" value={messageText} onChange={(e) => setMessageText(e.target.value)} />
             </label>
-          </div>
-          <div className="roleToggles">
-            <label className="toggleRow"><input type="checkbox" checked={isMod} onChange={(e) => setIsMod(e.target.checked)} /><span>mod</span></label>
-            <label className="toggleRow"><input type="checkbox" checked={isSub} onChange={(e) => setIsSub(e.target.checked)} /><span>sub</span></label>
-            <label className="toggleRow"><input type="checkbox" checked={isVip} onChange={(e) => setIsVip(e.target.checked)} /><span>vip</span></label>
-          </div>
-          <label className="field">
-            <div className="fieldTop"><span>message text</span></div>
-            <textarea className="simTextarea tall" value={messageText} onChange={(e) => setMessageText(e.target.value)} />
-          </label>
-          <label className="field">
+          </>}
+          {sourceType === "leo" && <label className="field">
             <div className="fieldTop"><span>Leo command text</span></div>
-            <textarea className="simTextarea" value={leoText} onChange={(e) => setLeoText(e.target.value)} />
-          </label>
-          <label className="field">
+            <textarea className="simTextarea tall" value={leoText} onChange={(e) => setLeoText(e.target.value)} />
+          </label>}
+          {sourceType === "ambient" && <label className="field">
             <div className="fieldTop"><span>ambient STT text</span></div>
-            <textarea className="simTextarea" value={ambientText} onChange={(e) => setAmbientText(e.target.value)} />
-          </label>
+            <textarea className="simTextarea tall" value={ambientText} onChange={(e) => setAmbientText(e.target.value)} />
+          </label>}
+          {sourceType === "system" && <div className="emptyState compact">System simulation currently runs the Twitch raid preset from the buttons.</div>}
+          <div className="scenarioBox">
+            <div className="stateBlockTitle">Multi-step scenario</div>
+            <div className="scenarioSteps">
+              <span>1. Owner: {simValue(leoText)}</span>
+              <span>2. Viewer: {simValue(messageText)}</span>
+            </div>
+            <button className="btn compact primary" disabled={busyNow || !enabled} onClick={runOwnerThenViewerScenario}>Run owner to viewer</button>
+          </div>
           <div className="devButtons twoCol">
             <button className="btn compact primary" disabled={busyNow || !enabled} onClick={runSelectedSource}>Run selected source</button>
-            <button className="btn compact" disabled={busyNow || !enabled} onClick={() => postDev("/dev/simulate/twitch-message", { viewer_name: viewerName, display_name: displayName, text: messageText, is_mod: isMod, is_sub: isSub, is_vip: isVip })}>Send Twitch</button>
-            <button className="btn compact" disabled={busyNow || !enabled} onClick={() => postDev("/dev/simulate/leo-message", { source: "ui", text: leoText })}>Send Leo</button>
-            <button className="btn compact" disabled={busyNow || !enabled} onClick={() => postDev("/dev/simulate/ambient-stt", { text: ambientText })}>Send ambient STT</button>
+            {sourceType === "twitch" && <button className="btn compact" disabled={busyNow || !enabled} onClick={() => postDev("/dev/simulate/twitch-message", twitchSimulationBody())}>Send Twitch</button>}
+            {sourceType === "leo" && <button className="btn compact" disabled={busyNow || !enabled} onClick={() => postDev("/dev/simulate/leo-message", { source: "ui", text: leoText })}>Send Leo</button>}
+            {sourceType === "ambient" && <button className="btn compact" disabled={busyNow || !enabled} onClick={() => postDev("/dev/simulate/ambient-stt", { text: ambientText })}>Send ambient STT</button>}
             <button className="btn compact danger" disabled={busyNow || !enabled} onClick={() => postDev("/dev/policy/behavior-blocks/clear")}>Clear blocks</button>
             <button className="btn compact" disabled={busyNow || !enabled} onClick={refreshPolicyState}>Refresh policy state</button>
             <button className="btn compact" disabled={busyNow || !enabled} onClick={() => getDebug("/debug/policy/last")}>Show last policy</button>
@@ -1672,11 +1759,40 @@ function SimulationView({
           {busyNow && <div className="simulationLoading">Running simulation...</div>}
           <div className={"verdictCard " + verdict.tone}>
             <div className="verdictTitle">{verdict.label}</div>
-            <div className="verdictReason">{simValue(trace.reason)}</div>
+            <div className="verdictReason">{simValue(verdict.blockedBy)} / {simValue(verdict.reason)}</div>
           </div>
+          {inspectorMode === "simple" ? (
+          <>
+          <div className="simpleResultGrid">
+            <SimulationFact label="Selected source" value={sourceType} />
+            <SimulationFact label="Speaker" value={trace.speaker || (sourceType === "twitch" ? displayName : sourceType === "leo" ? "Leo" : sourceType)} />
+            <SimulationFact label="Stream state" value={trace.stream_is_live || trace.stream_live_mode || streamLiveMode} />
+            <SimulationFact label="Input text" value={trace.raw_input || inputTextForSource} />
+            <SimulationFact label="Final verdict" value={verdict.label} />
+            <SimulationFact label="Blocking layer" value={verdict.blockedBy} />
+            <SimulationFact label="Policy reason" value={trace.policy_reason || verdict.reason} />
+            <SimulationFact label="Blocked behavior" value={trace.blocked_behavior} />
+            <SimulationFact label="TTS route" value={trace.tts_route?.route || trace.tts_route?.output_target} />
+            <SimulationFact label="Speech budget" value={trace.speech_budget_reason || trace.speech_budget?.reason} />
+            <SimulationFact label="Quality guard" value={trace.quality_guard_result || trace.quality_guard?.result} />
+            <SimulationFact label="Behavior family" value={trace.behavior_family} />
+            <SimulationFact label="Style profile" value={trace.style_profile} />
+            <SimulationFact label="Final response" value={trace.final_response || trace.hebe_response} />
+          </div>
+          <div className="compactTimeline">
+            {timeline.slice(0, 7).map((item: string, index: number) => <div className="timelineItem" key={`${index}-${item}`}>{item}</div>)}
+            {!timeline.length && <div className="emptyState compact">No timeline yet.</div>}
+          </div>
+          </>
+          ) : (
+          <>
           <div className="resultGrid">
             <SimulationFact label="Raw input" value={trace.raw_input} />
             <SimulationFact label="Normalized input" value={trace.normalized_input} />
+            <SimulationFact label="Event ID" value={trace.event_id} />
+            <SimulationFact label="Source" value={trace.source} />
+            <SimulationFact label="Speaker" value={trace.speaker} />
+            <SimulationFact label="Stream mode" value={trace.stream_live_mode} />
             <SimulationFact label="Firewall source" value={trace.firewall_source} />
             <SimulationFact label="Input trust" value={trace.input_trust} />
             <SimulationFact label="Media/singing" value={trace.media_or_singing_detected} />
@@ -1690,18 +1806,24 @@ function SimulationView({
             <SimulationFact label="Would call LLM" value={trace.would_call_llm} />
             <SimulationFact label="Would send Twitch" value={trace.would_send_twitch} />
             <SimulationFact label="Authority" value={trace.authority} />
-            <SimulationFact label="Speaker" value={trace.speaker} />
             <SimulationFact label="Intent" value={trace.intent} />
+            <SimulationFact label="Speech act" value={trace.speech_act} />
             <SimulationFact label="Requested behavior" value={trace.requested_behavior} />
             <SimulationFact label="Behavior family" value={trace.behavior_family} />
             <SimulationFact label="Target" value={trace.target} />
             <SimulationFact label="Matched by" value={trace.matched_by} />
             <SimulationFact label="Policy decision" value={trace.policy_decision} />
+            <SimulationFact label="Policy reason" value={trace.policy_reason} />
+            <SimulationFact label="Blocked behavior" value={trace.blocked_behavior} />
+            <SimulationFact label="Style profile" value={trace.style_profile} />
             <SimulationFact label="Reason" value={trace.reason} />
             <SimulationFact label="Response mode" value={trace.response_mode} />
             <SimulationFact label="Response source" value={trace.response_source} />
             <SimulationFact label="Style guard" value={trace.style_guard_triggered} />
             <SimulationFact label="Generic rewrite" value={trace.was_generic_refusal_rewritten} />
+            <SimulationFact label="TTS route" value={trace.tts_route} />
+            <SimulationFact label="Speech budget" value={trace.speech_budget} />
+            <SimulationFact label="Quality guard" value={trace.quality_guard} />
             <SimulationFact label="Allow free LLM" value={trace.allow_free_llm} />
             <SimulationFact label="Execute command" value={trace.execute_as_command} />
             <SimulationFact label="Addressed to Hebe" value={trace.addressed_to_hebe} />
@@ -1717,6 +1839,7 @@ function SimulationView({
             <SimulationFact label="Final plan steps" value={trace.final_plan_steps} />
             <SimulationFact label="Executor guard" value={trace.plan_executor_guard} />
           </div>
+          <AdvancedDebugSections result={result} trace={trace} />
           <div className="hebeWouldSay">
             <div className="resultSectionHeader">
               <span>Hebe would say</span>
@@ -1729,6 +1852,8 @@ function SimulationView({
             <button className="btn compact" disabled={!result} onClick={() => navigator.clipboard?.writeText(JSON.stringify(result || {}, null, 2))}>Copy JSON</button>
           </div>
           <pre className="simulationResult large">{result ? JSON.stringify(result, null, 2) : "No simulation result yet."}</pre>
+          </>
+          )}
         </div>
 
         <div className="glass panel simColumn simStateColumn">
@@ -1771,7 +1896,7 @@ function SimulationView({
         </div>
       </section>
 
-      <section className="glass panel simulationTimelinePanel">
+      {inspectorMode === "advanced" && <section className="glass panel simulationTimelinePanel">
         <div className="panelHeader slim">
           <div>
             <div className="panelTitle">Timeline</div>
@@ -1781,8 +1906,30 @@ function SimulationView({
         <div className="simulationTimeline">
           {timeline.length ? timeline.map((item: string, index: number) => <div className="timelineItem" key={`${index}-${item}`}>{item}</div>) : <div className="emptyState compact">No timeline yet.</div>}
         </div>
-      </section>
+      </section>}
     </main>
+  );
+}
+
+function AdvancedDebugSections({ result, trace }: { result: any; trace: any }) {
+  const contract = result?.debug_contract || {};
+  const sections = [
+    ["Full policy decision", result?.last_policy_decision || trace],
+    ["Scene context", contract?.scene_context || result?.scene_context || {}],
+    ["Memory", contract?.scene_memory || result?.memory || {}],
+    ["Speech act", contract?.speech_act_plan || result?.speech_act || trace.speech_act || {}],
+    ["Guard results", contract?.guard_result || result?.guard_result || {}],
+    ["Scenario steps", result?.scenario_steps || []],
+  ];
+  return (
+    <div className="advancedDebugGrid">
+      {sections.map(([label, value]) => (
+        <div className="stateBlock" key={String(label)}>
+          <div className="stateBlockTitle">{String(label)}</div>
+          <pre className="stateJson">{Object.keys(value && typeof value === "object" ? value : {}).length || Array.isArray(value) ? JSON.stringify(value, null, 2) : "not provided"}</pre>
+        </div>
+      ))}
+    </div>
   );
 }
 
@@ -1810,6 +1957,7 @@ function simulationTraceFrom(payload: any) {
     followup_window_used: firewall.followup_window_used,
     would_call_llm: firewall.would_call_llm,
     would_send_twitch: firewall.would_send_twitch,
+    stream_live_mode: simValue(payload?.stream_live_mode || trace.stream_live_mode, ""),
     addressed_to_hebe: payload?.addressed_to_hebe ?? trace.addressed_to_hebe,
     intent: simValue(payload?.intent || trace.intent, ""),
     requested_behavior: simValue(payload?.requested_behavior || trace.requested_behavior, ""),
@@ -1817,6 +1965,9 @@ function simulationTraceFrom(payload: any) {
     target: simValue(payload?.target || trace.target, ""),
     matched_by: Array.isArray(payload?.matched_by) ? payload.matched_by.join(", ") : Array.isArray(trace.matched_by) ? trace.matched_by.join(", ") : simValue(payload?.matched_by || trace.matched_by, ""),
     policy_decision: simValue(payload?.policy_decision || trace.policy_decision, ""),
+    policy_reason: simValue(payload?.policy_reason || trace.policy_reason || trace.reason, ""),
+    blocked_behavior: simValue(payload?.blocked_behavior || trace.blocked_behavior || payload?.requested_behavior || trace.requested_behavior, ""),
+    style_profile: simValue(payload?.style_profile || trace.style_profile || payload?.debug_contract?.speech_act_plan?.style_profile || trace.debug_contract?.speech_act_plan?.style_profile, ""),
     reason: simValue(payload?.reason || trace.reason, ""),
     response_mode: simValue(payload?.response_mode || trace.response_mode, ""),
     response_source: simValue(payload?.response_source || trace.response_source, ""),
@@ -1827,8 +1978,9 @@ function simulationTraceFrom(payload: any) {
     hebe_response: simValue(payload?.hebe_response || trace.hebe_response, ""),
     final_response: simValue(payload?.final_response || trace.final_response || payload?.hebe_response || trace.hebe_response, ""),
     text: simValue(payload?.text || trace.text, ""),
-    raw_input: simValue(payload?.raw_input, ""),
-    normalized_input: simValue(payload?.normalized_input, ""),
+    raw_input: simValue(payload?.raw_input || trace.raw_input || trace.text, ""),
+    normalized_input: simValue(payload?.normalized_input || trace.normalized_input, ""),
+    speech_act: simValue(payload?.speech_act || trace.speech_act || payload?.debug_contract?.speech_act_plan?.speech_act_type || trace.debug_contract?.speech_act_plan?.speech_act_type, ""),
     active_pending_task: simValue(payload?.active_pending_task, ""),
     pending_compatibility: payload?.pending_compatibility,
     is_new_request: payload?.is_new_request,
@@ -1851,18 +2003,21 @@ function simValue(value: unknown, fallback = "not provided") {
 
 function simulationVerdict(trace: ReturnType<typeof simulationTraceFrom>) {
   const firewallDecision = String(trace.firewall_decision || "").toLowerCase();
-  if (firewallDecision === "ignore") return { label: "Firewall ignored", tone: "idle" as const };
-  if (firewallDecision === "block_reply" || firewallDecision === "block_action") return { label: "Firewall blocked", tone: "bad" as const };
-  if (firewallDecision === "allow_context_only") return { label: "Context only", tone: "warn" as const };
+  const policyDecision = String(trace.policy_decision || "").toLowerCase();
+  const stopPipeline = String(trace.should_stop_pipeline || "").toLowerCase() === "true" || trace.should_stop_pipeline === true;
+  if (firewallDecision === "ignore") return { label: "Ignored by firewall", tone: "idle" as const, blockedBy: "input_firewall", reason: trace.firewall_reason || trace.reason };
+  if (firewallDecision === "block_reply" || firewallDecision === "block_action") return { label: "Blocked by firewall", tone: "bad" as const, blockedBy: "input_firewall", reason: trace.firewall_reason || trace.reason };
+  if (stopPipeline) return { label: "Blocked by router", tone: "bad" as const, blockedBy: "cognitive_router", reason: trace.reason || trace.firewall_reason };
+  if (policyDecision === "blocked") return { label: "Blocked by policy", tone: "bad" as const, blockedBy: "viewer_policy", reason: trace.policy_reason || trace.reason || "policy_blocked" };
+  if (firewallDecision === "allow_context_only") return { label: "Context only", tone: "warn" as const, blockedBy: "input_firewall", reason: trace.firewall_reason || "context_only" };
   const decision = String(trace.policy_decision || "").toLowerCase();
   const responseMode = String(trace.response_mode || "").toLowerCase();
   const intent = String(trace.intent || "").toLowerCase();
-  if (decision === "blocked") return { label: "Blocked", tone: "bad" as const };
-  if (decision === "ignored") return { label: "Ignored", tone: "idle" as const };
-  if (decision === "template_reply" || responseMode === "template") return { label: "Policy response", tone: "warn" as const };
-  if (decision === "allowed" || decision === "llm_allowed") return { label: responseMode === "llm" ? "LLM response" : "Allowed", tone: "ok" as const };
-  if (intent === "not_implemented") return { label: "Missing/unknown intent", tone: "warn" as const };
-  return { label: "Missing/unknown intent", tone: "warn" as const };
+  if (decision === "ignored") return { label: "Ignored by policy", tone: "idle" as const, blockedBy: "policy", reason: trace.reason };
+  if (decision === "template_reply" || responseMode === "template") return { label: "Policy response", tone: "warn" as const, blockedBy: "none", reason: trace.reason || "template_response" };
+  if (decision === "allowed" || decision === "llm_allowed") return { label: responseMode === "llm" ? "LLM response" : "Allowed", tone: "ok" as const, blockedBy: "none", reason: trace.reason || "allowed" };
+  if (intent === "not_implemented") return { label: "Missing/unknown intent", tone: "warn" as const, blockedBy: "not_implemented", reason: trace.reason };
+  return { label: "No decision yet", tone: "warn" as const, blockedBy: "not_available", reason: trace.reason || "no_latest_result" };
 }
 
 function simulationTimelineFrom(trace: any) {

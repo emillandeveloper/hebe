@@ -2,6 +2,7 @@
 import os
 import json
 import asyncio
+import time
 import websockets
 
 VTS_HOST = os.getenv("HEBE_VTS_HOST", "127.0.0.1")
@@ -12,6 +13,34 @@ VTS_PLUGIN_AUTHOR = os.getenv("HEBE_VTS_PLUGIN_AUTHOR", "Leo")
 VTS_PLUGIN_ICON = None
 
 VTS_TOKEN_FILE = os.getenv("HEBE_VTS_TOKEN_FILE", "vts_auth_token.txt")
+VTS_RETRY_INTERVAL_SECONDS = float(os.getenv("HEBE_VTS_RETRY_INTERVAL_SECONDS", "30") or 30)
+
+_vts_status = {
+    "status": "unknown",
+    "unavailable_until": 0.0,
+    "last_error": "",
+    "last_attempt": 0.0,
+}
+
+
+def get_vts_status() -> dict:
+    return dict(_vts_status)
+
+
+def _mark_vts_unavailable(error: Exception | str) -> None:
+    message = str(error)
+    _vts_status.update(
+        {
+            "status": "unavailable",
+            "unavailable_until": time.time() + max(1.0, VTS_RETRY_INTERVAL_SECONDS),
+            "last_error": message[:180],
+        }
+    )
+    print(f"[HEBE][VTS_BRIDGE] unavailable retry_in={VTS_RETRY_INTERVAL_SECONDS:.0f}s error={message[:180]}", flush=True)
+
+
+def _vts_retry_blocked() -> bool:
+    return time.time() < float(_vts_status.get("unavailable_until") or 0.0)
 
 
 class VTSClient:
@@ -144,16 +173,28 @@ class VTSClient:
 
 
 async def _vts_hotkey_async(nombre_hotkey: str):
+    _vts_status["status"] = "reconnecting"
+    _vts_status["last_attempt"] = time.time()
+    print(f"[HEBE][VTS_BRIDGE] reconnect_attempt hotkey={nombre_hotkey}", flush=True)
     client = VTSClient()
     try:
         await client.connect()
+        _vts_status["status"] = "connected"
+        _vts_status["last_error"] = ""
         await client.trigger_hotkey(nombre_hotkey)
     finally:
         await client.close()
 
 
 def vts_hotkey(nombre_hotkey: str):
+    if _vts_retry_blocked():
+        remaining = int(float(_vts_status.get("unavailable_until") or 0.0) - time.time())
+        print(f"[HEBE][VTS_BRIDGE] hotkey_skipped hotkey={nombre_hotkey} reason=unavailable cooldown={remaining}s", flush=True)
+        return False
     try:
         asyncio.run(_vts_hotkey_async(nombre_hotkey))
+        return True
     except Exception as e:
+        _mark_vts_unavailable(e)
+        return False
         print(f"❌ Error al disparar hotkey VTS '{nombre_hotkey}': {e}")

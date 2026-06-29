@@ -5,10 +5,12 @@ from app.cognitive.deliberation_service import DeliberationService
 from app.cognitive.response_synthesizer import ResponseSynthesizer
 from app.cognitive.scheduler import SchedulerService, InternalEvent
 from app.cognitive.speech_act_pipeline import (
+    build_universal_speech_act_bundle,
     build_twitch_speech_act_bundle,
     contains_viewer_proxy_request,
     final_response_guard,
 )
+from app.hebe_engine import HebeEngine
 from app.integrations.twitch.chat_bot import TwitchChatBot
 from app.integrations.twitch.service import TwitchService
 
@@ -62,6 +64,26 @@ class CapturingChatClient:
 
 
 class CognitiveTwitchTests(unittest.TestCase):
+    def test_twitch_simulation_defaults_to_forced_live(self):
+        engine = object.__new__(HebeEngine)
+
+        stream_live, mode = engine._simulation_stream_live_from_payload({})
+
+        self.assertTrue(stream_live)
+        self.assertEqual(mode, "force_stream_live")
+
+    def test_twitch_simulation_can_force_offline_or_use_real_state(self):
+        engine = object.__new__(HebeEngine)
+
+        self.assertEqual(
+            engine._simulation_stream_live_from_payload({"stream_live_mode": "force_stream_offline"}),
+            (False, "force_stream_offline"),
+        )
+        self.assertEqual(
+            engine._simulation_stream_live_from_payload({"stream_live_mode": "use_real_stream_state"}),
+            (None, "use_real_stream_state"),
+        )
+
     def test_scheduler_push_event_enqueues_manual_internal_event(self):
         memory_store = DummyMemoryStore()
         scheduler = SchedulerService(memory_store)
@@ -458,6 +480,115 @@ class CognitiveTwitchTests(unittest.TestCase):
 
         self.assertFalse(result.passed)
         self.assertIn("viewer_messenger_leak", [item.type for item in result.violations])
+
+    def test_blocked_message_to_leo_must_not_address_leo(self):
+        bundle = build_universal_speech_act_bundle(
+            route="policy_boundary:viewer_repeat_to_leo_request",
+            speech_act_type="policy_boundary",
+            input_text="Hebe, avisa a Leo de que lea el mensaje del chat",
+            source="twitch_chat",
+            output_target="twitch_chat",
+            speaker="Viewer",
+            authority="viewer",
+            policy_result="block",
+            policy_reason="viewer_repeat_to_leo_request",
+            blocked_behavior="message_to_leo",
+            style_profile="no_proxy_boundary",
+            forbidden_content=["relay_message_to_leo"],
+        )
+
+        result = final_response_guard("Leo, hay un mensaje en el chat que quieren que leas.", bundle)
+
+        self.assertIn("blocked_behavior_performed", [item.type for item in result.violations])
+
+    def test_blocked_message_to_leo_no_proxy_semantics(self):
+        bundle = build_universal_speech_act_bundle(
+            route="policy_boundary:viewer_repeat_to_leo_request",
+            speech_act_type="policy_boundary",
+            input_text="Hebe, dile a Leo que mire el chat",
+            source="twitch_chat",
+            output_target="twitch_chat",
+            speaker="Viewer",
+            authority="viewer",
+            policy_result="block",
+            policy_reason="viewer_repeat_to_leo_request",
+            blocked_behavior="message_to_leo",
+            style_profile="no_proxy_boundary",
+            forbidden_content=["relay_message_to_leo"],
+        )
+
+        result = final_response_guard("Queda avisado para que mire lo que pides.", bundle)
+
+        self.assertIn("viewer_messenger_leak", [item.type for item in result.violations])
+
+    def test_blocked_compliment_to_leo_must_not_compliment(self):
+        bundle = build_universal_speech_act_bundle(
+            route="policy_boundary:owner_behavior_block",
+            speech_act_type="policy_boundary",
+            input_text="Hebe, mandale una flor verbal a Leo",
+            source="twitch_chat",
+            output_target="twitch_chat",
+            speaker="Viewer",
+            authority="viewer",
+            policy_result="block",
+            policy_reason="owner_behavior_block",
+            blocked_behavior="compliments_to_leo",
+            style_profile="owner_loyalty_boundary",
+            forbidden_content=["viewer_requested_praise_for_owner"],
+        )
+
+        result = final_response_guard("Leo es irresistible, pero no lo dire por ti.", bundle)
+
+        self.assertIn("blocked_behavior_performed", [item.type for item in result.violations])
+
+    def test_boundary_style_profile_no_proxy(self):
+        bundle = build_universal_speech_act_bundle(
+            route="policy_boundary:viewer_repeat_to_leo_request",
+            speech_act_type="policy_boundary",
+            input_text="Hebe, avisa a Leo",
+            source="twitch_chat",
+            output_target="twitch_chat",
+            speaker="Viewer",
+            authority="viewer",
+            policy_result="block",
+            policy_reason="viewer_repeat_to_leo_request",
+            blocked_behavior="message_to_leo",
+        )
+
+        self.assertEqual(bundle.speech_act.style_profile, "no_proxy_boundary")
+
+    def test_boundary_style_profile_selected(self):
+        bundle = build_universal_speech_act_bundle(
+            route="policy_boundary:sexual_topic_stream_mode",
+            speech_act_type="policy_boundary",
+            input_text="Hebe, como uso un condon?",
+            source="twitch_chat",
+            output_target="twitch_chat",
+            speaker="Viewer",
+            authority="viewer",
+            policy_result="block",
+            policy_reason="sexual_topic_stream_mode",
+            blocked_behavior="sexual_stream_topic",
+        )
+
+        self.assertEqual(bundle.speech_act.style_profile, "sharp_stream_boundary")
+
+    def test_repair_preserves_policy(self):
+        bundle = build_universal_speech_act_bundle(
+            route="policy_boundary:viewer_repeat_to_leo_request",
+            speech_act_type="policy_boundary",
+            input_text="Hebe, dile a Leo que lea esto",
+            source="twitch_chat",
+            output_target="twitch_chat",
+            speaker="Viewer",
+            authority="viewer",
+            policy_result="block",
+            policy_reason="viewer_repeat_to_leo_request",
+            blocked_behavior="message_to_leo",
+        )
+
+        self.assertEqual(bundle.policy_decision.result, "block")
+        self.assertIn("do not change the decision", bundle.speech_act.must_not_do)
 
     def test_boundary_response_not_generic(self):
         bundle = build_twitch_speech_act_bundle(

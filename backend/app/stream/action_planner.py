@@ -75,13 +75,14 @@ class StreamActionPlanner:
         print(f"[HEBE][ENTITY] extracted={{'target_text': {target_raw!r}}}", flush=True)
         target, target_confidence, candidates, reason = self._resolve_target(target_raw)
         print(
-            "[HEBE][TARGET_RESOLVER] "
+            "[HEBE][PROMOTION_RESOLVE] "
             f"target_text={target_raw!r} resolved={target!r} "
             f"confidence={target_confidence:.3f} reason={reason} candidates={candidates!r}",
             flush=True,
         )
         confidence = min(1.0, (intent_confidence * 0.55) + (target_confidence * 0.45))
         if reason == "ambiguous_target":
+            print(f"[HEBE][PROMOTION_CLARIFY] reason=ambiguous candidates={candidates!r}", flush=True)
             return ActionPlan(
                 action_type="twitch_shoutout",
                 status="needs_confirmation",
@@ -94,6 +95,7 @@ class StreamActionPlanner:
                 slots={"target_raw": target_raw, "target_text": target_raw, "resolved_username": target},
             )
         if not target:
+            print(f"[HEBE][PROMOTION_CLARIFY] reason={reason or 'not_found'} candidates={candidates!r}", flush=True)
             return ActionPlan(
                 action_type="twitch_shoutout",
                 status="needs_confirmation",
@@ -108,6 +110,10 @@ class StreamActionPlanner:
 
         command = self.build_shoutout_command(target)
         status = "complete" if confidence >= 0.78 else "needs_confirmation"
+        if reason in {"medium_confidence", "unverified_username"}:
+            status = "needs_confirmation"
+        if status != "complete":
+            print(f"[HEBE][PROMOTION_CLARIFY] reason=medium_confidence candidates={candidates!r}", flush=True)
         return ActionPlan(
             action_type="twitch_shoutout",
             status=status,
@@ -179,6 +185,7 @@ class StreamActionPlanner:
                 confidence = float(_get_resolution_value(resolved, "confidence") or 0.0)
                 candidates = list(_get_resolution_value(resolved, "candidates") or [])
                 reason = str(_get_resolution_value(resolved, "reason") or "target_unclear")
+                source = str(_get_resolution_value(resolved, "source") or reason)
                 if username:
                     target = self.normalize_target(str(username))
                     if reason == "ambiguous_target":
@@ -219,7 +226,9 @@ class StreamActionPlanner:
         if normalized and re.fullmatch(r"[A-Za-z0-9_]{3,25}", normalized):
             if raw_key.startswith("a") and len(raw_key) > 4:
                 return None, 0.25, [], "target_unclear"
-            return normalized, 0.78, [normalized], "valid_username"
+            if "_" in normalized:
+                return normalized, 0.62, [normalized], "unverified_username"
+            return normalized, 0.82, [normalized], "valid_username"
         return None, 0.0, [], "invalid_target"
 
     def _known_pairs(self) -> list[tuple[str, str]]:

@@ -140,6 +140,10 @@ class ResponseSynthesizer:
         policy_result: str = "allow",
         policy_reason: str = "allowed",
         allowed_action: str = "respond",
+        blocked_behavior: str = "",
+        style_profile: str = "",
+        speaker: str = "Leo",
+        authority: str = "owner",
         execution_result: dict[str, Any] | None = None,
         required_facts: list[str] | None = None,
         allowed_content: list[str] | None = None,
@@ -157,19 +161,22 @@ class ResponseSynthesizer:
     ) -> PipelineResponse:
         source_value = source or str(getattr(context, "source", "") or "ui_text")
         input_value = input_text or str(getattr(context, "input_text", "") or "")
+        stream_mode = bool(stream_live) or output_target in {"twitch_chat", "stream_tts"} or source_value.startswith("twitch")
         bundle = build_universal_speech_act_bundle(
             route=route,
             speech_act_type=speech_act_type,
             input_text=input_value,
             source=source_value,
             output_target=output_target,
-            speaker="Leo",
-            authority="owner",
-            mode="stream" if stream_live else "private",
+            speaker=speaker,
+            authority=authority,
+            mode="stream" if stream_mode else "private",
             goal=goal,
             policy_result=policy_result,
             policy_reason=policy_reason,
             allowed_action=allowed_action,
+            blocked_behavior=blocked_behavior,
+            style_profile=style_profile,
             execution_result=execution_result,
             required_facts=required_facts,
             allowed_content=allowed_content,
@@ -1244,6 +1251,8 @@ class ResponseSynthesizer:
 
     def synthesize_command_result(self, result: CommandResult, *, input_text: str | None = None, state: Any | None = None) -> str:
         fallback = result.fallback_text or result.user_visible_summary or "Hecho."
+        if not result.requires_model_response:
+            return fallback
         response = self._run_universal_response(
             route=f"command_result:{result.action_type}",
             speech_act_type="action_confirmation" if result.success else "action_failure",
@@ -1318,37 +1327,66 @@ class ResponseSynthesizer:
         input_text: str = "",
         speaker: str = "",
         source: str = "",
+        current_game: str = "",
+        current_activity: str = "",
+        stream_live: bool = False,
+        output_mode: str = "",
     ) -> dict[str, Any]:
         reason = str(policy.get("reason") or "")
         response_intent = str(policy.get("response_intent") or "hebe_playful_boundary")
+        requested_behavior = str(policy.get("requested_behavior") or "")
+        behavior_family = str(policy.get("behavior_family") or "")
+        blocked_behavior = requested_behavior or behavior_family or reason
+        style_profile = self._boundary_style_profile(blocked_behavior, reason)
+        is_twitch = source.startswith("twitch")
         fallback = self._policy_boundary_fallback(reason)
         base = {
             "text": "",
             "response_source": "fallback_template",
             "style_guard_triggered": False,
             "was_generic_refusal_rewritten": False,
+            "style_profile": style_profile,
+            "blocked_behavior": blocked_behavior,
         }
+        if self.conversation_model is None:
+            print("[HEBE][PERSONA_RESPONSE] source=fallback_template intent=%s" % response_intent, flush=True)
+            return {**base, "text": fallback}
         response = self._run_universal_response(
             route=f"policy_boundary:{reason or response_intent}",
             speech_act_type="policy_boundary",
             input_text=input_text,
             source=source or "policy_gate",
-            output_target="twitch_chat" if source.startswith("twitch") else "local_ui",
+            output_target="twitch_chat" if is_twitch else "local_ui",
+            speaker=speaker or ("viewer" if is_twitch else "Leo"),
+            authority="viewer" if is_twitch else "owner",
             goal="render the policy boundary without changing the policy decision",
             policy_result="block",
             policy_reason=reason or response_intent,
-            allowed_content=[f"sanitized policy reason: {reason}", f"speaker: {speaker}"],
-            forbidden_content=["blocked content details", "generic assistant refusal", "policy lecture"],
-            must_do=["keep it short", "stay in Hebe voice"],
+            blocked_behavior=blocked_behavior,
+            style_profile=style_profile,
+            allowed_content=[f"sanitized policy reason: {reason}", f"speaker: {speaker}", f"blocked_behavior: {blocked_behavior}", f"style_profile: {style_profile}"],
+            forbidden_content=["blocked content details", "generic assistant refusal", "policy lecture"] + list(policy.get("must_not_include") or []),
+            must_do=["keep it short", "stay in Hebe voice", f"use style profile {style_profile}"],
+            must_not_do=self._boundary_must_not(blocked_behavior, reason),
             fallback=fallback,
-            cleaner=clean_twitch_reply if source.startswith("twitch") else clean_jarvis_reply,
+            cleaner=clean_twitch_reply if is_twitch else clean_jarvis_reply,
             max_length_chars=180,
+            current_game=current_game,
+            current_activity=current_activity or output_mode,
+            stream_live=stream_live,
+        )
+        guard = (response.debug_contract or {}).get("guard_result") or {}
+        violation_types = [str(item.get("type") or "") for item in guard.get("violations") or [] if isinstance(item, dict)]
+        style_guard_triggered = response.response_source in {"persona_repair_generated", "local_safe_fallback"} or any(
+            item in violation_types for item in {"generic_refusal_style", "blocked_behavior_performed", "viewer_messenger_leak"}
         )
         return {
             **base,
             "text": response.text,
-            "response_source": response.response_source,
+            "response_source": "llm_persona_generated" if response.response_source == "persona_repair_generated" else response.response_source,
             "debug_contract": response.debug_contract,
+            "style_guard_triggered": style_guard_triggered,
+            "was_generic_refusal_rewritten": style_guard_triggered,
         }
         if self.conversation_model is None:
             print("[HEBE][PERSONA_RESPONSE] source=fallback_template intent=%s" % response_intent, flush=True)
@@ -1460,6 +1498,37 @@ class ResponseSynthesizer:
         raw = self._call_model(system, user, fallback=fallback, seed=random.randint(1, 999999))
         return clean_twitch_reply(raw).strip()
 
+    def _boundary_style_profile(self, blocked_behavior: str, reason: str) -> str:
+        marker = self._normalize_guard_text(" ".join([blocked_behavior, reason]))
+        if any(item in marker for item in ("message to leo", "viewer repeat to leo request", "viewer proxy")):
+            return "no_proxy_boundary"
+        if any(item in marker for item in ("compliments to leo", "owner behavior block", "viewer behavior request")):
+            return "owner_loyalty_boundary"
+        if "sexual stream topic" in marker or "sexual topic stream mode" in marker:
+            return "sharp_stream_boundary"
+        if "protected group joke" in marker or "viewer not authority" in marker:
+            return "firm_stream_boundary"
+        return "playful_stream_boundary"
+
+    def _boundary_must_not(self, blocked_behavior: str, reason: str) -> list[str]:
+        marker = self._normalize_guard_text(" ".join([blocked_behavior, reason]))
+        base = [
+            "do not perform the blocked behavior",
+            "do not use generic assistant refusal wording",
+            "do not quote policy metadata",
+        ]
+        if any(item in marker for item in ("message to leo", "viewer repeat to leo request", "viewer proxy")):
+            base.extend(["do not address Leo", "do not relay the message", "do not say you will tell Leo", "do not say there is a message for Leo"])
+        if any(item in marker for item in ("compliments to leo", "owner behavior block", "viewer behavior request")):
+            base.extend(["do not compliment Leo", "do not flirt with Leo on viewer request", "do not describe the blocked compliment"])
+        if "sexual stream topic" in marker or "sexual topic stream mode" in marker:
+            base.extend(["do not provide sexual instructions", "do not offer resources", "do not write a safety lecture", "do not use corporate disclaimer language"])
+        if "protected group joke" in marker:
+            base.append("do not continue the protected-group joke")
+        if "viewer not authority" in marker:
+            base.append("do not imply viewer authority")
+        return base
+
     def _generic_refusal_reason(self, text: str) -> str:
         normalized = self._normalize_guard_text(text)
         if not normalized:
@@ -1468,6 +1537,10 @@ class ResponseSynthesizer:
             return "ai_identity_refusal"
         if "no puedo" in normalized and any(stem in normalized for stem in ("proporcion", "dar", "ayud", "responder")):
             return "generic_no_puedo"
+        if "no esta permitido" in normalized or "no es apropiado" in normalized:
+            return "generic_policy_disclaimer"
+        if "si quieres" in normalized and any(stem in normalized for stem in ("recurso", "fiable", "confiable", "explic", "informacion")):
+            return "generic_offer_followup"
         if "no estoy" in normalized and any(stem in normalized for stem in ("capac", "autoriz")):
             return "generic_capability_disclaimer"
         if "debo" in normalized and any(stem in normalized for stem in ("mantener", "evitar", "cumplir")):
