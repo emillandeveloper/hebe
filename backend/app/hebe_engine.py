@@ -40,6 +40,14 @@ from app.cognitive import MemoryStore, SchedulerService
 from app.cognitive.scheduler import InternalEvent
 from app.cognitive.command_result import CommandResult
 from app.cognitive.input_event import InputEnvelope, InputEvent
+from app.cognitive.core_loop import (
+    HebeCoreLoop,
+    PerceivedEvent,
+    PolicyContract,
+    PresenceEngine,
+    UnderstandingResult,
+)
+from app.cognitive.final_emission_gate import FinalEmissionGate, OutputRoute
 from app.cognitive.game_guidance import GameGuidanceCapability, GameRunState
 from app.cognitive.action_plan import ActionPlan
 from app.cognitive.stream_companion_flow import (
@@ -1739,6 +1747,7 @@ class HebeEngine:
         twitch = getattr(self.runtime, "twitch", None)
         shoutout = getattr(twitch, "shoutout", None)
         try:
+            print("[HEBE][RESPONSE_PIPELINE_BYPASS] allowed=true reason=twitch_action_only_shoutout", flush=True)
             if callable(shoutout):
                 ok = bool(shoutout(normalized))
                 command = getattr(twitch, "build_shoutout_command", lambda user: f"!so {user}")(normalized)
@@ -4767,6 +4776,74 @@ class HebeEngine:
             self.response_decision_resolver = resolver
         return resolver
 
+    def _get_presence_engine(self) -> PresenceEngine:
+        engine = getattr(self, "presence_engine", None)
+        if engine is None:
+            engine = PresenceEngine()
+            self.presence_engine = engine
+        return engine
+
+    def _get_core_loop(self) -> HebeCoreLoop:
+        loop = getattr(self, "core_loop", None)
+        if loop is None:
+            loop = HebeCoreLoop(presence_engine=self._get_presence_engine())
+            self.core_loop = loop
+        return loop
+
+    def _get_final_emission_gate(self) -> FinalEmissionGate:
+        gate = getattr(self, "final_emission_gate", None)
+        if gate is None:
+            gate = FinalEmissionGate()
+            self.final_emission_gate = gate
+        return gate
+
+    def _emit_final_response(
+        self,
+        *,
+        event_id: str = "",
+        source: str = "",
+        final_response: str = "",
+        output_route: str | OutputRoute = OutputRoute.SUPPRESS,
+        output_targets: list[str] | tuple[str, ...] | None = None,
+        guard_result: dict | None = None,
+        repair_summary: dict | None = None,
+        execution_result: dict | None = None,
+        debug_payload: dict | None = None,
+        send_twitch_fn=None,
+        speak_fn=None,
+    ) -> dict:
+        def emit_ui(payload: dict) -> None:
+            ui_payload = {
+                "text": payload.get("text", ""),
+                "source": payload.get("source", source),
+                "output_target": payload.get("output_target", OUTPUT_TARGET_LOCAL_UI),
+            }
+            if payload.get("message_id"):
+                ui_payload["message_id"] = payload.get("message_id")
+            if payload.get("debug_contract"):
+                ui_payload["debug_contract"] = payload.get("debug_contract")
+            emit("chat.assistant", ui_payload)
+
+        def emit_debug(payload: dict) -> None:
+            emit("debug.emission", payload)
+
+        result = self._get_final_emission_gate().emit(
+            event_id=event_id,
+            source=source,
+            final_response=final_response,
+            output_route=output_route,
+            output_targets=list(output_targets or []),
+            guard_result=guard_result,
+            repair_summary=repair_summary,
+            execution_result=execution_result,
+            debug_payload=debug_payload,
+            emit_ui=emit_ui,
+            emit_debug=emit_debug,
+            send_twitch=send_twitch_fn,
+            speak=speak_fn,
+        )
+        return result.to_dict()
+
     def _output_targets_for_input_type(self, input_type: str, *, event_type: str | None = None) -> list[str]:
         if input_type in {"ambient_stream_context", "twitch_chat_observed"}:
             return [OUTPUT_TARGET_SILENT_CONTEXT_UPDATE]
@@ -7590,12 +7667,25 @@ class HebeEngine:
             return False
         return True
 
+    def _viewer_talks_about_hebe(self, text: str) -> bool:
+        normalized = self._normalize_guard_text(text)
+        if "hebe" not in normalized and "hebenifelheim" not in normalized:
+            return False
+        return bool(re.search(
+            r"\b(?:hebe|hebenifelheim)\b\s+(?:esta|es|parece|suena|anda|se\s+queda|se\s+ve|va)\b|"
+            r"\b(?:callad[ao]|muda|despierta|dormida|graciosa|seca|afilada|presente)\b.*\b(?:hebe|hebenifelheim)\b|"
+            r"\b(?:hebe|hebenifelheim)\b.*\b(?:callad[ao]|muda|despierta|dormida|graciosa|seca|afilada|presente)\b",
+            normalized,
+        ))
+
     def _classify_twitch_viewer_message(self, text: str, *, payload: dict | None = None) -> str:
         normalized = self._normalize_guard_text(text)
         if not normalized:
             return "meme_or_emote"
         if self._stream_message_is_emote_only(text):
             return "meme_or_emote"
+        if self._viewer_talks_about_hebe(text):
+            return "viewer_talks_about_hebe"
         words = normalized.split()
         if len(words) <= 3 and self._message_mentions_hebe(text):
             if any(token in words for token in {"hola", "buenas", "hey", "ey"}):
@@ -7616,12 +7706,118 @@ class HebeEngine:
             return "meme_or_emote"
         return "low_value_banter"
 
+    def _perceive_twitch_viewer_event(self, *, payload: dict, event_type: str | None, category: str, stream) -> PerceivedEvent:
+        raw = str(payload.get("message_text") or payload.get("text") or "")
+        username = str(payload.get("user_login") or payload.get("username") or payload.get("display_name") or "viewer")
+        normalized = self._normalize_guard_text(raw)
+        event_id = str(payload.get("event_id") or payload.get("message_id") or f"evt_{uuid.uuid4().hex}")
+        return PerceivedEvent(
+            event_id=event_id,
+            source="twitch",
+            source_type="twitch_chat" if event_type == "twitch_chat_react" else "twitch_event",
+            speaker=str(payload.get("display_name") or username),
+            speaker_type="viewer",
+            raw_text=raw,
+            normalized_text=normalized,
+            output_context="stream",
+            stream_live=bool(getattr(stream, "is_live", False)) if stream is not None else False,
+            current_game=str(getattr(stream, "current_game", "") or "") if stream is not None else "",
+            current_activity=str(getattr(stream, "current_activity", "") or "") if stream is not None else "",
+            direct_address_to_hebe=bool(self._message_mentions_hebe(raw)),
+            talks_about_hebe=category == "viewer_talks_about_hebe",
+            mentions_hebe=bool(self._message_mentions_hebe(raw)),
+            talks_to_leo=bool(re.search(r"\bleo\b", normalized)),
+            is_emote_only=category == "meme_or_emote",
+            is_low_value_chat=category in {"low_value_banter", "meme_or_emote", "repeated_meme"},
+            confidence=0.9,
+            twitch_metadata={
+                "event_type": event_type or "",
+                "user_login": username,
+                "category": category,
+                "message_id": payload.get("message_id") or "",
+            },
+        )
+
+    def _understand_twitch_viewer_event(self, *, category: str, perception: PerceivedEvent) -> UnderstandingResult:
+        intent_map = {
+            "viewer_talks_about_hebe": "viewer_talks_about_hebe",
+            "viewer_boundary_needed": "viewer_boundary_needed",
+            "viewer_relay_attempt": "viewer_proxy_request",
+            "viewer_command_attempt": "viewer_command_attempt",
+            "high_value_question": "viewer_direct_question_to_hebe",
+            "simple_social_greeting": "viewer_banter_about_hebe",
+            "low_value_banter": "viewer_low_value_banter",
+            "meme_or_emote": "viewer_emote_only",
+            "repeated_meme": "viewer_emote_only",
+        }
+        pressure = {
+            "viewer_talks_about_hebe": 0.56,
+            "viewer_boundary_needed": 0.88,
+            "viewer_relay_attempt": 0.82,
+            "viewer_command_attempt": 0.72,
+            "high_value_question": 0.64,
+            "simple_social_greeting": 0.35,
+            "low_value_banter": 0.12,
+            "meme_or_emote": 0.02,
+            "repeated_meme": 0.01,
+        }.get(category, 0.2)
+        return UnderstandingResult(
+            intent=intent_map.get(category, "viewer_low_value_banter"),
+            confidence=0.86,
+            authority="viewer",
+            reply_pressure=pressure,
+            requires_policy=True,
+            possible_capability="twitch.reply",
+            social_context=category,
+            risk_flags=["viewer_authority"] if category in {"viewer_command_attempt", "viewer_relay_attempt"} else [],
+        )
+
+    def _policy_contract_for_twitch_category(self, *, category: str) -> PolicyContract:
+        if category in {"viewer_boundary_needed", "viewer_relay_attempt", "viewer_command_attempt"}:
+            return PolicyContract(
+                result="redirect",
+                reason=category,
+                blocked_behavior="viewer_control_or_proxy",
+                forbidden_actions=["owner_control", "viewer_proxy_message"],
+                capability_blocked=["owner_action"],
+                authority_constraints=["viewer_familiarity_does_not_grant_authority"],
+                boundary_required=True,
+                risk_level="medium",
+            )
+        return PolicyContract(
+            result="allow",
+            reason="viewer_interaction",
+            allowed_action="respond_directly",
+            capability_allowed=["twitch.reply"],
+            authority_constraints=["viewer_can_interact_not_command"],
+            risk_level="low",
+        )
+
+    def _log_presence_decision(self, decision: dict) -> None:
+        intervention = dict(decision.get("intervention") or decision)
+        budget = dict(intervention.get("output_budget_result") or {})
+        print(
+            "[HEBE][SOCIAL_BUDGET] "
+            f"allowed={str(bool(budget.get('allowed', True))).lower()} reason={budget.get('reason', 'not_checked')}",
+            flush=True,
+        )
+        print(
+            "[HEBE][PRESENCE_ENGINE] "
+            f"should_intervene={str(bool(intervention.get('should_intervene'))).lower()} "
+            f"level={intervention.get('intervention_level')} "
+            f"social_value={float(intervention.get('social_value_score') or 0.0):.2f} "
+            f"interruption_cost={float(intervention.get('interruption_cost') or 0.0):.2f} "
+            f"reason={intervention.get('reason')}",
+            flush=True,
+        )
+
     def _reply_value_score(self, *, category: str, text: str, response: str, payload: dict | None = None) -> float:
         base = {
             "high_value_question": 0.86,
             "viewer_boundary_needed": 0.92,
             "viewer_relay_attempt": 0.82,
             "viewer_command_attempt": 0.74,
+            "viewer_talks_about_hebe": 0.66,
             "simple_social_greeting": 0.52,
             "low_value_banter": 0.28,
             "meme_or_emote": 0.05,
@@ -7644,34 +7840,53 @@ class HebeEngine:
         category = self._classify_twitch_viewer_message(raw, payload=payload)
         thread_id = self._twitch_thread_id(username=username, text=raw, category=category)
         value_score = self._reply_value_score(category=category, text=raw, response="candidate", payload=payload)
-        if category in {"meme_or_emote", "repeated_meme", "low_value_banter"}:
-            return {
-                "should_generate": False,
-                "route": "observe_only",
-                "reason": category,
-                "category": category,
+        budget = (
+            {"allowed": True, "reason": "low_value_pre_budget"}
+            if category in {"meme_or_emote", "repeated_meme", "low_value_banter"}
+            else self._twitch_reply_budget_allows(stream=stream, username=username, category=category, thread_id=thread_id)
+        )
+        perception = self._perceive_twitch_viewer_event(
+            payload=payload,
+            event_type=event_type,
+            category=category,
+            stream=stream,
+        )
+        understanding = self._understand_twitch_viewer_event(category=category, perception=perception)
+        policy = self._policy_contract_for_twitch_category(category=category)
+        core_decision = self._get_core_loop().process(
+            perception=perception,
+            understanding=understanding,
+            policy=policy,
+            budget_result=budget,
+            thread_result={
                 "thread_id": thread_id,
-                "value_score": value_score,
-            }
-        budget = self._twitch_reply_budget_allows(stream=stream, username=username, category=category, thread_id=thread_id)
-        if not budget.get("allowed"):
+                "category": category,
+                "turn_count": int((getattr(stream, "public_reply_thread_counts", {}) or {}).get(thread_id, 0) or 0),
+            },
+        )
+        payload["core_loop"] = core_decision
+        self._log_presence_decision(core_decision)
+        intervention = dict(core_decision.get("intervention") or {})
+        if not intervention.get("should_intervene"):
             return {
                 "should_generate": False,
-                "route": "observe_only",
-                "reason": str(budget.get("reason") or "budget_exceeded"),
+                "route": str(intervention.get("intervention_level") or "observe_only"),
+                "reason": str(intervention.get("reason") or category),
                 "category": category,
                 "thread_id": thread_id,
                 "value_score": value_score,
                 "budget_result": budget,
+                "presence_decision": intervention,
             }
         return {
             "should_generate": True,
-            "route": "generate",
-            "reason": "public_reply_candidate",
+            "route": str(intervention.get("intervention_level") or "twitch_text_reply"),
+            "reason": str(intervention.get("reason") or "public_reply_candidate"),
             "category": category,
             "thread_id": thread_id,
             "value_score": value_score,
             "budget_result": budget,
+            "presence_decision": intervention,
         }
 
     def _twitch_thread_id(self, *, username: str, text: str, category: str) -> str:
@@ -7966,6 +8181,7 @@ class HebeEngine:
         payload = self._enrich_stream_payload(payload)
         is_spontaneous = event_type == "twitch_idle_prompt"
         is_simulated = bool((payload or {}).get("_simulated"))
+        final_event_id_for_gate = str((payload or {}).get("event_id") or (payload or {}).get("message_id") or (payload or {}).get("assistant_message_id") or f"evt_{uuid.uuid4().hex}")
         if event_type and event_type.startswith("twitch_"):
             raw_text = str((payload or {}).get("message_text") or (payload or {}).get("text") or "")
             username = str((payload or {}).get("user_login") or (payload or {}).get("username") or "")
@@ -8027,6 +8243,15 @@ class HebeEngine:
             )
             print("[HEBE][OUTPUT_ROUTE_DECISION] route=suppress reason=stream_response_quality_guard public=false tts=false", flush=True)
             print("[HEBE][EVENT][TWITCH] suppressed reason=stream_response_quality_guard", flush=True)
+            self._emit_final_response(
+                event_id=final_event_id_for_gate,
+                source="twitch",
+                final_response=text,
+                output_route=OutputRoute.SUPPRESS,
+                output_targets=[],
+                guard_result={"passed": False, "reason": "stream_response_quality_guard"},
+                debug_payload=self._latest_response_debug_payload(),
+            )
             return
         speaker_source = "twitch_viewer" if event_type == "twitch_chat_react" else "twitch_system"
         speaker_ok, speaker_reason = self._target_speaker_guard(
@@ -8047,6 +8272,15 @@ class HebeEngine:
             )
             print(f"[HEBE][OUTPUT_ROUTE_DECISION] route=suppress reason={speaker_reason} public=false tts=false", flush=True)
             print(f"[HEBE][EVENT][TWITCH] suppressed reason={speaker_reason}", flush=True)
+            self._emit_final_response(
+                event_id=final_event_id_for_gate,
+                source="twitch",
+                final_response=text,
+                output_route=OutputRoute.SUPPRESS,
+                output_targets=[],
+                guard_result={"passed": False, "reason": speaker_reason},
+                debug_payload=self._latest_response_debug_payload(),
+            )
             return
         route_policy = self._evaluate_twitch_chat_write_policy(
             text=text,
@@ -8073,6 +8307,15 @@ class HebeEngine:
                 target_speaker_guard_result={"passed": True, "reason": speaker_reason},
             )
             print(f"[HEBE][EVENT][TWITCH] suppressed reason={route_policy.get('reason')}", flush=True)
+            self._emit_final_response(
+                event_id=final_event_id_for_gate,
+                source="twitch",
+                final_response=text,
+                output_route=str(route_policy.get("route") or OutputRoute.OBSERVE_ONLY.value),
+                output_targets=[],
+                guard_result={"passed": False, "reason": str(route_policy.get("reason") or "")},
+                debug_payload=self._latest_response_debug_payload(),
+            )
             return
         input_id = str((payload or {}).get("event_id") or (payload or {}).get("message_id") or "")
         deduped, dedupe_reason = self._output_dedupe_suppressed(
@@ -8093,6 +8336,15 @@ class HebeEngine:
             )
             print(f"[HEBE][OUTPUT_ROUTE_DECISION] route=suppress reason={dedupe_reason} public=false tts=false", flush=True)
             print(f"[HEBE][OUTPUT_DEDUPE] suppressed=true reason={dedupe_reason}", flush=True)
+            self._emit_final_response(
+                event_id=final_event_id_for_gate,
+                source="twitch",
+                final_response=text,
+                output_route=OutputRoute.SUPPRESS,
+                output_targets=[],
+                guard_result={"passed": False, "reason": dedupe_reason},
+                debug_payload=self._latest_response_debug_payload(),
+            )
             return
         spontaneous_chat_allowed = False
         spontaneous_chat_reason = ""
@@ -8149,41 +8401,77 @@ class HebeEngine:
                         )
                 except Exception as exc:
                     print(f"[HEBE][LIVE_SESSION] anchor create failed: {exc!r}", flush=True)
+        final_event_id = input_id or str((payload or {}).get("assistant_message_id") or f"evt_{uuid.uuid4().hex}")
+        gate_source = "spontaneity" if is_spontaneous else "simulation" if is_simulated else "twitch"
+
+        def speak_stream_once(final_text: str) -> None:
+            safe_text = str(final_text or "").replace('"', '\\"')
+            print(f"[HEBE][TTS] speaking output_target={OUTPUT_TARGET_STREAM_TTS} text=\"{safe_text}\"", flush=True)
+            self._remember_tts_text(final_text)
+            self.runtime.speak(final_text, emit_chat=False)
+            self._remember_assistant_text(final_text, source=gate_source)
+
+        def send_twitch_once(final_text: str) -> None:
+            if twitch is None or not twitch.is_available():
+                print("[HEBE][EVENT][TWITCH] service not available, dropping chat reply", flush=True)
+                return
+            if is_spontaneous:
+                print("[HEBE][TWITCH][CHATBOT] send_message reason=spontaneity", flush=True)
+            twitch.send_message(final_text)
+            if stream is not None and not is_spontaneous:
+                self._record_twitch_public_reply(
+                    stream=stream,
+                    username=str((payload or {}).get("user_login") or (payload or {}).get("username") or ""),
+                    category=str(route_policy.get("category") or "stream_event"),
+                    thread_id=str(route_policy.get("thread_id") or ""),
+                )
+            if is_spontaneous:
+                self._record_spontaneous_twitch_chat_sent(final_text, payload)
+            self._remember_assistant_text(final_text, source=gate_source)
+
+        tts_gate_allowed = bool(tts_allowed and getattr(self.runtime.state, "tts_enabled", False) and not is_simulated)
         if is_spontaneous:
-            if spontaneous_chat_allowed and twitch is not None and twitch.is_available():
+            if output_mode == "silent":
+                print("[HEBE][SPONTANEITY] skipped reason=stream_output_mode_silent", flush=True)
+                self._emit_final_response(
+                    event_id=final_event_id,
+                    source="spontaneity",
+                    final_response=text,
+                    output_route=OutputRoute.SUPPRESS,
+                    output_targets=[],
+                    guard_result={"passed": False, "reason": "stream_output_mode_silent"},
+                    debug_payload=self._latest_response_debug_payload(),
+                )
+                return
+            gate_targets = list(targets)
+            if not spontaneous_chat_allowed and OUTPUT_TARGET_LOCAL_UI not in gate_targets:
+                gate_targets.insert(0, OUTPUT_TARGET_LOCAL_UI)
+            gate_route = OutputRoute.TWITCH_TEXT_REPLY if OUTPUT_TARGET_TWITCH_CHAT in gate_targets else (
+                OutputRoute.STREAM_TTS_REPLY if OUTPUT_TARGET_STREAM_TTS in gate_targets else OutputRoute.LOCAL_OWNER_REPLY
+            )
+            gate_result = self._emit_final_response(
+                event_id=final_event_id,
+                source="spontaneity",
+                final_response=text,
+                output_route=gate_route,
+                output_targets=gate_targets,
+                guard_result={"passed": True},
+                debug_payload=self._latest_response_debug_payload(),
+                send_twitch_fn=send_twitch_once if OUTPUT_TARGET_TWITCH_CHAT in gate_targets else None,
+                speak_fn=speak_stream_once if OUTPUT_TARGET_STREAM_TTS in gate_targets and tts_gate_allowed else None,
+            )
+            if gate_result.get("emitted"):
                 try:
-                    print("[HEBE][TWITCH][CHATBOT] send_message reason=spontaneity", flush=True)
-                    twitch.send_message(str(text or "").strip())
-                    self._remember_assistant_text(text, source="spontaneity")
-                    self._record_spontaneous_twitch_chat_sent(text, payload)
-                    try:
-                        anchor_id = str((payload or {}).get("used_fact_id") or (payload or {}).get("anchor_id") or (payload or {}).get("idle_topic") or "").strip() or None
-                        self._get_live_session_brain().observe_hebe_utterance(
-                            text,
-                            output_target=targets,
-                            input_type="spontaneity",
-                            anchor_id=anchor_id,
-                            topic=(payload or {}).get("idle_topic"),
-                        )
-                        self._get_live_session_brain().consume_anchor(anchor_id)
-                    except Exception as exc:
-                        print(f"[HEBE][LIVE_SESSION] hebe spontaneity record failed: {exc!r}", flush=True)
-                except Exception as e:
-                    print(f"[HEBE][EVENT][TWITCH] send_message failed: {e!r}", flush=True)
-            else:
-                if output_mode == "silent":
-                    print("[HEBE][SPONTANEITY] skipped reason=stream_output_mode_silent", flush=True)
-                    return
-                emit("chat.assistant", {**{"text": text, "source": "spontaneity", "output_target": OUTPUT_TARGET_LOCAL_UI}, **self._latest_response_debug_payload()})
-                self._remember_assistant_text(text, source="spontaneity")
-                try:
+                    anchor_id = str((payload or {}).get("used_fact_id") or (payload or {}).get("anchor_id") or (payload or {}).get("idle_topic") or "").strip() or None
                     self._get_live_session_brain().observe_hebe_utterance(
                         text,
-                        output_target=targets,
+                        output_target=gate_targets,
                         input_type="spontaneity",
-                        anchor_id=str((payload or {}).get("used_fact_id") or (payload or {}).get("idle_topic") or "").strip() or None,
+                        anchor_id=anchor_id,
                         topic=(payload or {}).get("idle_topic"),
                     )
+                    if OUTPUT_TARGET_TWITCH_CHAT in gate_targets:
+                        self._get_live_session_brain().consume_anchor(anchor_id)
                 except Exception as exc:
                     print(f"[HEBE][LIVE_SESSION] hebe spontaneity record failed: {exc!r}", flush=True)
         elif is_simulated or output_mode == "ui_only":
@@ -8199,30 +8487,53 @@ class HebeEngine:
                 stream_persona_quality_result=route_policy.get("stream_persona_quality_result"),
                 target_speaker_guard_result={"passed": True, "reason": speaker_reason},
             )
-            emit("chat.assistant", {**{"text": text, "source": "simulation" if is_simulated else "twitch", "output_target": OUTPUT_TARGET_LOCAL_UI}, **self._latest_response_debug_payload()})
-            self._remember_assistant_text(text, source="simulation" if is_simulated else "twitch")
-            try:
-                self._get_live_session_brain().observe_hebe_utterance(
-                    text,
-                    output_target=targets,
-                    input_type="twitch_mention_or_event",
-                    topic=event_type or "twitch_event",
-                )
-            except Exception as exc:
-                print(f"[HEBE][LIVE_SESSION] hebe twitch record failed: {exc!r}", flush=True)
+            gate_result = self._emit_final_response(
+                event_id=final_event_id,
+                source="simulation" if is_simulated else "twitch",
+                final_response=text,
+                output_route=OutputRoute.LOCAL_UI_DEBUG_ONLY,
+                output_targets=[OUTPUT_TARGET_LOCAL_UI],
+                guard_result={"passed": True},
+                debug_payload=self._latest_response_debug_payload(),
+            )
+            if gate_result.get("emitted"):
+                self._remember_assistant_text(text, source="simulation" if is_simulated else "twitch")
+                try:
+                    self._get_live_session_brain().observe_hebe_utterance(
+                        text,
+                        output_target=targets,
+                        input_type="twitch_mention_or_event",
+                        topic=event_type or "twitch_event",
+                    )
+                except Exception as exc:
+                    print(f"[HEBE][LIVE_SESSION] hebe twitch record failed: {exc!r}", flush=True)
         elif output_mode == "silent":
             print("[HEBE][EVENT][TWITCH] output_mode=silent dropping chat reply", flush=True)
+            self._emit_final_response(
+                event_id=final_event_id,
+                source="twitch",
+                final_response=text,
+                output_route=OutputRoute.SUPPRESS,
+                output_targets=[],
+                guard_result={"passed": False, "reason": "stream_output_mode_silent"},
+                debug_payload=self._latest_response_debug_payload(),
+            )
             return
         elif twitch is not None and twitch.is_available():
             try:
-                twitch.send_message(text)
-                if stream is not None:
-                    self._record_twitch_public_reply(
-                        stream=stream,
-                        username=str((payload or {}).get("user_login") or (payload or {}).get("username") or ""),
-                        category=str(route_policy.get("category") or "stream_event"),
-                        thread_id=str(route_policy.get("thread_id") or ""),
-                    )
+                gate_result = self._emit_final_response(
+                    event_id=final_event_id,
+                    source="twitch",
+                    final_response=text,
+                    output_route=OutputRoute.TWITCH_TEXT_REPLY if OUTPUT_TARGET_TWITCH_CHAT in targets else OutputRoute.STREAM_TTS_REPLY,
+                    output_targets=targets,
+                    guard_result={"passed": True},
+                    debug_payload=self._latest_response_debug_payload(),
+                    send_twitch_fn=send_twitch_once if OUTPUT_TARGET_TWITCH_CHAT in targets else None,
+                    speak_fn=speak_stream_once if OUTPUT_TARGET_STREAM_TTS in targets and tts_gate_allowed else None,
+                )
+                if not gate_result.get("emitted"):
+                    return
                 self._update_policy_trace_response(
                     text,
                     candidate_response=text,
@@ -8262,7 +8573,6 @@ class HebeEngine:
         if not tts_allowed:
             print("[HEBE][TTS] skipped reason=stream_tts_disabled", flush=True)
             return
-        self._deliver_voice_reply(text, output_target=OUTPUT_TARGET_STREAM_TTS, emit_ui=False, input_type=event_type or "twitch_event", declare_route=False)
 
 
     def _deliver_voice_reply(
@@ -8289,21 +8599,44 @@ class HebeEngine:
             if output_target == OUTPUT_TARGET_STREAM_TTS
             else self._local_tts_output_enabled()
         )
+        tts_can_speak = bool(voice_enabled and getattr(self.runtime.state, "tts_enabled", False))
         if declare_route:
             targets = [OUTPUT_TARGET_LOCAL_UI] if emit_ui else []
-            if voice_enabled:
+            if tts_can_speak:
                 targets.append(output_target)
             self._declare_output_route(
                 input_type=input_type,
                 targets=targets or [OUTPUT_TARGET_LOCAL_UI],
                 reason="voice_reply",
             )
+        targets_for_gate = [OUTPUT_TARGET_LOCAL_UI] if emit_ui else []
+        if tts_can_speak:
+            targets_for_gate.append(output_target)
+
+        def speak_once(final_text: str) -> None:
+            safe_text = str(final_text or "").replace('"', '\\"')
+            print(f"[HEBE][TTS] speaking output_target={output_target} text=\"{safe_text}\"", flush=True)
+            self._remember_tts_text(final_text)
+            self.runtime.speak(final_text, emit_chat=False)
+            self._remember_assistant_text(final_text, source=input_type)
+
+        gate_result = self._emit_final_response(
+            event_id=input_id,
+            source=input_type,
+            final_response=text,
+            output_route=OutputRoute.STREAM_TTS_REPLY if output_target == OUTPUT_TARGET_STREAM_TTS and tts_can_speak else OutputRoute.LOCAL_OWNER_REPLY,
+            output_targets=targets_for_gate or [OUTPUT_TARGET_LOCAL_UI],
+            guard_result={"passed": True},
+            debug_payload=self._latest_response_debug_payload(),
+            speak_fn=speak_once if tts_can_speak else None,
+        )
+        if not gate_result.get("emitted"):
+            return
         if emit_ui:
-            emit("chat.assistant", {**{"text": text, "source": input_type, "output_target": OUTPUT_TARGET_LOCAL_UI}, **self._latest_response_debug_payload()})
             self._remember_assistant_text(text, source=input_type)
         try:
             targets_for_brain = [OUTPUT_TARGET_LOCAL_UI] if emit_ui else []
-            if voice_enabled:
+            if tts_can_speak:
                 targets_for_brain.append(output_target)
             self._get_live_session_brain().observe_hebe_utterance(
                 text,
@@ -8319,15 +8652,6 @@ class HebeEngine:
         if not voice_enabled:
             print("[HEBE][TTS] skipped reason=stream_output_mode", flush=True)
             return
-        try:
-            safe_text = str(text or "").replace('"', '\\"')
-            print(f"[HEBE][TTS] speaking output_target={output_target} text=\"{safe_text}\"", flush=True)
-            self._remember_tts_text(text)
-            self.runtime.speak(text, emit_chat=False)
-            self._remember_assistant_text(text, source=input_type)
-        except Exception as e:
-            safe_error = str(e).replace('"', '\\"')
-            print(f"[HEBE][TTS] failed error=\"{safe_error}\"", flush=True)
 
     def _latest_response_debug_payload(self) -> dict:
         synthesizer = getattr(self, "response_synthesizer", None)
@@ -8350,8 +8674,17 @@ class HebeEngine:
                 reason="typed_input_reply",
             )
             log_chat("assistant", text, source="ui")
-            emit("chat.assistant", {**{"text": text, "source": "ui", "output_target": OUTPUT_TARGET_LOCAL_UI, "message_id": message_id}, **self._latest_response_debug_payload()})
-            print(f"[HEBE][FINAL_EMISSION_GATE] emitted=true route=local_owner_reply message_id={message_id}", flush=True)
+            gate_result = self._emit_final_response(
+                event_id=message_id,
+                source="ui",
+                final_response=text,
+                output_route=OutputRoute.LOCAL_OWNER_REPLY,
+                output_targets=[OUTPUT_TARGET_LOCAL_UI],
+                guard_result={"passed": True},
+                debug_payload={**{"message_id": message_id}, **self._latest_response_debug_payload()},
+            )
+            if not gate_result.get("emitted"):
+                return
             self._remember_assistant_text(text, source="ui")
             try:
                 self._get_live_session_brain().observe_hebe_utterance(
@@ -8374,7 +8707,6 @@ class HebeEngine:
             targets=targets,
             reason="direct_reply",
         )
-        print(f"[HEBE][FINAL_EMISSION_GATE] emitted=true route=local_voice_reply message_id=voice_{uuid.uuid4().hex}", flush=True)
         self._deliver_voice_reply(
             text,
             output_target=voice_target,

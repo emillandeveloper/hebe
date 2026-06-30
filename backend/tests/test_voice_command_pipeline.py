@@ -1572,6 +1572,45 @@ class VoiceCommandPipelineTests(unittest.TestCase):
         self.assertIn("[HEBE][PRE_GENERATION_ROUTE] should_generate=false route=observe_only reason=thread_closed", joined)
         self.assertEqual(engine.runtime.twitch.sent, [])
 
+    def test_talks_about_hebe_can_intervene_if_social_value_high(self):
+        engine = make_engine(["nuria"])
+        engine.runtime.state.stream.is_live = True
+        logs = []
+
+        with patch("builtins.print", lambda *args, **kwargs: logs.append(" ".join(str(arg) for arg in args))):
+            decision = engine._pre_generation_twitch_route_decision(
+                payload={"user_login": "viewer", "display_name": "Viewer", "message_text": "Hebe esta muy callada"},
+                event_type="twitch_chat_react",
+                stream=engine.runtime.state.stream,
+            )
+
+        joined = "\n".join(logs)
+        self.assertTrue(decision["should_generate"])
+        self.assertEqual(decision["category"], "viewer_talks_about_hebe")
+        self.assertEqual(decision["route"], "twitch_text_reply")
+        self.assertIn("[HEBE][PRESENCE_ENGINE] should_intervene=true", joined)
+
+    def test_repeated_hebe_talk_observed_after_saturation(self):
+        engine = make_engine(["nuria"])
+        engine.runtime.state.stream.is_live = True
+        text = "Hebe esta muy callada"
+        thread_id = engine._twitch_thread_id(username="viewer", text=text, category="viewer_talks_about_hebe")
+        engine.runtime.state.stream.public_reply_thread_counts[thread_id] = 2
+        logs = []
+
+        with patch("builtins.print", lambda *args, **kwargs: logs.append(" ".join(str(arg) for arg in args))):
+            decision = engine._pre_generation_twitch_route_decision(
+                payload={"user_login": "viewer", "display_name": "Viewer", "message_text": text},
+                event_type="twitch_chat_react",
+                stream=engine.runtime.state.stream,
+            )
+
+        joined = "\n".join(logs)
+        self.assertFalse(decision["should_generate"])
+        self.assertEqual(decision["route"], "observe_only")
+        self.assertEqual(decision["reason"], "thread_closed")
+        self.assertIn("[HEBE][SOCIAL_BUDGET] allowed=false reason=thread_closed", joined)
+
     def test_generic_reply_repaired_or_suppressed(self):
         engine = make_engine(["nuria"])
         engine.runtime.state.stream.is_live = True
