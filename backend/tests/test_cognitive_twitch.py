@@ -717,6 +717,61 @@ class CognitiveTwitchTests(unittest.TestCase):
         self.assertFalse(result.passed)
         self.assertIn("malformed_stt_echo", [item.type for item in result.violations])
 
+    def test_stream_banter_does_not_ask_unnecessary_followup(self):
+        bundle = build_twitch_speech_act_bundle(
+            {
+                "user_login": "viewer",
+                "display_name": "Viewer",
+                "message_text": "Hebe hola",
+            },
+            context=None,
+            is_broadcaster=False,
+        )
+
+        self.assertFalse(bundle.speech_act.allows_followup_question)
+        result = final_response_guard("Te leo, Viewer. que quieres?", bundle)
+
+        self.assertFalse(result.passed)
+        self.assertIn("stream_unnecessary_followup_question", [item.type for item in result.violations])
+
+    def test_stream_guard_rejects_voseo_and_debug_english(self):
+        bundle = build_twitch_speech_act_bundle(
+            {
+                "user_login": "viewer",
+                "display_name": "Viewer",
+                "message_text": "Hebe, alguna pista?",
+            },
+            context=None,
+            is_broadcaster=False,
+        )
+
+        voseo = final_response_guard("Vos decis si queres seguir por ahi.", bundle)
+        debug = final_response_guard("Latest confirmed objective: go to palace.", bundle)
+
+        self.assertFalse(voseo.passed)
+        self.assertIn("hebe_voice_voseo_drift", [item.type for item in voseo.violations])
+        self.assertFalse(debug.passed)
+        self.assertIn("hebe_voice_debug_english_leak", [item.type for item in debug.violations])
+
+    def test_twitch_guard_rejects_instructional_depth(self):
+        bundle = build_twitch_speech_act_bundle(
+            {
+                "user_login": "viewer",
+                "display_name": "Viewer",
+                "message_text": "Hebe, como gano?",
+            },
+            context=None,
+            is_broadcaster=False,
+        )
+
+        result = final_response_guard(
+            "Primero farmea recursos, luego cambia la build, despues guarda turno y finalmente remata.",
+            bundle,
+        )
+
+        self.assertFalse(result.passed)
+        self.assertIn("stream_twitch_answer_too_instructional", [item.type for item in result.violations])
+
 
 if __name__ == "__main__":
     unittest.main()

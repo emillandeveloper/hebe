@@ -45,6 +45,12 @@ class StreamSessionState:
     recent_active_users: list[str] = field(default_factory=list)
     recent_chat_topics: list[str] = field(default_factory=list)
     recent_chat_summary: Optional[str] = None
+    public_reply_timestamps: list[float] = field(default_factory=list)
+    public_reply_viewer_timestamps: dict[str, list[float]] = field(default_factory=dict)
+    public_reply_thread_counts: dict[str, int] = field(default_factory=dict)
+    public_reply_boundary_cooldowns: dict[str, float] = field(default_factory=dict)
+    consecutive_public_replies: int = 0
+    last_public_reply_ts: float = 0.0
 
     is_live: bool = False
     live_status_known: bool = False
@@ -68,6 +74,10 @@ class StreamSessionState:
     completed_run_markers: list[str] = field(default_factory=list)
     current_activity: str = "unknown"
     stream_output_mode: str = "tts_enabled"
+    stream_voice_mode: str = "normal"  # normal | wake_only | muted
+    wake_only_until: float = 0.0
+    muted_until: float = 0.0
+    mute_reason: Optional[str] = None
     combat_state: Optional[bool] = None
     current_game_activity_confidence: float = 0.0
     current_game_activity_provenance: Optional[str] = None

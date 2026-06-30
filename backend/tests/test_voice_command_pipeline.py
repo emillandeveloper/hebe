@@ -9,6 +9,7 @@ from app.cognitive.action_runtime import ActionRuntime
 from app.cognitive.models import DeliberationResult, ExecutionResult, Plan, PlanStep, StepExecutionResult
 from app.cognitive.response_synthesizer import ResponseSynthesizer
 from app.cognitive.cognitive_router import CognitiveRouter
+from app.cognitive.game_guidance import GameRunState
 from app.cognitive.wake_name_resolver import WakeNameResolver
 from app.core.state import HebeState
 from app.hebe_engine import HebeEngine
@@ -360,6 +361,25 @@ class VoiceCommandPipelineTests(unittest.TestCase):
         self.assertEqual(followup.state_changes["target"], "superdamu")
         self.assertEqual(engine.runtime.twitch.sent, ["!so superdamu"])
 
+    def test_promotion_pending_followup_allows_promotion_action(self):
+        engine = make_engine([])
+        engine.runtime.state.pending_clarification = {
+            "id": "promo-1",
+            "kind": "promotion_target_clarification",
+            "authority": "owner",
+            "expires_at": time.time() + 60,
+            "candidates": [],
+        }
+        engine.observe_twitch_chat_message("superdamu", "SUPERDAMU", "hola", "#chan")
+
+        result = engine._process_stt_voice_transcript("Super Damu")
+
+        self.assertEqual(result, "continue")
+        firewall = engine._last_input_firewall
+        self.assertIn("promotion_shoutout", firewall.get("allowed_actions", []))
+        self.assertIn("twitch_action", firewall.get("allowed_actions", []))
+        self.assertEqual(engine.runtime.twitch.sent, ["!so superdamu"])
+
     def test_promo_pending_contextual_recent_chatter_followup(self):
         engine = make_engine([])
         engine.observe_twitch_chat_message("superdamu", "SUPERDAMU", "hola", "#chan")
@@ -372,6 +392,79 @@ class VoiceCommandPipelineTests(unittest.TestCase):
         self.assertTrue(followup.success)
         self.assertEqual(followup.state_changes["target"], "superdamu")
         self.assertEqual(engine.runtime.twitch.sent, ["!so superdamu"])
+
+    def test_owner_mute_command_sets_wake_only_and_suppresses_tts(self):
+        engine = make_engine(["nuria"], live=True)
+        engine.runtime.state.stream.enabled = True
+        engine.runtime.state.tts_enabled = True
+        logs = []
+
+        with patch("builtins.print", lambda *args, **kwargs: logs.append(" ".join(str(arg) for arg in args))), \
+             patch("app.hebe_engine.emit"), patch("app.hebe_engine.log_chat"):
+            result = engine._process_stt_voice_transcript("deja de hablar")
+
+        joined = "\n".join(logs)
+        self.assertEqual(result, "continue")
+        self.assertEqual(engine.runtime.state.stream.stream_voice_mode, "wake_only")
+        self.assertGreater(engine.runtime.state.stream.wake_only_until, time.time())
+        self.assertIn("[HEBE][OWNER_MUTE_COMMAND] mode=wake_only", joined)
+        self.assertIn("[HEBE][TTS_CANCEL] reason=owner_mute", joined)
+
+    def test_output_dedupe_suppresses_same_manual_reply(self):
+        engine = make_engine(["nuria"])
+        emitted = []
+        with patch("app.hebe_engine.emit", lambda event_type, data=None: emitted.append((event_type, data or {}))), \
+             patch("app.hebe_engine.log_chat"):
+            engine._deliver_manual_reply("Hecho.", source="ui")
+            engine._deliver_manual_reply("Hecho.", source="ui")
+
+        assistant_events = [event for event in emitted if event[0] == "chat.assistant"]
+        self.assertEqual(len(assistant_events), 1)
+
+    def test_ui_cognitive_flow_emits_one_final_assistant_message(self):
+        engine = make_engine(["nuria"], live=False)
+        engine.context_builder = FakeContextBuilder()
+        engine.deliberation_service = FakeDeliberationService()
+        engine.plan_executor = FakePlanExecutor()
+        engine.response_synthesizer = FixedResponseSynth("Respuesta final.")
+        engine.memory_extractor = Mock()
+        emitted = []
+        logs = []
+
+        with patch("builtins.print", lambda *args, **kwargs: logs.append(" ".join(str(arg) for arg in args))), \
+             patch("app.hebe_engine.emit", lambda event_type, data=None: emitted.append((event_type, data or {}))), \
+             patch("app.hebe_engine.log_chat"):
+            result = engine.cognitive_flow("hola", source="ui")
+
+        assistant_events = [event for event in emitted if event[0] == "chat.assistant"]
+        self.assertEqual(result, "continue")
+        self.assertEqual(len(assistant_events), 1)
+        self.assertEqual(assistant_events[0][1]["text"], "Respuesta final.")
+        self.assertIn("[HEBE][FINAL_EMISSION_GATE] emitted=true route=local_owner_reply", "\n".join(logs))
+
+    def test_twitch_viewer_reply_addressed_to_owner_is_suppressed(self):
+        engine = make_engine(["nuria"], live=True)
+        engine.runtime.state.stream.enabled = True
+
+        engine._deliver_twitch_reply(
+            "Te leo, Leo. Recalibro.",
+            event_type="twitch_chat_react",
+            payload={"message_text": "Hebe?", "username": "yulawild", "user_login": "yulawild"},
+        )
+
+        self.assertEqual(engine.runtime.twitch.sent, [])
+
+    def test_translate_previous_response_uses_last_assistant_text(self):
+        engine = make_engine(["nuria"], live=False)
+        delivered = []
+        engine._deliver_manual_reply = lambda text, *, source: delivered.append(text)
+        engine._remember_assistant_text("Mira recursos antes de avanzar.", source="stt_voice")
+
+        result = engine.cognitive_flow("Ahora me lo dices en ingles", source="ui")
+
+        self.assertEqual(result, "continue")
+        self.assertEqual(delivered, ["In English: Mira recursos antes de avanzar."])
+        self.assertNotIn("Now say", delivered[0])
 
     def test_promo_low_confidence_asks_clarification(self):
         engine = make_engine([])
@@ -1061,6 +1154,73 @@ class VoiceCommandPipelineTests(unittest.TestCase):
         self.assertNotIn("reason=not_direct_command", joined)
         self.assertTrue(any(event_type == "chat.user" for event_type, _ in emitted))
 
+    def test_live_owner_monologue_does_not_reply_as_conversation_followup(self):
+        engine = make_engine(["nuria"], live=True)
+        engine.runtime.state.stream.enabled = True
+        engine.context_builder = FakeContextBuilder()
+        engine.deliberation_service = FakeDeliberationService()
+        engine.plan_executor = FakePlanExecutor()
+        engine.response_synthesizer = FixedResponseSynth("No deberia sonar.")
+        engine.memory_extractor = Mock()
+        delivered = []
+        logs = []
+        engine._deliver_voice_reply = lambda text, **kwargs: delivered.append(text)
+        engine._record_assistant_reply_for_conversation("Que tal vas?", source="stt_voice", synthesizer=pending_marker())
+
+        with patch("builtins.print", lambda *args, **kwargs: logs.append(" ".join(str(arg) for arg in args))), \
+             patch("app.hebe_engine.emit"), patch("app.hebe_engine.log_chat"):
+            result = engine._process_stt_voice_transcript("un RPG pero con combate por combos")
+
+        joined = "\n".join(logs)
+        self.assertEqual(result, "continue")
+        self.assertEqual(delivered, [])
+        self.assertEqual(engine.context_builder.inputs, [])
+        self.assertIn("[HEBE][LIVE_OWNER_SPEECH_GATE] action=context_only", joined)
+        self.assertNotIn("decision=conversation_followup", joined)
+
+    def test_expired_pending_is_purged_before_stt_classification(self):
+        engine = make_engine(["nuria"], live=True)
+        engine.runtime.state.stream.enabled = True
+        engine.runtime.state.pending_clarification = {
+            "id": "appointment-expired",
+            "kind": "appointment_datetime",
+            "authority": "owner",
+            "expires_at": time.time() - 1,
+        }
+        logs = []
+
+        with patch("builtins.print", lambda *args, **kwargs: logs.append(" ".join(str(arg) for arg in args))), \
+             patch("app.hebe_engine.emit"), patch("app.hebe_engine.log_chat"):
+            result = engine._process_stt_voice_transcript("el jueves")
+
+        joined = "\n".join(logs)
+        self.assertEqual(result, "continue")
+        self.assertIsNone(engine.runtime.state.pending_clarification)
+        self.assertIn("[HEBE][PENDING_EXPIRED] kind=appointment_datetime id=appointment-expired", joined)
+        self.assertIn("[HEBE][PENDING_CLEARED] reason=expired", joined)
+
+    def test_appointment_pending_rejects_stream_planning_weekday_chatter(self):
+        engine = make_engine(["nuria"], live=True)
+        engine.runtime.state.stream.enabled = True
+        engine.runtime.state.pending_clarification = {
+            "id": "appointment-live",
+            "kind": "appointment_datetime",
+            "authority": "owner",
+            "expires_at": time.time() + 300,
+        }
+        engine.context_builder = FakeContextBuilder()
+        logs = []
+
+        with patch("builtins.print", lambda *args, **kwargs: logs.append(" ".join(str(arg) for arg in args))), \
+             patch("app.hebe_engine.emit"), patch("app.hebe_engine.log_chat"):
+            result = engine._process_stt_voice_transcript("estar atentos porque voy a traer si terminamos la partida el jueves")
+
+        joined = "\n".join(logs)
+        self.assertEqual(result, "continue")
+        self.assertEqual(engine.context_builder.inputs, [])
+        self.assertIn("[HEBE][LIVE_OWNER_SPEECH_GATE] action=context_only", joined)
+        self.assertIn("pending_compatible=false", joined)
+
     def test_pending_conversation_does_not_capture_filler_mumble(self):
         engine = make_engine(["nuria"])
         engine.runtime.state.stream.enabled = False
@@ -1255,13 +1415,193 @@ class VoiceCommandPipelineTests(unittest.TestCase):
             engine._deliver_twitch_reply(
                 "Corta y al pie.",
                 event_type="twitch_chat_react",
-                payload={"user_login": "viewer", "display_name": "Viewer", "message_text": "Hebe"},
+                payload={"user_login": "viewer", "display_name": "Viewer", "message_text": "Hebe, que opinas de esto?"},
             )
             engine._record_assistant_reply_for_conversation("¿tú qué tal?", source="twitch_chat_react", synthesizer=pending_marker())
 
         self.assertEqual(engine.runtime.twitch.sent, ["Corta y al pie."])
         self.assertFalse(hasattr(engine.runtime.state, "pending_conversation_turn"))
         self.assertIn("input_type=twitch_mention_or_event output_target=twitch_chat", "\n".join(logs))
+
+    def test_twitch_mention_not_always_public_reply(self):
+        engine = make_engine(["nuria"])
+        engine.runtime.state.stream.is_live = True
+        logs = []
+
+        with patch("builtins.print", lambda *args, **kwargs: logs.append(" ".join(str(arg) for arg in args))), \
+            patch("app.hebe_engine.emit"):
+            engine._deliver_twitch_reply(
+                "Visto.",
+                event_type="twitch_chat_react",
+                payload={"user_login": "viewer", "display_name": "Viewer", "message_text": "Hebe xd"},
+            )
+
+        joined = "\n".join(logs)
+        self.assertEqual(engine.runtime.twitch.sent, [])
+        self.assertIn("[HEBE][OUTPUT_ROUTE_DECISION] route=observe_only", joined)
+
+    def test_high_value_question_writes_to_twitch(self):
+        engine = make_engine(["nuria"])
+        engine.runtime.state.stream.is_live = True
+
+        engine._deliver_twitch_reply(
+            "FFIX tiene una melancolia muy fina.",
+            event_type="twitch_chat_react",
+            payload={"user_login": "viewer", "display_name": "Viewer", "message_text": "Hebe, que opinas de Final Fantasy IX?"},
+        )
+
+        self.assertEqual(engine.runtime.twitch.sent, ["FFIX tiene una melancolia muy fina."])
+
+    def test_emote_only_no_reply(self):
+        engine = make_engine(["nuria"])
+        engine.runtime.state.stream.is_live = True
+
+        engine._deliver_twitch_reply(
+            "Te leo.",
+            event_type="twitch_chat_react",
+            payload={"user_login": "viewer", "display_name": "Viewer", "message_text": "Kappa Kappa"},
+        )
+
+        self.assertEqual(engine.runtime.twitch.sent, [])
+
+    def test_repeated_viewer_mentions_budgeted(self):
+        engine = make_engine(["nuria"])
+        engine.runtime.state.stream.is_live = True
+
+        for idx in range(3):
+            engine._deliver_twitch_reply(
+                f"Respuesta {idx}.",
+                event_type="twitch_chat_react",
+                payload={"user_login": "viewer", "display_name": "Viewer", "message_text": f"Hebe, que opinas de tema {idx}?"},
+            )
+
+        self.assertEqual(engine.runtime.twitch.sent, ["Respuesta 0.", "Respuesta 1."])
+
+    def test_thread_followup_limited(self):
+        engine = make_engine(["nuria"])
+        engine.runtime.state.stream.is_live = True
+        thread_id = engine._twitch_thread_id(username="viewer", text="Hebe, que opinas de esto?", category="high_value_question")
+        engine.runtime.state.stream.public_reply_thread_counts[thread_id] = 2
+
+        engine._deliver_twitch_reply(
+            "Otra respuesta.",
+            event_type="twitch_chat_react",
+            payload={"user_login": "viewer", "display_name": "Viewer", "message_text": "Hebe, que opinas de esto?"},
+        )
+
+        self.assertEqual(engine.runtime.twitch.sent, [])
+
+    def test_third_person_leo_mention_allowed(self):
+        engine = make_engine(["nuria"])
+
+        allowed, reason = engine._target_speaker_guard(
+            "yo me quedo con Leo en este desastre.",
+            source="twitch_viewer",
+            speaker="Viewer",
+        )
+
+        self.assertTrue(allowed, reason)
+
+    def test_direct_leo_address_from_viewer_blocked(self):
+        engine = make_engine(["nuria"])
+
+        allowed, reason = engine._target_speaker_guard(
+            "Leo, mira el chat ahora.",
+            source="twitch_viewer",
+            speaker="Viewer",
+        )
+
+        self.assertFalse(allowed)
+        self.assertEqual(reason, "viewer_answer_addressed_to_owner")
+
+    def test_candidate_not_broadcast_before_route(self):
+        engine = make_engine(["nuria"])
+        engine.runtime.state.stream.is_live = True
+        emitted = []
+
+        with patch("app.hebe_engine.emit", lambda event_type, data=None: emitted.append((event_type, data or {}))):
+            engine._deliver_twitch_reply(
+                "Te leo.",
+                event_type="twitch_chat_react",
+                payload={"user_login": "viewer", "display_name": "Viewer", "message_text": "Hebe xd"},
+            )
+
+        self.assertEqual(engine.runtime.twitch.sent, [])
+        self.assertFalse(any(event_type == "chat.assistant" for event_type, _ in emitted))
+
+    def test_observe_only_twitch_message_no_model_call(self):
+        engine = make_engine(["nuria"])
+        engine.runtime.state.stream.is_live = True
+        engine.context_builder = Mock()
+        engine.response_synthesizer = Mock()
+        logs = []
+        event = SimpleNamespace(
+            event_type="twitch_chat_react",
+            payload={"user_login": "viewer", "display_name": "Viewer", "message_text": "Hebe xd"},
+        )
+
+        with patch("builtins.print", lambda *args, **kwargs: logs.append(" ".join(str(arg) for arg in args))):
+            engine.process_internal_event(event)
+
+        joined = "\n".join(logs)
+        engine.context_builder.build.assert_not_called()
+        engine.response_synthesizer.synthesize.assert_not_called()
+        self.assertIn("[HEBE][PRE_GENERATION_ROUTE] should_generate=false route=observe_only reason=low_value_banter", joined)
+        self.assertEqual(engine.runtime.twitch.sent, [])
+
+    def test_budget_blocked_twitch_message_no_model_call(self):
+        engine = make_engine(["nuria"])
+        engine.runtime.state.stream.is_live = True
+        text = "Hebe, que opinas de esto?"
+        thread_id = engine._twitch_thread_id(username="viewer", text=text, category="high_value_question")
+        engine.runtime.state.stream.public_reply_thread_counts[thread_id] = 2
+        engine.context_builder = Mock()
+        engine.response_synthesizer = Mock()
+        logs = []
+        event = SimpleNamespace(
+            event_type="twitch_chat_react",
+            payload={"user_login": "viewer", "display_name": "Viewer", "message_text": text},
+        )
+
+        with patch("builtins.print", lambda *args, **kwargs: logs.append(" ".join(str(arg) for arg in args))):
+            engine.process_internal_event(event)
+
+        joined = "\n".join(logs)
+        engine.context_builder.build.assert_not_called()
+        engine.response_synthesizer.synthesize.assert_not_called()
+        self.assertIn("[HEBE][PRE_GENERATION_ROUTE] should_generate=false route=observe_only reason=thread_closed", joined)
+        self.assertEqual(engine.runtime.twitch.sent, [])
+
+    def test_generic_reply_repaired_or_suppressed(self):
+        engine = make_engine(["nuria"])
+        engine.runtime.state.stream.is_live = True
+        logs = []
+
+        with patch("builtins.print", lambda *args, **kwargs: logs.append(" ".join(str(arg) for arg in args))):
+            engine._deliver_twitch_reply(
+                "perfecto, sigue asi",
+                event_type="twitch_chat_react",
+                payload={"user_login": "viewer", "display_name": "Viewer", "message_text": "Hebe, que opinas de esto?"},
+            )
+
+        self.assertEqual(engine.runtime.twitch.sent, [])
+        self.assertIn("[HEBE][STREAM_PERSONA_QUALITY_GUARD] passed=false", "\n".join(logs))
+
+    def test_text_only_route_split(self):
+        engine = make_engine(["nuria"])
+        engine.runtime.state.stream.is_live = True
+        logs = []
+
+        with patch("builtins.print", lambda *args, **kwargs: logs.append(" ".join(str(arg) for arg in args))):
+            engine._deliver_twitch_reply(
+                "Respuesta con valor.",
+                event_type="twitch_chat_react",
+                payload={"user_login": "viewer", "display_name": "Viewer", "message_text": "Hebe, que opinas de esto?"},
+            )
+
+        joined = "\n".join(logs)
+        self.assertIn("[HEBE][OUTPUT_ROUTE_DECISION] route=twitch_text_reply", joined)
+        self.assertNotIn("route=text_only", joined)
 
     def test_ambient_game_commentary_does_not_enter_jarvis_unless_addressed(self):
         engine = make_engine(["nuria"])
@@ -1280,6 +1620,121 @@ class VoiceCommandPipelineTests(unittest.TestCase):
         self.assertEqual(delivered, [])
         self.assertEqual(engine.context_builder.inputs, [])
         self.assertIn("[HEBE][STT_GATE] ambient_only reason=no_wake_no_valid_pending", "\n".join(logs))
+
+    def test_casual_monologue_not_game_guidance_followup(self):
+        engine = make_engine(["nuria"], live=True)
+        engine.runtime.state.stream.enabled = True
+        engine.runtime.state.pending_clarification = {
+            "id": "game-pending",
+            "kind": "game_guidance_clarification",
+            "game": "Persona 5 Royal",
+            "expected_reply_type": "game_progress_state",
+            "missing_fields": ["current_location"],
+            "authority": "owner",
+            "created_at": time.time(),
+            "expires_at": time.time() + 300,
+        }
+        engine.context_builder = FakeContextBuilder()
+        logs = []
+
+        with patch("builtins.print", lambda *args, **kwargs: logs.append(" ".join(str(arg) for arg in args))), \
+             patch("app.hebe_engine.emit"), \
+             patch("app.hebe_engine.log_chat"):
+            result = engine._process_stt_voice_transcript("En plan tranquilamente podiamos ser 40")
+
+        joined = "\n".join(logs)
+        self.assertEqual(result, "continue")
+        self.assertEqual(engine.context_builder.inputs, [])
+        self.assertIsNotNone(engine.runtime.state.pending_clarification)
+        self.assertIn("[HEBE][GAME_PENDING_COMPAT] compatible=false", joined)
+        self.assertIn("ordinary_stream_or_real_life_talk", joined)
+
+    def test_compatible_game_progress_followup_accepted(self):
+        engine = make_engine(["nuria"], live=True)
+        engine.runtime.state.stream.enabled = True
+        engine.runtime.state.pending_clarification = {
+            "id": "game-pending",
+            "kind": "game_guidance_clarification",
+            "game": "Persona 5 Royal",
+            "expected_reply_type": "game_progress_state",
+            "missing_fields": ["current_location"],
+            "authority": "owner",
+            "created_at": time.time(),
+            "expires_at": time.time() + 300,
+        }
+        event = engine._build_input_event(
+            source="stt_voice",
+            raw_text="Hebe, estoy en el palacio de Kamoshida",
+            normalized_text=engine._normalize_text("Hebe, estoy en el palacio de Kamoshida"),
+            stt_metadata={"command_mode": True},
+        )
+        logs = []
+
+        with patch("builtins.print", lambda *args, **kwargs: logs.append(" ".join(str(arg) for arg in args))):
+            envelope = engine._build_stt_input_envelope(event, voice_type="direct_command_to_hebe", conversation_followup=False)
+
+        self.assertTrue(envelope.pending_compatible)
+        self.assertEqual(envelope.source, "owner_stt_followup")
+        self.assertIn("[HEBE][GAME_PENDING_COMPAT] compatible=true", "\n".join(logs))
+
+    def test_game_run_state_write_guard_rejects_stt_junk_and_keeps_previous_state(self):
+        engine = make_engine(["nuria"])
+        engine.runtime.state.game_run_state = GameRunState(game="Persona 5 Royal", current_location="Palacio de Kamoshida")
+        state_update = StepExecutionResult(
+            step_type="state_update",
+            success=True,
+            data={
+                "kind": "game_run_state",
+                "pending_id": "pending-game",
+                "updates": {
+                    "current_location": "Hacer artes marciales ver",
+                    "current_character": "Rango eh",
+                    "provenance": "leo_clarification",
+                    "confidence": 0.92,
+                },
+            },
+        )
+        logs = []
+
+        with patch("builtins.print", lambda *args, **kwargs: logs.append(" ".join(str(arg) for arg in args))):
+            engine._apply_game_run_state_execution(state_update)
+
+        run = engine.runtime.state.game_run_state
+        self.assertEqual(run.current_location, "Palacio de Kamoshida")
+        self.assertEqual(run.current_character, "")
+        joined = "\n".join(logs)
+        self.assertIn("[HEBE][GAME_RUN_STATE_WRITE_GUARD] accepted=false field=current_location", joined)
+        self.assertIn("[HEBE][GAME_PENDING] state_update_rejected", joined)
+
+    def test_game_run_state_write_guard_accepts_known_persona_location(self):
+        engine = make_engine(["nuria"])
+        state_update = StepExecutionResult(
+            step_type="state_update",
+            success=True,
+            data={
+                "kind": "game_run_state",
+                "pending_id": "pending-game",
+                "updates": {
+                    "game": "Persona 5 Royal",
+                    "current_location": "Palacio de Kamoshida",
+                    "provenance": "leo_clarification",
+                    "confidence": 0.92,
+                },
+            },
+        )
+
+        engine._apply_game_run_state_execution(state_update)
+
+        self.assertEqual(engine.runtime.state.game_run_state.current_location, "Palacio de Kamoshida")
+
+    def test_single_letter_shoutout_target_requires_clarification_without_alias(self):
+        engine = make_engine(["nuria", "charlie"])
+
+        result = engine._handle_stream_manual_command("shoutout a c")
+
+        self.assertEqual(result.action_type, "twitch_shoutout_clarify")
+        self.assertEqual(result.metadata["action_plan"]["reason"], "ambiguous_single_letter_target")
+        self.assertEqual(engine.runtime.twitch.sent, [])
 
     def test_pending_turn_not_created_for_twitch_source(self):
         engine = make_engine(["nuria"])

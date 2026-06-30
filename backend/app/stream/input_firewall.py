@@ -389,22 +389,25 @@ class InputAuthorityFirewall:
             )
 
         if source in FOLLOWUP_SOURCES:
+            allowed = [
+                ACTION_LOCAL_REPLY,
+                ACTION_LOCAL_UI_MESSAGE,
+                ACTION_LOCAL_TTS,
+                ACTION_SESSION_CONTEXT_UPDATE,
+            ]
+            if stream_is_live and has_action_intent:
+                allowed.extend([ACTION_TWITCH_ACTION, ACTION_PROMOTION_SHOUTOUT])
             return self._decision(
                 source=source,
                 authority="owner",
                 input_trust="trusted_followup",
                 firewall_decision="allow",
                 reason="owner_related_followup",
-                allowed_actions=[
-                    ACTION_LOCAL_REPLY,
-                    ACTION_LOCAL_UI_MESSAGE,
-                    ACTION_LOCAL_TTS,
-                    ACTION_SESSION_CONTEXT_UPDATE,
-                ],
+                allowed_actions=allowed,
                 stream_is_live=stream_is_live,
                 followup_window_used=True,
                 would_call_llm=True,
-                would_send_twitch=False,
+                would_send_twitch=stream_is_live and has_action_intent,
                 username=username,
                 event_type=event_type or "",
             )

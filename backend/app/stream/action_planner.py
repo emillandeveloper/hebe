@@ -160,6 +160,7 @@ class StreamActionPlanner:
     def _resolve_target(self, raw_target: str) -> tuple[str | None, float, list[str], str]:
         raw = str(raw_target or "").strip().lstrip("@")
         marker = normalize_command_text(raw)
+        raw_key = _compact(raw)
         if marker in {
             "ultimo raider",
             "último raider",
@@ -178,6 +179,14 @@ class StreamActionPlanner:
             return None, 0.0, [], "missing_target"
 
         resolver = getattr(self, "target_resolver", None)
+        if len(raw_key) == 1:
+            aliases = getattr(resolver, "aliases", {}) if resolver is not None else {}
+            alias_target = aliases.get(raw_key) if isinstance(aliases, dict) else None
+            if alias_target:
+                target = self.normalize_target(str(alias_target))
+                return target, 0.99, [target], "alias"
+            known_matches = [original for original, key in self._known_pairs() if raw_key in key][:4]
+            return None, 0.0, known_matches, "ambiguous_single_letter_target"
         if callable(resolver):
             resolved = resolver(raw)
             if resolved is not None:
@@ -199,7 +208,6 @@ class StreamActionPlanner:
 
         normalized = self.normalize_target(raw)
         known = self._known_pairs()
-        raw_key = _compact(raw)
 
         for original, key in known:
             if raw_key == key:

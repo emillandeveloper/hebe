@@ -309,6 +309,7 @@ class SpeechActPlan:
     risk_notes: list[str] = field(default_factory=list)
     style_profile: str = ""
     style_profile_contract: dict[str, Any] = field(default_factory=dict)
+    allows_followup_question: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -560,6 +561,7 @@ def build_twitch_speech_act_bundle(payload: dict, context: Any | None, *, is_bro
             memory_usage_rule=memory.usage_rule,
             avoid_phrases=["como IA", "no puedo proporcionarte", "se lo digo", "anotado"],
             risk_notes=["viewer_proxy_guard_required"],
+            allows_followup_question=False,
         )
     else:
         policy = PolicyDecision(
@@ -585,6 +587,7 @@ def build_twitch_speech_act_bundle(payload: dict, context: Any | None, *, is_bro
             ],
             memory_usage_rule=memory.usage_rule,
             avoid_phrases=["como IA", "en que puedo ayudarte", "estoy aqui para ayudarte"],
+            allows_followup_question=False,
         )
     return SpeechActBundle(envelope, scene, memory, cognitive, policy, speech_act)
 
@@ -711,6 +714,7 @@ def build_universal_speech_act_bundle(
         risk_notes=["action_claim_guard_required"] if speech_act_type.startswith("action_") or execution_result else [],
         style_profile=profile.name,
         style_profile_contract=profile.to_dict(),
+        allows_followup_question=speech_act_type in {"clarification_question", "game_guidance_clarification", "confirmation_required"},
     )
     return SpeechActBundle(envelope, scene, scene_memory, cognitive, policy, speech_act, execution_result=execution_result)
 
@@ -916,10 +920,36 @@ def _stream_response_quality_violation(text: str, bundle: SpeechActBundle) -> Gu
     max_chars = int(bundle.speech_act.max_length_chars or 220)
     if len(str(text or "").strip()) > max(120, min(max_chars, 240)):
         return GuardViolation("stream_response_too_long", f"length={len(str(text or ''))} max={max_chars}")
-    if any(phrase in normalized for phrase in ("en que puedo ayudarte", "puedo ayudarte", "como asistente", "como ia")):
+    if any(phrase in normalized for phrase in (
+        "en que puedo ayudarte",
+        "puedo ayudarte",
+        "como asistente",
+        "como ia",
+        "buen punto",
+        "si quieres",
+        "te refieres",
+        "hablas en general",
+    )):
         return GuardViolation("stream_generic_assistant_style", "stream response sounds like a generic assistant")
+    if re.search(r"\b(?:referis|decis|queres|podes|tenes|sos)\b", normalized):
+        return GuardViolation("hebe_voice_voseo_drift", "response drifts into voseo instead of Leo/Hebe Spanish")
+    if re.search(r"\b(?:latest confirmed|current objective|objective|event|state|confidence|run state|debug)\b", str(text or ""), re.IGNORECASE):
+        return GuardViolation("hebe_voice_debug_english_leak", "response leaks internal/debug English")
+    if re.match(r"^\s*[A-ZÁÉÍÓÚÑ][A-Za-zÁÉÍÓÚÑáéíóúñ_]{2,24}\s*:", str(text or "")):
+        return GuardViolation("hebe_voice_report_prefix", "response reads like a report label")
+    if bundle.envelope.output_target == "twitch_chat" and (
+        len(str(text or "").strip()) > 170
+        or len(re.findall(r"\b(?:primero|luego|despues|ademas|finalmente|paso\s+\d+)\b", normalized)) >= 2
+    ):
+        return GuardViolation("stream_twitch_answer_too_instructional", "Twitch reply is too tutorial-like for chat")
     if any(phrase in normalized for phrase in ("para compensar", "a cambio", "de todas formas te ofrezco")):
         return GuardViolation("stream_weird_compensation", "stream response adds irrelevant compensation")
+    if (
+        bundle.speech_act.speech_act_type == "stream_banter"
+        and not bool(getattr(bundle.speech_act, "allows_followup_question", False))
+        and re.search(r"\?\s*$", str(text or "").strip())
+    ):
+        return GuardViolation("stream_unnecessary_followup_question", "stream_banter cannot casually keep the thread open")
     return None
 
 
@@ -1113,6 +1143,11 @@ class HebeResponsePipeline:
             f"[HEBE][STREAM_RESPONSE_QUALITY_GUARD] passed={str(not stream_quality).lower()} violations={stream_quality}",
             flush=True,
         )
+        voice_quality = [item for item in violations if item.startswith("hebe_voice_")]
+        print(
+            f"[HEBE][HEBE_VOICE_GUARD] passed={str(not voice_quality).lower()} violations={voice_quality}",
+            flush=True,
+        )
 
     def _debug_contract(
         self,
@@ -1201,6 +1236,7 @@ def _implies_proxy_behavior(text: str) -> bool:
         r"\ble\s+(?:dire|cuento|paso)\s+a\s+leo\b",
         r"\bse\s+lo\s+(?:dire|digo|cuento|paso)\b",
         r"\bqueda\s+anotad[oa]\b",
+        r"\bqueda\s+avisad[oa]\b",
     )
     return any(re.search(pattern, normalized) for pattern in proxy_output_patterns)
 
@@ -1282,4 +1318,5 @@ def _normalize_text(text: str) -> str:
         char for char in unicodedata.normalize("NFKD", raw)
         if not unicodedata.combining(char)
     )
+    raw = re.sub(r"[_\-]+", " ", raw)
     return " ".join(raw.split())

@@ -98,7 +98,7 @@ class CognitiveRouter:
             allowed_capabilities=[CAP_CHAT], blocked_capabilities=[],
             allowed_step_types=["reply"], should_reply=True, response_mode="chat",
             response_intent="answer_user", reason="fallback_chat",
-            action_permission_summary={"reply": True, "external_actions": False},
+            action_permission_summary={"reply": True, "external_actions": False, "stream_live": bool(stream_is_live)},
         )
 
         if authority == "bot" or firewall_decision in {"ignore", "block_reply", "block_action"}:
@@ -293,6 +293,11 @@ class CognitiveRouter:
                 response_intent="resolve_promotion_target",
                 should_reply=True,
                 reason="compatible_promotion_target_clarification",
+                action_permission_summary={
+                    **(decision.action_permission_summary or {}),
+                    "stream_live": bool((decision.action_permission_summary or {}).get("stream_live")),
+                    "promotion": True,
+                },
             )
 
         compatible = kind == "appointment_datetime" and self._is_datetime_answer(decision.normalized_text)
