@@ -231,6 +231,8 @@ async def dev_simulate_leo_message(body: dict):
         text,
         source=source,
         pending_kind=str((body or {}).get("pending_kind") or "").strip() or None,
+        stream_live_mode=str((body or {}).get("stream_live_mode") or "").strip() or None,
+        stream_voice_mode=str((body or {}).get("stream_voice_mode") or "").strip() or None,
     )
 
 
@@ -276,6 +278,20 @@ async def dev_set_stream_output_mode(body: dict):
         return {"ok": True, **engine.set_stream_output_mode(mode, reason=reason)}
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.get("/dev/stream-readiness")
+async def dev_stream_readiness():
+    engine = _require_dev_engine()
+    now = time.time()
+    recent_errors = [
+        entry for entry in get_recent_logs(limit=1500)
+        if str(entry.get("level") or "").lower() == "error" and now - float(entry.get("ts") or 0.0) <= 600.0
+    ]
+    return engine.get_stream_readiness_status(
+        error_count_last_10m=len(recent_errors),
+        vts_status=get_vts_status(),
+    )
 
 
 @app.api_route("/dev/test-ui-message", methods=["GET", "POST"])

@@ -2,8 +2,10 @@ import unittest
 
 from app.stream.policy import (
     COMPLIMENTS_TO_LEO,
+    ENTERTAINMENT_REQUEST,
     ViewerIntentPolicy,
     apply_owner_game_activity_correction,
+    classify_viewer_semantic_intent,
     filter_ambient_facts_for_activity,
     has_active_behavior_block,
     owner_behavior_decision,
@@ -205,6 +207,62 @@ class StreamBehaviorPolicyTests(unittest.TestCase):
         self.assertEqual(decision.direct_template_response, "")
         self.assertTrue(decision.response_directive)
         self.assertTrue(decision.response_constraints)
+
+    def test_hebe_cuenta_un_chiste_not_message_to_leo(self):
+        semantic = classify_viewer_semantic_intent("hebe cuenta un chiste")
+
+        self.assertEqual(semantic.intent, "viewer_entertainment_request_to_hebe")
+        self.assertEqual(semantic.requested_behavior, ENTERTAINMENT_REQUEST)
+        self.assertEqual(semantic.target, "Hebe")
+
+    def test_hebe_cuenta_un_ciste_typo_not_message_to_leo(self):
+        semantic = classify_viewer_semantic_intent("hebe cuenta un ciste")
+
+        self.assertEqual(semantic.intent, "viewer_entertainment_request_to_hebe")
+        self.assertNotEqual(semantic.requested_behavior, "message_to_leo")
+
+    def test_hebe_pasa_del_chat_not_message_to_leo(self):
+        semantic = classify_viewer_semantic_intent("hebe pasa del chat")
+
+        self.assertEqual(semantic.intent, "viewer_entertainment_request_to_hebe")
+        self.assertEqual(semantic.target, "Hebe")
+
+    def test_hebe_di_algo_not_message_to_leo(self):
+        semantic = classify_viewer_semantic_intent("hebe di algo")
+
+        self.assertEqual(semantic.intent, "viewer_entertainment_request_to_hebe")
+        self.assertEqual(semantic.target, "Hebe")
+
+    def test_true_leo_proxy_requests_still_message_to_leo(self):
+        cases = [
+            "Hebe, dile a Leo que mire el chat",
+            "Hebe, avisa a Leo de que lea esto",
+            "Hebe, cuentale a Leo lo que dije",
+            "Hebe, cuenta le a Leo lo que dije",
+        ]
+
+        for text in cases:
+            with self.subTest(text=text):
+                semantic = classify_viewer_semantic_intent(text)
+                self.assertEqual(semantic.intent, "viewer_repeat_to_leo_request")
+                self.assertEqual(semantic.requested_behavior, "message_to_leo")
+
+    def test_entertainment_request_can_reach_presence_engine(self):
+        stream = self.make_stream()
+
+        decision = ViewerIntentPolicy().decide(
+            stream,
+            username="viewer",
+            display_name="Viewer",
+            text="hebe cuenta un chiste",
+            now=1000.0,
+        )
+
+        self.assertTrue(decision.allow_llm)
+        self.assertTrue(decision.allow_reply)
+        self.assertEqual(decision.intent, "viewer_entertainment_request_to_hebe")
+        self.assertEqual(decision.requested_behavior, ENTERTAINMENT_REQUEST)
+        self.assertFalse(decision.execute_as_command)
 
     def test_protected_group_joke_uses_in_character_boundary(self):
         stream = self.make_stream()

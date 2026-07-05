@@ -78,6 +78,51 @@ def _seconds_between(start: str | None, end: str | None) -> int | None:
     return max(0, int((b - a).total_seconds()))
 
 
+def _session_stale_reason(active: dict | None, metadata: dict[str, Any], now: str) -> str | None:
+    if not active:
+        return None
+    active_stream_id = str(active.get("twitch_stream_id") or "").strip()
+    current_stream_id = str(metadata.get("twitch_stream_id") or "").strip()
+    if active_stream_id and current_stream_id and active_stream_id != current_stream_id:
+        return "stream_id_mismatch"
+    age = _seconds_between(active.get("started_at"), now) or 0
+    max_age = int(float(os.getenv("HEBE_STREAM_SESSION_MAX_SECONDS", "64800") or 64800))
+    if age > max_age:
+        return "stale_or_too_old"
+    started = _parse_iso(active.get("started_at"))
+    current = _parse_iso(now)
+    if started and current and started.date() != current.date() and age > 4 * 3600:
+        return "stale_day_boundary"
+    return None
+
+
+def _stream_references_active_session(stream: Any, active: dict | None) -> bool:
+    if stream is None or not active:
+        return False
+    active_stream_id = str(active.get("twitch_stream_id") or "").strip()
+    current_stream_id = str(_stream_metadata(stream).get("twitch_stream_id") or "").strip()
+    if active_stream_id and current_stream_id and active_stream_id != current_stream_id:
+        return False
+    try:
+        return int(getattr(stream, "active_stream_session_id", 0) or 0) == int(active.get("id") or 0)
+    except (TypeError, ValueError):
+        return False
+
+
+def _stale_close_session(conn: sqlite3.Connection, active: dict, *, now: str, reason: str) -> None:
+    max_age = int(float(os.getenv("HEBE_STREAM_SESSION_MAX_SECONDS", "64800") or 64800))
+    duration = min(_seconds_between(active.get("started_at"), now) or 0, max_age)
+    conn.execute(
+        """
+        UPDATE stream_sessions
+        SET ended_at = ?, duration_seconds = ?, status = 'stale_closed', updated_at = ?
+        WHERE id = ?
+        """,
+        (now, duration, now, active["id"]),
+    )
+    print(f"[HEBE][STREAM_SESSION] stale_closed id={active['id']} reason={reason}", flush=True)
+
+
 def _is_bot(username: str | None) -> bool:
     configured = os.getenv("HEBE_TWITCH_BOT_USERNAMES", "")
     bots = set(BOT_USERNAMES)
@@ -446,6 +491,13 @@ def ensure_active_stream_session(stream: Any = None, *, source: str = "unknown")
         return getattr(stream, "active_stream_session_id", None) if stream is not None else None
     started_at = metadata.get("started_at") or now
 
+    if active and not _stream_references_active_session(stream, active):
+        stale_reason = _session_stale_reason(active, metadata, now)
+        if stale_reason:
+            _stale_close_session(conn, active, now=now, reason=stale_reason)
+            conn.commit()
+            active = None
+
     if active:
         session_id = int(active["id"])
         conn.execute(
@@ -481,7 +533,7 @@ def ensure_active_stream_session(stream: Any = None, *, source: str = "unknown")
                 session_id,
             ),
         )
-        print(f"[HEBE][STREAM_SESSION] reused_active id={session_id}", flush=True)
+        print(f"[HEBE][STREAM_SESSION] reused_active id={session_id} reason=same_twitch_stream_id", flush=True)
     else:
         cur = conn.execute(
             """
@@ -510,7 +562,7 @@ def ensure_active_stream_session(stream: Any = None, *, source: str = "unknown")
         session_id = int(cur.lastrowid)
         print(
             "[HEBE][STREAM_SESSION] "
-            f"created id={session_id} title={metadata.get('title')!r} "
+            f"created id={session_id} twitch_stream_id={metadata.get('twitch_stream_id')!r} title={metadata.get('title')!r} "
             f"game={(metadata.get('game') or metadata.get('category'))!r} source=twitch",
             flush=True,
         )
@@ -529,8 +581,19 @@ def close_active_stream_session(stream: Any = None, *, reason: str = "offline") 
     if not active:
         conn.close()
         return None
+    metadata = _stream_metadata(stream)
+    active_stream_id = str(active.get("twitch_stream_id") or "").strip()
+    current_stream_id = str(metadata.get("twitch_stream_id") or "").strip()
+    if current_stream_id and active_stream_id and current_stream_id != active_stream_id:
+        conn.close()
+        print(
+            f"[HEBE][STREAM_SESSION] close_skipped id={active['id']} reason=stream_id_mismatch",
+            flush=True,
+        )
+        return None
     now = _now_iso()
-    duration = _seconds_between(active.get("started_at"), now)
+    max_age = int(float(os.getenv("HEBE_STREAM_SESSION_MAX_SECONDS", "64800") or 64800))
+    duration = min(_seconds_between(active.get("started_at"), now) or 0, max_age)
     conn.execute(
         """
         UPDATE stream_sessions

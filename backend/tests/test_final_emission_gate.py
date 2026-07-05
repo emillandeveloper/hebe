@@ -38,6 +38,61 @@ class FinalEmissionGateTests(unittest.TestCase):
         self.assertEqual(calls["ui"], [])
         self.assertEqual(calls["debug"][0]["candidate_response"], "candidate")
 
+    def test_candidate_response_never_ui_broadcast_even_if_guard_marked_passed(self):
+        gate, calls = self.make_gate()
+
+        result = self.emit(
+            gate,
+            calls,
+            event_id="evt-stage-candidate",
+            source="ui",
+            final_response="candidate",
+            output_route=OutputRoute.LOCAL_OWNER_REPLY,
+            output_targets=["local_ui"],
+            guard_result={"passed": True},
+            debug_payload={"response_stage": "candidate"},
+        )
+
+        self.assertFalse(result.emitted)
+        self.assertEqual(calls["ui"], [])
+        self.assertTrue(calls["debug"][0]["blocked_candidate_ui"])
+
+    def test_failed_guard_response_never_ui_broadcast_by_stage(self):
+        gate, calls = self.make_gate()
+
+        result = self.emit(
+            gate,
+            calls,
+            event_id="evt-stage-failed",
+            source="ui",
+            final_response="failed",
+            output_route=OutputRoute.LOCAL_OWNER_REPLY,
+            output_targets=["local_ui"],
+            guard_result={"passed": True},
+            debug_payload={"response_stage": "failed_guard"},
+        )
+
+        self.assertFalse(result.emitted)
+        self.assertEqual(calls["ui"], [])
+
+    def test_repair_attempt_never_ui_broadcast_by_stage(self):
+        gate, calls = self.make_gate()
+
+        result = self.emit(
+            gate,
+            calls,
+            event_id="evt-stage-repair",
+            source="ui",
+            final_response="repair",
+            output_route=OutputRoute.LOCAL_OWNER_REPLY,
+            output_targets=["local_ui"],
+            guard_result={"passed": True},
+            debug_payload={"response_stage": "repair_attempt"},
+        )
+
+        self.assertFalse(result.emitted)
+        self.assertEqual(calls["ui"], [])
+
     def test_failed_guard_response_not_broadcast(self):
         gate, calls = self.make_gate()
 

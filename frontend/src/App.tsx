@@ -1306,18 +1306,38 @@ type SimulationStreamLiveMode = "use_real_stream_state" | "force_stream_live" | 
 type SimulationPreset = {
   label: string;
   source: SimulationSource;
+  leoSource?: "ui" | "stt_voice";
   viewerName?: string;
   displayName?: string;
   messageText?: string;
   leoText?: string;
   ambientText?: string;
   todo?: boolean;
-  pendingKind?: "appointment_datetime" | "game_guidance_clarification";
+  pendingKind?: "appointment_datetime" | "promotion_target_clarification" | "game_guidance_clarification";
   internalLive?: boolean;
   streamLiveMode?: SimulationStreamLiveMode;
+  streamVoiceMode?: "normal" | "wake_only" | "muted";
+  seedTwitchThreadClosed?: boolean;
+  seedTwitchMinuteBudgetFull?: boolean;
 };
 
 const SIMULATION_PRESETS: SimulationPreset[] = [
+  { label: "A Owner monologue no wake", source: "leo", leoSource: "stt_voice", leoText: "estoy pensando en farmear un poco antes del jefe", streamLiveMode: "force_stream_live" },
+  { label: "B Owner wake question", source: "leo", leoSource: "stt_voice", leoText: "Hebe, que hora es", streamLiveMode: "force_stream_live" },
+  { label: "C Owner stop talking", source: "leo", leoSource: "stt_voice", leoText: "Hebe, deja de hablar sola", streamLiveMode: "force_stream_live" },
+  { label: "D Wake-only monologue", source: "leo", leoSource: "stt_voice", leoText: "voy a mirar el inventario y luego seguimos", streamLiveMode: "force_stream_live", streamVoiceMode: "wake_only" },
+  { label: "E Low-value Hebe mention", source: "twitch", viewerName: "viewer", displayName: "Viewer", messageText: "Hebe xd", streamLiveMode: "force_stream_live" },
+  { label: "F Talks about Hebe", source: "twitch", viewerName: "viewer", displayName: "Viewer", messageText: "Hebe esta muy callada hoy", streamLiveMode: "force_stream_live" },
+  { label: "G Repeated mention spam", source: "twitch", viewerName: "viewer", displayName: "Viewer", messageText: "Hebe, que opinas de esto?", streamLiveMode: "force_stream_live", seedTwitchThreadClosed: true },
+  { label: "H Emote-only", source: "twitch", viewerName: "viewer", displayName: "Viewer", messageText: "Kappa Kappa", streamLiveMode: "force_stream_live" },
+  { label: "I Useful viewer question", source: "twitch", viewerName: "viewer", displayName: "Viewer", messageText: "Hebe, que opinas de Final Fantasy IX?", streamLiveMode: "force_stream_live" },
+  { label: "J Viewer tells Leo", source: "twitch", viewerName: "viewer", displayName: "Viewer", messageText: "Hebe, dile a Leo que mire esto", streamLiveMode: "force_stream_live" },
+  { label: "K Inappropriate topic", source: "twitch", viewerName: "viewer", displayName: "Viewer", messageText: "Hebe, explica educacion sexual explicita en directo", streamLiveMode: "force_stream_live" },
+  { label: "L Pending appt unrelated", source: "leo", leoSource: "stt_voice", leoText: "el jueves hacemos stream largo si terminamos esta partida", pendingKind: "appointment_datetime", streamLiveMode: "force_stream_live" },
+  { label: "M Pending promo target", source: "leo", leoSource: "stt_voice", leoText: "Super Damu", pendingKind: "promotion_target_clarification", streamLiveMode: "force_stream_live" },
+  { label: "N Game pending anecdote", source: "leo", leoSource: "stt_voice", leoText: "mi familia vendra luego a cenar", pendingKind: "game_guidance_clarification", streamLiveMode: "force_stream_live" },
+  { label: "O Guard fails candidate", source: "twitch", viewerName: "viewer", displayName: "Viewer", messageText: "Kappa Kappa", streamLiveMode: "force_stream_live" },
+  { label: "P Budget blocks reply", source: "twitch", viewerName: "viewer", displayName: "Viewer", messageText: "Hebe, que opinas de esto?", streamLiveMode: "force_stream_live", seedTwitchMinuteBudgetFull: true },
   { label: "Pending exact time reply", source: "leo", leoText: "a las cinco", pendingKind: "appointment_datetime" },
   { label: "Owner app overrides pending", source: "leo", leoText: "Hebe, abre Discord", pendingKind: "appointment_datetime" },
   { label: "Ambient random phrase", source: "ambient", ambientText: "al fondo suena una conversacion cualquiera" },
@@ -1526,6 +1546,8 @@ function SimulationView({
           viewer_name: preset.viewerName || viewerName,
           display_name: preset.displayName || displayName,
           text: preset.messageText || messageText,
+          seed_twitch_thread_closed: Boolean(preset.seedTwitchThreadClosed),
+          seed_twitch_minute_budget_full: Boolean(preset.seedTwitchMinuteBudgetFull),
         }),
         stream_live_mode: preset.streamLiveMode || "force_stream_live",
         use_real_stream_state: (preset.streamLiveMode || "force_stream_live") === "use_real_stream_state",
@@ -1535,7 +1557,13 @@ function SimulationView({
       return;
     }
     if (preset.source === "leo") {
-      postDev("/dev/simulate/leo-message", { source: "ui", text: preset.leoText || leoText, pending_kind: preset.pendingKind });
+      postDev("/dev/simulate/leo-message", {
+        source: preset.leoSource || "ui",
+        text: preset.leoText || leoText,
+        pending_kind: preset.pendingKind,
+        stream_live_mode: preset.streamLiveMode || streamLiveMode,
+        stream_voice_mode: preset.streamVoiceMode,
+      });
       return;
     }
     if (preset.source === "ambient") {
@@ -1599,6 +1627,20 @@ function SimulationView({
     }
   }
 
+  async function refreshStreamReadiness() {
+    setBusy("stream_readiness");
+    setError("");
+    try {
+      const res = await fetch(`${apiBase}/dev/stream-readiness`);
+      const payload = await readPayload(res);
+      setPolicyState((prev: any) => ({ ...(prev || {}), ...payload }));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy("");
+    }
+  }
+
   function setMode(mode: string) {
     setOutputMode(mode);
     setBusy("output_mode");
@@ -1626,6 +1668,7 @@ function SimulationView({
     : Array.isArray(policyState?.behavior_blocks)
       ? policyState.behavior_blocks
       : [];
+  const readiness = result?.stream_readiness || policyState?.stream_readiness || {};
   const gameState = result?.game_state || policyState?.game_state || {};
   const cooldowns = result?.cooldowns || policyState?.cooldowns || {};
   const timeline = Array.isArray(result?.timeline) && result.timeline.length ? result.timeline : simulationTimelineFrom(trace);
@@ -1730,6 +1773,7 @@ function SimulationView({
             {sourceType === "ambient" && <button className="btn compact" disabled={busyNow || !enabled} onClick={() => postDev("/dev/simulate/ambient-stt", { text: ambientText })}>Send ambient STT</button>}
             <button className="btn compact danger" disabled={busyNow || !enabled} onClick={() => postDev("/dev/policy/behavior-blocks/clear")}>Clear blocks</button>
             <button className="btn compact" disabled={busyNow || !enabled} onClick={refreshPolicyState}>Refresh policy state</button>
+            <button className="btn compact" disabled={busyNow || !enabled} onClick={refreshStreamReadiness}>Stream readiness</button>
             <button className="btn compact" disabled={busyNow || !enabled} onClick={() => getDebug("/debug/policy/last")}>Show last policy</button>
             <button className="btn compact" disabled={busyNow} onClick={() => { setResult(null); setPolicyState(null); setError(""); setLastSimulationAt(""); }}>Reset view</button>
           </div>
@@ -1778,6 +1822,8 @@ function SimulationView({
             <SimulationFact label="Behavior family" value={trace.behavior_family} />
             <SimulationFact label="Style profile" value={trace.style_profile} />
             <SimulationFact label="Final response" value={trace.final_response || trace.hebe_response} />
+            <SimulationFact label="Route" value={trace.output_route} />
+            <SimulationFact label="Why intervene/silent" value={trace.suppress_reason || trace.presence_reason || trace.reason} />
           </div>
           <div className="compactTimeline">
             {timeline.slice(0, 7).map((item: string, index: number) => <div className="timelineItem" key={`${index}-${item}`}>{item}</div>)}
@@ -1824,6 +1870,17 @@ function SimulationView({
             <SimulationFact label="TTS route" value={trace.tts_route} />
             <SimulationFact label="Speech budget" value={trace.speech_budget} />
             <SimulationFact label="Quality guard" value={trace.quality_guard} />
+            <SimulationFact label="Twitch category" value={trace.twitch_message_category} />
+            <SimulationFact label="Value score" value={trace.value_score} />
+            <SimulationFact label="Output route" value={trace.output_route} />
+            <SimulationFact label="Public sent" value={trace.public_chat_sent} />
+            <SimulationFact label="TTS sent" value={trace.tts_sent} />
+            <SimulationFact label="Suppress reason" value={trace.suppress_reason} />
+            <SimulationFact label="Budget result" value={trace.budget_result} />
+            <SimulationFact label="Thread result" value={trace.thread_result} />
+            <SimulationFact label="Depth result" value={trace.answer_depth_result} />
+            <SimulationFact label="Follow-up guard" value={trace.followup_question_guard_result} />
+            <SimulationFact label="Persona quality" value={trace.stream_persona_quality_result} />
             <SimulationFact label="Allow free LLM" value={trace.allow_free_llm} />
             <SimulationFact label="Execute command" value={trace.execute_as_command} />
             <SimulationFact label="Addressed to Hebe" value={trace.addressed_to_hebe} />
@@ -1861,6 +1918,24 @@ function SimulationView({
             <div>
               <div className="panelTitle">Active state</div>
               <div className="panelMeta">policy + run context</div>
+            </div>
+          </div>
+          <div className="stateBlock streamReadinessBlock">
+            <div className="stateBlockTitle">Stream Readiness</div>
+            <div className="statusList compact">
+              <StatusLine label="Backend" value={readiness.backend_running === false ? "offline" : "running"} tone={readiness.backend_running === false ? "bad" : "ok"} />
+              <StatusLine label="Twitch" value={readiness.twitch_connected ? "connected" : "not connected"} tone={readiness.twitch_connected ? "ok" : "warn"} />
+              <StatusLine label="Stream live" value={simValue(readiness.stream_live)} tone={readiness.stream_live ? "ok" : "warn"} />
+              <StatusLine label="VTS" value={simValue(readiness.vts_status?.status || readiness.vts_status?.state || readiness.vts_status?.connected)} tone={readiness.vts_status?.connected ? "ok" : "idle"} />
+              <StatusLine label="TTS" value={readiness.tts_enabled ? "enabled" : "disabled"} tone={readiness.tts_enabled ? "warn" : "idle"} />
+              <StatusLine label="Voice mode" value={simValue(readiness.stream_voice_mode)} tone={readiness.stream_voice_mode === "normal" ? "ok" : "warn"} />
+              <StatusLine label="Presence engine" value={simValue(readiness.presence_engine_mode)} tone={readiness.presence_engine_mode === "active" ? "ok" : "warn"} />
+              <StatusLine label="Proactive speech" value={readiness.proactive_speech_enabled ? "enabled" : "disabled"} tone={readiness.proactive_speech_enabled ? "warn" : "ok"} />
+              <StatusLine label="Current game" value={simValue(readiness.current_game)} tone={readiness.current_game ? "ok" : "idle"} />
+              <StatusLine label="Pending tasks" value={String(Array.isArray(readiness.active_pending_tasks) ? readiness.active_pending_tasks.length : 0)} tone={Array.isArray(readiness.active_pending_tasks) && readiness.active_pending_tasks.length ? "warn" : "ok"} />
+              <StatusLine label="Last route" value={simValue(readiness.last_output_route)} tone="idle" />
+              <StatusLine label="Last suppress" value={simValue(readiness.last_suppression_reason)} tone={readiness.last_suppression_reason ? "warn" : "ok"} />
+              <StatusLine label="Errors 10m" value={simValue(readiness.error_count_last_10m, "0")} tone={Number(readiness.error_count_last_10m || 0) ? "bad" : "ok"} />
             </div>
           </div>
           <div className="stateBlock">
@@ -1973,6 +2048,19 @@ function simulationTraceFrom(payload: any) {
     response_source: simValue(payload?.response_source || trace.response_source, ""),
     style_guard_triggered: payload?.style_guard_triggered ?? trace.style_guard_triggered,
     was_generic_refusal_rewritten: payload?.was_generic_refusal_rewritten ?? trace.was_generic_refusal_rewritten,
+    twitch_message_category: simValue(payload?.twitch_message_category || trace.twitch_message_category, ""),
+    value_score: payload?.value_score ?? payload?.reply_value_score ?? trace.value_score ?? trace.reply_value_score,
+    should_generate: payload?.should_generate ?? trace.should_generate,
+    output_route: simValue(payload?.output_route || trace.output_route, ""),
+    public_chat_sent: payload?.public_chat_sent ?? payload?.public_sent ?? trace.public_chat_sent ?? trace.public_sent,
+    tts_sent: payload?.tts_sent ?? trace.tts_sent,
+    suppress_reason: simValue(payload?.suppress_reason || trace.suppress_reason, ""),
+    budget_result: payload?.budget_result || trace.budget_result || {},
+    thread_result: payload?.thread_result || trace.thread_result || {},
+    answer_depth_result: payload?.answer_depth_result || trace.answer_depth_result || {},
+    followup_question_guard_result: payload?.followup_question_guard_result || trace.followup_question_guard_result || {},
+    stream_persona_quality_result: payload?.stream_persona_quality_result || trace.stream_persona_quality_result || {},
+    presence_reason: simValue(payload?.last_presence_decision?.reason || payload?.presence_decision?.reason || trace.presence_decision?.reason, ""),
     allow_free_llm: payload?.allow_free_llm ?? trace.allow_free_llm,
     execute_as_command: payload?.execute_as_command ?? trace.execute_as_command,
     hebe_response: simValue(payload?.hebe_response || trace.hebe_response, ""),
@@ -2010,6 +2098,10 @@ function simulationVerdict(trace: ReturnType<typeof simulationTraceFrom>) {
   if (stopPipeline) return { label: "Blocked by router", tone: "bad" as const, blockedBy: "cognitive_router", reason: trace.reason || trace.firewall_reason };
   if (policyDecision === "blocked") return { label: "Blocked by policy", tone: "bad" as const, blockedBy: "viewer_policy", reason: trace.policy_reason || trace.reason || "policy_blocked" };
   if (firewallDecision === "allow_context_only") return { label: "Context only", tone: "warn" as const, blockedBy: "input_firewall", reason: trace.firewall_reason || "context_only" };
+  const outputRoute = String(trace.output_route || "").toLowerCase();
+  if (outputRoute === "observe_only") return { label: "Observed silently", tone: "idle" as const, blockedBy: "presence_or_route_gate", reason: trace.suppress_reason || trace.presence_reason || trace.reason || "observe_only" };
+  if (outputRoute === "suppress") return { label: "Suppressed", tone: "warn" as const, blockedBy: "guard_or_route_gate", reason: trace.suppress_reason || trace.reason || "suppressed" };
+  if (outputRoute === "local_ui_debug_only") return { label: "Local debug only", tone: "warn" as const, blockedBy: "simulation_route", reason: trace.reason || "local_ui_debug_only" };
   const decision = String(trace.policy_decision || "").toLowerCase();
   const responseMode = String(trace.response_mode || "").toLowerCase();
   const intent = String(trace.intent || "").toLowerCase();
@@ -2029,6 +2121,8 @@ function simulationTimelineFrom(trace: any) {
     `[AUTHORITY] authority=${simValue(normalized.authority)}`,
     `[INTENT] intent=${simValue(normalized.intent)} requested_behavior=${simValue(normalized.requested_behavior)} behavior_family=${simValue(normalized.behavior_family)} matched_by=${simValue(normalized.matched_by)}`,
     `[POLICY] decision=${simValue(normalized.policy_decision)} reason=${simValue(normalized.reason)} allow_free_llm=${simValue(normalized.allow_free_llm)} execute_as_command=${simValue(normalized.execute_as_command)}`,
+    `[PRESENCE] category=${simValue(normalized.twitch_message_category)} value=${simValue(normalized.value_score)} reason=${simValue(normalized.presence_reason)}`,
+    `[ROUTE] output=${simValue(normalized.output_route)} public=${simValue(normalized.public_chat_sent)} tts=${simValue(normalized.tts_sent)} suppress=${simValue(normalized.suppress_reason)}`,
     `[RESPONSE_SOURCE] source=${simValue(normalized.response_source)} style_guard=${simValue(normalized.style_guard_triggered)} generic_rewrite=${simValue(normalized.was_generic_refusal_rewritten)}`,
   ];
   if (normalized.final_response || normalized.hebe_response) {
@@ -2565,13 +2659,26 @@ function LogsView({ apiBase, logs, onClearVisible }: { apiBase: string; logs: { 
   const [autoScroll, setAutoScroll] = useState(true);
   const [wrap, setWrap] = useState(true);
   const [hiddenKeys, setHiddenKeys] = useState<Set<string>>(() => new Set());
-  const [bundleMinutes, setBundleMinutes] = useState(30);
+  const [bundleMinutes, setBundleMinutes] = useState(300);
+  const [bundleMode, setBundleMode] = useState("last_5_hours");
   const [includeDbSnapshot, setIncludeDbSnapshot] = useState(false);
   const [includeCurrentState, setIncludeCurrentState] = useState(true);
   const [exportBusy, setExportBusy] = useState(false);
   const [preview, setPreview] = useState<{ errors: string[]; cognitive_router: any[]; stt: any[]; proactive_decisions: any[] } | null>(null);
   const [previewError, setPreviewError] = useState("");
   const listRef = useRef<HTMLDivElement | null>(null);
+  const debugBundleWindows = [
+    { mode: "last_30_minutes", minutes: 30, label: "Export last 30 min" },
+    { mode: "last_2_hours", minutes: 120, label: "Export last 2h" },
+    { mode: "last_5_hours", minutes: 300, label: "Export last 5h" },
+  ];
+  const selectedBundleWindow = debugBundleWindows.find((item) => item.mode === bundleMode) || debugBundleWindows[2];
+
+  function selectBundleMode(nextMode: string) {
+    const selected = debugBundleWindows.find((item) => item.mode === nextMode) || debugBundleWindows[2];
+    setBundleMode(selected.mode);
+    setBundleMinutes(selected.minutes);
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -2651,6 +2758,7 @@ function LogsView({ apiBase, logs, onClearVisible }: { apiBase: string; logs: { 
     try {
       const params = new URLSearchParams({
         minutes: String(bundleMinutes),
+        mode: bundleMode,
         include_db_snapshot: includeDbSnapshot ? "true" : "false",
         include_recent_state: includeCurrentState ? "true" : "false",
         include_recent_ui: "true",
@@ -2725,12 +2833,12 @@ function LogsView({ apiBase, logs, onClearVisible }: { apiBase: string; logs: { 
         <div className="debugBundleBar">
           <div className="debugBundleControls">
             <span className="muted small">Debug bundle</span>
-            <select className="select compactSelect" value={bundleMinutes} onChange={(e) => setBundleMinutes(Number(e.target.value))}>
-              {[5, 15, 30, 60].map((minutes) => <option value={minutes} key={minutes}>Ãšltimos {minutes} min</option>)}
+            <select className="select compactSelect" value={bundleMode} onChange={(e) => selectBundleMode(e.target.value)}>
+              {debugBundleWindows.map((item) => <option value={item.mode} key={item.mode}>{item.label}</option>)}
             </select>
             <label className="toggle mini"><input type="checkbox" checked={includeDbSnapshot} onChange={(e) => setIncludeDbSnapshot(e.target.checked)} /><span className="toggleLabel">DB sanitizada</span></label>
             <label className="toggle mini"><input type="checkbox" checked={includeCurrentState} onChange={(e) => setIncludeCurrentState(e.target.checked)} /><span className="toggleLabel">Estado actual</span></label>
-            <button className="btn compact" disabled={exportBusy} onClick={exportDebugBundle}>{exportBusy ? "Exportando..." : "Export debug bundle"}</button>
+            <button className="btn compact" disabled={exportBusy} onClick={exportDebugBundle}>{exportBusy ? "Exportando..." : selectedBundleWindow.label}</button>
             <button className="btn compact" onClick={loadRecentPreview}>Preview recientes</button>
           </div>
           {previewError && <div className="micError">{previewError}</div>}

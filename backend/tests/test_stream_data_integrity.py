@@ -111,6 +111,51 @@ class StreamDataIntegrityTests(unittest.TestCase):
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM stream_chat_messages").fetchone()[0], 0)
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM stream_events").fetchone()[0], 0)
 
+    def test_new_twitch_stream_id_creates_new_session(self):
+        stream = self._live_stream()
+        first_id = stream_memory.ensure_active_stream_session(stream, source="engine")
+        stream.twitch_stream_id = "tw-456"
+        stream.stream_started_at = "2026-06-19T18:00:00Z"
+
+        second_id = stream_memory.ensure_active_stream_session(stream, source="engine")
+
+        self.assertNotEqual(first_id, second_id)
+        with closing(self._conn()) as conn:
+            first = conn.execute("SELECT * FROM stream_sessions WHERE id = ?", (first_id,)).fetchone()
+            second = conn.execute("SELECT * FROM stream_sessions WHERE id = ?", (second_id,)).fetchone()
+            self.assertEqual(first["status"], "stale_closed")
+            self.assertEqual(second["status"], "live")
+            self.assertEqual(second["twitch_stream_id"], "tw-456")
+
+    def test_stale_session_not_reused_next_day(self):
+        stream = self._live_stream()
+        stream.stream_started_at = "2026-06-18T18:00:00Z"
+        first_id = stream_memory.ensure_active_stream_session(stream, source="engine")
+        with closing(self._conn()) as conn:
+            conn.execute(
+                "UPDATE stream_sessions SET started_at = ? WHERE id = ?",
+                ("2020-01-01T18:00:00+00:00", first_id),
+            )
+            conn.commit()
+
+        stream.active_stream_session_id = None
+        stream.twitch_stream_id = "tw-789"
+        second_id = stream_memory.ensure_active_stream_session(stream, source="engine")
+
+        self.assertNotEqual(first_id, second_id)
+
+    def test_offline_closes_matching_session(self):
+        stream = self._live_stream()
+        session_id = stream_memory.ensure_active_stream_session(stream, source="engine")
+
+        summary = stream_memory.close_active_stream_session(stream, reason="stream_offline_event")
+
+        self.assertIsNotNone(summary)
+        with closing(self._conn()) as conn:
+            session = conn.execute("SELECT * FROM stream_sessions WHERE id = ?", (session_id,)).fetchone()
+            self.assertEqual(session["status"], "ended")
+            self.assertLess(session["duration_seconds"], 24 * 3600)
+
     def test_repair_dry_run_reports_and_execute_backfills_without_fake_real_metadata(self):
         init_live_session_schema()
         now = "2026-06-18T19:00:00+00:00"

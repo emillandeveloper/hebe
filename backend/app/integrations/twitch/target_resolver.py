@@ -12,6 +12,9 @@ from typing import Any
 DEFAULT_VIEWER_ALIASES = {
     "charlie": "er_tito_xarly",
     "xarly": "er_tito_xarly",
+    "laurichu": "laurichutv",
+    "angelo noctis": "angelo_noctis",
+    "angelo": "angelo_noctis",
     "nuria": "nuriiia___",
     "superdamu": "superdamu",
     "super damu": "superdamu",

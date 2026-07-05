@@ -580,6 +580,7 @@ class STTService:
                 f"reason={reason}",
                 flush=True,
             )
+        self._log_input_device_diagnostic(selected)
 
         return device_index
 
@@ -629,8 +630,25 @@ class STTService:
             f"sample_rate={self.selected_input_sample_rate} channels={self.selected_input_channels}",
             flush=True,
         )
+        self._log_input_device_diagnostic(self.get_selected_input_device())
         self._emit("status", {"stt_input_device": self.get_selected_input_device()})
         return self.get_selected_input_device()
+
+    def _log_input_device_diagnostic(self, device: dict | None) -> None:
+        device = device or {}
+        name = str(device.get("name") or device.get("device_name") or device.get("display_label") or "").strip()
+        lowered = name.lower()
+        warning = ""
+        if any(marker in lowered for marker in ("out ", " output", "voicemeeter out", "desktop", "stereo mix", "what u hear", "loopback", "cable output", "bus")):
+            warning = "possible_output_mix"
+        print(
+            f"[HEBE][STT_DEVICE_DIAGNOSTIC] selected={name or '(default)'} warning={warning or 'none'}",
+            flush=True,
+        )
+        print(
+            f"[HEBE][STT_AUDIO_SOURCE] source={name or '(default)'}",
+            flush=True,
+        )
 
     def get_selected_input_device(self) -> dict:
         return {

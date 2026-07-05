@@ -78,6 +78,14 @@ class StreamSessionState:
     wake_only_until: float = 0.0
     muted_until: float = 0.0
     mute_reason: Optional[str] = None
+    voice_mode_activated_by_event_id: Optional[str] = None
+    voice_mode_activated_by_text: Optional[str] = None
+    voice_mode_activated_at: float = 0.0
+    voice_mode_expires_at: float = 0.0
+    voice_mode_ttl_seconds: float = 0.0
+    voice_mode_can_direct_wake_bypass: bool = True
+    voice_mode_can_twitch_boundary_bypass: bool = True
+    voice_mode_manual: bool = False
     combat_state: Optional[bool] = None
     current_game_activity_confidence: float = 0.0
     current_game_activity_provenance: Optional[str] = None

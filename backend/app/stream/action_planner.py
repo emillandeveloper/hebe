@@ -73,6 +73,21 @@ class StreamActionPlanner:
             )
 
         print(f"[HEBE][ENTITY] extracted={{'target_text': {target_raw!r}}}", flush=True)
+        guard_ok, guard_reason, guarded_raw = self._promotion_target_guard(target_raw, resolved=False)
+        if not guard_ok:
+            print(f"[HEBE][PROMOTION_CLARIFY] reason={guard_reason} candidates=[]", flush=True)
+            return ActionPlan(
+                action_type="twitch_shoutout",
+                status="needs_confirmation",
+                confidence=min(intent_confidence, 0.45),
+                requires_stream=True,
+                reason=guard_reason,
+                candidates=[],
+                context_checks=checks,
+                slots={"target_raw": target_raw, "target_text": guarded_raw, "resolved_username": None},
+                missing_slots=["target"],
+            )
+        target_raw = guarded_raw
         target, target_confidence, candidates, reason = self._resolve_target(target_raw)
         print(
             "[HEBE][PROMOTION_RESOLVE] "
@@ -108,6 +123,22 @@ class StreamActionPlanner:
                 missing_slots=["target"],
             )
 
+        final_ok, final_reason, guarded_target = self._promotion_target_guard(target, resolved=True)
+        if not final_ok:
+            print(f"[HEBE][PROMOTION_CLARIFY] reason={final_reason} candidates={candidates!r}", flush=True)
+            return ActionPlan(
+                action_type="twitch_shoutout",
+                status="needs_confirmation",
+                confidence=min(confidence, 0.45),
+                target=None,
+                requires_stream=True,
+                reason=final_reason,
+                candidates=candidates,
+                context_checks=checks,
+                slots={"target_raw": target_raw, "target_text": target_raw, "resolved_username": target},
+                missing_slots=["target"],
+            )
+        target = guarded_target
         command = self.build_shoutout_command(target)
         status = "complete" if confidence >= 0.78 else "needs_confirmation"
         if reason in {"medium_confidence", "unverified_username"}:
@@ -131,6 +162,42 @@ class StreamActionPlanner:
                 "requires_confirmation": status != "complete",
             },
         )
+
+    def _promotion_target_guard(self, target: str, *, resolved: bool) -> tuple[bool, str, str]:
+        raw = str(target or "").strip().lstrip("@")
+        normalized = normalize_command_text(raw)
+        compact = _compact(raw)
+        reason = "accepted"
+        accepted = True
+        guarded = raw
+        command_words = {"haz", "hazle", "dale", "tira", "promo", "promocion", "promociona", "shoutout", "so"}
+        sentence_markers = {
+            "juego", "partida", "jueves", "familia", "anime", "chat", "viewer", "espectador",
+            "combate", "directo", "stream", "vamos", "estoy", "esta", "donde", "cuando",
+        }
+        insult_markers = {"idiot", "imbecil", "gilipoll", "cabron", "tonto", "tonta", "estupido", "estupida"}
+        tokens = set(normalized.split())
+        if not normalized:
+            accepted, reason = False, "missing_target"
+        elif len(compact) == 1:
+            accepted, reason = False, "ambiguous_single_letter_target"
+        elif normalized in {"h", "hache"} or re.fullmatch(r"(?:a|al|a la|a el)\s+h(?:ache)?", normalized):
+            accepted, reason = False, "ambiguous_single_letter_target"
+        elif tokens & insult_markers:
+            accepted, reason = False, "invalid_target"
+        elif tokens & command_words or re.search(r"(?:haz|promo|shoutout|so)", compact):
+            accepted, reason = False, "command_words_in_target"
+        elif tokens & sentence_markers and not resolved:
+            accepted, reason = False, "sentence_fragment"
+        elif resolved and not re.fullmatch(r"[A-Za-z0-9_]{3,25}", raw):
+            accepted, reason = False, "invalid_twitch_username"
+        elif not resolved and re.fullmatch(r"[A-Za-z0-9_]{3,25}", raw):
+            guarded = raw
+        print(
+            f"[HEBE][PROMOTION_TARGET_GUARD] accepted={str(accepted).lower()} target={guarded!r} reason={reason}",
+            flush=True,
+        )
+        return accepted, reason, guarded
 
     def _plan_chat_message(self, candidate) -> ActionPlan:
         message = str((candidate.entities or {}).get("message") or "").strip()

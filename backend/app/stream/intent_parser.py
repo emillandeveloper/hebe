@@ -36,11 +36,13 @@ class StreamIntentParser:
     filler = {"haz", "hazle", "dale", "manda", "pon", "un", "una", "el", "la", "de", "del", "give"}
     wake_prefix_re = re.compile(r"^\s*(?:hebe|eve|ebe|e\s*[-.]?\s*b|eb|jebe|heve)[\s,;:.-]+", re.IGNORECASE)
     promotion_patterns = (
-        re.compile(r"\b(?:haz(?:le)?|dale|tira)\s+(?:una?\s+)?promo\s+a\s+(.+)$", re.IGNORECASE),
-        re.compile(r"\bpromociona\s+a\s+(.+)$", re.IGNORECASE),
-        re.compile(r"\bshoutout\s+(?:a|to)\s+(.+)$", re.IGNORECASE),
-        re.compile(r"\b(?:haz(?:le)?|dale|manda|give)\s+(?:un\s+)?shoutout\s+(?:a|to)\s+(.+)$", re.IGNORECASE),
-        re.compile(r"\b(?:dale|haz)\s+so\s+a\s+(.+)$", re.IGNORECASE),
+        ("haz_promo", re.compile(r"\b(?:haz|tira)\s+(?:una?\s+)?promo\s+(?:a|al|a\s+la|al\s+canal\s+de|a\s+el\s+canal\s+de)\s+(.+)$", re.IGNORECASE)),
+        ("hazle_promo", re.compile(r"\bhazle\s+promo\s+(?:a|al|a\s+la|al\s+canal\s+de)\s+(.+)$", re.IGNORECASE)),
+        ("dale_promo", re.compile(r"\bdale\s+promo\s+(?:a|al|a\s+la|al\s+canal\s+de)\s+(.+)$", re.IGNORECASE)),
+        ("promociona", re.compile(r"\bpromociona\s+(?:a|al|a\s+la|al\s+canal\s+de)\s+(.+)$", re.IGNORECASE)),
+        ("shoutout", re.compile(r"\bshoutout\s+(?:a|to)\s+(.+)$", re.IGNORECASE)),
+        ("give_shoutout", re.compile(r"\b(?:haz(?:le)?|dale|manda|give)\s+(?:un\s+)?shoutout\s+(?:a|to)\s+(.+)$", re.IGNORECASE)),
+        ("so", re.compile(r"\b(?:so|s\s*o|dale\s+so|haz\s+so)\s+(?:a|al|to)\s+(.+)$", re.IGNORECASE)),
     )
     trailing_banter_patterns = (
         r"\ba\s+ver\s+si\b.*$",
@@ -117,14 +119,17 @@ class StreamIntentParser:
             return None
         command = self.wake_prefix_re.sub("", raw).strip()
         normalized_command = self.normalize(command)
-        for pattern in self.promotion_patterns:
+        for pattern_name, pattern in self.promotion_patterns:
             match = pattern.search(command) or pattern.search(normalized_command)
             if not match:
                 continue
             target_raw = str(match.group(1) or "").strip(" ,.;:")
             target, trailing = self._strip_promotion_trailing_banter(target_raw)
+            target = self._strip_promotion_target_filler(target)
             print(
-                f"[HEBE][PROMOTION_PARSE] raw={raw!r} target_phrase={target!r} trailing_removed={trailing!r}",
+                "[HEBE][PROMOTION_PARSE] "
+                f"raw={raw!r} command_pattern={pattern_name} target_phrase={target!r} "
+                f"stripped_prefix={command[:match.start()].strip()!r} stripped_suffix={trailing!r}",
                 flush=True,
             )
             return PromotionRequest(
@@ -136,6 +141,17 @@ class StreamIntentParser:
                 confidence=0.96 if target else 0.88,
             )
         return None
+
+    def _looks_like_broken_promotion_command(self, normalized: str) -> bool:
+        tokens = set(str(normalized or "").split())
+        return bool(tokens & self.shoutout_concepts) and bool(tokens & {"haz", "hazle", "dale", "tira", "shoutout", "so"})
+
+    def _strip_promotion_target_filler(self, target: str) -> str:
+        value = str(target or "").strip(" @,.;:")
+        value = re.sub(r"^(?:a|al|a\s+la|al\s+canal\s+de|canal\s+de)\s+", "", value, flags=re.IGNORECASE).strip(" @,.;:")
+        value = re.sub(r"\b(?:haz|hazle|dale|tira|promo|promocion|shoutout|so)\b", " ", value, flags=re.IGNORECASE)
+        value = re.sub(r"\s+", " ", value).strip(" @,.;:")
+        return value
 
     def _strip_promotion_trailing_banter(self, target_raw: str) -> tuple[str, str]:
         original = str(target_raw or "").strip(" ,.;:")

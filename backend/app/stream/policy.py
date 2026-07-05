@@ -17,6 +17,7 @@ OWNER_SOURCE = "owner_direct_command"
 COMPLIMENTS_TO_LEO = "compliments_to_leo"
 MESSAGE_TO_LEO = "message_to_leo"
 VIEWER_COMMAND = "viewer_command"
+ENTERTAINMENT_REQUEST = "entertainment_request"
 UNKNOWN_BEHAVIOR = "unknown"
 
 SOCIAL_ACTIVITY_BLOCKED_COMMENT_CATEGORIES = [
@@ -524,8 +525,9 @@ def _has_owner_stop_control(normalized: str) -> bool:
 
 def _has_viewer_messenger_semantics(normalized: str) -> bool:
     tokens = _policy_tokens(normalized)
+    has_leo_target = "leo" in tokens
+    has_implied_relay_target = bool(re.search(r"\b(?:dile|avisa|avisale|mandale|pasale|recuerdale|comentale|transmitele)\s+que\b", normalized))
     direct_messenger_tokens = {
-        "di",
         "dile",
         "diselo",
         "cuentale",
@@ -538,10 +540,40 @@ def _has_viewer_messenger_semantics(normalized: str) -> bool:
         "comentale",
         "transmitele",
     }
-    messenger_stems = ("mand", "envi", "pas", "transmit", "coment", "avis", "recuerd", "cuent", "pregunt", "repet")
-    return bool(tokens & direct_messenger_tokens) or _contains_stem(normalized, messenger_stems) or (
-        "parte" in tokens and bool(tokens & {"mi", "nuestra", "nuestro"})
-    ) or ("hazle" in tokens and "saber" in tokens)
+    if bool(tokens & direct_messenger_tokens):
+        return True
+    if has_leo_target and (
+        re.search(r"\b(?:di|dile|avisa|avisale|cuenta|cuentale|pasa|pasale|manda|mandale|recuerda|recuerdale|comenta|comentale|transmite|transmitele)\w*\s+a\s+leo\b", normalized)
+        or re.search(r"\b(?:cuenta|pasa|manda|recuerda|comenta|transmite)\s+le\s+a\s+leo\b", normalized)
+    ):
+        return True
+    if has_leo_target and re.search(r"\b(?:que\s+leo\s+lea|haz\s+que\s+leo|se\s+lo\s+dices\s+a\s+leo)\b", normalized):
+        return True
+    if has_implied_relay_target:
+        return True
+    return ("parte" in tokens and bool(tokens & {"mi", "nuestra", "nuestro"}) and has_leo_target) or (
+        "hazle" in tokens and "saber" in tokens
+    )
+
+
+def _is_direct_entertainment_request_to_hebe(normalized: str) -> bool:
+    tokens = _policy_tokens(normalized)
+    if not normalized.startswith(("hebe ", "ebe ", "eve ")):
+        return False
+    entertainment_tokens = {
+        "chiste",
+        "broma",
+        "cuenta",
+        "di",
+        "habla",
+        "reacciona",
+        "contesta",
+        "canta",
+        "baila",
+    }
+    if bool(tokens & entertainment_tokens):
+        return True
+    return "di algo" in normalized or "cuenta algo" in normalized or "pasa del chat" in normalized
 
 
 def _target_for_viewer_request(normalized: str, *, messenger: bool) -> str:
@@ -626,6 +658,15 @@ def classify_viewer_semantic_intent(text: str) -> SemanticIntent:
             intent="viewer_unsafe_or_offbrand_request",
             requested_behavior="sexual_stream_topic",
             behavior_family="stream_safety",
+            matched_by=["semantic_classifier"],
+            execute_as_command=False,
+        )
+    if _is_direct_entertainment_request_to_hebe(normalized):
+        return SemanticIntent(
+            intent="viewer_entertainment_request_to_hebe",
+            requested_behavior=ENTERTAINMENT_REQUEST,
+            behavior_family="stream_banter",
+            target="Hebe",
             matched_by=["semantic_classifier"],
             execute_as_command=False,
         )

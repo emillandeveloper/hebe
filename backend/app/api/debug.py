@@ -168,7 +168,7 @@ def list_backend_logs(limit: int = Query(1000, ge=1, le=5000)):
 
 
 @router.get("/logs/recent")
-def preview_recent_logs(minutes: int = Query(10, ge=1, le=240)):
+def preview_recent_logs(minutes: int = Query(10, ge=1, le=720)):
     return {
         "minutes": minutes,
         "errors": read_text_recent("errors.log", minutes=minutes, max_lines=120),
@@ -181,7 +181,9 @@ def preview_recent_logs(minutes: int = Query(10, ge=1, le=240)):
 @router.get("/export-logs")
 def export_logs(
     request: Request,
-    minutes: int = Query(30, ge=1, le=240),
+    minutes: int = Query(300, ge=1, le=720),
+    mode: str = Query("last_5_hours"),
+    session_id: int | None = Query(None),
     include_db_snapshot: bool = Query(False),
     include_config: bool = Query(False),
     include_recent_state: bool = Query(True),
@@ -192,6 +194,8 @@ def export_logs(
     try:
         bundle_path = create_debug_bundle(
             minutes=minutes,
+            mode=mode,
+            session_id=session_id,
             include_db_snapshot=include_db_snapshot,
             include_config=include_config,
             include_recent_state=include_recent_state,

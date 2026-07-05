@@ -259,8 +259,14 @@ class TwitchChatBot:
         if username.lower() == self.bot_username.lower():
             self._handle_own_bot_message(message)
             return
+        if self._is_ignored_user(username):
+            print(
+                f"[HEBE][TWITCH][CHAT] response_skipped reason=known_bot username={username} message={message!r}",
+                flush=True,
+            )
+            return
 
-        if self.ambient_message_callback is not None and not self._is_ignored_user(username):
+        if self.ambient_message_callback is not None:
             self.ambient_message_callback(username, username, message, channel)
 
         self._cleanup_pending_replies()
@@ -274,6 +280,7 @@ class TwitchChatBot:
         #   Leo: "fue un problema personal..." -> debe entrar como follow-up sin mención
         # Si consumimos el pending en el segundo mensaje, el tercero se ignora.
         has_pending_reply = False if has_mention else self._consume_pending_reply(username)
+        has_observe_value = False if (has_mention or has_pending_reply) else self._has_stream_value_without_mention(message)
 
         if has_mention and self._has_pending_reply(username):
             print(
@@ -282,12 +289,17 @@ class TwitchChatBot:
                 flush=True,
             )
 
-        if not has_mention and not has_pending_reply:
+        if not has_mention and not has_pending_reply and not has_observe_value:
             print(
                 f"[HEBE][TWITCH][CHAT] response_skipped reason=no_mention username={username} message={message!r}",
                 flush=True,
             )
             return
+        if has_observe_value:
+            print(
+                f"[HEBE][TWITCH][CHATBOT] accepted no-mention value check user={username!r} message={message!r}",
+                flush=True,
+            )
 
         if has_pending_reply and not has_mention:
             print(
@@ -319,13 +331,27 @@ class TwitchChatBot:
 
     def _has_hebe_mention(self, message: str) -> bool:
         text = str(message or "")
-        names = {"hebe", "ebe"}
+        names = {"hebe", "ebe", "eve", "heve", "jebe"}
         bot_name = (self.bot_username or "").strip().lower().lstrip("@")
         if bot_name:
             names.add(bot_name)
         for name in names:
             if re.search(rf"(?<![\w])@?{re.escape(name)}(?![\w])", text, flags=re.IGNORECASE):
                 return True
+        return False
+
+    def _has_stream_value_without_mention(self, message: str) -> bool:
+        text = str(message or "")
+        normalized = re.sub(r"[^a-z0-9_ ]+", " ", text.lower())
+        normalized = " ".join(normalized.split())
+        if not normalized:
+            return False
+        if re.search(r"\b(?:callad[ao]|muda|despierta|dormida|rara|seca|presente)\b", normalized):
+            return True
+        if re.search(r"\b(?:shoutout|promo|so)\b", normalized):
+            return True
+        if re.search(r"\b(?:dile|avisa|cuenta|pasa|manda)\w*\s+a\s+leo\b", normalized):
+            return True
         return False
 
     def _handle_own_bot_message(self, message: str) -> None:

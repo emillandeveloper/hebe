@@ -81,6 +81,20 @@ class WakeNameResolverTests(unittest.TestCase):
         self.assertIsNone(result.matched_name)
         self.assertEqual(result.reason, "trusted_source_command_evidence_without_wake")
 
+    def test_single_h_is_not_a_wake_name_or_stripped_target(self):
+        result = self.resolve("haz promo al h")
+
+        self.assertFalse(result.addressed_to_hebe)
+        self.assertIsNone(result.matched_name)
+        self.assertIn("h", result.stripped_text)
+
+    def test_eve_wake_preserves_h_promo_target(self):
+        result = self.resolve("Eve haz promo al h")
+
+        self.assertTrue(result.addressed_to_hebe)
+        self.assertEqual(result.matched_name, "eve")
+        self.assertEqual(result.stripped_text, "haz promo al h")
+
 
 if __name__ == "__main__":
     unittest.main()

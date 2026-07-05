@@ -9,9 +9,11 @@ import subprocess
 import threading
 import time
 import zipfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
+
+from app.services import db_sqlite
 
 
 BACKEND_DIR = Path(__file__).resolve().parents[2]
@@ -161,50 +163,62 @@ def log_jsonl_event(kind: str, payload: dict | None = None) -> None:
     _append_line(LOG_DIR / filename, line)
 
 
+def _log_file_variants(filename: str) -> list[Path]:
+    base = LOG_DIR / filename
+    paths = []
+    if base.exists():
+        paths.append(base)
+    paths.extend(sorted(LOG_DIR.glob(f"{filename}.*"), key=lambda item: item.name))
+    return paths
+
+
 def read_jsonl_recent(kind: str, *, minutes: int = 10, limit: int = 200) -> list[dict]:
     filename = JSONL_LOGS.get(kind, kind)
-    path = LOG_DIR / filename
     cutoff = time.time() - max(0, int(minutes)) * 60
     rows: list[dict] = []
-    if not path.exists():
+    paths = _log_file_variants(filename)
+    if not paths:
         return rows
-    try:
-        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-            try:
-                item = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            try:
-                if float(item.get("ts") or 0) < cutoff:
+    for path in paths:
+        try:
+            for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+                try:
+                    item = json.loads(line)
+                except json.JSONDecodeError:
                     continue
-            except (TypeError, ValueError):
-                pass
-            rows.append(redact_value(item))
-    except Exception:
-        return []
+                try:
+                    if float(item.get("ts") or 0) < cutoff:
+                        continue
+                except (TypeError, ValueError):
+                    pass
+                rows.append(redact_value(item))
+        except Exception:
+            continue
+    rows.sort(key=lambda item: float(item.get("ts") or 0) if isinstance(item, dict) else 0)
     return rows[-max(1, int(limit)) :]
 
 
 def read_text_recent(filename: str, *, minutes: int = 10, max_lines: int = 300) -> list[str]:
-    path = LOG_DIR / filename
-    if not path.exists():
+    paths = _log_file_variants(filename)
+    if not paths:
         return []
     cutoff = time.time() - max(0, int(minutes)) * 60
     lines: list[str] = []
-    try:
-        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-            include = True
-            prefix = line[:32]
-            try:
-                if "T" in prefix:
-                    dt = datetime.fromisoformat(prefix.split(" ")[0].replace("Z", "+00:00"))
-                    include = dt.timestamp() >= cutoff
-            except Exception:
+    for path in paths:
+        try:
+            for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
                 include = True
-            if include:
-                lines.append(redact_text(line))
-    except Exception:
-        return []
+                prefix = line[:32]
+                try:
+                    if "T" in prefix:
+                        dt = datetime.fromisoformat(prefix.split(" ")[0].replace("Z", "+00:00"))
+                        include = dt.timestamp() >= cutoff
+                except Exception:
+                    include = True
+                if include:
+                    lines.append(redact_text(line))
+        except Exception:
+            continue
     return lines[-max(1, int(max_lines)) :]
 
 
@@ -286,8 +300,6 @@ def _capability_summary() -> dict:
 
 def _recent_db_snapshot() -> dict:
     try:
-        from app.services import db_sqlite
-
         path = Path(db_sqlite.DB_PATH)
         if not path.exists():
             return {"ok": False, "reason": "database_not_found"}
@@ -309,7 +321,9 @@ def _recent_db_snapshot() -> dict:
 
 def create_debug_bundle(
     *,
-    minutes: int = 30,
+    minutes: int = 300,
+    mode: str = "last_5_hours",
+    session_id: int | None = None,
     include_db_snapshot: bool = False,
     include_config: bool = False,
     include_recent_state: bool = True,
@@ -317,12 +331,43 @@ def create_debug_bundle(
     engine: Any = None,
 ) -> Path:
     ensure_log_dirs()
+    window = _debug_bundle_window(mode=mode, minutes=minutes, session_id=session_id)
+    minutes = int(window.get("minutes") or minutes)
+    created_at = datetime.now(timezone.utc).isoformat()
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     path = DEBUG_BUNDLE_DIR / f"hebe_debug_{stamp}_{int(time.time() * 1000)}.zip"
     with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
+        included_logs: list[dict[str, Any]] = []
+        for filename in set(TEXT_LOGS.values()) | set(JSONL_LOGS.values()):
+            for source in _log_file_variants(filename):
+                if not source.exists():
+                    continue
+                arcname = f"logs/{source.name}"
+                bundle.write(source, arcname)
+                try:
+                    size = source.stat().st_size
+                except OSError:
+                    size = None
+                included_logs.append({"path": arcname, "size": size})
         metadata = {
-            "created_at": datetime.now(timezone.utc).isoformat(),
+            "export_mode": window.get("mode"),
+            "requested_minutes": minutes,
+            "actual_start_time": window.get("actual_start_time") or window.get("start_time"),
+            "actual_end_time": window.get("actual_end_time") or window.get("end_time"),
+            "created_at": created_at,
+            "included_logs": included_logs,
+            "stream_session_id": window.get("session_id"),
+            "twitch_stream_id": window.get("stream_id"),
+            "app_version": "",
+            "git_commit": _git_commit(),
+            "mode": window.get("mode"),
             "minutes": minutes,
+            "session_id": window.get("session_id"),
+            "stream_id": window.get("stream_id"),
+            "start_time": window.get("start_time"),
+            "end_time": window.get("end_time"),
+            "duration": window.get("duration"),
+            "log_window": window,
             "commit": _git_commit(),
             "include_db_snapshot": include_db_snapshot,
             "include_config": include_config,
@@ -330,10 +375,6 @@ def create_debug_bundle(
             "include_recent_ui": include_recent_ui,
         }
         _write_json(bundle, "metadata.json", metadata)
-        for filename in set(TEXT_LOGS.values()) | set(JSONL_LOGS.values()):
-            source = LOG_DIR / filename
-            if source.exists():
-                bundle.write(source, f"logs/{filename}")
         _write_json(bundle, "recent/cognitive_router.json", read_jsonl_recent("cognitive_router", minutes=minutes, limit=500))
         _write_json(bundle, "recent/stt.json", read_jsonl_recent("stt", minutes=minutes, limit=500))
         _write_json(bundle, "recent/input_firewall.json", read_jsonl_recent("input_firewall", minutes=minutes, limit=500))
@@ -351,6 +392,103 @@ def create_debug_bundle(
         if include_db_snapshot:
             _write_json(bundle, "state/sanitized_db_snapshot.json", _recent_db_snapshot())
     return path
+
+
+def _debug_bundle_window(*, mode: str, minutes: int, session_id: int | None = None) -> dict:
+    selected_mode = str(mode or "last_5_hours").strip().lower()
+    now = datetime.now(timezone.utc)
+    fixed = {
+        "last_30_minutes": 30,
+        "last_2_hours": 120,
+        "last_5_hours": 300,
+    }
+    if selected_mode in fixed:
+        requested_minutes = fixed[selected_mode]
+        start = now - timedelta(minutes=requested_minutes)
+        return {
+            "mode": selected_mode,
+            "minutes": requested_minutes,
+            "actual_start_time": start.isoformat(),
+            "actual_end_time": now.isoformat(),
+            "start_time": start.isoformat(),
+            "end_time": now.isoformat(),
+        }
+    if selected_mode not in {"current_stream_session", "by_session_id"}:
+        requested_minutes = max(1, int(minutes or 300))
+        start = now - timedelta(minutes=requested_minutes)
+        return {
+            "mode": f"last_{requested_minutes}_minutes",
+            "minutes": requested_minutes,
+            "actual_start_time": start.isoformat(),
+            "actual_end_time": now.isoformat(),
+            "start_time": start.isoformat(),
+            "end_time": now.isoformat(),
+        }
+    try:
+        conn = db_sqlite.get_db_connection()
+        try:
+            if selected_mode == "by_session_id" and session_id:
+                row = conn.execute("SELECT * FROM stream_sessions WHERE id = ?", (int(session_id),)).fetchone()
+            else:
+                row = conn.execute(
+                    """
+                    SELECT * FROM stream_sessions
+                    WHERE status IN ('live', 'ended', 'stale_closed')
+                    ORDER BY COALESCE(started_at, created_at) DESC, id DESC LIMIT 1
+                    """
+                ).fetchone()
+        finally:
+            conn.close()
+    except Exception:
+        row = None
+    if not row:
+        requested_minutes = max(1, int(minutes or 300))
+        start = now - timedelta(minutes=requested_minutes)
+        return {
+            "mode": selected_mode,
+            "minutes": requested_minutes,
+            "actual_start_time": start.isoformat(),
+            "actual_end_time": now.isoformat(),
+            "start_time": start.isoformat(),
+            "end_time": now.isoformat(),
+        }
+    start = row["started_at"] or row["created_at"]
+    end = row["ended_at"] or datetime.now(timezone.utc).isoformat()
+    duration = _seconds_between_iso(start, end)
+    derived_minutes = max(1, min(24 * 60, int((duration or 0) / 60) + 10))
+    return {
+        "mode": selected_mode,
+        "minutes": derived_minutes,
+        "session_id": row["id"],
+        "stream_id": row["twitch_stream_id"],
+        "actual_start_time": start,
+        "actual_end_time": end,
+        "start_time": start,
+        "end_time": end,
+        "duration": duration,
+    }
+
+
+def _seconds_between_iso(start: str | None, end: str | None) -> int | None:
+    def parse(value: str | None) -> datetime | None:
+        if not value:
+            return None
+        text = str(value).strip()
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        try:
+            parsed = datetime.fromisoformat(text)
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+
+    a = parse(start)
+    b = parse(end)
+    if not a or not b:
+        return None
+    return max(0, int((b - a).total_seconds()))
 
 
 def prune_debug_bundles(max_files: int = 12) -> None:

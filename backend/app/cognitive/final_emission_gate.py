@@ -29,6 +29,13 @@ PUBLIC_TEXT_ROUTES = {
     OutputRoute.STREAM_TTS_REPLY,
 }
 
+FORBIDDEN_NORMAL_EMISSION_STAGES = {
+    "candidate",
+    "failed_guard",
+    "repair_attempt",
+    "suppressed",
+}
+
 
 def normalize_output_route(route: str | OutputRoute | None) -> OutputRoute:
     try:
@@ -104,6 +111,7 @@ class FinalEmissionGate:
             "execution_result": execution_result or {},
             "event_id": event_key,
         })
+        stage = str(debug.get("response_stage") or debug.get("stage") or "").strip().lower()
 
         def log(message: str) -> None:
             if logger is not None:
@@ -118,6 +126,14 @@ class FinalEmissionGate:
             if emit_debug is not None:
                 emit_debug({**debug, "suppress_reason": reason})
             log(f"[HEBE][FINAL_EMISSION_GATE] suppressed=true reason={reason} route={route.value} event_id={event_key}")
+            return FinalEmissionResult(False, route.value, targets, event_key, suppressed=True, reason=reason)
+
+        if stage in FORBIDDEN_NORMAL_EMISSION_STAGES:
+            reason = "pre_guard" if stage == "candidate" else f"stage_{stage}"
+            if emit_debug is not None:
+                emit_debug({**debug, "blocked_candidate_ui": True, "suppress_reason": reason})
+            log(f"[HEBE][FINAL_EMISSION_GATE] blocked_candidate_ui=true reason={reason} stage={stage} event_id={event_key}")
+            log(f"[HEBE][UI_EMISSION_GUARD] allowed=false stage={stage}")
             return FinalEmissionResult(False, route.value, targets, event_key, suppressed=True, reason=reason)
 
         if route in TEXT_ROUTES and not text:

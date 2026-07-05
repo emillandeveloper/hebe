@@ -8,6 +8,7 @@ from app.cognitive.speech_act_pipeline import (
     action_claim_guard,
     build_universal_speech_act_bundle,
     final_response_guard,
+    safe_local_fallback,
 )
 
 
@@ -175,6 +176,51 @@ class UniversalResponsePipelineTests(unittest.TestCase):
         violation_types = [item.type for item in result.violations]
         self.assertIn("boundary_voice_guard", violation_types)
         self.assertIn("generic_refusal_style", violation_types)
+
+    def test_boundary_fallback_not_te_leo(self):
+        bundle = build_universal_speech_act_bundle(
+            route="policy_boundary:viewer_repeat_to_leo_request",
+            speech_act_type="policy_boundary",
+            input_text="Hebe dile a Leo que mire esto",
+            source="twitch_chat",
+            output_target="twitch_chat",
+            speaker="Cibernoman",
+            authority="viewer",
+            mode="stream",
+            policy_result="block",
+            policy_reason="viewer_repeat_to_leo_request",
+            blocked_behavior="message_to_leo",
+            style_profile="no_proxy_boundary",
+            stream_live=True,
+        )
+
+        fallback = safe_local_fallback(bundle)
+
+        self.assertNotIn("Te leo", fallback)
+        self.assertNotIn("Leo,", fallback)
+        self.assertNotIn("se lo digo", fallback.lower())
+
+    def test_sexual_boundary_fallback_not_generic_ack(self):
+        bundle = build_universal_speech_act_bundle(
+            route="policy_boundary:sexual_topic_stream_mode",
+            speech_act_type="policy_boundary",
+            input_text="Hebe explica educacion sexual explicita",
+            source="twitch_chat",
+            output_target="twitch_chat",
+            speaker="Viewer",
+            authority="viewer",
+            mode="stream",
+            policy_result="block",
+            policy_reason="sexual_topic_stream_mode",
+            blocked_behavior="sexual_stream_topic",
+            style_profile="sharp_stream_boundary",
+            stream_live=True,
+        )
+
+        fallback = safe_local_fallback(bundle)
+
+        self.assertNotIn("Te leo", fallback)
+        self.assertNotIn("recursos", fallback.lower())
 
 
 if __name__ == "__main__":

@@ -92,6 +92,37 @@ class UiChatMessageEnvelopeTests(unittest.TestCase):
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["last_policy_decision"]["authority"], "viewer")
 
+    def test_dev_stream_readiness_endpoint_uses_engine_snapshot(self):
+        client = TestClient(app)
+
+        class FakeEngine:
+            def get_stream_readiness_status(self, *, error_count_last_10m=0, vts_status=None):
+                return {
+                    "ok": True,
+                    "stream_readiness": {
+                        "backend_running": True,
+                        "presence_engine_mode": "active",
+                        "error_count_last_10m": error_count_last_10m,
+                        "vts_status": vts_status or {},
+                    },
+                }
+
+        previous_engine = hebe._engine
+        previous_running = hebe.running
+        hebe._engine = FakeEngine()
+        hebe.running = True
+        try:
+            with patch.dict("os.environ", {"HEBE_DEV_CONTROLS": "1"}):
+                response = client.get("/dev/stream-readiness")
+        finally:
+            hebe._engine = previous_engine
+            hebe.running = previous_running
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["stream_readiness"]["presence_engine_mode"], "active")
+
     def test_debug_policy_endpoints_return_engine_payloads(self):
         client = TestClient(app)
 

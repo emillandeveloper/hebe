@@ -50,6 +50,17 @@ class STTDeviceFailureTests(unittest.TestCase):
         self.assertEqual(ordered[0]["host_api"], "Windows WASAPI")
         self.assertEqual(ordered[-1]["host_api"], "Windows WDM-KS")
 
+    def test_stt_device_diagnostic_warns_for_output_mix(self):
+        service = STTService(config=STTConfig())
+        logs = []
+
+        with unittest.mock.patch("builtins.print", lambda *args, **kwargs: logs.append(" ".join(str(arg) for arg in args))):
+            service._log_input_device_diagnostic({"name": "Voicemeeter Out A2"})
+
+        joined = "\n".join(logs)
+        self.assertIn("[HEBE][STT_DEVICE_DIAGNOSTIC]", joined)
+        self.assertIn("warning=possible_output_mix", joined)
+
 
 if __name__ == "__main__":
     unittest.main()

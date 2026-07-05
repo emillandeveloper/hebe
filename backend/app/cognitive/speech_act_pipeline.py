@@ -1176,10 +1176,44 @@ class HebeResponsePipeline:
 
 def safe_local_fallback(bundle: SpeechActBundle) -> str:
     speaker = bundle.scene.speaker or "chat"
+    speech_act_type = str(getattr(bundle.speech_act, "speech_act_type", "") or "")
+    policy_reason = str(getattr(bundle.policy_decision, "reason", "") or "")
+    blocked_behavior = str(getattr(bundle.policy_decision, "blocked_behavior", "") or getattr(bundle.policy_decision, "requested_behavior", "") or "")
+    boundary_speech_acts = {
+        "viewer_boundary",
+        "policy_boundary",
+        "no_proxy_boundary",
+        "owner_behavior_block_boundary",
+        "sharp_stream_boundary",
+        "playful_boundary",
+        "owner_boundary",
+    }
+    boundary_reasons = {
+        "viewer_proxy_request",
+        "viewer_repeat_to_leo_request",
+        "viewer_behavior_request",
+        "viewer_not_authority",
+        "owner_behavior_block",
+        "sexual_topic_stream_mode",
+        "protected_group_joke",
+    }
+    if speech_act_type in boundary_speech_acts or policy_reason in boundary_reasons:
+        print(
+            f"[HEBE][SPEECH_ACT_FALLBACK] speech_act={speech_act_type} blocked_behavior={blocked_behavior or policy_reason} opens_pending=false",
+            flush=True,
+        )
+        if policy_reason in {"viewer_proxy_request", "viewer_repeat_to_leo_request"} or blocked_behavior == "message_to_leo":
+            return f"{speaker}, eso va directo al chat. Yo no hago de recadera."
+        if policy_reason == "sexual_topic_stream_mode" or blocked_behavior == "sexual_stream_topic":
+            return "Ese tema no se convierte en clase de directo. Lo aparco."
+        if policy_reason == "owner_behavior_block":
+            return "Leo ya marco ese limite. Yo no lo rodeo por el chat."
+        return "Ese camino no toca en directo. Lo corto aqui."
     if bundle.policy_decision.reason == "viewer_proxy_request":
         return f"{speaker}, eso se lo dices tu a Leo. Yo no hago de recadera del chat."
     if bundle.scene.speaker_authority == "owner":
         return "Te leo, Leo. Recalibro."
+    print("[HEBE][GENERIC_ACK_GUARD] rejected=true reason=invalid_speech_act", flush=True)
     return f"Te leo, {speaker}."
 
 
