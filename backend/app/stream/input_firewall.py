@@ -271,6 +271,14 @@ class InputAuthorityFirewall:
     ) -> InputFirewallDecision:
         source = self._normalize_source(source, event_type=event_type)
         normalized_text = normalize_firewall_text(text)
+        self._log_context = {
+            "raw_text": str(text or ""),
+            "normalized_text": normalized_text,
+            "addressed_to_hebe": bool(addressed_to_hebe),
+            "mentions_hebe": bool(addressed_to_hebe),
+            "event_type": str(event_type or ""),
+            "username": str(username or ""),
+        }
         media_detected, media_reason = looks_like_media_or_singing(text)
         bot_detected = source in {"twitch_viewer", "twitch_bot"} and self.is_bot_user(username)
         if bot_detected:
@@ -575,10 +583,13 @@ class InputAuthorityFirewall:
             event_type=str(event_type or ""),
             is_simulation=bool(is_simulation),
         )
+        log_context = dict(getattr(self, "_log_context", {}) or {})
         log_jsonl_event("input_firewall", {
             **decision.as_dict(),
-            "raw_text": text if "text" in locals() else "",
-            "addressed_to_hebe": False,
+            "raw_text": log_context.get("raw_text", ""),
+            "normalized_text": log_context.get("normalized_text", ""),
+            "addressed_to_hebe": bool(log_context.get("addressed_to_hebe", False)),
+            "mentions_hebe": bool(log_context.get("mentions_hebe", False)),
             "matched_wake_name": "",
             "pending_compatible": bool(followup_window_used),
             "intent_candidates": [],

@@ -196,7 +196,7 @@ class CognitiveTwitchTests(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual(chat.sent, ["!promo Totodile"])
 
-    def test_twitch_chat_bot_ignores_own_bot_messages_and_unrelated_words(self):
+    def test_twitch_chat_bot_ignores_own_bot_messages_and_forwards_unrelated_words(self):
         received = []
         bot = TwitchChatBot(
             channel_name="testchannel",
@@ -209,7 +209,9 @@ class CognitiveTwitchTests(unittest.TestCase):
         bot._handle_privmsg(":HebeNifelheim!bot@bot.tmi.twitch.tv PRIVMSG #testchannel :@HebeNifelheim hola")
         bot._handle_privmsg(":viewer!viewer@viewer.tmi.twitch.tv PRIVMSG #testchannel :alhebedo no cuenta")
 
-        self.assertEqual(received, [])
+        self.assertEqual(len(received), 1)
+        self.assertEqual(received[0][0], "viewer")
+        self.assertEqual(received[0][2], "alhebedo no cuenta")
 
     def test_deliberation_service_plans_twitch_event_as_reply(self):
         deliberation_service = DeliberationService(
@@ -644,6 +646,17 @@ class CognitiveTwitchTests(unittest.TestCase):
 
         self.assertFalse(result.passed)
         self.assertIn("memory_creep", [item.type for item in result.violations])
+
+    def test_generic_twitch_fallback_does_not_te_leo(self):
+        synth = ResponseSynthesizer(conversation_model=None)
+
+        reply = synth._fallback_twitch_chat_react(
+            chatter="Viewer",
+            message="Hebe que opinas",
+            is_broadcaster=False,
+        )
+
+        self.assertEqual(reply, "")
 
     def test_repair_renderer_keeps_same_decision(self):
         model = SequentialModel([

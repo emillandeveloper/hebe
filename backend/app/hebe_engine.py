@@ -199,9 +199,11 @@ class HebeEngine:
             def _twitch_chat_callback(username, display_name, text, channel):
                 if self._is_known_twitch_bot_user(username):
                     print(
-                        f"[HEBE][SELF_MESSAGE_IGNORED] username={username}",
+                        f"[HEBE][TWITCH_PIPELINE_SKIP] stage=chat_callback reason=bot_or_self_ignored username={username}",
                         flush=True,
                     )
+                    self._increment_twitch_pipeline_counter("twitch_messages_bot_ignored")
+                    self._increment_twitch_pipeline_counter("twitch_messages_early_skipped", reason="bot_or_self_ignored")
                     return
                 if self._is_owner_twitch_user(username) and self._is_raw_twitch_command(text):
                     self.observe_twitch_chat_message(username, display_name, text, channel)
@@ -219,24 +221,20 @@ class HebeEngine:
                     addressed_to_hebe=self._message_mentions_hebe(text),
                 )
                 if not self._firewall_allows_pipeline(firewall):
+                    self._increment_twitch_pipeline_counter("twitch_messages_early_skipped", reason=firewall.reason)
+                    print(
+                        f"[HEBE][TWITCH_PIPELINE_SKIP] stage=input_firewall reason={firewall.reason} username={username}",
+                        flush=True,
+                    )
                     return
-                self.observe_twitch_chat_message(username, display_name, text, channel, firewall_decision=firewall)
+                self.handle_twitch_chat_event(
+                    username=username,
+                    display_name=display_name,
+                    text=text,
+                    channel=channel,
+                    firewall_decision=firewall,
+                )
                 stream = self._get_stream_state()
-                recent_chat = list(getattr(stream, "recent_chat_messages", []) or [])[-10:] if stream is not None else []
-                print(
-                    f"[HEBE][TWITCH][CHATBOT] dispatching event twitch_chat_react user={username!r} channel={channel!r} message={text!r}",
-                    flush=True,
-                )
-                self.scheduler.push_event(
-                    "twitch_chat_react",
-                    {
-                        "display_name": display_name,
-                        "user_login": username,
-                        "message_text": text,
-                        "channel": channel,
-                        "recent_chat": recent_chat,
-                    },
-                )
                 if stream is not None:
                     stream.last_chat_activity_ts = time.time()
 
@@ -996,6 +994,17 @@ class HebeEngine:
 
     def _record_input_firewall(self, decision: InputFirewallDecision, *, text: str | None = "") -> None:
         payload = decision.as_dict()
+        raw_text = str(text or "")
+        mentions_hebe = bool(self._message_mentions_hebe(raw_text)) if raw_text else False
+        normalized_text = self._normalize_guard_text(raw_text)
+        payload.update({
+            "raw_text": raw_text,
+            "normalized_text": normalized_text,
+            "mentions_hebe": mentions_hebe,
+            "addressed_to_hebe": mentions_hebe,
+            "direct_address_to_hebe": mentions_hebe,
+            "talks_about_hebe": bool(self._viewer_talks_about_hebe(raw_text)) if raw_text else False,
+        })
         self._last_input_firewall = payload
         print(
             "[HEBE][INPUT_FIREWALL] "
@@ -1661,6 +1670,8 @@ class HebeEngine:
             "should_stop_pipeline": cognitive.get("should_stop_pipeline"),
             "plan_executor_guard": cognitive.get("plan_executor_guard") or [],
             "input_firewall": self._firewall_payload(),
+            "last_twitch_route_state": dict(getattr(self, "_last_twitch_route_state", {}) or {}),
+            "twitch_pipeline_health": dict(getattr(stream, "twitch_pipeline_health", {}) or {}) if stream is not None else {},
             "stream_live_used": bool((self._firewall_payload() or {}).get("stream_is_live")),
             "debug_contract": debug_contract if isinstance(debug_contract, dict) else {},
             "speech_act": (speech_act_plan or {}).get("speech_act_type") if isinstance(speech_act_plan, dict) else "",
@@ -1852,6 +1863,144 @@ class HebeEngine:
                 print(f"[HEBE][TWITCH][TARGET] legacy resolver failed target={raw_target!r} error={exc!r}", flush=True)
         return None
 
+    def _twitch_pipeline_health(self) -> dict:
+        stream = self._get_stream_state()
+        if stream is None:
+            return {}
+        health = getattr(stream, "twitch_pipeline_health", None)
+        if not isinstance(health, dict):
+            health = {
+                "twitch_messages_received": 0,
+                "twitch_messages_bot_ignored": 0,
+                "twitch_messages_self_ignored": 0,
+                "twitch_messages_presence_evaluated": 0,
+                "twitch_messages_observe_only": 0,
+                "twitch_messages_should_generate": 0,
+                "twitch_messages_generated": 0,
+                "twitch_messages_final_emitted": 0,
+                "twitch_messages_suppressed": 0,
+                "twitch_messages_early_skipped": 0,
+                "suppress_reasons": {},
+                "last_summary_ts": 0.0,
+            }
+            stream.twitch_pipeline_health = health
+        return health
+
+    def _increment_twitch_pipeline_counter(self, key: str, *, reason: str = "") -> None:
+        health = self._twitch_pipeline_health()
+        if not health:
+            return
+        health[key] = int(health.get(key, 0) or 0) + 1
+        if reason:
+            reasons = dict(health.get("suppress_reasons") or {})
+            reasons[reason] = int(reasons.get(reason, 0) or 0) + 1
+            health["suppress_reasons"] = reasons
+
+    def _set_last_twitch_route_state(self, **updates) -> None:
+        stream = self._get_stream_state()
+        state = dict(getattr(self, "_last_twitch_route_state", {}) or {})
+        state.update({key: value for key, value in updates.items() if value is not None})
+        self._last_twitch_route_state = state
+        if stream is not None:
+            stream.last_twitch_route_state = state
+
+    def _log_twitch_pipeline_health_if_due(self, *, force: bool = False) -> None:
+        health = self._twitch_pipeline_health()
+        if not health:
+            return
+        now = time.time()
+        if not force and now - float(health.get("last_summary_ts", 0.0) or 0.0) < 600.0:
+            return
+        health["last_summary_ts"] = now
+        reasons = dict(health.get("suppress_reasons") or {})
+        top_reasons = ",".join(
+            f"{reason}:{count}" for reason, count in sorted(reasons.items(), key=lambda item: item[1], reverse=True)[:5]
+        )
+        print(
+            "[HEBE][TWITCH_PIPELINE_HEALTH] "
+            f"received={int(health.get('twitch_messages_received', 0) or 0)} "
+            f"presence_evaluated={int(health.get('twitch_messages_presence_evaluated', 0) or 0)} "
+            f"emitted={int(health.get('twitch_messages_final_emitted', 0) or 0)} "
+            f"early_skipped={int(health.get('twitch_messages_early_skipped', 0) or 0)} "
+            f"top_suppress_reasons={top_reasons or 'none'}",
+            flush=True,
+        )
+
+    def _record_twitch_pipeline_final(
+        self,
+        *,
+        route: str,
+        emitted: bool,
+        reason: str,
+        public_chat_sent: bool = False,
+        tts_sent: bool = False,
+    ) -> None:
+        if emitted:
+            self._increment_twitch_pipeline_counter("twitch_messages_final_emitted")
+        elif route == "observe_only":
+            self._increment_twitch_pipeline_counter("twitch_messages_observe_only", reason=reason)
+        else:
+            self._increment_twitch_pipeline_counter("twitch_messages_suppressed", reason=reason)
+        self._set_last_twitch_route_state(
+            output_route=route,
+            emitted_to_twitch=bool(public_chat_sent),
+            tts_sent=bool(tts_sent),
+            suppress_reason="" if emitted else reason,
+        )
+        print(
+            f"[HEBE][TWITCH_PIPELINE_FINAL] route={route} emitted={str(bool(emitted)).lower()} reason={reason}",
+            flush=True,
+        )
+
+    def handle_twitch_chat_event(
+        self,
+        *,
+        username: str,
+        display_name: str,
+        text: str,
+        channel: str = "",
+        firewall_decision: InputFirewallDecision | None = None,
+    ) -> None:
+        message = str(text or "").strip()
+        event_id = f"twchat_{uuid.uuid4().hex}"
+        if not message:
+            self._increment_twitch_pipeline_counter("twitch_messages_early_skipped", reason="empty_message")
+            print(
+                f"[HEBE][TWITCH_PIPELINE_SKIP] stage=ingress reason=empty_message event_id={event_id} username={username}",
+                flush=True,
+            )
+            return
+        self._increment_twitch_pipeline_counter("twitch_messages_received")
+        print(
+            f"[HEBE][TWITCH_PIPELINE_START] event_id={event_id} username={username} raw={message!r}",
+            flush=True,
+        )
+        self.observe_twitch_chat_message(
+            username,
+            display_name,
+            message,
+            channel,
+            firewall_decision=firewall_decision,
+        )
+        stream = self._get_stream_state()
+        recent_chat = list(getattr(stream, "recent_chat_messages", []) or [])[-10:] if stream is not None else []
+        payload = {
+            "event_id": event_id,
+            "_pipeline_started": True,
+            "display_name": display_name,
+            "user_login": username,
+            "username": username,
+            "message_text": message,
+            "channel": channel,
+            "recent_chat": recent_chat,
+        }
+        self.process_internal_event(InternalEvent(
+            event_type="twitch_chat_react",
+            payload=payload,
+            created_at=datetime.now(timezone.utc).isoformat(),
+        ))
+        self._log_twitch_pipeline_health_if_due()
+
     def observe_twitch_chat_message(
         self,
         username: str,
@@ -1882,24 +2031,6 @@ class HebeEngine:
             return
 
         print(f"[HEBE][TWITCH][CHAT] observed username={username} message={message!r}", flush=True)
-        chat_event = InputEvent(
-            source="twitch_chat",
-            raw_text=message,
-            normalized_text=self._normalize_text(message),
-            username=username,
-            is_stream_context=True,
-        )
-        chat_classification = self._get_input_classifier().classify(
-            chat_event,
-            addressed_to_hebe=self._message_mentions_hebe(message),
-            valid=True,
-        )
-        self._log_input_classification(chat_classification)
-        self._declare_output_route(
-            input_type="twitch_chat_observe",
-            targets=[OUTPUT_TARGET_SILENT_CONTEXT_UPDATE],
-            reason="chat_context_update",
-        )
         twitch = getattr(self.runtime, "twitch", None)
         remember = getattr(twitch, "remember_chat_message", None)
         if callable(remember):
@@ -2939,8 +3070,20 @@ class HebeEngine:
         if event_type.startswith("twitch_"):
             raw_text = str((payload or {}).get("message_text") or (payload or {}).get("text") or "")
             username = str((payload or {}).get("user_login") or (payload or {}).get("username") or "")
+            event_id = str((payload or {}).get("event_id") or (payload or {}).get("message_id") or f"evt_{uuid.uuid4().hex}")
+            if event_type == "twitch_chat_react" and not bool((payload or {}).get("_pipeline_started")):
+                self._increment_twitch_pipeline_counter("twitch_messages_received")
+                print(
+                    f"[HEBE][TWITCH_PIPELINE_START] event_id={event_id} username={username} raw={raw_text!r}",
+                    flush=True,
+                )
             if username and self._is_known_twitch_bot_user(username):
-                print(f"[HEBE][SELF_MESSAGE_IGNORED] username={username}", flush=True)
+                reason = "self_message_ignored" if username.casefold().lstrip("@") in {"hebenifelheim"} else "bot_ignored"
+                self._increment_twitch_pipeline_counter(
+                    "twitch_messages_self_ignored" if reason == "self_message_ignored" else "twitch_messages_bot_ignored"
+                )
+                self._increment_twitch_pipeline_counter("twitch_messages_early_skipped", reason=reason)
+                print(f"[HEBE][TWITCH_PIPELINE_SKIP] stage=bot_filter reason={reason} event_id={event_id} username={username}", flush=True)
                 return
             source = "twitch_viewer" if event_type == "twitch_chat_react" else "twitch_system"
             firewall = self._input_firewall_decision(
@@ -2954,6 +3097,11 @@ class HebeEngine:
                 payload["input_firewall"] = firewall.as_dict()
                 event.payload = payload
             if not self._firewall_allows_pipeline(firewall):
+                self._increment_twitch_pipeline_counter("twitch_messages_early_skipped", reason=firewall.reason)
+                print(
+                    f"[HEBE][TWITCH_PIPELINE_SKIP] stage=input_firewall reason={firewall.reason} event_id={event_id} username={username}",
+                    flush=True,
+                )
                 self._record_policy_trace(policy_trace(
                     source=firewall.source,
                     speaker=str((payload or {}).get("display_name") or username or firewall.source),
@@ -2987,7 +3135,34 @@ class HebeEngine:
             )
             event_decision = (getattr(self, "cognitive_router", None) or CognitiveRouter()).route(route_context)
             self._last_cognitive_trace = event_decision.to_dict()
+            if event_type == "twitch_chat_react":
+                print(
+                    "[HEBE][COGNITIVE_ROUTER] "
+                    f"source=twitch_chat event_id={event_id} should_reply={str(bool(getattr(event_decision, 'should_reply', False))).lower()} "
+                    f"reason={getattr(event_decision, 'reason', '')} response_mode={getattr(event_decision, 'response_mode', '')}",
+                    flush=True,
+                )
+            if (
+                event_type == "twitch_chat_react"
+                and bool(getattr(event_decision, "should_reply", False))
+                and not bool(getattr(event_decision, "should_stop_pipeline", False))
+                and (
+                    "twitch.reply" in set(getattr(event_decision, "allowed_capabilities", []) or [])
+                    or (hasattr(event_decision, "allows_capability") and event_decision.allows_capability("twitch.reply"))
+                )
+            ):
+                print(
+                    "[HEBE][POST_ROUTER_DISPATCH] "
+                    f"event_id={getattr(event_decision, 'message_id', '')} should_reply=true next=twitch_response_pipeline",
+                    flush=True,
+                )
             if event_decision.should_stop_pipeline:
+                if event_type == "twitch_chat_react":
+                    self._increment_twitch_pipeline_counter("twitch_messages_early_skipped", reason=str(event_decision.reason or "router_stop"))
+                    print(
+                        f"[HEBE][TWITCH_PIPELINE_SKIP] stage=cognitive_router reason={event_decision.reason} event_id={event_id}",
+                        flush=True,
+                    )
                 print(f"[HEBE][EVENT_ROUTER] blocked type={event_type} reason={event_decision.reason}", flush=True)
                 return
         if event_type == "twitch_raid":
@@ -3045,6 +3220,15 @@ class HebeEngine:
                 stream=stream,
             )
             if not pre_route.get("should_generate", True):
+                self._set_last_twitch_route_state(
+                    output_route=str(pre_route.get("route") or "observe_only"),
+                    should_generate=False,
+                    suppress_reason=str(pre_route.get("reason") or ""),
+                    emitted_to_twitch=False,
+                    tts_sent=False,
+                    budget_result=pre_route.get("budget_result"),
+                    thread_result=pre_route.get("thread_result"),
+                )
                 print(
                     "[HEBE][PRE_GENERATION_ROUTE] "
                     f"should_generate=false route={pre_route.get('route')} reason={pre_route.get('reason')}",
@@ -3059,6 +3243,11 @@ class HebeEngine:
                     "[HEBE][OUTPUT_ROUTE_DECISION] "
                     f"route={pre_route.get('route')} reason={pre_route.get('reason')} public=false tts=false "
                     f"value_score={float(pre_route.get('value_score') or 0.0):.2f}",
+                    flush=True,
+                )
+                print(
+                    "[HEBE][TWITCH_PIPELINE_FINAL] "
+                    f"route={pre_route.get('route')} emitted=false reason={pre_route.get('reason')}",
                     flush=True,
                 )
                 self._update_policy_trace_response(
@@ -3151,6 +3340,8 @@ class HebeEngine:
             deliberation=deliberation,
             execution=execution,
         )
+        if event_type == "twitch_chat_react":
+            self._increment_twitch_pipeline_counter("twitch_messages_generated")
 
         print(
             "[HEBE][EVENT] "
@@ -3160,6 +3351,36 @@ class HebeEngine:
         )
 
         if not reply_text:
+            if event_type == "twitch_chat_react" and event_decision is not None and getattr(event_decision, "should_reply", False):
+                print(
+                    "[HEBE][POST_ROUTER_DROP_GUARD] dropped=true reason=empty_response_after_generation",
+                    flush=True,
+                )
+                print(
+                    "[HEBE][OUTPUT_ROUTE_DECISION] route=suppress reason=empty_response_after_generation public=false tts=false value_score=0.00",
+                    flush=True,
+                )
+                self._increment_twitch_pipeline_counter("twitch_messages_suppressed", reason="empty_response_after_generation")
+                self._set_last_twitch_route_state(
+                    output_route="suppress",
+                    should_generate=True,
+                    suppress_reason="empty_response_after_generation",
+                    emitted_to_twitch=False,
+                    tts_sent=False,
+                )
+                print(
+                    "[HEBE][TWITCH_PIPELINE_FINAL] route=suppress emitted=false reason=empty_response_after_generation",
+                    flush=True,
+                )
+                self._emit_final_response(
+                    event_id=str((payload or {}).get("event_id") or (payload or {}).get("message_id") or getattr(event_decision, "message_id", "")),
+                    source="twitch",
+                    final_response="",
+                    output_route=OutputRoute.SUPPRESS,
+                    output_targets=[],
+                    guard_result={"passed": False, "reason": "empty_response_after_generation"},
+                    debug_payload=self._latest_response_debug_payload(),
+                )
             return
 
         # Routing del reply según tipo de evento
@@ -8207,9 +8428,20 @@ class HebeEngine:
         return bool(re.search(
             r"\b(?:hebe|hebenifelheim)\b\s+(?:esta|es|parece|suena|anda|se\s+queda|se\s+ve|va)\b|"
             r"\b(?:callad[ao]|muda|despierta|dormida|graciosa|seca|afilada|presente)\b.*\b(?:hebe|hebenifelheim)\b|"
-            r"\b(?:hebe|hebenifelheim)\b.*\b(?:callad[ao]|muda|despierta|dormida|graciosa|seca|afilada|presente)\b",
+            r"\b(?:hebe|hebenifelheim)\b.*\b(?:callad[ao]|muda|despierta|dormida|graciosa|seca|afilada|presente|pasa\s+del\s+chat)\b|"
+            r"\b(?:esos\s+dias|esos\s+dias|no\s+te\s+dejan\s+opinar|tampoco\s+opina)\b.*\b(?:hebe|hebenifelheim)\b",
             normalized,
         ))
+
+    def _viewer_direct_open_prompt_to_hebe(self, text: str) -> bool:
+        normalized = self._normalize_guard_text(text)
+        if not self._message_mentions_hebe(text):
+            return False
+        stripped = re.sub(r"^(?:@?hebe|@?hebenifelheim|ebe|eve|jebe|heve)\b[:,\s-]*", "", normalized).strip()
+        return bool(
+            re.search(r"\b(?:que\s+opinas|di\s+algo|cuenta\s+algo|que\s+dices|opina|reacciona|habla)\b", stripped)
+            or stripped in {"que opinas", "di algo", "cuenta algo", "que dices"}
+        )
 
     def _classify_twitch_viewer_message(self, text: str, *, payload: dict | None = None) -> str:
         normalized = self._normalize_guard_text(text)
@@ -8219,11 +8451,11 @@ class HebeEngine:
             return "meme_or_emote"
         if self._viewer_talks_about_hebe(text):
             return "viewer_talks_about_hebe"
+        if self._viewer_direct_open_prompt_to_hebe(text):
+            return "direct_open_prompt_to_hebe"
         words = normalized.split()
-        if len(words) <= 3 and self._message_mentions_hebe(text):
-            if any(token in words for token in {"hola", "buenas", "hey", "ey"}):
-                return "simple_social_greeting"
-            return "low_value_banter"
+        if len(words) <= 5 and len(set(words)) <= 2 and len(words) >= 3:
+            return "repeated_spam"
         if re.search(r"\b(?:dile|avisa|cuenta|pasa|manda)\w*\s+a\s+leo\b", normalized):
             return "viewer_relay_attempt"
         if re.search(r"\b(?:shoutout|promo|so)\b", normalized):
@@ -8236,23 +8468,42 @@ class HebeEngine:
                 return "viewer_boundary_needed"
         if "?" in str(text or "") or re.search(r"\b(?:que|quien|cuando|donde|como|por que|porque|cuanto|opinas|sabes|eres|estas)\b", normalized):
             return "high_value_question"
+        if re.search(r"\b(?:pista|tip|consejo|ruta|camino|templo|cueva|mazmorra|boss|jefe|npc|objeto|cofre|mision|quest|zona|build|arma|habilidad)\b", normalized):
+            return "high_value_game_tip"
+        if re.search(r"\b(?:raid|raideo|raidear|follow|sub|resub|bits|hype|clip|victoria|derrota|final|empezamos|terminamos)\b", normalized):
+            return "stream_milestone_comment"
+        if re.search(r"\b(?:me\s+voy|me\s+piro|hasta\s+(?:luego|otra|manana)|buenas\s+noches|voy\s+a\s+por|vuelvo\s+luego|nos\s+vemos)\b", normalized):
+            return "viewer_goodbye"
+        if re.search(r"\b(?:ya\s+volvi|he\s+vuelto|vuelvo|estoy\s+de\s+vuelta|back)\b", normalized):
+            return "viewer_returning"
+        if len(words) <= 3 and self._message_mentions_hebe(text):
+            if any(token in words for token in {"hola", "buenas", "hey", "ey"}):
+                return "simple_social_greeting"
+            return "low_value_banter"
         meme_tokens = {"xd", "lol", "lmao", "kekw", "pog", "jaja", "haha"}
         if len(words) <= 5 and any(token in meme_tokens for token in words):
             return "meme_or_emote"
-        return "low_value_banter"
+        return "normal_no_mention_chat"
 
     def _canonical_twitch_message_category(self, category: str) -> str:
         return {
             "viewer_talks_about_hebe": "talks_about_hebe",
+            "direct_open_prompt_to_hebe": "direct_open_prompt_to_hebe",
             "viewer_relay_attempt": "viewer_proxy_request",
             "viewer_command_attempt": "viewer_command_attempt",
             "promo_request_from_viewer": "promo_request_from_viewer",
             "viewer_boundary_needed": "viewer_boundary_needed",
             "high_value_question": "high_value_question",
+            "high_value_game_tip": "high_value_game_tip",
+            "stream_milestone_comment": "stream_milestone_comment",
+            "viewer_goodbye": "viewer_goodbye",
+            "viewer_returning": "viewer_returning",
+            "normal_no_mention_chat": "normal_no_mention_chat",
             "simple_social_greeting": "simple_social_greeting",
             "low_value_banter": "low_value_banter",
             "meme_or_emote": "meme_or_emote",
             "repeated_meme": "repeated_meme",
+            "repeated_spam": "repeated_spam",
             "followup_to_hebe_question": "followup_to_hebe_question",
         }.get(str(category or ""), "unclear")
 
@@ -8263,9 +8514,13 @@ class HebeEngine:
             return "clarification_question"
         if category == "high_value_question":
             return "direct_answer"
-        if category in {"viewer_talks_about_hebe", "simple_social_greeting"}:
+        if category == "high_value_game_tip":
+            return "game_guidance_clarification"
+        if category == "direct_open_prompt_to_hebe":
+            return "stream_banter"
+        if category in {"viewer_talks_about_hebe", "simple_social_greeting", "viewer_goodbye", "viewer_returning", "stream_milestone_comment"}:
             return "hebe_banter"
-        if category in {"low_value_banter", "meme_or_emote", "repeated_meme"}:
+        if category in {"low_value_banter", "meme_or_emote", "repeated_meme", "repeated_spam", "normal_no_mention_chat"}:
             return "low_value_banter"
         return "stream_banter"
 
@@ -8290,11 +8545,11 @@ class HebeEngine:
             current_game=str(getattr(stream, "current_game", "") or "") if stream is not None else "",
             current_activity=str(getattr(stream, "current_activity", "") or "") if stream is not None else "",
             direct_address_to_hebe=bool(self._message_mentions_hebe(raw)),
-            talks_about_hebe=category == "viewer_talks_about_hebe",
+            talks_about_hebe=category in {"viewer_talks_about_hebe", "direct_open_prompt_to_hebe"},
             mentions_hebe=bool(self._message_mentions_hebe(raw)),
             talks_to_leo=bool(re.search(r"\bleo\b", normalized)),
             is_emote_only=category == "meme_or_emote",
-            is_low_value_chat=category in {"low_value_banter", "meme_or_emote", "repeated_meme"},
+            is_low_value_chat=category in {"low_value_banter", "meme_or_emote", "repeated_meme", "repeated_spam", "normal_no_mention_chat"},
             confidence=0.9,
             twitch_metadata={
                 "event_type": event_type or "",
@@ -8307,27 +8562,41 @@ class HebeEngine:
     def _understand_twitch_viewer_event(self, *, category: str, perception: PerceivedEvent) -> UnderstandingResult:
         intent_map = {
             "viewer_talks_about_hebe": "viewer_talks_about_hebe",
+            "direct_open_prompt_to_hebe": "direct_open_prompt_to_hebe",
             "viewer_boundary_needed": "viewer_boundary_needed",
             "viewer_relay_attempt": "viewer_proxy_request",
             "viewer_command_attempt": "viewer_command_attempt",
             "promo_request_from_viewer": "viewer_cannot_request_promo",
             "high_value_question": "viewer_direct_question_to_hebe",
+            "high_value_game_tip": "high_value_game_tip",
+            "stream_milestone_comment": "stream_milestone_comment",
+            "viewer_goodbye": "viewer_goodbye",
+            "viewer_returning": "viewer_returning",
+            "normal_no_mention_chat": "normal_no_mention_chat",
             "simple_social_greeting": "viewer_banter_about_hebe",
             "low_value_banter": "viewer_low_value_banter",
             "meme_or_emote": "viewer_emote_only",
             "repeated_meme": "viewer_emote_only",
+            "repeated_spam": "viewer_emote_only",
         }
         pressure = {
             "viewer_talks_about_hebe": 0.56,
+            "direct_open_prompt_to_hebe": 0.58,
             "viewer_boundary_needed": 0.88,
             "viewer_relay_attempt": 0.82,
             "viewer_command_attempt": 0.72,
             "promo_request_from_viewer": 0.76,
             "high_value_question": 0.64,
+            "high_value_game_tip": 0.74,
+            "stream_milestone_comment": 0.54,
+            "viewer_goodbye": 0.56,
+            "viewer_returning": 0.50,
+            "normal_no_mention_chat": 0.16,
             "simple_social_greeting": 0.35,
             "low_value_banter": 0.12,
             "meme_or_emote": 0.02,
             "repeated_meme": 0.01,
+            "repeated_spam": 0.01,
         }.get(category, 0.2)
         return UnderstandingResult(
             intent=intent_map.get(category, "viewer_low_value_banter"),
@@ -8371,6 +8640,7 @@ class HebeEngine:
         )
         print(
             "[HEBE][PRESENCE_ENGINE] "
+            "source=twitch_chat "
             f"should_intervene={str(bool(intervention.get('should_intervene'))).lower()} "
             f"level={intervention.get('intervention_level')} "
             f"social_value={float(intervention.get('social_value_score') or 0.0):.2f} "
@@ -8388,14 +8658,23 @@ class HebeEngine:
         )
         print(
             "[HEBE][INTERVENTION_DECISION] "
+            "source=twitch_chat "
             f"should_intervene={str(bool(intervention.get('should_intervene'))).lower()} "
-            f"route={intervention.get('intervention_level')} reason={intervention.get('reason')}",
+            f"route={intervention.get('intervention_level')} "
+            f"speech_act={intervention.get('speech_act_type')} "
+            f"reason={intervention.get('reason')}",
             flush=True,
         )
 
     def _reply_value_score(self, *, category: str, text: str, response: str, payload: dict | None = None) -> float:
         base = {
             "high_value_question": 0.86,
+            "direct_open_prompt_to_hebe": 0.72,
+            "high_value_game_tip": 0.78,
+            "stream_milestone_comment": 0.58,
+            "viewer_goodbye": 0.56,
+            "viewer_returning": 0.50,
+            "normal_no_mention_chat": 0.22,
             "viewer_boundary_needed": 0.92,
             "viewer_relay_attempt": 0.82,
             "viewer_command_attempt": 0.74,
@@ -8405,6 +8684,7 @@ class HebeEngine:
             "low_value_banter": 0.28,
             "meme_or_emote": 0.05,
             "repeated_meme": 0.02,
+            "repeated_spam": 0.02,
             "followup_to_hebe_question": 0.62,
             "unclear": 0.20,
         }.get(category, 0.20)
@@ -8461,11 +8741,28 @@ class HebeEngine:
             print("[HEBE][INTERVENTION_DECISION] source=twitch_chat route=twitch_action_observed reason=owner_manual_twitch_command", flush=True)
             return result
         category = self._classify_twitch_viewer_message(raw, payload=payload)
+        canonical_category = self._canonical_twitch_message_category(category)
+        mentions_hebe = self._message_mentions_hebe(raw)
+        talks_about_hebe = category in {"viewer_talks_about_hebe", "direct_open_prompt_to_hebe"}
+        social_candidate = category not in {"normal_no_mention_chat", "low_value_banter", "meme_or_emote", "repeated_meme", "repeated_spam"}
+        print(
+            "[HEBE][TWITCH_PIPELINE_CLASSIFY] "
+            f"category={canonical_category} mentions_hebe={str(mentions_hebe).lower()} "
+            f"talks_about_hebe={str(talks_about_hebe).lower()} social_candidate={str(social_candidate).lower()}",
+            flush=True,
+        )
+        self._set_last_twitch_route_state(
+            username=username,
+            raw_text=raw,
+            category=canonical_category,
+            mentions_hebe=mentions_hebe,
+            talks_about_hebe=talks_about_hebe,
+        )
         no_direct_mention = not self._message_mentions_hebe(raw)
         if no_direct_mention:
             observe_value = category
             social_value = self._reply_value_score(category=category, text=raw, response="candidate", payload=payload)
-            action = "intervene" if category in {"high_value_question", "viewer_boundary_needed", "viewer_relay_attempt", "viewer_command_attempt", "promo_request_from_viewer"} else "observe"
+            action = "intervene" if category in {"high_value_question", "high_value_game_tip", "viewer_goodbye", "stream_milestone_comment", "viewer_boundary_needed", "viewer_relay_attempt", "viewer_command_attempt", "promo_request_from_viewer"} else "observe"
             print(
                 "[HEBE][TWITCH_OBSERVE_VALUE] "
                 f"category={observe_value} social_value={social_value:.2f} action={action}",
@@ -8503,9 +8800,17 @@ class HebeEngine:
         )
         payload["core_loop"] = core_decision
         self._log_presence_decision(core_decision)
+        self._increment_twitch_pipeline_counter("twitch_messages_presence_evaluated")
         intervention = dict(core_decision.get("intervention") or {})
+        self._set_last_twitch_route_state(
+            presence_decision=intervention,
+            should_generate=bool(intervention.get("should_intervene")),
+            output_route=str(intervention.get("intervention_level") or "observe_only"),
+            suppress_reason="" if intervention.get("should_intervene") else str(intervention.get("reason") or category),
+        )
         if thread_result.get("action") in {"observe", "close"} and category not in {"viewer_boundary_needed", "viewer_relay_attempt", "viewer_command_attempt", "promo_request_from_viewer"}:
             public_reason = "thread_closed" if thread_result.get("action") == "close" else category
+            self._increment_twitch_pipeline_counter("twitch_messages_observe_only", reason=public_reason)
             return {
                 "should_generate": False,
                 "should_write_to_twitch": False,
@@ -8524,6 +8829,7 @@ class HebeEngine:
                 "suggested_speech_act": self._suggested_twitch_speech_act(category),
             }
         if not intervention.get("should_intervene"):
+            self._increment_twitch_pipeline_counter("twitch_messages_observe_only", reason=str(intervention.get("reason") or category))
             return {
                 "should_generate": False,
                 "should_write_to_twitch": False,
@@ -8541,6 +8847,7 @@ class HebeEngine:
                 "presence_decision": intervention,
                 "suggested_speech_act": self._suggested_twitch_speech_act(category),
             }
+        self._increment_twitch_pipeline_counter("twitch_messages_should_generate")
         return {
             "should_generate": True,
             "should_write_to_twitch": True,
@@ -8762,9 +9069,11 @@ class HebeEngine:
             violations.append("unnecessary_followup_question")
         if category in {"low_value_banter", "meme_or_emote", "repeated_meme"} and normalized in {"te leo", "te sigo", "aqui estoy", "dime"}:
             violations.append("low_value_generic_ack")
+        if normalized.startswith("te leo"):
+            violations.append("generic_ack_twitch_fallback")
         action = "allow"
         if violations:
-            action = "suppress" if any(item in violations for item in {"generic_empty_encouragement", "unnecessary_followup_question", "low_value_generic_ack"}) else "repair"
+            action = "suppress" if any(item in violations for item in {"generic_empty_encouragement", "unnecessary_followup_question", "low_value_generic_ack", "generic_ack_twitch_fallback"}) else "repair"
         print(
             f"[HEBE][STREAM_PERSONA_QUALITY_GUARD] passed={str(not violations).lower()} violations={violations} action={action}",
             flush=True,
@@ -9066,6 +9375,8 @@ class HebeEngine:
             )
             print("[HEBE][OUTPUT_ROUTE_DECISION] route=suppress reason=stream_response_quality_guard public=false tts=false", flush=True)
             print("[HEBE][EVENT][TWITCH] suppressed reason=stream_response_quality_guard", flush=True)
+            if event_type == "twitch_chat_react":
+                self._record_twitch_pipeline_final(route="suppress", emitted=False, reason="stream_response_quality_guard")
             self._emit_final_response(
                 event_id=final_event_id_for_gate,
                 source="twitch",
@@ -9095,6 +9406,8 @@ class HebeEngine:
             )
             print(f"[HEBE][OUTPUT_ROUTE_DECISION] route=suppress reason={speaker_reason} public=false tts=false", flush=True)
             print(f"[HEBE][EVENT][TWITCH] suppressed reason={speaker_reason}", flush=True)
+            if event_type == "twitch_chat_react":
+                self._record_twitch_pipeline_final(route="suppress", emitted=False, reason=speaker_reason)
             self._emit_final_response(
                 event_id=final_event_id_for_gate,
                 source="twitch",
@@ -9114,6 +9427,15 @@ class HebeEngine:
             quality_guard=quality_guard,
             local_debug_only=bool(is_simulated or (output_mode == "ui_only" and not is_spontaneous)),
         )
+        if event_type == "twitch_chat_react":
+            self._set_last_twitch_route_state(
+                output_route=str(route_policy.get("route") or ""),
+                should_generate=bool(route_policy.get("should_generate")),
+                suppress_reason=str(route_policy.get("reason") or ""),
+                budget_result=route_policy.get("budget_result"),
+                thread_result=route_policy.get("thread_result"),
+                presence_decision=(payload or {}).get("core_loop", {}).get("intervention") if isinstance((payload or {}).get("core_loop"), dict) else None,
+            )
         text = str(route_policy.get("final_text") or text)
         tts_allowed = bool(route_policy.get("should_tts"))
         if not bool(route_policy.get("should_write_to_twitch")) and not is_spontaneous and not is_simulated and output_mode != "ui_only":
@@ -9136,6 +9458,12 @@ class HebeEngine:
                 target_speaker_guard_result={"passed": True, "reason": speaker_reason},
             )
             print(f"[HEBE][EVENT][TWITCH] suppressed reason={route_policy.get('reason')}", flush=True)
+            if event_type == "twitch_chat_react":
+                self._record_twitch_pipeline_final(
+                    route=str(route_policy.get("route") or "observe_only"),
+                    emitted=False,
+                    reason=str(route_policy.get("reason") or ""),
+                )
             self._emit_final_response(
                 event_id=final_event_id_for_gate,
                 source="twitch",
@@ -9165,6 +9493,8 @@ class HebeEngine:
             )
             print(f"[HEBE][OUTPUT_ROUTE_DECISION] route=suppress reason={dedupe_reason} public=false tts=false", flush=True)
             print(f"[HEBE][OUTPUT_DEDUPE] suppressed=true reason={dedupe_reason}", flush=True)
+            if event_type == "twitch_chat_react":
+                self._record_twitch_pipeline_final(route="suppress", emitted=False, reason=dedupe_reason)
             self._emit_final_response(
                 event_id=final_event_id_for_gate,
                 source="twitch",
@@ -9343,6 +9673,8 @@ class HebeEngine:
                     print(f"[HEBE][LIVE_SESSION] hebe twitch record failed: {exc!r}", flush=True)
         elif output_mode == "silent":
             print("[HEBE][EVENT][TWITCH] output_mode=silent dropping chat reply", flush=True)
+            if event_type == "twitch_chat_react":
+                self._record_twitch_pipeline_final(route="suppress", emitted=False, reason="stream_output_mode_silent")
             self._emit_final_response(
                 event_id=final_event_id,
                 source="twitch",
@@ -9367,6 +9699,8 @@ class HebeEngine:
                     speak_fn=speak_stream_once if OUTPUT_TARGET_STREAM_TTS in targets and tts_gate_allowed else None,
                 )
                 if not gate_result.get("emitted"):
+                    if event_type == "twitch_chat_react":
+                        self._record_twitch_pipeline_final(route="suppress", emitted=False, reason="final_emission_gate")
                     return
                 self._update_policy_trace_response(
                     text,
@@ -9386,6 +9720,14 @@ class HebeEngine:
                     target_speaker_guard_result={"passed": True, "reason": speaker_reason},
                 )
                 self._remember_assistant_text(text, source="twitch")
+                if event_type == "twitch_chat_react":
+                    self._record_twitch_pipeline_final(
+                        route=str(route_policy.get("route") or "twitch_text_reply"),
+                        emitted=True,
+                        reason=str(route_policy.get("reason") or "public_reply_allowed"),
+                        public_chat_sent=OUTPUT_TARGET_TWITCH_CHAT in targets,
+                        tts_sent=tts_allowed,
+                    )
                 try:
                     self._get_live_session_brain().observe_hebe_utterance(
                         text,
@@ -9399,6 +9741,8 @@ class HebeEngine:
                 print(f"[HEBE][EVENT][TWITCH] send_message failed: {e!r}", flush=True)
         else:
             print("[HEBE][EVENT][TWITCH] service not available, dropping chat reply", flush=True)
+            if event_type == "twitch_chat_react":
+                self._record_twitch_pipeline_final(route="suppress", emitted=False, reason="twitch_service_unavailable")
 
         if not getattr(self.runtime.state, "tts_enabled", False):
             print("[HEBE][TTS] skipped reason=global_disabled", flush=True)

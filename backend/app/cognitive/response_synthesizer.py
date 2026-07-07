@@ -2742,10 +2742,11 @@ class ResponseSynthesizer:
                 else f"personalidad tengo, {name}. paciencia con el despliegue."
             )
 
+        print("[HEBE][GENERIC_ACK_GUARD] rejected=true reason=invalid_twitch_fallback", flush=True)
         if is_broadcaster:
-            return "te leo, Leo. sigo calibrando."
+            return ""
 
-        return f"te leo, {name}."
+        return ""
 
     def _is_broadcaster(self, payload: dict) -> bool:
         if bool(payload.get("is_broadcaster")):

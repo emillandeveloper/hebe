@@ -1898,6 +1898,76 @@ class VoiceCommandPipelineTests(unittest.TestCase):
         self.assertIn("[HEBE][PRE_GENERATION_ROUTE] should_generate=false route=observe_only reason=low_value_banter", joined)
         self.assertEqual(engine.runtime.twitch.sent, [])
 
+    def test_twitch_normal_no_mention_chat_reaches_presence_observe(self):
+        engine = make_engine(["nuria"])
+        engine.runtime.state.stream.is_live = True
+        engine.context_builder = Mock()
+        engine.response_synthesizer = Mock()
+        logs = []
+
+        with patch("builtins.print", lambda *args, **kwargs: logs.append(" ".join(str(arg) for arg in args))):
+            engine.handle_twitch_chat_event(
+                username="viewer",
+                display_name="Viewer",
+                text="estoy mirando la partida tranquilamente",
+                channel="#chan",
+            )
+
+        joined = "\n".join(logs)
+        engine.context_builder.build.assert_not_called()
+        engine.response_synthesizer.synthesize.assert_not_called()
+        self.assertIn("[HEBE][TWITCH_PIPELINE_START]", joined)
+        self.assertIn("[HEBE][TWITCH_PIPELINE_CLASSIFY] category=normal_no_mention_chat", joined)
+        self.assertIn("[HEBE][PRESENCE_ENGINE] source=twitch_chat", joined)
+        self.assertIn("[HEBE][TWITCH_PIPELINE_FINAL] route=observe_only emitted=false reason=normal_no_mention_chat", joined)
+        self.assertEqual(engine.runtime.twitch.sent, [])
+
+    def test_high_value_game_tip_can_reply_without_hebe_mention(self):
+        engine = make_engine(["nuria"])
+        engine.runtime.state.stream.is_live = True
+        engine.context_builder = FakeContextBuilder()
+        engine.deliberation_service = FakeDeliberationService()
+        engine.plan_executor = FakePlanExecutor()
+        engine.response_synthesizer = FixedResponseSynth("buena pista; eso encaja con la ruta")
+        logs = []
+
+        with patch("builtins.print", lambda *args, **kwargs: logs.append(" ".join(str(arg) for arg in args))), \
+             patch("app.hebe_engine.emit"), \
+             patch("app.hebe_engine.log_chat"):
+            engine.handle_twitch_chat_event(
+                username="viewer",
+                display_name="Viewer",
+                text="pista de juego: revisa la cueva antes del jefe",
+                channel="#chan",
+            )
+
+        joined = "\n".join(logs)
+        self.assertEqual(len(engine.response_synthesizer.calls), 1)
+        self.assertEqual(engine.runtime.twitch.sent, ["buena pista; eso encaja con la ruta"])
+        self.assertIn("[HEBE][TWITCH_PIPELINE_CLASSIFY] category=high_value_game_tip", joined)
+        self.assertIn("[HEBE][PRESENCE_ENGINE] source=twitch_chat should_intervene=true", joined)
+        self.assertIn("[HEBE][TWITCH_PIPELINE_FINAL] route=twitch_text_reply emitted=true", joined)
+
+    def test_twitch_pipeline_health_counts_messages(self):
+        engine = make_engine(["nuria"])
+        engine.runtime.state.stream.is_live = True
+        engine.context_builder = Mock()
+        engine.response_synthesizer = Mock()
+
+        with patch("builtins.print"):
+            engine.handle_twitch_chat_event(
+                username="viewer",
+                display_name="Viewer",
+                text="estoy mirando la partida tranquilamente",
+                channel="#chan",
+            )
+
+        health = engine.runtime.state.stream.twitch_pipeline_health
+        self.assertEqual(health["twitch_messages_received"], 1)
+        self.assertEqual(health["twitch_messages_presence_evaluated"], 1)
+        self.assertEqual(health["twitch_messages_observe_only"], 1)
+        self.assertEqual(health["twitch_messages_final_emitted"], 0)
+
     def test_pre_generation_observe_no_model_call_logs_route_gate(self):
         engine = make_engine(["nuria"])
         engine.runtime.state.stream.is_live = True
@@ -2006,7 +2076,7 @@ class VoiceCommandPipelineTests(unittest.TestCase):
         engine = make_engine(["nuria"])
         engine.runtime.state.stream.is_live = True
         text = "Hebe, que opinas de esto?"
-        thread_id = engine._twitch_thread_id(username="viewer", text=text, category="high_value_question")
+        thread_id = engine._twitch_thread_id(username="viewer", text=text, category="direct_open_prompt_to_hebe")
         engine.runtime.state.stream.public_reply_thread_counts[thread_id] = 2
         engine.context_builder = Mock()
         engine.response_synthesizer = Mock()
@@ -2041,7 +2111,70 @@ class VoiceCommandPipelineTests(unittest.TestCase):
         self.assertTrue(decision["should_generate"])
         self.assertEqual(decision["category"], "viewer_talks_about_hebe")
         self.assertEqual(decision["route"], "twitch_text_reply")
-        self.assertIn("[HEBE][PRESENCE_ENGINE] should_intervene=true", joined)
+        self.assertIn("[HEBE][PRESENCE_ENGINE] source=twitch_chat should_intervene=true", joined)
+
+    def test_direct_hebe_open_prompt_reaches_presence_and_generation(self):
+        engine = make_engine(["nuria"])
+        engine.runtime.state.stream.is_live = True
+        logs = []
+
+        with patch("builtins.print", lambda *args, **kwargs: logs.append(" ".join(str(arg) for arg in args))):
+            decision = engine._pre_generation_twitch_route_decision(
+                payload={"user_login": "viewer", "display_name": "Viewer", "message_text": "hebe que opinas"},
+                event_type="twitch_chat_react",
+                stream=engine.runtime.state.stream,
+            )
+
+        joined = "\n".join(logs)
+        self.assertTrue(decision["should_generate"])
+        self.assertEqual(decision["category"], "direct_open_prompt_to_hebe")
+        self.assertEqual(decision["route"], "twitch_text_reply")
+        self.assertEqual(decision["twitch_message_category"], "direct_open_prompt_to_hebe")
+        self.assertIn("[HEBE][PRESENCE_ENGINE] source=twitch_chat should_intervene=true", joined)
+        self.assertIn("[HEBE][INTERVENTION_DECISION] source=twitch_chat", joined)
+
+    def test_direct_hebe_prompt_dispatches_after_cognitive_router(self):
+        engine = make_engine(["nuria"])
+        engine.runtime.state.stream.is_live = True
+        engine.context_builder = FakeContextBuilder()
+        engine.deliberation_service = FakeDeliberationService()
+        engine.plan_executor = FakePlanExecutor()
+        engine.response_synthesizer = FixedResponseSynth("opinion corta con filo")
+        logs = []
+        event = SimpleNamespace(
+            event_type="twitch_chat_react",
+            payload={"user_login": "viewer", "display_name": "Viewer", "message_text": "hebe que opinas"},
+        )
+
+        with patch("builtins.print", lambda *args, **kwargs: logs.append(" ".join(str(arg) for arg in args))), \
+             patch("app.hebe_engine.emit"), \
+             patch("app.hebe_engine.log_chat"):
+            engine.process_internal_event(event)
+
+        joined = "\n".join(logs)
+        self.assertEqual(len(engine.response_synthesizer.calls), 1)
+        self.assertEqual(engine.runtime.twitch.sent, ["opinion corta con filo"])
+        self.assertIn("[HEBE][POST_ROUTER_DISPATCH]", joined)
+        self.assertIn("[HEBE][PRESENCE_ENGINE] source=twitch_chat", joined)
+        self.assertIn("[HEBE][OUTPUT_ROUTE_DECISION] route=twitch_text_reply", joined)
+
+    def test_input_firewall_twitch_preserves_raw_text_and_addressing(self):
+        engine = make_engine(["nuria"])
+        engine.runtime.state.stream.is_live = True
+
+        engine._input_firewall_decision(
+            source="twitch_viewer",
+            text="hebe que opinas",
+            username="viewer",
+            event_type="twitch_chat_react",
+            addressed_to_hebe=True,
+        )
+
+        payload = engine._firewall_payload()
+        self.assertEqual(payload["raw_text"], "hebe que opinas")
+        self.assertEqual(payload["normalized_text"], "hebe que opinas")
+        self.assertTrue(payload["addressed_to_hebe"])
+        self.assertTrue(payload["mentions_hebe"])
 
     def test_repeated_hebe_talk_observed_after_saturation(self):
         engine = make_engine(["nuria"])
@@ -2078,6 +2211,23 @@ class VoiceCommandPipelineTests(unittest.TestCase):
 
         self.assertEqual(engine.runtime.twitch.sent, [])
         self.assertIn("[HEBE][STREAM_PERSONA_QUALITY_GUARD] passed=false", "\n".join(logs))
+
+    def test_public_twitch_generic_te_leo_ack_suppressed(self):
+        engine = make_engine(["nuria"])
+        engine.runtime.state.stream.is_live = True
+        logs = []
+
+        with patch("builtins.print", lambda *args, **kwargs: logs.append(" ".join(str(arg) for arg in args))):
+            engine._deliver_twitch_reply(
+                "te leo, Viewer.",
+                event_type="twitch_chat_react",
+                payload={"user_login": "viewer", "display_name": "Viewer", "message_text": "Hebe, que opinas?"},
+            )
+
+        joined = "\n".join(logs)
+        self.assertEqual(engine.runtime.twitch.sent, [])
+        self.assertIn("generic_ack_twitch_fallback", joined)
+        self.assertIn("[HEBE][OUTPUT_ROUTE_DECISION] route=suppress", joined)
 
     def test_text_only_route_split(self):
         engine = make_engine(["nuria"])

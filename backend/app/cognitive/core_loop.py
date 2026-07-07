@@ -211,7 +211,7 @@ class PresenceEngine:
             value += 0.08
         if policy.boundary_required:
             value += 0.45
-        if understanding.intent in {"viewer_direct_question_to_hebe", "game_guidance_request", "promotion_request"}:
+        if understanding.intent in {"viewer_direct_question_to_hebe", "game_guidance_request", "promotion_request", "high_value_game_tip"}:
             value += 0.25
         if perception.is_low_value_chat:
             value -= 0.35
@@ -248,6 +248,8 @@ class PresenceEngine:
             return "self_banter_reply"
         if understanding.intent == "viewer_direct_question_to_hebe":
             return "stream_banter"
+        if understanding.intent == "high_value_game_tip":
+            return "game_guidance_clarification"
         if understanding.intent == "owner_direct_question":
             return "direct_answer"
         return "stream_banter"

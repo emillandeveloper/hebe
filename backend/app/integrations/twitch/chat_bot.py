@@ -261,7 +261,7 @@ class TwitchChatBot:
             return
         if self._is_ignored_user(username):
             print(
-                f"[HEBE][TWITCH][CHAT] response_skipped reason=known_bot username={username} message={message!r}",
+                f"[HEBE][TWITCH_PIPELINE_SKIP] stage=chat_bot reason=bot_ignored username={username} message={message!r}",
                 flush=True,
             )
             return
@@ -291,10 +291,10 @@ class TwitchChatBot:
 
         if not has_mention and not has_pending_reply and not has_observe_value:
             print(
-                f"[HEBE][TWITCH][CHAT] response_skipped reason=no_mention username={username} message={message!r}",
+                f"[HEBE][TWITCH][CHATBOT] forwarding normal no-mention chat "
+                f"user={username!r} message={message!r}",
                 flush=True,
             )
-            return
         if has_observe_value:
             print(
                 f"[HEBE][TWITCH][CHATBOT] accepted no-mention value check user={username!r} message={message!r}",
