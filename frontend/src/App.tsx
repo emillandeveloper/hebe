@@ -1930,7 +1930,24 @@ function SimulationView({
               <StatusLine label="TTS" value={readiness.tts_enabled ? "enabled" : "disabled"} tone={readiness.tts_enabled ? "warn" : "idle"} />
               <StatusLine label="Voice mode" value={simValue(readiness.stream_voice_mode)} tone={readiness.stream_voice_mode === "normal" ? "ok" : "warn"} />
               <StatusLine label="Presence engine" value={simValue(readiness.presence_engine_mode)} tone={readiness.presence_engine_mode === "active" ? "ok" : "warn"} />
+              <StatusLine label="Presence mode" value={simValue(readiness.presence_mode)} tone={readiness.presence_mode === "reactive" ? "idle" : "ok"} />
+              <StatusLine label="Stream TTS" value={readiness.stream_tts_enabled ? "enabled" : "disabled"} tone={readiness.stream_tts_enabled ? "ok" : "warn"} />
+              <StatusLine label="Raid auto-thank" value={readiness.raid_auto_thank_enabled ? "enabled" : "disabled"} tone={readiness.raid_auto_thank_enabled ? "ok" : "bad"} />
+              <StatusLine label="Recent raid" value={simValue(readiness.recent_raid_context?.user_login || readiness.recent_raid_context?.display_name)} tone={readiness.recent_raid_context ? "ok" : "idle"} />
+              <StatusLine label="Last raid" value={simValue(readiness.last_raid_event?.user_login || readiness.last_raid_event?.display_name)} tone={readiness.last_raid_event ? "ok" : "idle"} />
+              <StatusLine label="Last raid ack" value={simValue(readiness.last_raid_ack_result?.reason)} tone={readiness.last_raid_ack_result?.emitted ? "ok" : readiness.last_raid_ack_result ? "warn" : "idle"} />
+              <StatusLine label="Last promo parse" value={simValue(readiness.last_promo_parse?.reason || readiness.last_promo_parse?.status)} tone={readiness.last_promo_parse ? "ok" : "idle"} />
+              <StatusLine label="Last promo reject" value={simValue(readiness.last_promo_rejected_reason)} tone={readiness.last_promo_rejected_reason ? "warn" : "ok"} />
+              <StatusLine label="Twitch consecutive" value={simValue(readiness.twitch_reply_consecutive_count, "0")} tone={Number(readiness.twitch_reply_consecutive_count || 0) >= 3 ? "warn" : "ok"} />
+              <StatusLine label="Budget reset" value={simValue(readiness.last_budget_reset_reason)} tone={readiness.last_budget_reset_reason ? "ok" : "idle"} />
               <StatusLine label="Proactive speech" value={readiness.proactive_speech_enabled ? "enabled" : "disabled"} tone={readiness.proactive_speech_enabled ? "warn" : "ok"} />
+              <StatusLine label="Companion loop" value={readiness.stream_companion_loop_running ? "running" : "not running"} tone={readiness.stream_companion_loop_running ? "ok" : "bad"} />
+              <StatusLine label="Last companion tick" value={readiness.last_companion_tick_time ? new Date(Number(readiness.last_companion_tick_time) * 1000).toLocaleTimeString() : "never"} tone={readiness.last_companion_tick_time ? "ok" : "warn"} />
+              <StatusLine label="Last proactive block" value={simValue(readiness.last_proactive_blocked_reason)} tone={readiness.last_proactive_blocked_reason ? "warn" : "ok"} />
+              <StatusLine label="Last proactive emit" value={simValue(readiness.last_proactive_emitted_response)} tone={readiness.last_proactive_emitted_response ? "ok" : "idle"} />
+              <StatusLine label="Proactive/hour" value={simValue(readiness.proactive_comments_this_hour, "0")} tone={Number(readiness.proactive_comments_this_hour || 0) ? "ok" : "idle"} />
+              <StatusLine label="Proactive cooldown" value={`${Math.round(Number(readiness.current_proactive_cooldown || 0))}s`} tone={Number(readiness.current_proactive_cooldown || 0) ? "warn" : "ok"} />
+              <StatusLine label="Last anchor" value={`${simValue(readiness.last_anchor_type)} (${Number(readiness.last_anchor_quality || 0).toFixed(2)})`} tone={readiness.last_anchor_type ? "ok" : "idle"} />
               <StatusLine label="Current game" value={simValue(readiness.current_game)} tone={readiness.current_game ? "ok" : "idle"} />
               <StatusLine label="Pending tasks" value={String(Array.isArray(readiness.active_pending_tasks) ? readiness.active_pending_tasks.length : 0)} tone={Array.isArray(readiness.active_pending_tasks) && readiness.active_pending_tasks.length ? "warn" : "ok"} />
               <StatusLine label="Last route" value={simValue(readiness.last_output_route)} tone="idle" />

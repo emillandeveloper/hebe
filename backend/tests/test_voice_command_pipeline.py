@@ -353,6 +353,23 @@ class VoiceCommandPipelineTests(unittest.TestCase):
         self.assertFalse(accepted)
         self.assertEqual(reason, "command_words_in_target")
 
+    def test_so_um_is_not_parsed_as_shoutout(self):
+        engine = make_engine([])
+        planner = engine._get_stream_action_planner()
+
+        plan = planner.plan(InputEvent(source="typed_ui", raw_text="So, um...", normalized_text="So, um..."))
+
+        self.assertIsNone(plan)
+
+    def test_promotion_guard_rejects_filler_target_um(self):
+        engine = make_engine([])
+        planner = engine._get_stream_action_planner()
+
+        accepted, reason, _target = planner._promotion_target_guard("um", resolved=False)
+
+        self.assertFalse(accepted)
+        self.assertEqual(reason, "filler_target")
+
     def test_valid_twitch_login_allowed(self):
         engine = make_engine([])
         planner = engine._get_stream_action_planner()
@@ -381,6 +398,15 @@ class VoiceCommandPipelineTests(unittest.TestCase):
         self.assertTrue(result.success)
         self.assertEqual(result.state_changes["target"], "er_tito_xarly")
         self.assertEqual(engine.runtime.twitch.sent, ["!so er_tito_xarly"])
+
+    def test_owner_promo_with_filler_executes(self):
+        engine = make_engine(["superdamu"])
+
+        result = engine._handle_stream_manual_command("de hecho Eve, haz una promo a Super Dammu.")
+
+        self.assertEqual(result.action_type, "twitch_shoutout")
+        self.assertTrue(result.success)
+        self.assertEqual(engine.runtime.twitch.sent, ["!so superdamu"])
         self.assertNotIn("charlieaversiahoralohace", engine.runtime.twitch.sent[0].lower())
 
     def test_promo_superdamu_active_viewer_fuzzy(self):
@@ -1763,6 +1789,63 @@ class VoiceCommandPipelineTests(unittest.TestCase):
         )
 
         self.assertEqual(engine.runtime.twitch.sent, [])
+
+    def test_reply_parent_to_hebe_detected_and_bypasses_viewer_cooldown(self):
+        engine = make_engine(["viewer"])
+        stream = engine.runtime.state.stream
+        stream.is_live = True
+        now = time.time()
+        stream.public_reply_viewer_timestamps = {"viewer": [now - 10, now - 20]}
+
+        category = engine._classify_twitch_viewer_message(
+            "@HebeNifelheim Respete a los mayores",
+            payload={"reply_to_hebe_message": True, "mentions_hebe": True},
+        )
+        budget = engine._twitch_reply_budget_allows(
+            stream=stream,
+            username="viewer",
+            category=category,
+            thread_id="viewer:reply_to_hebe_message:respete",
+            payload={"reply_to_hebe_message": True, "direct_priority_reason": "reply_to_hebe_message"},
+        )
+
+        self.assertEqual(category, "reply_to_hebe_message")
+        self.assertTrue(budget["allowed"])
+        self.assertTrue(budget["direct_priority_applied"])
+
+    def test_mention_hebe_never_normal_no_mention(self):
+        engine = make_engine(["viewer"])
+
+        category = engine._classify_twitch_viewer_message("Hebenifelheim oye no te metas en conversaciones ajenas Kappa")
+
+        self.assertIn(category, {"direct_hebe_prompt", "direct_hebe_banter", "viewer_talks_about_hebe"})
+        self.assertNotEqual(category, "normal_no_mention_chat")
+
+    def test_greeting_not_high_value_question(self):
+        engine = make_engine(["viewer"])
+
+        category = engine._classify_twitch_viewer_message("que ondaaaaa")
+
+        self.assertNotEqual(category, "high_value_question")
+
+    def test_human_chat_between_replies_does_not_reset_viewer_cooldown(self):
+        engine = make_engine(["viewer"])
+        stream = engine.runtime.state.stream
+        now = time.time()
+        stream.public_reply_viewer_timestamps = {"viewer": [now - 10, now - 20]}
+        stream.consecutive_public_replies = 1
+
+        engine.observe_twitch_chat_message("other", "Other", "hola normal", "#chan")
+        budget = engine._twitch_reply_budget_allows(
+            stream=stream,
+            username="viewer",
+            category="high_value_question",
+            thread_id="thread",
+            payload={},
+        )
+
+        self.assertFalse(budget["allowed"])
+        self.assertEqual(budget["reason"], "viewer_cooldown")
 
     def test_third_person_leo_mention_allowed(self):
         engine = make_engine(["nuria"])

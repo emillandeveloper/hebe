@@ -97,6 +97,13 @@ class StreamIntentParser:
                 },
                 reason="promotion_command_parser",
             )
+        if self._looks_like_missing_target_promotion_command(raw_text):
+            return StreamIntentCandidate(
+                "twitch_shoutout",
+                0.88,
+                entities={"target_text": ""},
+                reason="missing_promotion_target",
+            )
         tokens = normalized.split()
         if not tokens:
             return None
@@ -104,6 +111,9 @@ class StreamIntentParser:
         if not concept_indexes:
             return None
         concept_index = concept_indexes[0]
+        concept = tokens[concept_index]
+        if concept == "so" and not re.search(r"\b(?:so|s\s*o|dale\s+so|haz\s+so)\s+(?:a|al|to)\b", raw_text, flags=re.IGNORECASE):
+            return None
         target_text = self._extract_target(tokens, concept_index, raw_text)
         confidence = 0.92 if target_text else 0.88
         return StreamIntentCandidate(
@@ -115,7 +125,9 @@ class StreamIntentParser:
 
     def parse_promotion_request(self, text: str, *, source: str = "owner_stt_direct") -> PromotionRequest | None:
         raw = str(text or "").strip()
+        print(f"[HEBE][PROMOTION_PARSE_ATTEMPT] raw={raw!r} source={source}", flush=True)
         if not raw:
+            print("[HEBE][PROMOTION_PARSE_RESULT] command_detected=false target_phrase='' reason=empty", flush=True)
             return None
         command = self.wake_prefix_re.sub("", raw).strip()
         normalized_command = self.normalize(command)
@@ -132,6 +144,11 @@ class StreamIntentParser:
                 f"stripped_prefix={command[:match.start()].strip()!r} stripped_suffix={trailing!r}",
                 flush=True,
             )
+            print(
+                "[HEBE][PROMOTION_PARSE_RESULT] "
+                f"command_detected=true target_phrase={target!r} reason={'parsed' if target else 'no_target'}",
+                flush=True,
+            )
             return PromotionRequest(
                 raw_text=raw,
                 target_phrase=target,
@@ -140,11 +157,25 @@ class StreamIntentParser:
                 source=source,
                 confidence=0.96 if target else 0.88,
             )
+        promo_language = bool(set(normalized_command.split()) & (self.shoutout_concepts | {"promos"}))
+        reason = "meta_or_no_explicit_command" if promo_language else "not_promotion_language"
+        print(
+            f"[HEBE][PROMOTION_PARSE_RESULT] command_detected=false target_phrase='' reason={reason}",
+            flush=True,
+        )
         return None
 
     def _looks_like_broken_promotion_command(self, normalized: str) -> bool:
         tokens = set(str(normalized or "").split())
         return bool(tokens & self.shoutout_concepts) and bool(tokens & {"haz", "hazle", "dale", "tira", "shoutout", "so"})
+
+    def _looks_like_missing_target_promotion_command(self, text: str) -> bool:
+        command = self.wake_prefix_re.sub("", str(text or "").strip()).strip()
+        return bool(re.search(
+            r"^(?:(?:haz(?:le)?|dale|tira)\s+(?:una?\s+)?(?:promo|shoutout|so)|(?:promo|shoutout))\s*$",
+            command,
+            flags=re.IGNORECASE,
+        ))
 
     def _strip_promotion_target_filler(self, target: str) -> str:
         value = str(target or "").strip(" @,.;:")

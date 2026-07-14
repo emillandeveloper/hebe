@@ -6,6 +6,7 @@ import threading
 import time
 from typing import Callable, Optional
 
+from app.integrations.twitch.raid_events import parse_irc_tags, parse_raid_bot_message, parse_raid_usernotice
 from websockets.sync.client import connect
 
 
@@ -22,6 +23,7 @@ class TwitchChatBot:
         enabled: bool = True,
         message_callback: Optional[Callable[[str, str, str, str], None]] = None,
         ambient_message_callback: Optional[Callable[[str, str, str, str], None]] = None,
+        social_event_callback: Optional[Callable[[str, dict], None]] = None,
         reconnect_delay: float = 5.0,
     ) -> None:
         self.channel_name = str(channel_name or "").strip().lower()
@@ -32,12 +34,16 @@ class TwitchChatBot:
         self.enabled = enabled
         self.message_callback = message_callback
         self.ambient_message_callback = ambient_message_callback
+        self.social_event_callback = social_event_callback
         self.reconnect_delay = reconnect_delay
 
         self._ws = None
         self._thread: Optional[threading.Thread] = None
         self._stop = False
         self._connected = False
+        self.irc_usernotice_seen_count = 0
+        self.raid_events_seen_count = 0
+        self.last_raid_event_at: float | None = None
 
         # Continuidad conversacional corta:
         # si Hebe acaba de preguntar algo a un chatter, el siguiente mensaje
@@ -71,6 +77,22 @@ class TwitchChatBot:
     @property
     def is_connected(self) -> bool:
         return self._connected
+
+    def raid_intake_health(self, *, eventsub_raid_subscription: str = "unknown") -> dict:
+        result = {
+            "last_raid_event_at": self.last_raid_event_at,
+            "irc_usernotice_seen": self.irc_usernotice_seen_count,
+            "raid_events_seen": self.raid_events_seen_count,
+            "eventsub_raid_subscription": eventsub_raid_subscription,
+        }
+        print(
+            "[HEBE][RAID_INTAKE_HEALTH] "
+            f"irc_usernotice_seen={self.irc_usernotice_seen_count} "
+            f"raid_events_seen={self.raid_events_seen_count} "
+            f"eventsub_raid_subscription={eventsub_raid_subscription}",
+            flush=True,
+        )
+        return result
 
     def start(self) -> bool:
         if not self.enabled:
@@ -133,6 +155,28 @@ class TwitchChatBot:
             if line.startswith("PING"):
                 print("[HEBE][TWITCH][CHATBOT] IRC PING received", flush=True)
                 self._send_raw(self.PING_RESPONSE)
+                continue
+
+            if "USERNOTICE" in line:
+                tags = parse_irc_tags(line)
+                self.irc_usernotice_seen_count += 1
+                print(
+                    "[HEBE][IRC_USERNOTICE] "
+                    f"msg_id={tags.get('msg-id') or ''} raw_tags={tags!r} "
+                    f"login={tags.get('login') or ''!r} display={tags.get('display-name') or ''!r}",
+                    flush=True,
+                )
+            raid_event = parse_raid_usernotice(line)
+            if raid_event is not None:
+                self.raid_events_seen_count += 1
+                self.last_raid_event_at = time.time()
+                print(
+                    "[HEBE][TWITCH_RAID_EVENT] "
+                    f"source=irc_usernotice raider={raid_event.get('user_login')!r} viewers={raid_event.get('viewer_count')}",
+                    flush=True,
+                )
+                if self.social_event_callback is not None:
+                    self.social_event_callback("twitch_raid", raid_event)
                 continue
 
             if "PRIVMSG" in line:
@@ -211,8 +255,9 @@ class TwitchChatBot:
         print(f"[HEBE][TWITCH][CHATBOT] sending raw: {log_data!r}", flush=True)
         self._ws.send(data + "\r\n")
 
-    def _parse_privmsg_line(self, line: str) -> tuple[str, str, str] | None:
+    def _parse_privmsg_line(self, line: str) -> tuple[str, str, str, dict] | None:
         """Parse a PRIVMSG line, handling optional IRCv3 tags from Twitch."""
+        tags = parse_irc_tags(line)
         if line.startswith("@"):
             parts = line.split(" ", 1)
             if len(parts) != 2:
@@ -230,7 +275,7 @@ class TwitchChatBot:
         if command != "PRIVMSG":
             return None
 
-        return prefix, channel, message
+        return prefix, channel, message, tags
 
     def _handle_privmsg(self, line: str) -> None:
         parsed = self._parse_privmsg_line(line)
@@ -241,7 +286,7 @@ class TwitchChatBot:
             )
             return
 
-        prefix, channel, message = parsed
+        prefix, channel, message, tags = parsed
 
         if message.startswith(":"):
             message = message[1:]
@@ -259,6 +304,17 @@ class TwitchChatBot:
         if username.lower() == self.bot_username.lower():
             self._handle_own_bot_message(message)
             return
+        raid_event = parse_raid_bot_message(username, message)
+        if raid_event is not None:
+            print(
+                "[HEBE][RAID_BOT_FALLBACK] "
+                f"parsed=true bot={username!r} user={raid_event.get('user_login')!r} viewers={raid_event.get('viewer_count')}",
+                flush=True,
+            )
+            if self.social_event_callback is not None:
+                self.social_event_callback("twitch_raid", raid_event)
+            return
+
         if self._is_ignored_user(username):
             print(
                 f"[HEBE][TWITCH_PIPELINE_SKIP] stage=chat_bot reason=bot_ignored username={username} message={message!r}",
@@ -289,12 +345,8 @@ class TwitchChatBot:
                 flush=True,
             )
 
-        if not has_mention and not has_pending_reply and not has_observe_value:
-            print(
-                f"[HEBE][TWITCH][CHATBOT] forwarding normal no-mention chat "
-                f"user={username!r} message={message!r}",
-                flush=True,
-            )
+        # Every eligible human message enters the canonical pipeline. The engine,
+        # not the IRC adapter, decides whether ordinary no-mention chat is observed.
         if has_observe_value:
             print(
                 f"[HEBE][TWITCH][CHATBOT] accepted no-mention value check user={username!r} message={message!r}",
@@ -314,12 +366,10 @@ class TwitchChatBot:
             )
             self._last_callback_username = username
             self._last_callback_at = time.time()
-            self.message_callback(
-                username,
-                username,
-                message,
-                channel,
-            )
+            try:
+                self.message_callback(username, username, message, channel, tags)
+            except TypeError:
+                self.message_callback(username, username, message, channel)
 
     def _is_ignored_user(self, username: str) -> bool:
         normalized = (username or "").strip().lower().lstrip("@")

@@ -171,18 +171,27 @@ class StreamActionPlanner:
         accepted = True
         guarded = raw
         command_words = {"haz", "hazle", "dale", "tira", "promo", "promocion", "promociona", "shoutout", "so"}
+        filler_fragments = {
+            "um", "uh", "eh", "emm", "em", "mmm", "pues", "este", "esto", "osea", "o sea",
+            "ese", "esa", "eso", "alguien", "viewer", "chat",
+        }
         sentence_markers = {
             "juego", "partida", "jueves", "familia", "anime", "chat", "viewer", "espectador",
             "combate", "directo", "stream", "vamos", "estoy", "esta", "donde", "cuando",
+            "quiero", "creo", "porque", "entonces", "pero", "mientras", "cuando", "digo",
         }
         insult_markers = {"idiot", "imbecil", "gilipoll", "cabron", "tonto", "tonta", "estupido", "estupida"}
         tokens = set(normalized.split())
         if not normalized:
             accepted, reason = False, "missing_target"
-        elif len(compact) == 1:
-            accepted, reason = False, "ambiguous_single_letter_target"
         elif normalized in {"h", "hache"} or re.fullmatch(r"(?:a|al|a la|a el)\s+h(?:ache)?", normalized):
             accepted, reason = False, "ambiguous_single_letter_target"
+        elif normalized in filler_fragments:
+            accepted, reason = False, "filler_target"
+        elif len(compact) == 1:
+            accepted, reason = False, "ambiguous_single_letter_target"
+        elif len(compact) == 2:
+            accepted, reason = False, "ambiguous_short_target"
         elif tokens & insult_markers:
             accepted, reason = False, "invalid_target"
         elif tokens & command_words or re.search(r"(?:haz|promo|shoutout|so)", compact):

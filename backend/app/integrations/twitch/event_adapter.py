@@ -282,6 +282,7 @@ class TwitchEventAdapter:
         return True
 
     def _handle_event(self, sub_type: str, event: dict[str, Any]) -> None:
+        print(f"[HEBE][EVENTSUB_NOTIFICATION] type={sub_type}", flush=True)
         print(f"[HEBE][TWITCH][EVENTSUB] event type={sub_type} event={event}", flush=True)
 
         if sub_type == "channel.chat.message":
@@ -311,6 +312,9 @@ class TwitchEventAdapter:
                     self.push_event_callback("twitch_follow_batch", {
                         "display_names": [username],
                         "count": 1,
+                        "source": "eventsub",
+                        "visible_public": False,
+                        "passive_eventsub": True,
                     })
             return
 
@@ -325,6 +329,9 @@ class TwitchEventAdapter:
                         "cumulative_months": 1,  # TODO: obtener de event si disponible
                         "is_gift": False,
                         "is_resub": False,
+                        "source": "eventsub",
+                        "visible_public": False,
+                        "passive_eventsub": True,
                     })
             return
 
@@ -332,12 +339,19 @@ class TwitchEventAdapter:
             username = str(event.get("from_broadcaster_user_login") or "").strip()
             viewers = int(event.get("viewers") or 0)
             if username:
+                print(
+                    f"[HEBE][TWITCH_RAID_EVENT] source=eventsub raider={username!r} viewers={viewers}",
+                    flush=True,
+                )
                 self.twitch_service.remember_raid(username=username, viewer_count=viewers)
                 if self.push_event_callback:
                     self.push_event_callback("twitch_raid", {
                         "display_name": username,
                         "user_login": username,
                         "viewer_count": viewers,
+                        "event_id": event.get("id") or event.get("event_id") or "",
+                        "source": "eventsub",
+                        "visible_public": True,
                     })
             return
 

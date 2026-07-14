@@ -161,6 +161,33 @@ class CognitiveTwitchTests(unittest.TestCase):
 
         self.assertEqual(len(received), 1)
 
+    def test_normal_no_mention_chat_enters_canonical_callback(self):
+        received = []
+        bot = TwitchChatBot(
+            channel_name="testchannel",
+            bot_username="HebeNifelheim",
+            oauth_token="oauth:dummy",
+            enabled=True,
+            message_callback=lambda *args: received.append(args),
+        )
+
+        bot._handle_privmsg(":viewer!viewer@viewer.tmi.twitch.tv PRIVMSG #testchannel :este game me pega mas")
+
+        self.assertEqual(len(received), 1)
+        self.assertEqual(received[0][2], "este game me pega mas")
+
+    def test_raid_health_reports_no_events(self):
+        bot = TwitchChatBot(
+            channel_name="testchannel", bot_username="HebeNifelheim",
+            oauth_token="oauth:dummy", enabled=True,
+        )
+
+        health = bot.raid_intake_health(eventsub_raid_subscription="missing")
+
+        self.assertIsNone(health["last_raid_event_at"])
+        self.assertEqual(health["irc_usernotice_seen"], 0)
+        self.assertEqual(health["raid_events_seen"], 0)
+
     def test_twitch_esquirola_reply_is_short_in_character(self):
         synth = ResponseSynthesizer(conversation_model=CapturingModel("alguien tiene que recordarles que no son el centro del universo."))
 

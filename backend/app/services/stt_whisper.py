@@ -580,7 +580,7 @@ class STTService:
                 f"reason={reason}",
                 flush=True,
             )
-        self._log_input_device_diagnostic(selected)
+        self._log_input_device_diagnostic(selected, default_device=default_device)
 
         return device_index
 
@@ -634,10 +634,14 @@ class STTService:
         self._emit("status", {"stt_input_device": self.get_selected_input_device()})
         return self.get_selected_input_device()
 
-    def _log_input_device_diagnostic(self, device: dict | None) -> None:
+    def _log_input_device_diagnostic(self, device: dict | None, *, default_device: dict | None = None) -> None:
         device = device or {}
         name = str(device.get("name") or device.get("device_name") or device.get("display_label") or "").strip()
-        lowered = name.lower()
+        default_name = str((default_device or {}).get("name") or (default_device or {}).get("device_name") or (default_device or {}).get("display_label") or "").strip()
+        selected_label = str(device.get("display_label") or name or "(default)").strip()
+        default_label = str((default_device or {}).get("display_label") or default_name or "(unknown)").strip()
+        actual_capture = name or selected_label or "(default)"
+        lowered = actual_capture.lower()
         warning = ""
         if any(marker in lowered for marker in ("out ", " output", "voicemeeter out", "desktop", "stereo mix", "what u hear", "loopback", "cable output", "bus")):
             warning = "possible_output_mix"
@@ -646,7 +650,13 @@ class STTService:
             flush=True,
         )
         print(
-            f"[HEBE][STT_AUDIO_SOURCE] source={name or '(default)'}",
+            "[HEBE][STT_DEVICE_ACTIVE] "
+            f"selected={selected_label} default={default_label} actual_capture={actual_capture} "
+            f"warning={warning or 'none'}",
+            flush=True,
+        )
+        print(
+            f"[HEBE][STT_AUDIO_SOURCE] source={actual_capture}",
             flush=True,
         )
 

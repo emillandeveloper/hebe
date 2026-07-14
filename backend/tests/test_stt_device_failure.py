@@ -61,6 +61,40 @@ class STTDeviceFailureTests(unittest.TestCase):
         self.assertIn("[HEBE][STT_DEVICE_DIAGNOSTIC]", joined)
         self.assertIn("warning=possible_output_mix", joined)
 
+    def test_stt_active_device_logged(self):
+        service = STTService(config=STTConfig())
+        logs = []
+
+        with unittest.mock.patch("builtins.print", lambda *args, **kwargs: logs.append(" ".join(str(arg) for arg in args))):
+            service._log_input_device_diagnostic(
+                {"name": "MicrÃ³fono (Yeti GX)", "display_label": "MicrÃ³fono (Yeti GX) - WASAPI - id 8"},
+                default_device={"name": "Voicemeeter Out A2", "display_label": "Voicemeeter Out A2 - WASAPI - id 3"},
+            )
+
+        joined = "\n".join(logs)
+        self.assertIn("[HEBE][STT_DEVICE_ACTIVE]", joined)
+        self.assertIn("actual_capture=MicrÃ³fono (Yeti GX)", joined)
+        self.assertIn("default=Voicemeeter Out A2", joined)
+        self.assertIn("warning=none", joined)
+
+    def test_output_bus_warns_only_if_actual_capture(self):
+        service = STTService(config=STTConfig())
+        logs = []
+
+        with unittest.mock.patch("builtins.print", lambda *args, **kwargs: logs.append(" ".join(str(arg) for arg in args))):
+            service._log_input_device_diagnostic(
+                {"name": "MicrÃ³fono (Yeti GX)"},
+                default_device={"name": "Voicemeeter Out A2"},
+            )
+            service._log_input_device_diagnostic(
+                {"name": "Voicemeeter Out A2"},
+                default_device={"name": "MicrÃ³fono (Yeti GX)"},
+            )
+
+        active_lines = [line for line in logs if "[HEBE][STT_DEVICE_ACTIVE]" in line]
+        self.assertIn("warning=none", active_lines[0])
+        self.assertIn("warning=possible_output_mix", active_lines[1])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -29,6 +29,13 @@ class ProactiveDecision:
     blocked_reason: str = ""
     proposed_response: str = ""
     final_response: str = ""
+    stream_session_id: int | None = None
+    twitch_stream_id: str = ""
+    anchor_id: str = ""
+    selected_route: str = ""
+    social_value_score: float = 0.0
+    interruption_cost: float = 0.0
+    channel_cost: float = 0.0
     game_advice_validation: dict[str, Any] | None = None
     score: dict[str, float] = field(default_factory=dict)
 

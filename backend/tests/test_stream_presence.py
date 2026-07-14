@@ -7,6 +7,8 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from app.hebe_engine import HebeEngine
+from app.integrations.twitch.chat_bot import TwitchChatBot
+from app.integrations.twitch.raid_events import parse_raid_usernotice
 from app.services import db_sqlite
 from app.stream.context_sync import StreamContextSyncService
 from app.stream.game_research import GameKnowledgeResearchConfig, GameKnowledgeResearchService
@@ -681,6 +683,102 @@ class StreamPresenceTests(unittest.TestCase):
         self.assertEqual(engine.runtime.twitch.sent, ["Gracias por la raid, Raider.", "!so Raider"])
         self.assertEqual(stream.last_raid_event["display_name"], "Raider")
 
+    def test_raid_usernotice_parser_extracts_canonical_event(self):
+        line = (
+            "@badge-info=;badges=;id=abc-123;msg-id=raid;msg-param-displayName=Agent;msg-param-login=agent;"
+            "msg-param-viewerCount=7 :tmi.twitch.tv USERNOTICE #leonifelheim"
+        )
+
+        event = parse_raid_usernotice(line, now=123.0)
+
+        self.assertEqual(event["source"], "irc_usernotice")
+        self.assertEqual(event["user_login"], "agent")
+        self.assertEqual(event["display_name"], "Agent")
+        self.assertEqual(event["viewer_count"], 7)
+
+    def test_raid_bot_fallback_bypasses_ignored_bot_skip(self):
+        events = []
+        bot = TwitchChatBot(
+            channel_name="leonifelheim",
+            bot_username="HebeNifelheim",
+            oauth_token="token",
+            social_event_callback=lambda event_type, payload: events.append((event_type, payload)),
+        )
+
+        bot._handle_privmsg(":jotunbot!jotunbot@jotunbot.tmi.twitch.tv PRIVMSG #leonifelheim :Agent just raided the channel with 7 viewers!")
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0][0], "twitch_raid")
+        self.assertEqual(events[0][1]["source"], "bot_fallback")
+        self.assertEqual(events[0][1]["user_login"], "Agent")
+
+    def test_raid_usernotice_and_bot_fallback_dedupes_ack(self):
+        stream = StreamSessionState(enabled=True, presence_mode="reactive")
+        stream.is_live = True
+        engine = make_engine(stream)
+        engine._synthesize_internal_event_reply = Mock(return_value="Gracias por la raid, Agent.")
+
+        engine._handle_twitch_raid_event(SimpleNamespace(
+            event_type="twitch_raid",
+            payload={"display_name": "Agent", "user_login": "Agent", "viewer_count": 7, "source": "irc_usernotice"},
+        ))
+        engine._handle_twitch_raid_event(SimpleNamespace(
+            event_type="twitch_raid",
+            payload={"display_name": "Agent", "user_login": "Agent", "viewer_count": 7, "source": "bot_fallback"},
+        ))
+
+        self.assertEqual(engine.runtime.twitch.sent, ["Gracias por la raid, Agent.", "!so Agent"])
+        self.assertEqual(stream.last_raid_ack_result["reason"], "duplicate_raid_event")
+
+    def test_raid_usernotice_and_eventsub_deduped(self):
+        stream = StreamSessionState(enabled=True, presence_mode="reactive")
+        stream.is_live = True
+        engine = make_engine(stream)
+        engine._synthesize_internal_event_reply = Mock(return_value="Gracias por la raid, Xarly.")
+
+        engine._handle_twitch_raid_event(SimpleNamespace(
+            event_type="twitch_raid",
+            payload={"display_name": "er_tito_xarly", "user_login": "er_tito_xarly", "viewer_count": 3, "source": "irc_usernotice", "event_id": "raid-1"},
+        ))
+        engine._handle_twitch_raid_event(SimpleNamespace(
+            event_type="twitch_raid",
+            payload={"display_name": "er_tito_xarly", "user_login": "er_tito_xarly", "viewer_count": 3, "source": "eventsub", "event_id": "raid-2"},
+        ))
+
+        self.assertEqual(engine.runtime.twitch.sent, ["Gracias por la raid, Xarly.", "!so er_tito_xarly"])
+        self.assertEqual(len(stream.recent_raid_contexts), 1)
+
+    def test_raid_ack_renderer_error_uses_safe_fallback(self):
+        stream = StreamSessionState(enabled=True, presence_mode="reactive")
+        stream.is_live = True
+        engine = make_engine(stream)
+        engine.auto_shoutout_raiders = False
+        engine._synthesize_internal_event_reply = Mock(side_effect=NameError("name 'situation' is not defined"))
+
+        engine._handle_twitch_raid_event(SimpleNamespace(
+            event_type="twitch_raid",
+            payload={"display_name": "er_tito_xarly", "user_login": "er_tito_xarly", "viewer_count": 3, "source": "irc_usernotice"},
+        ))
+
+        self.assertEqual(len(engine.runtime.twitch.sent), 1)
+        self.assertIn("er_tito_xarly", engine.runtime.twitch.sent[0])
+        self.assertTrue(stream.last_raid_ack_result["emitted"])
+        self.assertIn("NameError", stream.last_raid_ack_error["error"])
+
+    def test_passive_subscription_not_public_by_default(self):
+        stream = StreamSessionState(enabled=True, presence_mode="reactive")
+        stream.is_live = True
+        engine = make_engine(stream)
+        engine._synthesize_internal_event_reply = Mock(return_value="Gracias por el sub.")
+
+        engine.process_internal_event(SimpleNamespace(
+            event_type="twitch_sub",
+            payload={"display_name": "lurker", "user_login": "lurker", "source": "eventsub", "passive_eventsub": True, "visible_public": False},
+        ))
+
+        self.assertEqual(engine.runtime.twitch.sent, [])
+        self.assertEqual(stream.last_stream_event_ack_decision["route"], "observe_only")
+
     def test_raid_thank_you_not_blocked_by_idle_cooldown(self):
         stream = StreamSessionState(enabled=True, presence_mode="reactive")
         stream.is_live = True
@@ -780,6 +878,65 @@ class StreamPresenceTests(unittest.TestCase):
         engine._handle_stream_manual_command("Hebe, haz SO al ultimo raider")
 
         self.assertEqual(engine.runtime.twitch.sent, ["!so LastRaider"])
+
+    def test_manual_promo_without_target_uses_single_recent_raid_context(self):
+        stream = StreamSessionState(enabled=True)
+        stream.is_live = True
+        now = time.time()
+        stream.recent_raid_contexts = [{
+            "user_login": "AngeloNoctis",
+            "display_name": "Angelo Noctis",
+            "viewer_count": 4,
+            "ts": now,
+            "expires_at": now + 300,
+            "thanked": True,
+            "shoutout_done": False,
+        }]
+        engine = make_engine(stream)
+
+        reply = engine._handle_stream_manual_command("Hebe, hazle promo")
+
+        self.assertEqual(reply.action_type, "twitch_shoutout")
+        self.assertEqual(engine.runtime.twitch.sent, ["!so AngeloNoctis"])
+        self.assertTrue(stream.recent_raid_contexts[-1]["shoutout_done"])
+
+    def test_manual_promo_a_ese_uses_single_recent_raid_context(self):
+        stream = StreamSessionState(enabled=True)
+        stream.is_live = True
+        now = time.time()
+        stream.recent_raid_contexts = [{
+            "user_login": "Agent",
+            "display_name": "Agent",
+            "viewer_count": 7,
+            "ts": now,
+            "expires_at": now + 300,
+            "thanked": True,
+            "shoutout_done": False,
+        }]
+        engine = make_engine(stream)
+
+        reply = engine._handle_stream_manual_command("Hebe, promo a ese")
+
+        self.assertEqual(reply.action_type, "twitch_shoutout")
+        self.assertEqual(engine.runtime.twitch.sent, ["!so Agent"])
+
+    def test_twitch_consecutive_budget_resets_after_time_decay(self):
+        stream = StreamSessionState(enabled=True)
+        stream.is_live = True
+        stream.consecutive_public_replies = 3
+        stream.last_public_reply_ts = time.time() - 181
+        engine = make_engine(stream)
+
+        decision = engine._twitch_reply_budget_allows(
+            stream=stream,
+            username="viewer",
+            category="high_value_question",
+            thread_id="thread-1",
+        )
+
+        self.assertTrue(decision["allowed"])
+        self.assertEqual(decision["counts"]["consecutive"], 0)
+        self.assertEqual(stream.last_twitch_reply_budget_reset_reason, "time_decay")
 
     def test_manual_shoutout_without_target_asks_for_clarification(self):
         engine = make_engine(StreamSessionState(enabled=True))

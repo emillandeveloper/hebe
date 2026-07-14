@@ -51,6 +51,11 @@ class StreamSessionState:
     public_reply_boundary_cooldowns: dict[str, float] = field(default_factory=dict)
     consecutive_public_replies: int = 0
     last_public_reply_ts: float = 0.0
+    last_twitch_reply_budget_reset_reason: Optional[str] = None
+    last_twitch_reply_budget_reset_ts: float = 0.0
+    human_messages_since_last_public_reply: int = 0
+    last_no_mention_reply_ts: float = 0.0
+    public_reply_no_mention_timestamps: list[float] = field(default_factory=list)
 
     is_live: bool = False
     live_status_known: bool = False
@@ -112,6 +117,13 @@ class StreamSessionState:
     recent_style_motifs: list[dict] = field(default_factory=list)
     idle_prompts_sent_stream: int = 0
     last_raid_event: Optional[dict] = None
+    recent_raid_contexts: list[dict] = field(default_factory=list)
+    last_raid_ack_result: Optional[dict] = None
+    last_raid_ack_error: Optional[dict] = None
+    last_promo_parse: Optional[dict] = None
+    last_promo_rejected_reason: Optional[str] = None
+    last_promo_execution_decision: Optional[dict] = None
+    last_stream_event_ack_decision: Optional[dict] = None
     last_shoutout_target: Optional[str] = None
     last_shoutout_ts: float = 0.0
     last_shoutout_error: Optional[str] = None
