@@ -500,6 +500,17 @@ def _has_compliment_behavior(normalized: str) -> bool:
     )
 
 
+def _requests_compliment_behavior(normalized: str) -> bool:
+    """Distinguish an action request from a viewer's own affection toward Leo."""
+    if not _has_compliment_behavior(normalized):
+        return False
+    return bool(re.search(
+        r"\b(?:hebe\s+)?(?:haz|hazle|di|dile|manda|mandale|envia|enviale|ponte|se|"
+        r"flirtea|coquetea|piropea|halaga|elogia|alaba)\b",
+        normalized,
+    ))
+
+
 def _has_owner_stop_control(normalized: str) -> bool:
     tokens = _policy_tokens(normalized)
     stop_tokens = {
@@ -608,7 +619,7 @@ def classify_viewer_semantic_intent(text: str) -> SemanticIntent:
     tokens = _policy_tokens(normalized)
     messenger = _has_viewer_messenger_semantics(normalized)
     target = _target_for_viewer_request(normalized, messenger=messenger)
-    behavior = COMPLIMENTS_TO_LEO if _has_compliment_behavior(normalized) else ""
+    behavior = COMPLIMENTS_TO_LEO if _requests_compliment_behavior(normalized) else ""
 
     if messenger and behavior:
         return SemanticIntent(

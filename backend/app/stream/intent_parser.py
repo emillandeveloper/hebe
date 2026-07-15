@@ -37,12 +37,14 @@ class StreamIntentParser:
     wake_prefix_re = re.compile(r"^\s*(?:hebe|eve|ebe|e\s*[-.]?\s*b|eb|jebe|heve)[\s,;:.-]+", re.IGNORECASE)
     promotion_patterns = (
         ("haz_promo", re.compile(r"\b(?:haz|tira)\s+(?:una?\s+)?promo\s+(?:a|al|a\s+la|al\s+canal\s+de|a\s+el\s+canal\s+de)\s+(.+)$", re.IGNORECASE)),
+        ("haz_promo_compact", re.compile(r"\b(?:haz|tira)\s+(?:una?\s+)?promo\s+(@?[A-Za-z0-9_]{2,25})(?:\b|$)", re.IGNORECASE)),
         ("hazle_promo", re.compile(r"\bhazle\s+promo\s+(?:a|al|a\s+la|al\s+canal\s+de)\s+(.+)$", re.IGNORECASE)),
         ("dale_promo", re.compile(r"\bdale\s+promo\s+(?:a|al|a\s+la|al\s+canal\s+de)\s+(.+)$", re.IGNORECASE)),
         ("promociona", re.compile(r"\bpromociona\s+(?:a|al|a\s+la|al\s+canal\s+de)\s+(.+)$", re.IGNORECASE)),
         ("shoutout", re.compile(r"\bshoutout\s+(?:a|to)\s+(.+)$", re.IGNORECASE)),
         ("give_shoutout", re.compile(r"\b(?:haz(?:le)?|dale|manda|give)\s+(?:un\s+)?shoutout\s+(?:a|to)\s+(.+)$", re.IGNORECASE)),
         ("so", re.compile(r"\b(?:so|s\s*o|dale\s+so|haz\s+so)\s+(?:a|al|to)\s+(.+)$", re.IGNORECASE)),
+        ("bare_promo", re.compile(r"\bpromo\s+(?:a|al|para)\s+(.+)$", re.IGNORECASE)),
     )
     trailing_banter_patterns = (
         r"\ba\s+ver\s+si\b.*$",
@@ -104,6 +106,10 @@ class StreamIntentParser:
                 entities={"target_text": ""},
                 reason="missing_promotion_target",
             )
+        if set(normalized.split()) & self.shoutout_concepts:
+            # Promotion resolution is executable only after the canonical
+            # parser has recognized an explicit command shape.
+            return None
         tokens = normalized.split()
         if not tokens:
             return None

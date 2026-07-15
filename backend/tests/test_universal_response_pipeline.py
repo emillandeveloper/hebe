@@ -4,9 +4,11 @@ from types import SimpleNamespace
 from app.cognitive.models import ExecutionResult, StepExecutionResult
 from app.cognitive.response_synthesizer import ResponseSynthesizer
 from app.cognitive.speech_act_pipeline import (
+    HebeResponsePipeline,
     TestFakeProvider,
     action_claim_guard,
     build_universal_speech_act_bundle,
+    deterministic_response_repair,
     final_response_guard,
     safe_local_fallback,
 )
@@ -38,6 +40,63 @@ def context(text="Hebe, abre OBS", source="stt_voice", message_type="task_reques
 
 
 class UniversalResponsePipelineTests(unittest.TestCase):
+    def test_deterministic_report_prefix_repair_preserves_answer(self):
+        bundle = build_universal_speech_act_bundle(
+            route="direct",
+            speech_act_type="direct_answer",
+            input_text="Hebe, Espana esta en Europa?",
+            source="twitch_chat",
+            output_target="twitch_chat",
+            speaker="Ismael",
+            authority="viewer",
+            mode="stream",
+            stream_live=True,
+        )
+        candidate = "Ismael: Espana esta en Europa."
+        guard = final_response_guard(candidate, bundle)
+
+        repaired = deterministic_response_repair(candidate, guard)
+
+        self.assertEqual(repaired, "Ismael, Espana esta en Europa.")
+        self.assertTrue(final_response_guard(repaired, bundle).passed)
+
+    def test_pipeline_uses_deterministic_repair_without_second_model_call(self):
+        provider = TestFakeProvider(["Ismael: Espana esta en Europa."])
+        pipeline = HebeResponsePipeline(provider)
+        bundle = build_universal_speech_act_bundle(
+            route="direct",
+            speech_act_type="direct_answer",
+            input_text="Hebe, Espana esta en Europa?",
+            source="twitch_chat",
+            output_target="twitch_chat",
+            speaker="Ismael",
+            authority="viewer",
+            mode="stream",
+            stream_live=True,
+        )
+
+        response = pipeline.render(bundle)
+
+        self.assertEqual(response.text, "Ismael, Espana esta en Europa.")
+        self.assertEqual(response.response_source, "deterministic_repair")
+        self.assertEqual(response.repair_attempts[0]["method"], "deterministic")
+        self.assertEqual(len(provider.calls), 1)
+
+    def test_direct_viewer_fallback_does_not_fake_an_answer(self):
+        bundle = build_universal_speech_act_bundle(
+            route="direct",
+            speech_act_type="direct_answer",
+            input_text="Hebe, que opinas?",
+            source="twitch_chat",
+            output_target="twitch_chat",
+            speaker="Viewer",
+            authority="viewer",
+            mode="stream",
+            stream_live=True,
+        )
+
+        self.assertEqual(safe_local_fallback(bundle), "")
+
     def test_owner_open_obs_uses_universal_pipeline(self):
         model = CapturingModel(["OBS queda abierto, Leo."])
         synth = ResponseSynthesizer(conversation_model=model)

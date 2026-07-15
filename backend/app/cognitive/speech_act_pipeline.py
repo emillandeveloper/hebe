@@ -875,6 +875,21 @@ def final_response_guard(
     )
 
 
+def deterministic_response_repair(response: str, guard_result: FinalResponseGuardResult) -> str:
+    """Repair cosmetic violations without asking the model to regenerate content."""
+    violation_types = {item.type for item in list(guard_result.violations or [])}
+    if not violation_types or not violation_types.issubset({"hebe_voice_report_prefix"}):
+        return str(response or "")
+    text = str(response or "").strip()
+    repaired = re.sub(
+        r"^\s*([A-ZÃÃ‰ÃÃ“ÃšÃ‘][A-Za-zÃÃ‰ÃÃ“ÃšÃ‘Ã¡Ã©Ã­Ã³ÃºÃ±_]{2,24})\s*:\s*",
+        r"\1, ",
+        text,
+        count=1,
+    ).strip()
+    return repaired
+
+
 def _internal_metadata_violation(text: str) -> GuardViolation | None:
     normalized = _normalize_text(text)
     patterns = (
@@ -1033,6 +1048,39 @@ class HebeResponsePipeline:
                 guard_result=guard,
                 debug_contract=self._debug_contract(bundle, raw, guard, [], "persona_generated", final_response=cleaned),
             )
+        deterministic = deterministic_response_repair(cleaned, guard)
+        if deterministic != cleaned:
+            deterministic_guard = final_response_guard(
+                deterministic,
+                bundle,
+                game_advice_gate=self.game_advice_gate,
+                previous_responses=previous_responses,
+            )
+            print(
+                "[HEBE][DETERMINISTIC_RESPONSE_REPAIR] "
+                f"violation=hebe_voice_report_prefix before={cleaned!r} after={deterministic!r} "
+                f"passed={str(deterministic_guard.passed).lower()}",
+                flush=True,
+            )
+            self._log_guard(bundle, deterministic_guard)
+            if deterministic_guard.passed:
+                attempts = [{
+                    "attempt": 0,
+                    "method": "deterministic",
+                    "raw": raw,
+                    "cleaned": deterministic,
+                    "guard_result": deterministic_guard.to_dict(),
+                }]
+                return PipelineResponse(
+                    deterministic,
+                    raw_response=raw,
+                    response_source="deterministic_repair",
+                    guard_result=deterministic_guard,
+                    repair_attempts=attempts,
+                    debug_contract=self._debug_contract(
+                        bundle, raw, deterministic_guard, attempts, "deterministic_repair", final_response=deterministic
+                    ),
+                )
         repair_attempts: list[dict[str, Any]] = []
         previous = cleaned
         for attempt in range(1, self.max_repair_attempts + 1):
@@ -1211,6 +1259,9 @@ def safe_local_fallback(bundle: SpeechActBundle) -> str:
         return "Ese camino no toca en directo. Lo corto aqui."
     if bundle.policy_decision.reason == "viewer_proxy_request":
         return f"{speaker}, eso se lo dices tu a Leo. Yo no hago de recadera del chat."
+    if speech_act_type in {"direct_answer", "grounded_answer"} and bundle.scene.speaker_authority != "owner":
+        print("[HEBE][GENERIC_ACK_GUARD] rejected=true reason=direct_question_requires_answer", flush=True)
+        return ""
     if bundle.scene.speaker_authority == "owner":
         return "Te leo, Leo. Recalibro."
     print("[HEBE][GENERIC_ACK_GUARD] rejected=true reason=invalid_speech_act", flush=True)

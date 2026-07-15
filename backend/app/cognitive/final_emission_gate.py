@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Callable
 import re
+import threading
 
 
 class OutputRoute(StrEnum):
@@ -32,9 +33,12 @@ PUBLIC_TEXT_ROUTES = {
 FORBIDDEN_NORMAL_EMISSION_STAGES = {
     "candidate",
     "failed_guard",
+    "fallback_candidate",
     "repair_attempt",
     "suppressed",
 }
+
+RESPONSE_STAGES = FORBIDDEN_NORMAL_EMISSION_STAGES | {"final"}
 
 
 def normalize_output_route(route: str | OutputRoute | None) -> OutputRoute:
@@ -78,6 +82,7 @@ class FinalEmissionGate:
     def __init__(self) -> None:
         self._seen_event_ids: set[str] = set()
         self._seen_message_keys: set[tuple[str, str, str]] = set()
+        self._commit_lock = threading.Lock()
 
     def emit(
         self,
@@ -124,16 +129,25 @@ class FinalEmissionGate:
             if route == OutputRoute.TWITCH_ACTION_ONLY:
                 reason = "action_only"
             if emit_debug is not None:
-                emit_debug({**debug, "suppress_reason": reason})
+                emit_debug({**debug, "response_stage": stage or "suppressed", "suppress_reason": reason})
+            log(
+                f"[HEBE][FINAL_EMISSION_GATE] ui_allowed=false twitch_allowed=false tts_allowed=false "
+                f"suppressed=true reason={reason} route={route.value} event_id={event_key}"
+            )
             log(f"[HEBE][FINAL_EMISSION_GATE] suppressed=true reason={reason} route={route.value} event_id={event_key}")
+            log(
+                f"[HEBE][OUTPUT_VISIBILITY_INVARIANT] passed=true route={route.value} "
+                "ui_count=0 twitch_sent=false tts_sent=false"
+            )
             return FinalEmissionResult(False, route.value, targets, event_key, suppressed=True, reason=reason)
 
-        if stage in FORBIDDEN_NORMAL_EMISSION_STAGES:
-            reason = "pre_guard" if stage == "candidate" else f"stage_{stage}"
+        if stage != "final":
+            blocked_stage = stage if stage in RESPONSE_STAGES else "missing"
+            reason = "pre_guard" if blocked_stage == "candidate" else f"stage_{blocked_stage}"
             if emit_debug is not None:
-                emit_debug({**debug, "blocked_candidate_ui": True, "suppress_reason": reason})
-            log(f"[HEBE][FINAL_EMISSION_GATE] blocked_candidate_ui=true reason={reason} stage={stage} event_id={event_key}")
-            log(f"[HEBE][UI_EMISSION_GUARD] allowed=false stage={stage}")
+                emit_debug({**debug, "response_stage": blocked_stage, "blocked_candidate_ui": True, "suppress_reason": reason})
+            log(f"[HEBE][FINAL_EMISSION_GATE] ui_allowed=false twitch_allowed=false tts_allowed=false reason={reason} stage={blocked_stage} event_id={event_key}")
+            log(f"[HEBE][UI_EMISSION_GUARD] allowed=false stage={blocked_stage} reason=debug_only")
             return FinalEmissionResult(False, route.value, targets, event_key, suppressed=True, reason=reason)
 
         if route in TEXT_ROUTES and not text:
@@ -174,16 +188,31 @@ class FinalEmissionGate:
             log(f"[HEBE][FINAL_EMISSION_GATE] emitted=true route={route.value} targets={targets} event_id={event_key}")
             return FinalEmissionResult(True, route.value, targets, event_key)
 
-        if emit_ui is not None and "local_ui" in targets:
-            emit_ui({"text": text, "source": source, "output_target": "local_ui", **debug})
-        if send_twitch is not None and "twitch_chat" in targets:
-            send_twitch(text)
-        if speak is not None and any(target in targets for target in ("local_tts", "stream_tts")):
-            speak(text)
+        with self._commit_lock:
+            if event_key and event_key in self._seen_event_ids:
+                reason = "duplicate_event_id"
+                log(f"[HEBE][FINAL_EMISSION_GATE] deduped=true reason={reason} route={route.value} event_id={event_key}")
+                return FinalEmissionResult(False, route.value, targets, event_key, suppressed=True, deduped=True, reason=reason)
+            if not event_key and text and dedupe_key in self._seen_message_keys:
+                reason = "duplicate_normalized_text"
+                log(f"[HEBE][FINAL_EMISSION_GATE] deduped=true reason={reason} route={route.value} event_id={event_key}")
+                return FinalEmissionResult(False, route.value, targets, event_key, suppressed=True, deduped=True, reason=reason)
+            if emit_ui is not None and "local_ui" in targets:
+                emit_ui({"text": text, "source": source, "output_target": "local_ui", **debug})
+            if send_twitch is not None and "twitch_chat" in targets:
+                send_twitch(text)
+            if speak is not None and any(target in targets for target in ("local_tts", "stream_tts")):
+                speak(text)
 
-        if event_key:
-            self._seen_event_ids.add(event_key)
-        elif text:
-            self._seen_message_keys.add(dedupe_key)
+            if event_key:
+                self._seen_event_ids.add(event_key)
+            elif text:
+                self._seen_message_keys.add(dedupe_key)
+        log(
+            f"[HEBE][FINAL_EMISSION_GATE] ui_allowed={str('local_ui' in targets).lower()} "
+            f"twitch_allowed={str('twitch_chat' in targets).lower()} "
+            f"tts_allowed={str(any(target in targets for target in ('local_tts', 'stream_tts'))).lower()} "
+            f"emitted=true route={route.value} targets={targets} event_id={event_key}"
+        )
         log(f"[HEBE][FINAL_EMISSION_GATE] emitted=true route={route.value} targets={targets} event_id={event_key}")
         return FinalEmissionResult(True, route.value, targets, event_key)

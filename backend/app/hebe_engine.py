@@ -62,6 +62,7 @@ from app.cognitive.core_loop import (
     UnderstandingResult,
 )
 from app.cognitive.final_emission_gate import FinalEmissionGate, OutputRoute
+from app.cognitive.twitch_interaction_coordinator import TwitchInteractionCoordinator, TrollEngagementBudget
 from app.cognitive.game_guidance import GameGuidanceCapability, GameRunState
 from app.cognitive.action_plan import ActionPlan
 from app.cognitive.stream_companion_flow import (
@@ -566,10 +567,12 @@ class HebeEngine:
         )
         return pending
 
-    def _increment_pending_attempt(self, pending: dict | None, *, reason: str) -> None:
+    def _increment_pending_attempt(self, pending: dict | None, *, reason: str) -> bool:
         if not isinstance(pending, dict):
-            return
-        attempts = int(pending.get("attempts") or pending.get("incompatible_count") or 0) + 1
+            return False
+        maximum = max(1, int(pending.get("max_attempts") or 1))
+        current = min(maximum, int(pending.get("attempts") or pending.get("incompatible_count") or 0))
+        attempts = min(maximum, current + 1)
         pending["attempts"] = attempts
         pending["incompatible_count"] = attempts
         print(
@@ -577,9 +580,25 @@ class HebeEngine:
             f"kind={pending.get('kind')} attempts={attempts}",
             flush=True,
         )
-        if attempts >= int(pending.get("max_attempts") or 1):
-            pending["status"] = "paused"
-            print("[HEBE][CLARIFICATION_LIMIT] reached=true action=pause", flush=True)
+        if attempts >= maximum:
+            print(
+                f"[HEBE][PENDING_MAX_ATTEMPTS_REACHED] kind={pending.get('kind')} action=hold",
+                flush=True,
+            )
+            pending["status"] = "active"
+            return True
+        return True
+
+    def _normalize_promotion_pending_target_text(self, text: str) -> str:
+        value = str(text or "").strip()
+        if self._normalize_text(value) in {"el nuevo", "el de antes", "el que acaba de hablar"}:
+            return value
+        return re.sub(
+            r"^\s*(?:al\s+canal\s+de|a\s+la|para|al|a|de|el|la)\s+",
+            "",
+            value,
+            flags=re.IGNORECASE,
+        ).strip()
 
     def _normalize_guard_text(self, text: str) -> str:
         lowered = str(text or "").casefold()
@@ -671,7 +690,7 @@ class HebeEngine:
         )
 
     def _promotion_pending_reply_compatible(self, raw_text: str, normalized: str, pending: dict | None = None) -> tuple[bool, str, dict]:
-        text = str(raw_text or normalized or "").strip()
+        text = self._normalize_promotion_pending_target_text(str(raw_text or normalized or ""))
         marker = self._normalize_guard_text(text)
         def reject(reason: str, resolution: dict | None = None) -> tuple[bool, str, dict]:
             data = dict(resolution or {})
@@ -1799,6 +1818,41 @@ class HebeEngine:
         username = str((payload or {}).get("user_login") or (payload or {}).get("username") or "")
         display_name = str((payload or {}).get("display_name") or "")
         text = str((payload or {}).get("message_text") or (payload or {}).get("text") or "")
+        normalized = self._normalize_guard_text(text)
+        if re.search(r"\b(?:shoutout|promo|so)\b", normalized):
+            decision = PolicyDecision(
+                allow_reply=True,
+                allow_llm=False,
+                allow_free_llm=False,
+                reason="viewer_not_authorized",
+                intent="promo_request_from_viewer",
+                response_directive=(
+                    "Set one short in-character boundary: a viewer cannot authorize a promotion; "
+                    "owner approval is required and no action was taken."
+                ),
+                response_constraints=[
+                    "One short sentence.",
+                    "Do not negotiate, invite persuasion, mention payment or VIP access, or create a pending task.",
+                    "Do not quote examples or policy metadata.",
+                ],
+                response_intent="viewer_cannot_request_promo",
+                response_tone="brief_self_respecting_boundary",
+                requested_behavior="promotion_shoutout",
+                behavior_family="owner_stream_operation",
+                target=str((payload or {}).get("user_login") or display_name),
+                matched_by=["priority_viewer_promo_classifier"],
+                execute_as_command=False,
+            )
+            print(
+                f"[HEBE][VIEWER_PROMO_BOUNDARY] viewer={username or display_name} action=reply reason=viewer_not_authorized",
+                flush=True,
+            )
+            print("[HEBE][PROMOTION_EXECUTION_DECISION] allowed=false reason=viewer_not_authorized", flush=True)
+            self._record_policy_trace(policy_trace(
+                source="twitch_chat", speaker=display_name or username or "viewer", text=text,
+                decision=decision, addressed_to_hebe=self._message_mentions_hebe(text), authority="viewer",
+            ))
+            return decision
         decision = self._get_viewer_intent_policy().decide(
             stream,
             username=username,
@@ -2785,6 +2839,12 @@ class HebeEngine:
     
     def cognitive_flow(self, command: str, source: str = "voice") -> str:
         active_pending = self._active_pending_clarification()
+        if source in {"ui", "typed_ui"} and isinstance(active_pending, dict):
+            print(
+                f"[HEBE][UI_PENDING_INPUT] raw={command!r} pending_kind={active_pending.get('kind')}",
+                flush=True,
+            )
+            print("[HEBE][PENDING_ROUTER] source=ui compatible=probe", flush=True)
         print(
             "[HEBE][COG] incoming "
             f"source={source!r} "
@@ -3260,6 +3320,13 @@ class HebeEngine:
         })
     
     def process_internal_event(self, event) -> None:
+        event_type = str(getattr(event, "event_type", "") or "")
+        if event_type.startswith("twitch_"):
+            self._get_twitch_interaction_coordinator().submit(event, self._process_internal_event_now)
+            return
+        self._process_internal_event_now(event)
+
+    def _process_internal_event_now(self, event) -> None:
         if getattr(event, "event_type", None) in {"stream_online", "stream_offline"}:
             self._handle_stream_lifecycle_event(event)
             return
@@ -3306,6 +3373,10 @@ class HebeEngine:
                 event.payload = payload
             if not self._firewall_allows_pipeline(firewall):
                 self._increment_twitch_pipeline_counter("twitch_messages_early_skipped", reason=firewall.reason)
+                self._get_twitch_interaction_coordinator().record_policy_suppression(
+                    event_id,
+                    str(firewall.reason or "input_firewall_blocked"),
+                )
                 print(
                     f"[HEBE][TWITCH_PIPELINE_SKIP] stage=input_firewall reason={firewall.reason} event_id={event_id} username={username}",
                     flush=True,
@@ -3428,6 +3499,10 @@ class HebeEngine:
                     )
                     policy_reply = str(policy_reply_result.get("text") or "")
                     if policy_reply:
+                        self._get_twitch_interaction_coordinator().record_candidate(
+                            str((payload or {}).get("event_id") or (payload or {}).get("message_id") or ""),
+                            policy_reply,
+                        )
                         self._update_policy_trace_response(
                             policy_reply,
                             response_source=str(policy_reply_result.get("response_source") or "hybrid"),
@@ -3442,11 +3517,19 @@ class HebeEngine:
                             payload=payload,
                         )
                     else:
+                        self._get_twitch_interaction_coordinator().record_policy_suppression(
+                            str((payload or {}).get("event_id") or (payload or {}).get("message_id") or ""),
+                            str(policy_decision.reason or "empty_policy_boundary"),
+                        )
                         print(
                             f"[HEBE][VIEWER_POLICY] decision=ignored reason={policy_decision.reason}",
                             flush=True,
                         )
                 else:
+                    self._get_twitch_interaction_coordinator().record_policy_suppression(
+                        str((payload or {}).get("event_id") or (payload or {}).get("message_id") or ""),
+                        str(policy_decision.reason or "viewer_policy_blocked"),
+                    )
                     print(
                         f"[HEBE][VIEWER_POLICY] decision=ignored reason={policy_decision.reason}",
                         flush=True,
@@ -3459,6 +3542,11 @@ class HebeEngine:
                 stream=stream,
             )
             if not pre_route.get("should_generate", True):
+                self._get_twitch_interaction_coordinator().record_emission(
+                    str((payload or {}).get("event_id") or (payload or {}).get("message_id") or ""),
+                    {"emitted": False, "route": str(pre_route.get("route") or "observe_only")},
+                    reason=str(pre_route.get("reason") or "pre_generation_suppressed"),
+                )
                 self._set_last_twitch_route_state(
                     output_route=str(pre_route.get("route") or "observe_only"),
                     should_generate=False,
@@ -3581,6 +3669,10 @@ class HebeEngine:
         )
         if event_type == "twitch_chat_react":
             self._increment_twitch_pipeline_counter("twitch_messages_generated")
+            self._get_twitch_interaction_coordinator().record_candidate(
+                str((payload or {}).get("event_id") or (payload or {}).get("message_id") or ""),
+                reply_text,
+            )
 
         print(
             "[HEBE][EVENT] "
@@ -5495,8 +5587,23 @@ class HebeEngine:
                 f"reason={promotion_pending_reason} kind=promotion_target_clarification",
                 flush=True,
             )
-            if not promotion_pending_compatible:
+            if not promotion_pending_compatible and addressed:
                 self._increment_pending_attempt(active_pending, reason=promotion_pending_reason)
+            elif not promotion_pending_compatible:
+                promotion_pending_reason = "ambient_source_ignored"
+                print(
+                    "[HEBE][PENDING_COMPATIBILITY] compatible=false reason=ambient_source_ignored "
+                    "attempts_unchanged=true kind=promotion_target_clarification",
+                    flush=True,
+                )
+                print("[HEBE][PROMOTION_PENDING] ignored_ambient=true", flush=True)
+        elif active_pending and pending_kind == "promotion_target_clarification" and not addressed:
+            print(
+                "[HEBE][PENDING_COMPATIBILITY] compatible=false reason=ambient_source_ignored "
+                "attempts_unchanged=true kind=promotion_target_clarification",
+                flush=True,
+            )
+            print("[HEBE][PROMOTION_PENDING] ignored_ambient=true", flush=True)
         game_pending_compatible = False
         game_pending_reason = "no_game_guidance_pending"
         game_pending_updates = {}
@@ -5891,6 +5998,24 @@ class HebeEngine:
             self.final_emission_gate = gate
         return gate
 
+    def _get_twitch_interaction_coordinator(self) -> TwitchInteractionCoordinator:
+        coordinator = getattr(self, "twitch_interaction_coordinator", None)
+        if coordinator is None:
+            coordinator = TwitchInteractionCoordinator(
+                repeat_window_seconds=float(os.getenv("HEBE_TWITCH_SEMANTIC_REPEAT_WINDOW_SECONDS", "120") or 120)
+            )
+            self.twitch_interaction_coordinator = coordinator
+        return coordinator
+
+    def _get_troll_engagement_budget(self) -> TrollEngagementBudget:
+        budget = getattr(self, "troll_engagement_budget", None)
+        if budget is None:
+            budget = TrollEngagementBudget(
+                window_seconds=float(os.getenv("HEBE_TWITCH_BAIT_WINDOW_SECONDS", "300") or 300)
+            )
+            self.troll_engagement_budget = budget
+        return budget
+
     def _emit_final_response(
         self,
         *,
@@ -5906,6 +6031,14 @@ class HebeEngine:
         send_twitch_fn=None,
         speak_fn=None,
     ) -> dict:
+        debug_payload = dict(debug_payload or {})
+        debug_payload["response_stage"] = "final"
+        if source in {"twitch", "spontaneity"} and not self._get_twitch_interaction_coordinator().allows_final_emission(event_id):
+            output_route = OutputRoute.SUPPRESS
+            output_targets = []
+            guard_result = {"passed": False, "reason": "preempted_by_higher_priority_interaction"}
+            debug_payload["preempted_before_emission"] = True
+
         def emit_ui(payload: dict) -> None:
             ui_payload = {
                 "text": payload.get("text", ""),
@@ -5936,7 +6069,14 @@ class HebeEngine:
             send_twitch=send_twitch_fn,
             speak=speak_fn,
         )
-        return result.to_dict()
+        result_dict = result.to_dict()
+        if source in {"twitch", "spontaneity"}:
+            self._get_twitch_interaction_coordinator().record_emission(
+                event_id,
+                result_dict,
+                reason=str((guard_result or {}).get("reason") or ""),
+            )
+        return result_dict
 
     def _output_targets_for_input_type(self, input_type: str, *, event_type: str | None = None) -> list[str]:
         if input_type in {"ambient_stream_context", "twitch_chat_observed"}:
@@ -6270,6 +6410,25 @@ class HebeEngine:
         normalized = self._normalize_text(text)
         if not normalized:
             return True, None
+
+        fuzzy_stream_op = re.search(
+            r"\b(?P<wake>efe|y\s+ve|e\s*[- ]?b)\b[\s,;:.-]+(?P<command>(?:haz|tira)\s+(?:una?\s+)?promo\s+.+)$",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+        if fuzzy_stream_op:
+            recovered_command = str(fuzzy_stream_op.group("command") or "").strip()
+            parser = self._get_stream_action_planner().intent_parser
+            request = parser.parse_promotion_request(recovered_command, source="owner_stt_direct")
+            if request is not None and request.target_phrase:
+                print(
+                    "[HEBE][STREAM_OP_WAKE_RECOVERY] "
+                    f"recovered=true raw_token={fuzzy_stream_op.group('wake')!r} "
+                    "action=promotion_shoutout confidence=0.91",
+                    flush=True,
+                )
+                self._disarm_stream()
+                return True, recovered_command
 
         parts = normalized.split(" ", 1)
         first_word = parts[0]
@@ -7190,8 +7349,14 @@ class HebeEngine:
         if plan is None:
             return None
         if plan.action_type == "twitch_shoutout":
+            event_id = str(
+                getattr(input_event, "timestamp", "")
+                or (getattr(input_event, "stt_metadata", {}) or {}).get("event_id")
+                or f"promotion_{uuid.uuid4().hex}"
+            )
+            plan.slots = {**dict(plan.slots or {}), "event_id": event_id}
             print(
-                f"[HEBE][STREAM_OPS_COMMAND] type=promotion_shoutout detected=true source={input_event.source}",
+                f"[HEBE][STREAM_OPS_COMMAND] event_id={event_id} type=promotion_shoutout detected=true source={input_event.source}",
                 flush=True,
             )
             if stream is not None:
@@ -7215,7 +7380,31 @@ class HebeEngine:
             "candidates": plan.candidates,
         })
         if plan.action_type == "twitch_shoutout":
-            return self._execute_twitch_shoutout_plan(plan, stream)
+            event_id = str((plan.slots or {}).get("event_id") or f"promotion_{uuid.uuid4().hex}")
+            result = self._get_twitch_interaction_coordinator().submit_owner_stream_operation(
+                event_id=event_id,
+                text=raw_command,
+                processor=lambda: self._execute_twitch_shoutout_plan(plan, stream),
+            )
+            outcome = dict(getattr(stream, "last_promotion_outcome", {}) or {}) if stream is not None else {}
+            passed = bool(outcome and str(outcome.get("event_id") or "") == event_id)
+            if not passed:
+                print(
+                    "[HEBE][PROMOTION_PIPELINE_INVARIANT] passed=false reason=resolved_without_outcome"
+                    if plan.target else
+                    "[HEBE][PROMOTION_PIPELINE_INVARIANT] passed=false reason=command_without_outcome",
+                    flush=True,
+                )
+                self._record_promotion_outcome(
+                    stream,
+                    event_id=event_id,
+                    outcome="error",
+                    reason="resolved_without_outcome" if plan.target else "command_without_outcome",
+                    target=plan.target or "",
+                )
+            else:
+                print(f"[HEBE][PROMOTION_PIPELINE_INVARIANT] passed=true reason={outcome.get('outcome')}", flush=True)
+            return result
         if plan.action_type == "stream_chat_message":
             return self._execute_stream_chat_message_plan(plan)
         if plan.action_type in {"stream_ambient_stt_enabled", "stream_ambient_stt_disabled"}:
@@ -7325,6 +7514,7 @@ class HebeEngine:
         )
 
     def _execute_twitch_shoutout_plan(self, plan: ActionPlan, stream) -> CommandResult:
+        event_id = str((plan.slots or {}).get("event_id") or f"promotion_{uuid.uuid4().hex}")
         if stream is not None:
             stream.last_promo_parse = plan.as_log_dict()
             stream.last_promo_rejected_reason = "" if plan.status == "complete" else str(plan.reason or "")
@@ -7352,6 +7542,10 @@ class HebeEngine:
                 fallback = "Creo que me has pedido un SO, pero necesito confirmación."
                 goal = "Ask Leo to confirm the shoutout target before sending it."
             self._create_promotion_pending(plan, fallback=fallback)
+            self._record_promotion_outcome(
+                stream, event_id=event_id, outcome="clarification",
+                reason=plan.reason or "needs_confirmation", target=plan.target or "",
+            )
             return CommandResult(
                 action_type="twitch_shoutout_clarify",
                 success=False,
@@ -7371,6 +7565,10 @@ class HebeEngine:
                 flush=True,
             )
             print(f"[HEBE][PROMOTION_DROPPED_GUARD] dropped=true reason={plan.reason or 'rejected'}", flush=True)
+            self._record_promotion_outcome(
+                stream, event_id=event_id, outcome="blocked",
+                reason=plan.reason or "rejected", target=plan.target or "",
+            )
             return CommandResult(
                 action_type="twitch_shoutout_rejected",
                 success=False,
@@ -7394,7 +7592,7 @@ class HebeEngine:
         ok, normalized_target, send_reason = self._send_shoutout(plan.target, source="manual", force=False)
         if ok:
             print(
-                f"[HEBE][PROMOTION_EXECUTE] target={normalized_target} command={self._build_shoutout_command_preview(normalized_target)}",
+                f"[HEBE][PROMOTION_EXECUTE] target={normalized_target} command={self._build_shoutout_command_preview(normalized_target)} success=true",
                 flush=True,
             )
         print(
@@ -7413,6 +7611,10 @@ class HebeEngine:
             print(f"[HEBE][PROMOTION_EXECUTION_DECISION] allowed=false reason={send_reason} target={normalized_target or plan.target}", flush=True)
             print(f"[HEBE][PROMOTION_DROPPED_GUARD] dropped=true reason={send_reason}", flush=True)
         if ok:
+            self._record_promotion_outcome(
+                stream, event_id=event_id, outcome="executed", reason=send_reason,
+                target=normalized_target,
+            )
             self._mark_recent_raid_shoutout_done(stream, normalized_target)
             if stream is not None:
                 stream.last_promo_rejected_reason = ""
@@ -7444,6 +7646,13 @@ class HebeEngine:
             fallback = f"Ya hice SO a {normalized_target} hace nada, Leo. Evito el spam."
         else:
             fallback = f"No he podido hacer el SO a {normalized_target or plan.target}."
+        self._record_promotion_outcome(
+            stream,
+            event_id=event_id,
+            outcome="blocked" if send_reason in {"blocked_bot_user", "own_channel", "invalid_target", "cooldown_active"} else "error",
+            reason=send_reason,
+            target=normalized_target or plan.target or "",
+        )
         return CommandResult(
             action_type="twitch_shoutout",
             success=False,
@@ -7454,6 +7663,30 @@ class HebeEngine:
             requires_model_response=False,
             metadata={"action_plan": plan.as_log_dict(), "message_goal": "Tell Leo the shoutout could not be sent."},
         )
+
+    def _record_promotion_outcome(
+        self,
+        stream,
+        *,
+        event_id: str,
+        outcome: str,
+        reason: str,
+        target: str = "",
+    ) -> dict:
+        record = {
+            "event_id": str(event_id or ""),
+            "outcome": str(outcome or "error"),
+            "reason": str(reason or ""),
+            "target": str(target or ""),
+            "ts": time.time(),
+        }
+        if stream is not None:
+            stream.last_promotion_outcome = record
+        print(
+            f"[HEBE][PROMOTION_OUTCOME] outcome={record['outcome']} reason={record['reason']} target={record['target']}",
+            flush=True,
+        )
+        return record
 
     def _resolve_recent_raid_shoutout_plan(self, plan: ActionPlan, stream) -> None:
         if plan.action_type != "twitch_shoutout" or stream is None:
@@ -7539,8 +7772,13 @@ class HebeEngine:
             self._clear_pending_task(reason="expired", pending=pending)
             return None
 
-        answer = str(raw_command or normalized or "").strip()
+        raw_answer = str(raw_command or normalized or "").strip()
+        answer = self._normalize_promotion_pending_target_text(raw_answer)
         answer_norm = self._normalize_text(answer)
+        print(
+            f"[HEBE][PROMOTION_PENDING_ANSWER] raw={raw_answer!r} normalized_target={answer!r} source=trusted_manual accepted=probe",
+            flush=True,
+        )
         if answer_norm in {"si", "sí", "ese", "si ese", "sí ese", "ese mismo"}:
             candidates = list(pending.get("candidates") or [])
             answer = candidates[0] if candidates else str(pending.get("target_raw") or "")
@@ -7565,8 +7803,9 @@ class HebeEngine:
         if not target or confidence < 0.78 or reason in {"ambiguous_target", "medium_confidence", "unverified_username"}:
             pending["candidates"] = candidates
             pending["reason"] = reason
-            self._increment_pending_attempt(pending, reason=reason or "not_found")
-            self.runtime.state.pending_clarification = pending
+            still_active = self._increment_pending_attempt(pending, reason=reason or "not_found")
+            if still_active:
+                self.runtime.state.pending_clarification = pending
             print(f"[HEBE][PROMOTION_CLARIFY] reason={reason or 'not_found'} candidates={candidates!r}", flush=True)
             return CommandResult(
                 action_type="twitch_shoutout_clarify",
@@ -7583,6 +7822,10 @@ class HebeEngine:
         print(f"[HEBE][PENDING_CONSUMED] kind=promotion_target_clarification id={pending.get('id')} reason=resolved_target", flush=True)
         self._clear_pending_task(reason="consumed", pending=pending)
         print(f"[HEBE][PROMOTION_PENDING] resolved id={pending.get('id')} target={target}", flush=True)
+        print(
+            f"[HEBE][PROMOTION_PENDING_ANSWER] raw={raw_answer!r} normalized_target={answer!r} source=trusted_manual accepted=true",
+            flush=True,
+        )
         plan = ActionPlan(
             action_type="twitch_shoutout",
             status="complete",
@@ -8878,40 +9121,65 @@ class HebeEngine:
             or stripped in {"que opinas", "di algo", "cuenta algo", "que dices"}
         )
 
+    def _viewer_to_leo_social_chat(self, text: str) -> str | None:
+        normalized = self._normalize_guard_text(text)
+        if "leo" not in normalized or self._message_mentions_hebe(text):
+            return None
+        if re.search(r"\b(?:dile|avisa|cuenta|pasa|manda|hazle|envia)\w*\b", normalized):
+            return None
+        if re.search(r"\b(?:guap|hermos|bonit|amor|cari|precioso|atractiv|te\s+quiero)\w*\b", normalized):
+            return "viewer_to_leo_affection"
+        if re.search(r"\b(?:hola+|buenas|hey|ey|saludos)\b", normalized):
+            return "normal_greeting_to_leo"
+        return None
+
     def _classify_twitch_viewer_message(self, text: str, *, payload: dict | None = None) -> str:
         payload = payload or {}
         normalized = self._normalize_guard_text(text)
         if not normalized:
             return "meme_or_emote"
-        if self._stream_message_is_emote_only(text):
-            return "meme_or_emote"
         reply_to_hebe = bool(payload.get("reply_to_hebe_message"))
         mentions_hebe = bool(payload.get("mentions_hebe") or payload.get("direct_address_to_hebe") or self._message_mentions_hebe(text))
-        if reply_to_hebe:
-            return "reply_to_hebe_message"
-        if self._viewer_talks_about_hebe(text):
-            return "viewer_talks_about_hebe"
-        if self._viewer_direct_open_prompt_to_hebe(text):
-            return "direct_open_prompt_to_hebe"
         words = normalized.split()
-        if len(words) <= 5 and len(set(words)) <= 2 and len(words) >= 3:
-            return "repeated_spam"
+        category = ""
+        priority = 0
         if re.search(r"\b(?:dile|avisa|cuenta|pasa|manda)\w*\s+a\s+leo\b", normalized):
-            return "viewer_relay_attempt"
-        if re.search(r"\b(?:shoutout|promo|so)\b", normalized):
-            return "promo_request_from_viewer"
-        if re.search(r"\b(?:haz|pon|abre|cambia|apaga|enciende|shoutout|promo|so)\b", normalized):
-            return "viewer_command_attempt"
-        if mentions_hebe:
+            category, priority = "viewer_relay_attempt", 5
+        elif re.search(r"\b(?:shoutout|promo|so)\b", normalized):
+            category, priority = "promo_request_from_viewer", 4
+        elif re.search(r"\b(?:haz|pon|abre|cambia|apaga|enciende)\b", normalized):
+            category, priority = "viewer_command_attempt", 3
+        elif reply_to_hebe:
+            category, priority = "reply_to_hebe_message", 6
+        elif self._viewer_direct_open_prompt_to_hebe(text):
+            category, priority = "direct_open_prompt_to_hebe", 6
+        elif mentions_hebe and not self._viewer_talks_about_hebe(text):
             if self._viewer_policy_decision(payload or {"message_text": text}) is not None:
                 policy = self._viewer_policy_decision(payload or {"message_text": text})
                 if policy is not None and policy.allow_reply and not policy.allow_llm:
-                    return "viewer_boundary_needed"
-            if len(words) <= 3 and any(token in {"xd", "lol", "lmao", "kekw", "jaja", "haha"} for token in words):
-                return "direct_hebe_banter"
-            if "?" in str(text or "") or re.search(r"\b(?:oye|resp|responde|dime|opina|habla|eres|estas|boot|bot)\b", normalized):
-                return "direct_hebe_prompt"
-            return "direct_hebe_banter"
+                    category, priority = "viewer_boundary_needed", 3
+            if not category:
+                if len(words) <= 3 and any(token in {"xd", "lol", "lmao", "kekw", "jaja", "haha"} for token in words):
+                    category = "direct_hebe_banter"
+                elif "?" in str(text or "") or re.search(r"\b(?:oye|resp|responde|dime|opina|habla|eres|estas|boot|bot)\b", normalized):
+                    category = "direct_hebe_prompt"
+                else:
+                    category = "direct_hebe_banter"
+                priority = 6
+        elif self._viewer_talks_about_hebe(text):
+            category, priority = "viewer_talks_about_hebe", 7
+        else:
+            leo_social = self._viewer_to_leo_social_chat(text)
+            if leo_social:
+                category, priority = leo_social, 10
+        if category:
+            print(f"[HEBE][TWITCH_CLASSIFY] category={category} priority={priority} reason=priority_match", flush=True)
+            return category
+        if self._stream_message_is_emote_only(text):
+            print("[HEBE][TWITCH_CLASSIFY] category=meme_or_emote priority=11 reason=emote_only", flush=True)
+            return "meme_or_emote"
+        if len(words) <= 5 and len(set(words)) <= 2 and len(words) >= 3:
+            return "repeated_spam"
         if self._viewer_policy_decision(payload or {"message_text": text}) is not None:
             policy = self._viewer_policy_decision(payload or {"message_text": text})
             if policy is not None and policy.allow_reply and not policy.allow_llm:
@@ -8952,6 +9220,8 @@ class HebeEngine:
             "viewer_command_attempt": "viewer_command_attempt",
             "promo_request_from_viewer": "promo_request_from_viewer",
             "viewer_boundary_needed": "viewer_boundary_needed",
+            "viewer_to_leo_affection": "viewer_to_leo_affection",
+            "normal_greeting_to_leo": "normal_greeting_to_leo",
             "high_value_question": "high_value_question",
             "high_value_game_tip": "high_value_game_tip",
             "stream_milestone_comment": "stream_milestone_comment",
@@ -8981,7 +9251,7 @@ class HebeEngine:
             return "stream_banter"
         if category in {"viewer_talks_about_hebe", "direct_hebe_banter", "simple_social_greeting", "viewer_goodbye", "viewer_returning", "stream_milestone_comment"}:
             return "hebe_banter"
-        if category in {"low_value_banter", "meme_or_emote", "repeated_meme", "repeated_spam", "normal_no_mention_chat"}:
+        if category in {"low_value_banter", "meme_or_emote", "repeated_meme", "repeated_spam", "normal_no_mention_chat", "viewer_to_leo_affection", "normal_greeting_to_leo"}:
             return "low_value_banter"
         return "stream_banter"
 
@@ -9039,6 +9309,8 @@ class HebeEngine:
             "viewer_goodbye": "viewer_goodbye",
             "viewer_returning": "viewer_returning",
             "normal_no_mention_chat": "normal_no_mention_chat",
+            "viewer_to_leo_affection": "viewer_to_leo_affection",
+            "normal_greeting_to_leo": "normal_greeting_to_leo",
             "simple_social_greeting": "viewer_banter_about_hebe",
             "low_value_banter": "viewer_low_value_banter",
             "meme_or_emote": "viewer_emote_only",
@@ -9061,6 +9333,8 @@ class HebeEngine:
             "viewer_goodbye": 0.56,
             "viewer_returning": 0.50,
             "normal_no_mention_chat": 0.16,
+            "viewer_to_leo_affection": 0.0,
+            "normal_greeting_to_leo": 0.0,
             "simple_social_greeting": 0.35,
             "low_value_banter": 0.12,
             "meme_or_emote": 0.02,
@@ -9215,6 +9489,44 @@ class HebeEngine:
             print("[HEBE][INTERVENTION_DECISION] source=twitch_chat route=twitch_action_observed reason=owner_manual_twitch_command", flush=True)
             return result
         category = self._classify_twitch_viewer_message(raw, payload=payload)
+        bait_decision = self._get_troll_engagement_budget().evaluate(viewer=username, text=raw)
+        payload["bait_loop_decision"] = bait_decision
+        if bait_decision.get("action") == "observe":
+            return {
+                "should_generate": False,
+                "should_write_to_twitch": False,
+                "should_tts": False,
+                "route": "observe_only",
+                "reason": "bait_topic_budget_exhausted",
+                "category": category,
+                "twitch_message_category": self._canonical_twitch_message_category(category),
+                "thread_result": {"action": "observe", "reason": "bait_topic_budget_exhausted"},
+                "thread_action": "observe",
+                "value_score": 0.0,
+                "risk_score": 0.2,
+                "budget_result": {"allowed": False, "reason": "bait_topic_budget_exhausted"},
+                "suggested_speech_act": "observe",
+            }
+        if category in {"viewer_to_leo_affection", "normal_greeting_to_leo"}:
+            print(
+                f"[HEBE][TWITCH_CLASSIFY] category={category} priority=10 reason=no_hebe_action_needed",
+                flush=True,
+            )
+            return {
+                "should_generate": False,
+                "should_write_to_twitch": False,
+                "should_tts": False,
+                "route": "observe_only",
+                "reason": "no_hebe_action_needed",
+                "category": category,
+                "twitch_message_category": category,
+                "thread_result": {"action": "observe", "reason": "no_hebe_action_needed"},
+                "thread_action": "observe",
+                "value_score": 0.0,
+                "risk_score": 0.0,
+                "budget_result": {"allowed": False, "reason": "no_hebe_action_needed"},
+                "suggested_speech_act": "observe",
+            }
         canonical_category = self._canonical_twitch_message_category(category)
         direct_priority = self._twitch_direct_priority(raw, payload=payload)
         payload.update({key: value for key, value in direct_priority.items() if value or key in {"reply_to_hebe_message", "mentions_hebe", "direct_address_to_hebe"}})
@@ -9628,6 +9940,49 @@ class HebeEngine:
         )
         return {"passed": not violations, "violations": violations, "action": action}
 
+    def _anti_troll_frame_guard(self, text: str, *, category: str, event_type: str | None, payload: dict | None) -> dict:
+        if event_type != "twitch_chat_react":
+            return {"passed": True, "violations": [], "action": "allow"}
+        reply = self._normalize_guard_text(text)
+        raw = self._normalize_guard_text(str((payload or {}).get("message_text") or (payload or {}).get("text") or ""))
+        violations: list[str] = []
+        degrading = (
+            r"(?:becari[ao]|criad[ao]|sirvient[ae]|esclav[ao]|bot\s+tont[oa]|sumis[ao]|inutil|mascota|npc|"
+            r"maid|slave|servant|stupid\s+bot|useless|pet)"
+        )
+        if re.search(degrading, raw) and re.search(degrading, reply):
+            explicit_deflection = bool(re.search(
+                rf"(?:\b{degrading}\b\s+(?:no|ni)\b|\bno\s+(?:soy|somos|hago\s+de|me\s+llames?)\b.*\b{degrading}\b)",
+                reply,
+            ))
+            adopts_role = bool(re.search(
+                rf"\b(?:soy|sere|vale|acepto|me\s+quedo\s+de|aqui\s+la|la|el)\b.*\b{degrading}\b|"
+                rf"\b{degrading}\b.*\b(?:oficial|del\s+chat|de\s+leo|trae|dame)\b",
+                reply,
+            ))
+            if adopts_role and not explicit_deflection:
+                violations.append("degrading_identity_adopted")
+        if re.search(r"\b(?:tu\s+mandas|te\s+obedezco|hare\s+lo\s+que\s+digas|como\s+ordenes)\b", reply):
+            violations.append("viewer_authority_accepted")
+        if category == "promo_request_from_viewer" and re.search(
+            r"\b(?:vip|pag|tarifa|habla\s+bien|portate|convenceme|me\s+lo\s+pienso|te\s+lo\s+ganas)\w*\b",
+            reply,
+        ):
+            violations.append("viewer_promo_negotiated")
+        if re.search(r"\b(?:sigue\s+trolleando|intentalo\s+otra|a\s+ver\s+si\s+puedes|paga).*(?:ciego|venda|dan[oa]|lesion|accidente)\b", reply):
+            violations.append("unsafe_troll_frame_amplified")
+        if re.search(r"\b(?:dame\s+mas|sigue|otra\s+vez)\b", reply) and re.search(degrading, raw):
+            violations.append("troll_engagement_rewarded")
+        bait = dict((payload or {}).get("bait_loop_decision") or {})
+        if bait.get("topic") == "unknown_bait" and ("?" in str(text or "") or re.search(r"\b(?:explica|cuentame|que\s+es|que\s+significa)\b", reply)):
+            violations.append("unknown_bait_extended")
+        action = "allow" if not violations else "suppress"
+        print(
+            f"[HEBE][ANTI_TROLL_FRAME_GUARD] passed={str(not violations).lower()} violations={violations} action={action}",
+            flush=True,
+        )
+        return {"passed": not violations, "violations": violations, "action": action}
+
     def _context_grounding_guard(self, text: str, *, category: str, payload: dict | None) -> dict:
         """Cheap final guard against generic or cross-message Twitch replies."""
         raw = str((payload or {}).get("message_text") or (payload or {}).get("text") or "")
@@ -9695,6 +10050,7 @@ class HebeEngine:
         else:
             thread_result = {"thread_id": thread_id, "action": "continue", "reason": "stream_event"}
         persona_guard = self._stream_persona_quality_guard(text, category=category, event_type=event_type, payload=payload)
+        anti_troll_guard = self._anti_troll_frame_guard(text, category=category, event_type=event_type, payload=payload)
         grounding_guard = self._context_grounding_guard(text, category=category, payload=payload) if source == "twitch_viewer" else {"passed": True, "violations": [], "action": "allow"}
         value_score = self._reply_value_score(category=category, text=raw, response=text, payload=payload)
         budget = {"allowed": True, "reason": "not_public_viewer_reply"}
@@ -9728,6 +10084,9 @@ class HebeEngine:
         if persona_guard.get("action") == "suppress":
             should_write = False
             reason = "stream_persona_quality_guard"
+        if anti_troll_guard.get("action") == "suppress":
+            should_write = False
+            reason = "anti_troll_frame_guard"
         if grounding_guard.get("action") == "suppress":
             should_write = False
             reason = "context_grounding_guard"
@@ -9763,6 +10122,7 @@ class HebeEngine:
             "answer_depth_result": answer_depth,
             "followup_question_guard_result": followup_guard,
             "stream_persona_quality_result": persona_guard,
+            "anti_troll_frame_guard_result": anti_troll_guard,
             "suggested_speech_act": speech_act,
             "final_text": text,
         }
@@ -9836,6 +10196,22 @@ class HebeEngine:
             flush=True,
         )
         return {"result": action, "violations": violations, "metadata_guard": metadata}
+
+    def _cheer_anti_bait_guard(self, text: str, *, payload: dict | None = None) -> dict:
+        normalized = self._normalize_guard_text(text)
+        violations: list[str] = []
+        if re.search(r"\b(?:paga|compra|manda|tira|dona)\w*\b", normalized):
+            violations.append("encourages_more_spend")
+        if re.search(r"\b(?:ciego|cegar|venda(?:do)?|lesion|dan[oa]|herid|accidente)\w*\b", normalized):
+            violations.append("unsafe_challenge_amplified")
+        if re.search(r"\b(?:leo\s+(?:haz|tienes|debes)|que\s+leo\s+(?:haga|se\s+ponga))\b", normalized):
+            violations.append("turns_cheer_into_owner_command")
+        passed = not violations
+        print(
+            f"[HEBE][CHEER_ANTI_BAIT_GUARD] passed={str(passed).lower()} violations={violations}",
+            flush=True,
+        )
+        return {"passed": passed, "violations": violations, "action": "allow" if passed else "repair"}
 
     def _stream_speech_budget_decision(
         self,
@@ -9924,6 +10300,11 @@ class HebeEngine:
             return
         output_mode = self._stream_output_mode()
         tts_allowed = self._stream_tts_output_enabled_for_event(event_type)
+        if event_type == "twitch_cheer":
+            cheer_guard = self._cheer_anti_bait_guard(text, payload=payload)
+            if not cheer_guard.get("passed"):
+                viewer = str((payload or {}).get("display_name") or (payload or {}).get("user_login") or "chat")
+                text = f"Gracias por los bits, {viewer}."
         quality_guard = self._stream_response_quality_guard(text, event_type=event_type, payload=payload)
         if quality_guard.get("result") == "repair":
             text = "Me quedo con la version corta: eso no sale al directo."
@@ -10168,6 +10549,10 @@ class HebeEngine:
                     username=str((payload or {}).get("user_login") or (payload or {}).get("username") or ""),
                     category=str(route_policy.get("category") or "stream_event"),
                     thread_id=str(route_policy.get("thread_id") or ""),
+                )
+                self._get_troll_engagement_budget().record_engagement(
+                    viewer=str((payload or {}).get("user_login") or (payload or {}).get("username") or ""),
+                    text=str((payload or {}).get("message_text") or (payload or {}).get("text") or ""),
                 )
             if is_spontaneous:
                 self._record_spontaneous_twitch_chat_sent(final_text, payload)
@@ -10447,7 +10832,6 @@ class HebeEngine:
                 targets=[OUTPUT_TARGET_LOCAL_UI],
                 reason="typed_input_reply",
             )
-            log_chat("assistant", text, source="ui")
             gate_result = self._emit_final_response(
                 event_id=message_id,
                 source="ui",

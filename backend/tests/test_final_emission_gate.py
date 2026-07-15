@@ -1,3 +1,5 @@
+import threading
+import time
 import unittest
 
 from app.cognitive.final_emission_gate import FinalEmissionGate, OutputRoute
@@ -10,12 +12,15 @@ class FinalEmissionGateTests(unittest.TestCase):
         return gate, calls
 
     def emit(self, gate, calls, **kwargs):
+        debug_payload = dict(kwargs.pop("debug_payload", {}) or {})
+        debug_payload.setdefault("response_stage", "final")
         return gate.emit(
             emit_ui=lambda payload: calls["ui"].append(payload),
             emit_debug=lambda payload: calls["debug"].append(payload),
             send_twitch=lambda text: calls["twitch"].append(text),
             speak=lambda text: calls["tts"].append(text),
             logger=lambda line: calls["logs"].append(line),
+            debug_payload=debug_payload,
             **kwargs,
         )
 
@@ -93,6 +98,39 @@ class FinalEmissionGateTests(unittest.TestCase):
         self.assertFalse(result.emitted)
         self.assertEqual(calls["ui"], [])
 
+    def test_fallback_candidate_never_reaches_any_normal_output(self):
+        gate, calls = self.make_gate()
+        result = self.emit(
+            gate,
+            calls,
+            event_id="evt-fallback-candidate",
+            source="twitch",
+            final_response="draft",
+            output_route=OutputRoute.STREAM_TTS_REPLY,
+            output_targets=["local_ui", "twitch_chat", "stream_tts"],
+            guard_result={"passed": True},
+            debug_payload={"response_stage": "fallback_candidate"},
+        )
+        self.assertFalse(result.emitted)
+        self.assertEqual(calls["ui"], [])
+        self.assertEqual(calls["twitch"], [])
+        self.assertEqual(calls["tts"], [])
+
+    def test_missing_stage_is_debug_only(self):
+        gate, calls = self.make_gate()
+        result = gate.emit(
+            event_id="evt-missing-stage",
+            source="ui",
+            final_response="draft",
+            output_route=OutputRoute.LOCAL_OWNER_REPLY,
+            output_targets=["local_ui"],
+            guard_result={"passed": True},
+            emit_ui=lambda payload: calls["ui"].append(payload),
+            emit_debug=lambda payload: calls["debug"].append(payload),
+        )
+        self.assertFalse(result.emitted)
+        self.assertEqual(calls["ui"], [])
+
     def test_failed_guard_response_not_broadcast(self):
         gate, calls = self.make_gate()
 
@@ -154,6 +192,39 @@ class FinalEmissionGateTests(unittest.TestCase):
         )
 
         self.assertEqual([payload["text"] for payload in calls["ui"]], ["once"])
+
+    def test_final_public_emissions_are_serialized_across_threads(self):
+        gate = FinalEmissionGate()
+        state = {"active": 0, "maximum": 0}
+        lock = threading.Lock()
+
+        def send(_text):
+            with lock:
+                state["active"] += 1
+                state["maximum"] = max(state["maximum"], state["active"])
+            time.sleep(0.02)
+            with lock:
+                state["active"] -= 1
+
+        def emit(index):
+            gate.emit(
+                event_id=f"evt-thread-{index}",
+                source="twitch",
+                final_response=f"message {index}",
+                output_route=OutputRoute.TWITCH_TEXT_REPLY,
+                output_targets=["twitch_chat"],
+                guard_result={"passed": True},
+                debug_payload={"response_stage": "final"},
+                send_twitch=send,
+            )
+
+        workers = [threading.Thread(target=emit, args=(index,)) for index in range(4)]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(2)
+
+        self.assertEqual(state["maximum"], 1)
 
     def test_suppress_route_no_public_output(self):
         gate, calls = self.make_gate()

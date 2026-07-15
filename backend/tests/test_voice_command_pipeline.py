@@ -672,6 +672,41 @@ class VoiceCommandPipelineTests(unittest.TestCase):
         self.assertEqual(engine.runtime.twitch.sent, ["!so nuriiia___"])
         self.assertEqual(reply, "Promo hecha para nuriiia___.")
 
+    def test_narrow_fuzzy_wake_recovers_anuria_promotion(self):
+        engine = make_engine(["nuriiia___"])
+        engine.runtime.twitch.remember_user_alias("anuria", "nuriiia___")
+
+        handled, command = engine._extract_stream_command("A ver, espera, Efe, haz una promo anuria.")
+        result = engine._handle_stream_manual_command(command)
+
+        self.assertTrue(handled)
+        self.assertEqual(command, "haz una promo anuria")
+        self.assertTrue(result.success)
+        self.assertEqual(engine.runtime.twitch.sent, ["!so nuriiia___"])
+        self.assertEqual(engine.runtime.state.stream.last_promotion_outcome["outcome"], "executed")
+
+    def test_narrow_fuzzy_wake_recovers_ismael_promotion(self):
+        engine = make_engine(["ismael"])
+
+        handled, command = engine._extract_stream_command("Y ve, haz una promo Ismael.")
+        with patch.object(engine, "_record_promotion_outcome", wraps=engine._record_promotion_outcome) as record:
+            result = engine._handle_stream_manual_command(command)
+
+        self.assertTrue(handled)
+        self.assertTrue(result.success)
+        self.assertEqual(engine.runtime.twitch.sent, ["!so ismael"])
+        self.assertEqual(record.call_count, 1)
+        self.assertEqual(engine.runtime.state.stream.last_promotion_outcome["outcome"], "executed")
+
+    def test_fuzzy_wake_recovery_does_not_expand_to_non_promotion_speech(self):
+        engine = make_engine(["ismael"])
+
+        handled, command = engine._extract_stream_command("Efe, dime que tal va todo")
+
+        self.assertTrue(handled)
+        self.assertIsNone(command)
+        self.assertEqual(engine.runtime.twitch.sent, [])
+
     def test_recent_chatter_can_resolve_spoken_promo_target(self):
         engine = make_engine([])
 
