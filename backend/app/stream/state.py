@@ -120,6 +120,16 @@ class StreamSessionState:
     recent_raid_contexts: list[dict] = field(default_factory=list)
     last_raid_ack_result: Optional[dict] = None
     last_raid_ack_error: Optional[dict] = None
+    last_cheer_event: Optional[dict] = None
+    last_cheer_ack_result: Optional[dict] = None
+    last_cheer_dedupe_result: Optional[dict] = None
+    discourse_participation_mode: str = "shadow"
+    current_discourse_topic: Optional[dict] = None
+    proposed_discourse_contribution: Optional[dict] = None
+    current_stream_turn: Optional[dict] = None
+    last_discourse_contribution: Optional[dict] = None
+    last_discourse_blocked_reason: Optional[str] = None
+    discourse_contribution_timestamps: list[float] = field(default_factory=list)
     last_promo_parse: Optional[dict] = None
     last_promo_rejected_reason: Optional[str] = None
     last_promo_execution_decision: Optional[dict] = None

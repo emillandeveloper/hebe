@@ -91,6 +91,21 @@ from app.stream.game_research import GameKnowledgeResearchConfig, GameKnowledgeR
 from app.stream import memory as stream_memory
 from app.stream.live_session import LiveSessionBrain, init_live_session_schema
 from app.stream.ambient_context import AmbientContextExtractor
+from app.stream.audio_state import EffectiveStreamAudioState
+from app.stream.discourse import (
+    DiscourseContributionPlanner,
+    DiscourseGroundingGuard,
+    DiscourseParticipationBudget,
+    OwnerDiscourseBuffer,
+    StreamTurnDetector,
+)
+from app.stream.social_events import (
+    CheerAcknowledgementRenderer,
+    CheerDeduplicator,
+    CheerEventPolicy,
+    StreamSocialEventRouter,
+    TwitchCheerEvent,
+)
 from app.stream.action_planner import StreamActionPlanner
 from app.stream.policy import (
     active_behavior_blocks,
@@ -326,6 +341,31 @@ class HebeEngine:
                 print(f"[HEBE][OUTPUT_MODE] mode={initial_output_mode} reason=config", flush=True)
         self._apply_stream_performance_profile()
         self.ambient_context_extractor = AmbientContextExtractor()
+        self.owner_discourse_buffer = OwnerDiscourseBuffer(
+            tracker=None,
+            session_gap_seconds=float(os.getenv("HEBE_DISCOURSE_SESSION_GAP_SECONDS", "90") or 90),
+        )
+        self.discourse_contribution_planner = DiscourseContributionPlanner()
+        self.discourse_grounding_guard = DiscourseGroundingGuard()
+        self.stream_turn_detector = StreamTurnDetector(
+            natural_pause_seconds=float(os.getenv("HEBE_DISCOURSE_NATURAL_PAUSE_SECONDS", "3.5") or 3.5)
+        )
+        self.discourse_participation_budget = DiscourseParticipationBudget(
+            min_between_seconds=float(os.getenv("HEBE_DISCOURSE_MIN_BETWEEN_SECONDS", "480") or 480),
+            max_per_hour=int(os.getenv("HEBE_DISCOURSE_MAX_PER_HOUR", "3") or 3),
+        )
+        self.discourse_participation_mode = os.getenv("HEBE_DISCOURSE_PARTICIPATION_MODE", "shadow").strip().lower()
+        if self.discourse_participation_mode not in {"disabled", "shadow", "active"}:
+            self.discourse_participation_mode = "shadow"
+        stream_for_discourse = getattr(self.runtime.state, "stream", None)
+        if stream_for_discourse is not None:
+            stream_for_discourse.discourse_participation_mode = self.discourse_participation_mode
+        self.stream_social_event_router = StreamSocialEventRouter()
+        self.cheer_event_policy = CheerEventPolicy()
+        self.cheer_deduplicator = CheerDeduplicator(
+            window_seconds=float(os.getenv("HEBE_CHEER_DEDUPE_WINDOW_SECONDS", "20") or 20)
+        )
+        self.cheer_ack_renderer = CheerAcknowledgementRenderer()
         self.memory_extractor = MemoryExtractor(
             intent_model=getattr(self.runtime, "intent_llm", None),
         )
@@ -374,8 +414,8 @@ class HebeEngine:
         ).strip().lower() in ("1", "true", "yes", "on")
         self.default_live_presence_mode = os.getenv(
             "HEBE_DEFAULT_LIVE_PRESENCE_MODE",
-            "reactive",
-        ).strip().lower() or "reactive"
+            "companion",
+        ).strip().lower() or "companion"
         self.presence_engine_mode = os.getenv(
             "HEBE_PRESENCE_ENGINE_MODE",
             "active",
@@ -1343,6 +1383,14 @@ class HebeEngine:
         recent_idle = list(getattr(stream, "recent_idle_messages", []) or []) if stream is not None else []
         now_ts = time.time()
         cooldown_until = float((getattr(stream, "cooldowns", {}) or {}).get("stream_idle_prompt_next_ts", 0.0) or 0.0) if stream is not None else 0.0
+        effective_audio = self._effective_stream_audio_state("owner_discourse_opportunity")
+        discourse_topic = dict(getattr(stream, "current_discourse_topic", {}) or {}) if stream is not None else {}
+        discourse_plan = dict(getattr(stream, "proposed_discourse_contribution", {}) or {}) if stream is not None else {}
+        discourse_turn = dict(getattr(stream, "current_stream_turn", {}) or {}) if stream is not None else {}
+        discourse_timestamps = [
+            float(ts) for ts in list(getattr(stream, "discourse_contribution_timestamps", []) or [])
+            if now_ts - float(ts) <= 3600
+        ] if stream is not None else []
         readiness = {
             "backend_running": True,
             "twitch_connected": twitch_connected,
@@ -1351,6 +1399,7 @@ class HebeEngine:
             "vts_status": vts_status or {},
             "tts_enabled": bool(getattr(self.runtime.state, "tts_enabled", False)),
             "stream_tts_enabled": bool(policies and getattr(policies, "allow_tts_replies", False)),
+            "effective_stream_audio_state": effective_audio.to_dict(),
             "stream_voice_mode": str(getattr(stream, "stream_voice_mode", "normal") if stream is not None else "normal"),
             "stream_voice_mode_expires_at": float(getattr(stream, "voice_mode_expires_at", 0.0) or 0.0) if stream is not None else 0.0,
             "stream_voice_mode_ttl_seconds": float(getattr(stream, "voice_mode_ttl_seconds", 0.0) or 0.0) if stream is not None else 0.0,
@@ -1366,6 +1415,23 @@ class HebeEngine:
             "last_raid_event": getattr(stream, "last_raid_event", None) if stream is not None else None,
             "last_raid_ack_result": getattr(stream, "last_raid_ack_result", None) if stream is not None else None,
             "last_raid_ack_error": getattr(stream, "last_raid_ack_error", None) if stream is not None else None,
+            "last_cheer_event": getattr(stream, "last_cheer_event", None) if stream is not None else None,
+            "last_cheer_ack_result": getattr(stream, "last_cheer_ack_result", None) if stream is not None else None,
+            "last_cheer_dedupe_result": getattr(stream, "last_cheer_dedupe_result", None) if stream is not None else None,
+            "discourse_participation_mode": str(getattr(stream, "discourse_participation_mode", "shadow") if stream is not None else "shadow"),
+            "current_discourse_topic": discourse_topic,
+            "current_discourse_topic_label": str(discourse_topic.get("label") or ""),
+            "current_discourse_topic_family": str(discourse_topic.get("family") or ""),
+            "current_discourse_topic_confidence": float(discourse_topic.get("confidence") or 0.0),
+            "current_discourse_topic_duration": float(discourse_topic.get("duration_seconds") or 0.0),
+            "current_discourse_owner_stance": str(discourse_topic.get("owner_stance") or ""),
+            "buffered_discourse_fragment_count": len(discourse_topic.get("fragments") or []),
+            "proposed_discourse_contribution": discourse_plan,
+            "current_stream_turn": discourse_turn,
+            "waiting_for_discourse_pause": bool(discourse_plan.get("wait_for_turn") and not discourse_turn.get("turn_available")),
+            "last_discourse_contribution": getattr(stream, "last_discourse_contribution", None) if stream is not None else None,
+            "last_discourse_blocked_reason": str(getattr(stream, "last_discourse_blocked_reason", "") or "") if stream is not None else "",
+            "discourse_contributions_this_hour": len(discourse_timestamps),
             "last_promo_parse": getattr(stream, "last_promo_parse", None) if stream is not None else None,
             "last_promo_rejected_reason": str(getattr(stream, "last_promo_rejected_reason", "") or "") if stream is not None else "",
             "last_promo_execution_decision": getattr(stream, "last_promo_execution_decision", None) if stream is not None else None,
@@ -3335,6 +3401,9 @@ class HebeEngine:
         if event_type.startswith("twitch_") and isinstance(payload, dict):
             payload = self._enrich_stream_payload(payload)
             event.payload = payload
+        if event_type == "twitch_cheer":
+            self._handle_twitch_cheer_event(event)
+            return
         event_decision = None
         if event_type.startswith("twitch_"):
             raw_text = str((payload or {}).get("message_text") or (payload or {}).get("text") or "")
@@ -3846,6 +3915,127 @@ class HebeEngine:
             }
         return allowed
 
+    def _effective_stream_audio_state(self, event_type: str = "") -> EffectiveStreamAudioState:
+        stream = self._get_stream_state()
+        policies = getattr(stream, "policies", None) if stream is not None else None
+        mode, _ = self._stream_voice_mode_active()
+        route_enabled = bool(
+            self._stream_output_mode() == "tts_enabled"
+            and policies
+            and (
+                getattr(policies, "allow_tts_event_replies", True)
+                if event_type.startswith("twitch_")
+                else getattr(policies, "allow_tts_replies", False)
+            )
+        )
+        tts_service = getattr(self.runtime, "tts", None)
+        engine_ready = bool(callable(getattr(self.runtime, "speak", None)) and not getattr(tts_service, "failed", False))
+        state = EffectiveStreamAudioState.resolve(
+            configured=bool(getattr(self.runtime.state, "tts_enabled", False)),
+            engine_ready=engine_ready,
+            route_enabled=route_enabled,
+            muted=mode in {"muted", "wake_only"},
+        )
+        print(
+            "[HEBE][STREAM_TTS_STATE] "
+            f"configured={str(state.configured).lower()} ready={str(state.engine_ready).lower()} "
+            f"enabled={str(state.route_enabled).lower()} effective={str(state.actual_can_speak).lower()} "
+            f"reason={state.blocked_reason or 'available'}",
+            flush=True,
+        )
+        return state
+
+    def _handle_twitch_cheer_event(self, event) -> None:
+        payload = dict(getattr(event, "payload", {}) or {})
+        try:
+            cheer = TwitchCheerEvent(
+                event_id=str(payload.get("event_id") or payload.get("twitch_message_id") or f"cheer_{uuid.uuid4().hex}"),
+                source=str(payload.get("source") or "eventsub"),
+                viewer_login=str(payload.get("viewer_login") or payload.get("user_login") or "viewer"),
+                viewer_display_name=str(payload.get("viewer_display_name") or payload.get("display_name") or payload.get("viewer_login") or "viewer"),
+                bits=int(payload.get("bits") or 0),
+                message=str(payload.get("message") or payload.get("message_text") or ""),
+                timestamp=float(payload.get("timestamp") or time.time()),
+                twitch_message_id=str(payload.get("twitch_message_id") or payload.get("message_id") or ""),
+                dedupe_key=str(payload.get("dedupe_key") or ""),
+                raw_tags=dict(payload.get("raw_tags") or payload.get("irc_tags") or {}),
+            )
+        except (TypeError, ValueError):
+            print("[HEBE][CHEER_ACK_DECISION] allowed=false route=suppress reason=invalid_cheer_payload", flush=True)
+            return
+        if cheer.bits <= 0:
+            print("[HEBE][CHEER_ACK_DECISION] allowed=false route=suppress reason=invalid_bits", flush=True)
+            return
+        routed = self.stream_social_event_router.route(cheer)
+        print(f"[HEBE][STREAM_SOCIAL_EVENT] type=cheer event_id={routed['event_id']}", flush=True)
+        duplicate, dedupe_reason = self.cheer_deduplicator.check_and_record(cheer)
+        stream = self._get_stream_state()
+        if stream is not None:
+            stream.last_cheer_event = cheer.to_dict()
+            stream.last_cheer_dedupe_result = {"duplicate": duplicate, "reason": dedupe_reason}
+        decision = self.cheer_event_policy.decide(cheer, duplicate=duplicate)
+        audio = self._effective_stream_audio_state("twitch_cheer")
+        fallback_text = os.getenv("HEBE_CHEER_TWITCH_TEXT_FALLBACK", "true").strip().lower() in {"1", "true", "yes", "on"}
+        both = os.getenv("HEBE_CHEER_OUTPUT_BOTH", "false").strip().lower() in {"1", "true", "yes", "on"}
+        twitch = getattr(self.runtime, "twitch", None)
+        twitch_available = bool(twitch is not None and twitch.is_available())
+        route = "stream_tts_reply" if audio.actual_can_speak else "twitch_text_reply" if fallback_text and twitch_available else "suppress"
+        if both and audio.actual_can_speak:
+            route = "stream_tts_reply+twitch_text_reply"
+        if decision["allowed"] and route == "suppress":
+            decision = {**decision, "allowed": False, "reason": audio.blocked_reason or "no_output_route"}
+        decision["route"] = route if decision["allowed"] else "suppress"
+        print(
+            f"[HEBE][CHEER_ACK_DECISION] allowed={str(bool(decision['allowed'])).lower()} "
+            f"route={decision['route']} reason={decision['reason']}", flush=True,
+        )
+        if not decision["allowed"]:
+            if stream is not None:
+                stream.last_cheer_ack_result = {"emitted": False, "reason": decision["reason"], "route": "suppress"}
+            print(f"[HEBE][CHEER_ACK_EMITTED] viewer={cheer.viewer_login} bits={cheer.bits} public_sent=false tts_sent=false", flush=True)
+            return
+        text = self.cheer_ack_renderer.render(cheer)
+        guard = self._cheer_anti_bait_guard(text, payload=payload)
+        if not guard.get("passed"):
+            print(f"[HEBE][CHEER_ACK_DECISION] allowed=false route=suppress reason=cheer_guard", flush=True)
+            return
+        targets = [OUTPUT_TARGET_LOCAL_UI]
+        if audio.actual_can_speak:
+            targets.append(OUTPUT_TARGET_STREAM_TTS)
+        if (not audio.actual_can_speak and fallback_text and twitch_available) or (both and twitch_available):
+            targets.append(OUTPUT_TARGET_TWITCH_CHAT)
+        public_sent = OUTPUT_TARGET_TWITCH_CHAT in targets
+        tts_sent = OUTPUT_TARGET_STREAM_TTS in targets
+
+        def speak(final_text: str) -> None:
+            self._remember_tts_text(final_text)
+            self.runtime.speak(final_text, emit_chat=False)
+
+        def send(final_text: str) -> None:
+            if twitch is not None and twitch.is_available():
+                twitch.send_message(final_text)
+
+        self._get_twitch_interaction_coordinator().record_candidate(cheer.event_id, text)
+        result = self._emit_final_response(
+            event_id=cheer.event_id, source="twitch", final_response=text,
+            output_route=OutputRoute.STREAM_TTS_REPLY if tts_sent else OutputRoute.TWITCH_TEXT_REPLY,
+            output_targets=targets, guard_result=guard,
+            debug_payload={"event_type": "twitch_cheer", "open_pending": False},
+            send_twitch_fn=send if public_sent else None, speak_fn=speak if tts_sent else None,
+        )
+        emitted = bool(result.get("emitted"))
+        if stream is not None:
+            stream.last_cheer_ack_result = {
+                "emitted": emitted, "reason": result.get("reason") or decision["reason"],
+                "route": decision["route"], "public_sent": public_sent and emitted,
+                "tts_sent": tts_sent and emitted,
+            }
+        print(
+            f"[HEBE][CHEER_ACK_EMITTED] viewer={cheer.viewer_login} bits={cheer.bits} "
+            f"public_sent={str(public_sent and emitted).lower()} tts_sent={str(tts_sent and emitted).lower()}",
+            flush=True,
+        )
+
     def _handle_twitch_raid_event(self, event, cognitive_decision=None) -> None:
         stream = self._get_stream_state()
         payload = getattr(event, "payload", {}) or {}
@@ -4171,6 +4361,8 @@ class HebeEngine:
             if not context_updated_ts or now - context_updated_ts > 120:
                 self.poll_stream_context(force=True, require_enabled=False)
 
+        self._poll_owner_discourse_opportunity(stream, now=now)
+
         loop = getattr(self, "stream_companion_loop", None)
         if loop is None:
             service = getattr(self, "stream_spontaneity", None)
@@ -4200,6 +4392,134 @@ class HebeEngine:
             flush=True,
         )
         self.process_internal_event(tick.event)
+
+    def _poll_owner_discourse_opportunity(self, stream, *, now: float | None = None) -> bool:
+        if stream is None:
+            return False
+        mode = str(getattr(stream, "discourse_participation_mode", getattr(self, "discourse_participation_mode", "shadow")) or "shadow").lower()
+        buffer = getattr(self, "owner_discourse_buffer", None)
+        session = getattr(buffer, "current_session", None) if buffer is not None else None
+        topic = getattr(session, "topic", None)
+        if mode == "disabled" or topic is None or not topic.stable:
+            return False
+        planner = getattr(self, "discourse_contribution_planner", None) or DiscourseContributionPlanner()
+        plan = planner.plan(topic)
+        stream.proposed_discourse_contribution = plan.to_dict()
+        detector = getattr(self, "stream_turn_detector", None) or StreamTurnDetector()
+        turn = detector.detect(
+            now=now, audio_active=self._owner_audio_active(), tts_speaking=bool(getattr(self, "_tts_active", False)),
+            topic_ready=plan.should_contribute,
+            combat_intense=bool(getattr(stream, "combat_state", False) or getattr(stream, "current_activity", "") in {"combat", "boss"}),
+        )
+        stream.current_stream_turn = turn.to_dict()
+        if not turn.turn_available:
+            stream.last_discourse_blocked_reason = turn.reason
+            print(f"[HEBE][DISCOURSE_CONTRIBUTION_WAIT] reason={turn.reason}", flush=True)
+            return False
+        if str(getattr(stream, "presence_mode", "reactive")) != "companion":
+            stream.last_discourse_blocked_reason = "reactive_mode"
+            return False
+        budgeter = getattr(self, "discourse_participation_budget", None) or DiscourseParticipationBudget()
+        budget = budgeter.allows(topic, now=now)
+        perception = PerceivedEvent(
+            event_id=f"discourse_opportunity_{topic.topic_id}_{int(now or time.time())}",
+            timestamp=float(now or time.time()), source="owner_discourse_opportunity",
+            source_type="owner_discourse_opportunity", speaker="Leo", speaker_type="owner",
+            raw_text=" ".join(item.text for item in topic.fragments[-6:]),
+            normalized_text=" ".join(item.normalized_text for item in topic.fragments[-6:]),
+            output_context="stream", stream_live=bool(getattr(stream, "is_live", False)),
+            current_game=str(getattr(stream, "current_game", "") or ""),
+            current_activity=str(getattr(stream, "current_activity", "") or ""),
+            is_owner_monologue=False,
+            twitch_metadata={"turn_available": turn.turn_available, "topic_stable": topic.stable,
+                             "contribution_value": plan.contribution_value, "novelty_score": plan.novelty_score,
+                             "topic_id": topic.topic_id},
+        )
+        core = self._get_core_loop().process(
+            perception=perception,
+            understanding=UnderstandingResult(intent="owner_discourse_opportunity", confidence=plan.confidence,
+                                               authority="owner", reply_pressure=plan.contribution_value,
+                                               social_context=topic.family),
+            policy=PolicyContract(result="allow", reason="validated_owner_discourse",
+                                  allowed_action="stream_discourse_contribution",
+                                  forbidden_actions=["open_pending", "ask_followup", "twitch_text_by_default"]),
+            budget_result=budget,
+            thread_result={"topic_id": topic.topic_id, "one_contribution_per_topic": True},
+        )
+        intervention = dict(core.get("intervention") or {})
+        if not intervention.get("should_intervene"):
+            stream.last_discourse_blocked_reason = str(intervention.get("reason") or "presence_engine")
+            return False
+        guarder = getattr(self, "discourse_grounding_guard", None) or DiscourseGroundingGuard()
+        guard = guarder.evaluate(plan, topic)
+        if not guard.get("passed"):
+            stream.last_discourse_blocked_reason = "grounding_guard"
+            return False
+        if mode == "shadow":
+            stream.last_discourse_blocked_reason = "shadow_mode"
+            print("[HEBE][DISCOURSE_CONTRIBUTION_WAIT] reason=shadow_mode", flush=True)
+            return False
+        candidate = self._render_discourse_contribution(topic, plan)
+        guard = guarder.evaluate(plan, topic, candidate=candidate)
+        if not candidate or not guard.get("passed"):
+            stream.last_discourse_blocked_reason = "render_or_grounding_failed"
+            return False
+        final_turn = detector.detect(now=time.time(), audio_active=self._owner_audio_active(), topic_ready=True,
+                                     tts_speaking=bool(getattr(self, "_tts_active", False)))
+        if not final_turn.turn_available:
+            stream.last_discourse_blocked_reason = "owner_resumed_speaking"
+            print("[HEBE][DISCOURSE_CONTRIBUTION_CANCELLED] reason=owner_resumed_speaking", flush=True)
+            return False
+        audio = self._effective_stream_audio_state("owner_discourse_opportunity")
+        if not audio.actual_can_speak:
+            stream.last_discourse_blocked_reason = audio.blocked_reason
+            return False
+        result = self._emit_final_response(
+            event_id=perception.event_id, source="owner_discourse_opportunity", final_response=candidate,
+            output_route=OutputRoute.STREAM_TTS_REPLY,
+            output_targets=[OUTPUT_TARGET_LOCAL_UI, OUTPUT_TARGET_STREAM_TTS], guard_result=guard,
+            debug_payload={"speech_act": "stream_discourse_contribution", "topic_id": topic.topic_id, "open_pending": False},
+            speak_fn=lambda text: self.runtime.speak(text, emit_chat=False),
+        )
+        if not result.get("emitted"):
+            stream.last_discourse_blocked_reason = str(result.get("reason") or "final_emission_gate")
+            return False
+        budgeter.record(topic, contribution_type=plan.contribution_type, thesis_key="|".join(topic.topic_keywords[:6]), now=now)
+        stream.last_discourse_contribution = {"topic_id": topic.topic_id, "contribution_type": plan.contribution_type,
+                                              "timestamp": float(now or time.time()), "text": candidate}
+        stream.discourse_contribution_timestamps = [item["timestamp"] for item in budgeter.contributions]
+        stream.last_discourse_blocked_reason = ""
+        return True
+
+    def _owner_audio_active(self) -> bool:
+        stt = getattr(self.runtime, "stt", None)
+        rms = float(getattr(stt, "last_input_rms", 0.0) or 0.0)
+        cfg = getattr(stt, "cfg", None)
+        threshold = float(getattr(cfg, "silence_rms_threshold", 0.003) or 0.003)
+        return bool(rms > max(0.001, threshold * 1.25))
+
+    def _render_discourse_contribution(self, topic, plan) -> str:
+        model = getattr(self.runtime, "llm", None)
+        fragments = "\n".join(f"- {item.text}" for item in topic.fragments[-6:])
+        prompt = (
+            "Escribe una intervención de Hebe como copresentadora del stream. Una sola idea, una o dos frases "
+            "cortas, en español, sin pregunta, sin repetir literalmente a Leo y sin afirmar noticias actuales. "
+            f"Tipo: {plan.contribution_type}. Postura de Leo: {topic.owner_stance}. "
+            f"Objetivo semántico: {'; '.join(plan.proposed_claims)}. Fragmentos:\n{fragments}"
+        )
+        try:
+            text = str(model.chat([
+                {"role": "system", "content": "Eres Hebe, copresentadora breve, cálida y con criterio. No haces de asistente ni entrevistas al streamer."},
+                {"role": "user", "content": prompt},
+            ], temperature=0.45, num_predict=80) or "").strip() if model is not None and hasattr(model, "chat") else ""
+        except Exception as exc:
+            print(f"[HEBE][DISCOURSE_RENDER] failed error={exc!r}", flush=True)
+            text = ""
+        text = re.sub(r"\s+", " ", text).strip().strip('"')
+        if "?" in text or "¿" in text:
+            return ""
+        sentences = [item.strip() for item in re.split(r"(?<=[.!])\s+", text) if item.strip()]
+        return " ".join(sentences[:2])[:240].strip()
 
     def poll_stream_routine(self) -> None:
         now_ts = time.time()
@@ -6527,6 +6847,18 @@ class HebeEngine:
         stream.last_voice_event = event_type
         stream.last_voice_event_ts = time.time()
         stream.last_voice_summary = self._summarize_voice_event(text, event_type)
+        now_ts = time.time()
+        discourse_buffer = getattr(self, "owner_discourse_buffer", None)
+        turn_detector = getattr(self, "stream_turn_detector", None)
+        if discourse_buffer is not None:
+            topic = discourse_buffer.add_fragment(text, timestamp=now_ts, confidence=1.0, language="es")
+            stream.current_discourse_topic = topic.to_dict()
+            planner = getattr(self, "discourse_contribution_planner", None)
+            if planner is not None:
+                plan = planner.plan(topic)
+                stream.proposed_discourse_contribution = plan.to_dict()
+        if turn_detector is not None:
+            turn_detector.record_owner_fragment(text, timestamp=now_ts)
         if mood_hint:
             stream.leo_mood_hint = mood_hint
         self._apply_ambient_voice_to_run_context(stream, text, event_type)
@@ -9007,11 +9339,14 @@ class HebeEngine:
             policies = getattr(stream, "policies", None) if stream else None
             stt = getattr(self.runtime, "stt", None)
             stt_device = stt.get_selected_input_device() if stt is not None and hasattr(stt, "get_selected_input_device") else None
+            effective_audio = self._effective_stream_audio_state("stream_reply")
             emit(
                 "status",
                 {
                     "tts_enabled": bool(getattr(self.runtime.state, "tts_enabled", False)),
                     "stream_tts_enabled": bool(getattr(policies, "allow_tts_replies", False)),
+                    "stream_tts_effective": effective_audio.actual_can_speak,
+                    "effective_stream_audio_state": effective_audio.to_dict(),
                     "stream_output_mode": str(getattr(stream, "stream_output_mode", "tts_enabled") if stream else "tts_enabled"),
                     "stt_enabled": bool(getattr(self.runtime, "stt_enabled", False)),
                     "stt": getattr(stt, "status", "off") if stt is not None else "off",

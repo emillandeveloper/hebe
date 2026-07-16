@@ -7,6 +7,7 @@ import time
 from typing import Callable, Optional
 
 from app.integrations.twitch.raid_events import parse_irc_tags, parse_raid_bot_message, parse_raid_usernotice
+from app.stream.social_events import parse_cheer_bot_fallback, parse_twitch_cheer_privmsg, twitch_timestamp
 from websockets.sync.client import connect
 
 
@@ -299,6 +300,23 @@ class TwitchChatBot:
         if not username:
             return
 
+        # Tagged cheers are stream social events, never ordinary no-mention chat.
+        cheer = parse_twitch_cheer_privmsg(
+            username=username,
+            display_name=str(tags.get("display-name") or username),
+            message=message,
+            tags=tags,
+            timestamp=twitch_timestamp(tags),
+        )
+        if cheer is not None:
+            print(
+                f"[HEBE][TWITCH_CHEER_EVENT] viewer={cheer.viewer_login} bits={cheer.bits} source={cheer.source}",
+                flush=True,
+            )
+            if self.social_event_callback is not None:
+                self.social_event_callback("twitch_cheer", cheer.to_dict())
+            return
+
         # Twitch nos devuelve también los mensajes enviados por el bot.
         # Los usamos para saber si Hebe acaba de abrir una pregunta/turno.
         if username.lower() == self.bot_username.lower():
@@ -313,6 +331,17 @@ class TwitchChatBot:
             )
             if self.social_event_callback is not None:
                 self.social_event_callback("twitch_raid", raid_event)
+            return
+
+        cheer_fallback = parse_cheer_bot_fallback(username, message)
+        if cheer_fallback is not None:
+            print(
+                f"[HEBE][TWITCH_CHEER_EVENT] viewer={cheer_fallback.viewer_login} "
+                f"bits={cheer_fallback.bits} source=bot_fallback",
+                flush=True,
+            )
+            if self.social_event_callback is not None:
+                self.social_event_callback("twitch_cheer", cheer_fallback.to_dict())
             return
 
         if self._is_ignored_user(username):

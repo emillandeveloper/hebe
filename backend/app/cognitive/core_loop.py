@@ -149,6 +149,23 @@ class PresenceEngine:
         urgency = self._urgency(understanding, policy)
         critical = bool(policy.boundary_required or understanding.intent in {"viewer_boundary_needed", "viewer_proxy_request", "viewer_command_attempt"})
 
+        if perception.source == "owner_discourse_opportunity" or understanding.intent == "owner_discourse_opportunity":
+            if not bool(budget.get("allowed", True)):
+                return self._decision(False, "observe_only", str(budget.get("reason") or "discourse_budget"), social_value, interruption_cost, channel_cost, urgency, policy, budget, thread)
+            turn_available = bool(perception.twitch_metadata.get("turn_available"))
+            topic_stable = bool(perception.twitch_metadata.get("topic_stable"))
+            contribution_value = float(perception.twitch_metadata.get("contribution_value", 0.0) or 0.0)
+            novelty = float(perception.twitch_metadata.get("novelty_score", 0.0) or 0.0)
+            if not topic_stable or not turn_available or contribution_value < 0.62 or novelty < 0.5:
+                reason = "owner_still_speaking" if not turn_available else "discourse_not_ready"
+                return self._decision(False, "observe_only", reason, contribution_value, interruption_cost, 0.05, urgency, policy, budget, thread)
+            return InterventionDecision(
+                should_intervene=True, intervention_level="stream_tts_reply", reason="validated_discourse_opportunity",
+                social_value_score=round(contribution_value, 3), interruption_cost=round(interruption_cost, 3),
+                channel_cost=0.05, urgency=0.3, risk=policy.risk_level,
+                speech_act_type="stream_discourse_contribution", output_budget_result=budget, thread_result=thread,
+            )
+
         if policy.result in {"block", "redirect"} and not policy.boundary_required:
             return self._decision(False, "suppress", policy.reason or "policy_block", social_value, interruption_cost, channel_cost, urgency, policy, budget, thread)
         if understanding.intent in {"viewer_emote_only", "viewer_low_value_banter"}:

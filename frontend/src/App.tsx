@@ -1932,10 +1932,16 @@ function SimulationView({
               <StatusLine label="Presence engine" value={simValue(readiness.presence_engine_mode)} tone={readiness.presence_engine_mode === "active" ? "ok" : "warn"} />
               <StatusLine label="Presence mode" value={simValue(readiness.presence_mode)} tone={readiness.presence_mode === "reactive" ? "idle" : "ok"} />
               <StatusLine label="Stream TTS" value={readiness.stream_tts_enabled ? "enabled" : "disabled"} tone={readiness.stream_tts_enabled ? "ok" : "warn"} />
+              <StatusLine label="Effective TTS" value={readiness.effective_stream_audio_state?.actual_can_speak ? "available" : simValue(readiness.effective_stream_audio_state?.blocked_reason)} tone={readiness.effective_stream_audio_state?.actual_can_speak ? "ok" : "warn"} />
               <StatusLine label="Raid auto-thank" value={readiness.raid_auto_thank_enabled ? "enabled" : "disabled"} tone={readiness.raid_auto_thank_enabled ? "ok" : "bad"} />
               <StatusLine label="Recent raid" value={simValue(readiness.recent_raid_context?.user_login || readiness.recent_raid_context?.display_name)} tone={readiness.recent_raid_context ? "ok" : "idle"} />
               <StatusLine label="Last raid" value={simValue(readiness.last_raid_event?.user_login || readiness.last_raid_event?.display_name)} tone={readiness.last_raid_event ? "ok" : "idle"} />
               <StatusLine label="Last raid ack" value={simValue(readiness.last_raid_ack_result?.reason)} tone={readiness.last_raid_ack_result?.emitted ? "ok" : readiness.last_raid_ack_result ? "warn" : "idle"} />
+              <StatusLine label="Last cheer" value={simValue(readiness.last_cheer_event?.viewer_display_name || readiness.last_cheer_event?.viewer_login)} tone={readiness.last_cheer_event ? "ok" : "idle"} />
+              <StatusLine label="Cheer bits" value={simValue(readiness.last_cheer_event?.bits)} tone={readiness.last_cheer_event ? "ok" : "idle"} />
+              <StatusLine label="Cheer source" value={simValue(readiness.last_cheer_event?.source)} tone="idle" />
+              <StatusLine label="Cheer ack" value={simValue(readiness.last_cheer_ack_result?.reason)} tone={readiness.last_cheer_ack_result?.emitted ? "ok" : readiness.last_cheer_ack_result ? "warn" : "idle"} />
+              <StatusLine label="Cheer dedupe" value={simValue(readiness.last_cheer_dedupe_result?.reason)} tone={readiness.last_cheer_dedupe_result?.duplicate ? "warn" : "idle"} />
               <StatusLine label="Last promo parse" value={simValue(readiness.last_promo_parse?.reason || readiness.last_promo_parse?.status)} tone={readiness.last_promo_parse ? "ok" : "idle"} />
               <StatusLine label="Last promo reject" value={simValue(readiness.last_promo_rejected_reason)} tone={readiness.last_promo_rejected_reason ? "warn" : "ok"} />
               <StatusLine label="Twitch consecutive" value={simValue(readiness.twitch_reply_consecutive_count, "0")} tone={Number(readiness.twitch_reply_consecutive_count || 0) >= 3 ? "warn" : "ok"} />
@@ -1953,6 +1959,25 @@ function SimulationView({
               <StatusLine label="Last route" value={simValue(readiness.last_output_route)} tone="idle" />
               <StatusLine label="Last suppress" value={simValue(readiness.last_suppression_reason)} tone={readiness.last_suppression_reason ? "warn" : "ok"} />
               <StatusLine label="Errors 10m" value={simValue(readiness.error_count_last_10m, "0")} tone={Number(readiness.error_count_last_10m || 0) ? "bad" : "ok"} />
+            </div>
+          </div>
+          <div className="stateBlock">
+            <div className="stateBlockTitle">Conversation</div>
+            <div className="statusList compact">
+              <StatusLine label="Topic" value={simValue(readiness.current_discourse_topic_label)} tone={readiness.current_discourse_topic?.stable ? "ok" : "idle"} />
+              <StatusLine label="Family" value={simValue(readiness.current_discourse_topic_family)} tone="idle" />
+              <StatusLine label="Confidence" value={Number(readiness.current_discourse_topic_confidence || 0).toFixed(2)} tone={Number(readiness.current_discourse_topic_confidence || 0) >= .55 ? "ok" : "idle"} />
+              <StatusLine label="Duration" value={`${Math.round(Number(readiness.current_discourse_topic_duration || 0))}s`} tone="idle" />
+              <StatusLine label="Owner stance" value={simValue(readiness.current_discourse_owner_stance)} tone="idle" />
+              <StatusLine label="Fragments" value={simValue(readiness.buffered_discourse_fragment_count, "0")} tone="idle" />
+              <StatusLine label="Proposed type" value={simValue(readiness.proposed_discourse_contribution?.contribution_type)} tone={readiness.proposed_discourse_contribution?.should_contribute ? "ok" : "idle"} />
+              <StatusLine label="Contribution value" value={Number(readiness.proposed_discourse_contribution?.contribution_value || 0).toFixed(2)} tone="idle" />
+              <StatusLine label="Turn" value={simValue(readiness.current_stream_turn?.reason)} tone={readiness.current_stream_turn?.turn_available ? "ok" : "warn"} />
+              <StatusLine label="Waiting for pause" value={readiness.waiting_for_discourse_pause ? "yes" : "no"} tone={readiness.waiting_for_discourse_pause ? "warn" : "ok"} />
+              <StatusLine label="Participation" value={simValue(readiness.discourse_participation_mode)} tone={readiness.discourse_participation_mode === "active" ? "ok" : "idle"} />
+              <StatusLine label="Last contribution" value={simValue(readiness.last_discourse_contribution?.contribution_type)} tone={readiness.last_discourse_contribution ? "ok" : "idle"} />
+              <StatusLine label="Last blocked" value={simValue(readiness.last_discourse_blocked_reason)} tone={readiness.last_discourse_blocked_reason ? "warn" : "ok"} />
+              <StatusLine label="Contributions/hour" value={simValue(readiness.discourse_contributions_this_hour, "0")} tone="idle" />
             </div>
           </div>
           <div className="stateBlock">

@@ -5,7 +5,8 @@ Use this before a live test stream. The goal is not perfection; the goal is to c
 ## Stream-safe defaults
 
 - `HEBE_PRESENCE_ENGINE_MODE=active`
-- `HEBE_DEFAULT_LIVE_PRESENCE_MODE=reactive`
+- `HEBE_DEFAULT_LIVE_PRESENCE_MODE=companion`
+- Start discourse rollout with `HEBE_DISCOURSE_PARTICIPATION_MODE=shadow`; switch to `active` only after the Conversation panel shows stable topics, useful plans, and correct natural-pause detection.
 - Keep stream TTS conservative. Prefer `twitch_chat_only` or `ui_only` unless you explicitly want stream TTS.
 - Owner STT without wake should stay `context_only`.
 - Twitch text replies are value-gated by PresenceEngine Lite and Twitch reply budget.
@@ -26,6 +27,9 @@ Confirm:
 - Voice mode: `normal`, unless testing `wake_only` or `muted`
 - Presence engine: `active`
 - Proactive speech: disabled unless explicitly testing it
+- Conversation: topic/stance/turn state should update; in `shadow`, proposals must not emit
+- Effective TTS: `available` before an active discourse or cheer TTS test, otherwise an explicit blocked reason
+- Last cheer: viewer, bits, source, acknowledgement, and dedupe state agree
 - Pending tasks: `0` before going live, unless intentionally testing a pending flow
 - Errors 10m: `0`
 
@@ -65,6 +69,13 @@ Useful normal logs:
 - `[HEBE][STREAM_PERSONA_QUALITY_GUARD]`
 - `[HEBE][HEBE_VOICE_GUARD]`
 - `[HEBE][GAME_RUN_STATE_WRITE_GUARD]`
+- `[HEBE][TWITCH_CHEER_EVENT]`
+- `[HEBE][CHEER_ACK_DECISION]`
+- `[HEBE][DISCOURSE_TOPIC]`
+- `[HEBE][STREAM_TURN]`
+- `[HEBE][DISCOURSE_GROUNDING_GUARD]`
+- `[HEBE][DISCOURSE_BUDGET]`
+- `[HEBE][STREAM_TTS_STATE]`
 
 `errors.log` should contain actual errors or warnings, not normal passed guard logs.
 
@@ -73,7 +84,7 @@ Useful normal logs:
 From `backend`:
 
 ```powershell
-python -m unittest tests.test_voice_command_pipeline tests.test_ui_chat_message_envelope tests.test_cognitive_twitch tests.test_stream_presence tests.test_input_firewall tests.test_universal_response_pipeline tests.test_command_result_synthesis tests.test_proactive_stream_behavior tests.test_stream_spontaneity tests.test_tts_control
+python -m unittest tests.test_voice_command_pipeline tests.test_ui_chat_message_envelope tests.test_cognitive_twitch tests.test_stream_presence tests.test_input_firewall tests.test_universal_response_pipeline tests.test_command_result_synthesis tests.test_proactive_stream_behavior tests.test_stream_spontaneity tests.test_tts_control tests.test_vnext_conversational_companion
 ```
 
 For a faster smoke pass:
