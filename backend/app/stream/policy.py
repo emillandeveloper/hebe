@@ -8,6 +8,14 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
+from app.stream.behavior_constraints import (
+    BehaviorConstraint,
+    BehaviorConstraintCompiler,
+    constraint_matches,
+    persist_constraint,
+    render_constraint_confirmation,
+)
+
 
 ACTIVITY_SOCIAL_LINKS = "social_links"
 ACTIVITY_CONFIDANT_EVENT = "confidant_event"
@@ -208,14 +216,18 @@ def active_behavior_blocks(stream: Any, *, now: float | None = None) -> list[dic
 
 
 def has_active_behavior_block(stream: Any, behavior: str, *, now: float | None = None) -> bool:
-    return any(block.get("behavior") == behavior for block in active_behavior_blocks(stream, now=now))
+    return any(
+        block.get("behavior") == behavior
+        or (behavior == COMPLIMENTS_TO_LEO and block.get("behavior_family") == "compliment" and block.get("recipient_scope") == "owner")
+        for block in active_behavior_blocks(stream, now=now)
+    )
 
 
 def matching_active_behavior_block(stream: Any, behavior: str, *, now: float | None = None) -> dict[str, Any] | None:
     if not behavior:
         return None
     for block in active_behavior_blocks(stream, now=now):
-        if block.get("behavior") == behavior:
+        if block.get("behavior") == behavior or (behavior == COMPLIMENTS_TO_LEO and block.get("behavior_family") == "compliment" and block.get("recipient_scope") == "owner"):
             print(
                 f"[HEBE][BEHAVIOR_BLOCK] matched behavior={behavior} source={block.get('source')}",
                 flush=True,
@@ -285,23 +297,30 @@ def _looks_like_compliment_stop(text: str) -> bool:
     return any(term in normalized for term in stop_terms) and any(term in normalized for term in compliment_terms)
 
 
-def owner_behavior_decision(stream: Any, text: str, *, now: float | None = None) -> PolicyDecision:
+def owner_behavior_decision(stream: Any, text: str, *, now: float | None = None, resolver=None, source_event_id: str = "") -> PolicyDecision:
     normalized = normalize_policy_text(text)
     semantic = _owner_semantic_intent(text)
     if semantic.intent == "owner_stop_behavior":
         print("[HEBE][AUTHORITY] source=leo decision=owner_command", flush=True)
-        block = create_behavior_block(
-            stream,
-            behavior=semantic.requested_behavior,
-            blocked_patterns=list(COMPLIMENT_BLOCK_MARKERS),
-            reason=str(text or "").strip() or "owner stopped compliments",
-            now=now,
-        )
+        compilation = BehaviorConstraintCompiler(resolver=resolver).compile(text, source_event_id=source_event_id, now=now)
+        if compilation.constraint is None:
+            return PolicyDecision(
+                allow_reply=True, allow_llm=False, allow_free_llm=False,
+                reason="behavior_constraint_resolution_required", intent="owner_stop_behavior",
+                response_directive="Ask Leo one short clarification about which viewer the behavior restriction targets. Do not confirm that a restriction was stored.",
+                response_constraints=list(POLICY_RESPONSE_CONSTRAINTS), response_intent="owner_constraint_clarification",
+                response_tone="brief_owner_clarification", must_not_include=["false_success_acknowledgement"],
+                requested_behavior="compliment", behavior_family="compliment", target=compilation.recipient_text,
+                matched_by=["behavior_constraint_compiler"], execute_as_command=True,
+            )
+        block = persist_constraint(stream, compilation.constraint)
+        confirmation, invariant = render_constraint_confirmation(compilation.constraint)
         return PolicyDecision(
             allow_reply=True,
             allow_llm=False,
             allow_free_llm=False,
             reason="owner_behavior_block_created",
+            direct_template_response=confirmation,
             intent=semantic.intent,
             response_directive=POLICY_DIRECTIVES["owner_behavior_block_created"],
             response_constraints=list(POLICY_RESPONSE_CONSTRAINTS),
@@ -310,10 +329,10 @@ def owner_behavior_decision(stream: Any, text: str, *, now: float | None = None)
             must_include=["owner_order_respected"],
             must_not_include=["copied_prompt_examples", "actual_blocked_compliment"],
             update_behavior_block=block,
-            requested_behavior=semantic.requested_behavior,
-            behavior_family=semantic.behavior_family,
-            target=semantic.target,
-            matched_by=semantic.matched_by,
+            requested_behavior=compilation.constraint.behavior_family,
+            behavior_family=compilation.constraint.behavior_family,
+            target=compilation.constraint.recipient_login or compilation.constraint.recipient_scope,
+            matched_by=["behavior_constraint_compiler"],
             execute_as_command=semantic.execute_as_command,
         )
     if any(marker in normalized for marker in ("ignora eso", "no respondas a eso", "no le hagas caso", "cambia de tema")):

@@ -8,6 +8,7 @@ from app.cognitive.action_plan import ActionPlan
 from app.cognitive.input_event import InputEvent
 from app.cognitive.wake_name_resolver import WakeNameResolver
 from app.stream.intent_parser import StreamIntentParser
+from app.stream.promotion_recovery import PromotionSTTRecovery, stream_ops_no_generic_fallback
 
 
 def normalize_command_text(text: str) -> str:
@@ -32,9 +33,35 @@ class StreamActionPlanner:
         self.target_resolver = target_resolver
         self.intent_parser = StreamIntentParser()
         self.wake_resolver = WakeNameResolver()
+        self.promotion_recovery = PromotionSTTRecovery(
+            resolver=target_resolver,
+            known_targets_provider=known_targets_provider,
+        )
 
     def plan(self, input_event: InputEvent) -> ActionPlan | None:
         raw_text = self._strip_wakeword_preserve(input_event.normalized_text)
+        recovery = self.promotion_recovery.recover(
+            input_event.raw_text or raw_text,
+            trusted_owner=str(input_event.source or "") not in {"twitch_chat", "twitch_viewer", "ambient_stt"},
+            addressed_to_hebe=True,
+        )
+        if recovery.command_candidate:
+            if recovery.recovered:
+                candidate = type("RecoveredPromotionCandidate", (), {
+                    "intent": "twitch_shoutout", "confidence": recovery.confidence,
+                    "entities": {"target_text": recovery.resolved_target, "raw_promotion_text": input_event.raw_text,
+                                 "promotion_stt_recovery": recovery.to_dict()},
+                    "reason": "promotion_stt_recovery",
+                })()
+                stream_ops_no_generic_fallback(recovery, routed_to_generic=False)
+                return self._plan_shoutout(candidate, input_event)
+            stream_ops_no_generic_fallback(recovery, routed_to_generic=False)
+            return ActionPlan(
+                action_type="twitch_shoutout", status="needs_confirmation", confidence=recovery.confidence,
+                requires_stream=True, reason=recovery.reason or "target_unclear", candidates=recovery.candidates,
+                missing_slots=["target"], context_checks=self._stream_context_checks(),
+                slots={"target_raw": recovery.target_suffix, "promotion_stt_recovery": recovery.to_dict()},
+            )
         candidates = self.intent_parser.parse(raw_text, raw_text=raw_text)
         print(f"[HEBE][COG] intent_candidates={[candidate.intent for candidate in candidates]!r}", flush=True)
         for candidate in candidates:

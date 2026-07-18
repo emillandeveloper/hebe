@@ -1413,6 +1413,7 @@ function SimulationView({
   const [result, setResult] = useState<any>(null);
   const [policyState, setPolicyState] = useState<any>(null);
   const [lastSimulationAt, setLastSimulationAt] = useState<string>("");
+  const [viewerProfiles, setViewerProfiles] = useState<any[]>([]);
 
   useEffect(() => {
     if (streamOutputMode) setOutputMode(streamOutputMode);
@@ -1469,6 +1470,28 @@ function SimulationView({
     } finally {
       setBusy("");
     }
+  }
+
+  async function refreshViewerProfiles() {
+    const res = await fetch(`${apiBase}/debug/viewer-profiles`);
+    const payload = await readPayload(res);
+    setViewerProfiles(payload.profiles || []);
+  }
+
+  async function setViewerProfile(login: string, gender: string, profile: any = {}) {
+    await readPayload(await fetch(`${apiBase}/debug/viewer-profiles/${encodeURIComponent(login)}`, {
+      method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        twitch_user_id: profile.twitch_user_id || "", display_name: profile.display_name || login,
+        preferred_grammatical_gender: gender, pronouns: profile.pronouns || {},
+      }),
+    }));
+    await refreshViewerProfiles();
+  }
+
+  async function clearViewerProfile(login: string) {
+    await readPayload(await fetch(`${apiBase}/debug/viewer-profiles/${encodeURIComponent(login)}`, { method: "DELETE" }));
+    await refreshViewerProfiles();
   }
 
   async function refreshPolicyState() {
@@ -1788,6 +1811,22 @@ function SimulationView({
               <option value="twitch_chat_only">twitch_chat_only</option>
               <option value="silent">silent</option>
             </select>
+          </div>
+          <div className="scenarioBox">
+            <div className="stateBlockTitle">Viewer Profiles</div>
+            <button className="btn compact" onClick={refreshViewerProfiles}>Refresh profiles</button>
+            {viewerProfiles.length === 0 && <div className="panelMeta">No saved profiles.</div>}
+            {viewerProfiles.map((profile) => <div className="scenarioSteps" key={profile.twitch_user_id}>
+              <span>{profile.display_name || profile.login} (@{profile.login}) · {profile.preferred_grammatical_gender} · {profile.source_type} · {Math.round((profile.confidence || 0) * 100)}%</span>
+              <span>{profile.conflict ? "conflict · neutralized" : profile.owner_locked ? "owner locked" : profile.expires_at ? "temporary" : "confirmed/active"} · {profile.evidence_summary || "no evidence note"}</span>
+              <div className="devButtons twoCol">
+                <button className="btn compact" onClick={() => setViewerProfile(profile.login, "masculine", profile)}>Masculine</button>
+                <button className="btn compact" onClick={() => setViewerProfile(profile.login, "feminine", profile)}>Feminine</button>
+                <button className="btn compact" onClick={() => setViewerProfile(profile.login, "neutral", profile)}>Neutral</button>
+                <button className="btn compact" onClick={() => setViewerProfile(profile.login, "unknown", profile)}>Unknown</button>
+                <button className="btn compact danger" onClick={() => clearViewerProfile(profile.login)}>Clear</button>
+              </div>
+            </div>)}
           </div>
         </div>
 

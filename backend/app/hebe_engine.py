@@ -116,6 +116,15 @@ from app.stream.policy import (
     owner_behavior_decision,
     policy_trace,
 )
+from app.stream.behavior_constraints import (
+    BehaviorConstraintOutputGuard,
+    constraint_matches,
+)
+from app.stream.viewer_profiles import (
+    GrammaticalAgreementGuard,
+    ViewerLinguisticProfileStore,
+    ViewerProfileCommandParser,
+)
 from app.stream.input_firewall import (
     ACTION_PROMOTION_SHOUTOUT,
     ACTION_TWITCH_ACTION,
@@ -461,6 +470,10 @@ class HebeEngine:
         self._stt_visible_transcripts: set[str] = set()
         self.stream_action_planner = self._build_stream_action_planner()
         self.viewer_intent_policy = ViewerIntentPolicy()
+        self.behavior_constraint_output_guard = BehaviorConstraintOutputGuard()
+        self.grammatical_agreement_guard = GrammaticalAgreementGuard()
+        self.viewer_profile_command_parser = ViewerProfileCommandParser()
+        self.viewer_linguistic_profiles = ViewerLinguisticProfileStore()
         self.input_authority_firewall = self._build_input_firewall()
         self._last_input_firewall: dict = {}
         self._last_policy_trace: dict = {}
@@ -1322,6 +1335,9 @@ class HebeEngine:
     ) -> dict:
         if not decision.allow_reply:
             return {"text": "", "response_source": "silent"}
+        deterministic = str(getattr(decision, "direct_template_response", "") or "").strip()
+        if deterministic:
+            return {"text": deterministic, "response_source": "structured_constraint_confirmation"}
         directive = str(getattr(decision, "response_directive", "") or "").strip()
         if not directive:
             return {"text": "", "response_source": "silent"}
@@ -1847,6 +1863,13 @@ class HebeEngine:
         stream = self._get_stream_state()
         if stream is None:
             return None
+        profile_decision = self._owner_viewer_profile_decision(command, source=source)
+        if profile_decision is not None:
+            self._record_policy_trace(policy_trace(
+                source=source, speaker="Leo", text=command, decision=profile_decision,
+                addressed_to_hebe=True, authority="owner",
+            ))
+            return profile_decision
         activity_decision = apply_owner_game_activity_correction(stream, command)
         if not activity_decision.allow_llm:
             self._record_policy_trace(policy_trace(
@@ -1864,8 +1887,41 @@ class HebeEngine:
             except Exception as exc:
                 print(f"[HEBE][LIVE_SESSION] owner policy correction failed: {exc!r}", flush=True)
             return activity_decision
-        behavior_decision = owner_behavior_decision(stream, command)
+        resolver = getattr(getattr(self.runtime, "twitch", None), "target_resolver", None)
+        resolve_details = getattr(resolver, "resolve_user_details", None)
+        def resolve_behavior_target(value: str):
+            resolved = resolve_details(value, intent="behavior_constraint") if callable(resolve_details) else None
+            login = str(getattr(resolved, "username", "") or "")
+            profiles = (getattr(self, "viewer_linguistic_profiles", None) or ViewerLinguisticProfileStore()).list_profiles()
+            normalized_value = self._normalize_guard_text(value)
+            profile = next((item for item in profiles if normalized_value in {
+                self._normalize_guard_text(item.get("login") or ""),
+                self._normalize_guard_text(item.get("display_name") or ""),
+            }), None)
+            if login and profile and str(profile.get("login") or "").casefold() == login.casefold():
+                return {"username": login, "display_name": profile.get("display_name") or login,
+                        "user_id": profile.get("twitch_user_id") or "",
+                        "confidence": max(float(getattr(resolved, "confidence", 0.0) or 0.0), .99),
+                        "candidates": list(getattr(resolved, "candidates", []) or [login]), "reason": "viewer_profile"}
+            if login:
+                return resolved
+            if profile:
+                return {"username": profile.get("login") or "", "display_name": profile.get("display_name") or "",
+                        "user_id": profile.get("twitch_user_id") or "", "confidence": .96,
+                        "candidates": [profile.get("login")], "reason": "viewer_profile"}
+            return resolved
+        behavior_decision = owner_behavior_decision(
+            stream, command,
+            resolver=resolve_behavior_target,
+            source_event_id=str(getattr(getattr(self, "_current_input_event", None), "timestamp", "") or ""),
+        )
         if not behavior_decision.allow_llm:
+            block = dict(getattr(behavior_decision, "update_behavior_block", None) or {})
+            if block.get("behavior_family") == "compliment" and block.get("recipient_scope") == "specific_viewer":
+                self._get_troll_engagement_budget().close_topic_by_owner(
+                    viewer=str(block.get("recipient_login") or block.get("recipient_display_name") or "viewer"),
+                    topic="compliment_fishing",
+                )
             self._record_policy_trace(policy_trace(
                 source=source,
                 speaker="Leo",
@@ -1877,6 +1933,47 @@ class HebeEngine:
             return behavior_decision
         return None
 
+    def _owner_viewer_profile_decision(self, command: str, *, source: str) -> PolicyDecision | None:
+        parser = getattr(self, "viewer_profile_command_parser", None) or ViewerProfileCommandParser()
+        parsed = parser.parse(command)
+        if not parsed.detected:
+            return None
+        resolver = getattr(getattr(self.runtime, "twitch", None), "target_resolver", None)
+        resolve = getattr(resolver, "resolve_user_details", None)
+        resolution = resolve(parsed.viewer_text, intent="viewer_profile") if callable(resolve) else None
+        login = str(getattr(resolution, "username", "") or "")
+        confidence = float(getattr(resolution, "confidence", 0.0) or 0.0)
+        candidates = list(getattr(resolution, "candidates", []) or [])
+        if not login or confidence < .78 or len(candidates) > 1 and confidence < .9:
+            return PolicyDecision(
+                allow_reply=True, allow_llm=False, allow_free_llm=False,
+                reason="viewer_profile_target_clarification", intent="viewer_profile_command",
+                response_directive="Ask Leo which viewer profile should be changed. Do not claim the profile was updated.",
+                response_intent="owner_profile_clarification", response_tone="brief_owner_clarification",
+                requested_behavior="viewer_linguistic_profile", target=parsed.viewer_text,
+            )
+        store = getattr(self, "viewer_linguistic_profiles", None) or ViewerLinguisticProfileStore()
+        if parsed.action == "clear":
+            store.clear(login=login)
+            confirmation = f"Perfil lingüístico de {login} borrado."
+        else:
+            user_id = str(getattr(resolution, "user_id", "") or f"login:{login.casefold()}")
+            store.apply_evidence(
+                twitch_user_id=user_id, login=login, display_name=login,
+                candidate_gender=parsed.gender, confidence=1.0, source_type="owner_confirmed",
+                source_event_id=str(getattr(getattr(self, "_current_input_event", None), "timestamp", "") or ""),
+                evidence_summary="explicit owner linguistic preference",
+            )
+            confirmation = f"Perfil lingüístico de {login} actualizado a {parsed.gender}."
+        return PolicyDecision(
+            allow_reply=True, allow_llm=False, allow_free_llm=False,
+            reason="viewer_profile_updated", intent="viewer_profile_command",
+            direct_template_response=confirmation,
+            response_directive="Confirm the structured viewer linguistic profile update briefly.",
+            response_intent="owner_profile_confirmation", response_tone="brief_owner_confirmation",
+            requested_behavior="viewer_linguistic_profile", target=login,
+        )
+
     def _viewer_policy_decision(self, payload: dict) -> PolicyDecision | None:
         stream = self._get_stream_state()
         if stream is None:
@@ -1885,6 +1982,31 @@ class HebeEngine:
         display_name = str((payload or {}).get("display_name") or "")
         text = str((payload or {}).get("message_text") or (payload or {}).get("text") or "")
         normalized = self._normalize_guard_text(text)
+        compliment_request = bool(re.search(r"\b(?:cumplid\w*|pirop\w*|halag\w*|elog\w*)\b", normalized))
+        if compliment_request:
+            blocks = active_behavior_blocks(stream)
+            matched = next((block for block in blocks if constraint_matches(
+                block, behavior_family="compliment", recipient_login=username or display_name,
+                requester_login=username or display_name,
+            )), None)
+            if matched is not None:
+                print("[HEBE][OWNER_CONSTRAINT_GATE] matched=true action=block", flush=True)
+                print("[HEBE][DIRECT_PRIORITY] bypass_denied reason=owner_constraint", flush=True)
+                decision = PolicyDecision(
+                    allow_reply=True, allow_llm=False, allow_free_llm=False,
+                    reason="owner_behavior_constraint", intent="blocked_compliment_request",
+                    direct_template_response="Ese hilo queda cerrado.",
+                    response_directive="Set a short neutral boundary without complimenting the viewer.",
+                    response_intent="owner_constraint_boundary", response_tone="brief_neutral_boundary",
+                    requested_behavior="compliment", behavior_family="compliment",
+                    target=username or display_name, matched_by=["owner_behavior_constraint"],
+                )
+                self._record_policy_trace(policy_trace(
+                    source="twitch_chat", speaker=display_name or username or "viewer", text=text,
+                    decision=decision, addressed_to_hebe=self._message_mentions_hebe(text), authority="viewer",
+                ))
+                return decision
+        print("[HEBE][OWNER_CONSTRAINT_GATE] matched=false action=allow", flush=True)
         if re.search(r"\b(?:shoutout|promo|so)\b", normalized):
             decision = PolicyDecision(
                 allow_reply=True,
@@ -5091,6 +5213,17 @@ class HebeEngine:
         self._tts_started_at = now
         self._tts_until = until
         self._tts_active = True
+        pending = getattr(getattr(self.runtime, "state", None), "pending_clarification", None)
+        if isinstance(pending, dict) and pending.get("kind") == "promotion_target_clarification":
+            capture_seconds = float(pending.get("capture_window_seconds") or 12.0)
+            pending["starts_after_tts_end"] = until
+            pending["actual_tts_completion_time"] = float(pending.get("actual_tts_completion_time") or 0.0)
+            pending["expires_at"] = until + capture_seconds
+            self.runtime.state.pending_clarification = pending
+            print(
+                f"[HEBE][PROMOTION_PENDING] capture_starts={until:.3f} window_seconds={capture_seconds:.1f} source=tts_completion_estimate",
+                flush=True,
+            )
         recent = [item for item in recent if now - float(item.get("ts", 0.0) or 0.0) <= window]
         recent.append({
             "text": value,
@@ -6353,6 +6486,42 @@ class HebeEngine:
     ) -> dict:
         debug_payload = dict(debug_payload or {})
         debug_payload["response_stage"] = "final"
+        viewer = str(
+            debug_payload.get("intended_recipient") or debug_payload.get("user_login")
+            or debug_payload.get("username") or debug_payload.get("speaker") or ""
+        ).lstrip("@")
+        source_viewer = str(debug_payload.get("source_viewer") or debug_payload.get("user_login") or viewer)
+        stream = self._get_stream_state()
+        if final_response and viewer and stream is not None:
+            constraint_guard = getattr(self, "behavior_constraint_output_guard", None) or BehaviorConstraintOutputGuard()
+            constraint_result = constraint_guard.evaluate(
+                active_behavior_blocks(stream), intended_recipient=viewer,
+                generated_response=final_response, source_viewer=source_viewer,
+                speech_act=str(debug_payload.get("speech_act") or ""), scene_context=debug_payload,
+            )
+            if not constraint_result.get("passed", True):
+                final_response = str(constraint_result.get("repaired_response") or "").strip()
+                repair_summary = {**dict(repair_summary or {}), "behavior_constraint": constraint_result}
+                debug_payload["behavior_constraint_repaired"] = True
+                if not final_response:
+                    guard_result = {"passed": False, "reason": "owner_behavior_constraint"}
+                    output_route = OutputRoute.SUPPRESS
+                    output_targets = []
+            try:
+                profile_store = getattr(self, "viewer_linguistic_profiles", None) or ViewerLinguisticProfileStore()
+                profile = profile_store.get(
+                    twitch_user_id=str(debug_payload.get("twitch_user_id") or ""), login=viewer,
+                )
+                agreement_guard = getattr(self, "grammatical_agreement_guard", None) or GrammaticalAgreementGuard()
+                agreement = agreement_guard.evaluate(
+                    final_response, viewer=viewer, profile=profile,
+                    refers_to_hebe=bool(debug_payload.get("refers_to_hebe")),
+                )
+                final_response = str(agreement.get("text") or final_response)
+                if agreement.get("action") != "allow":
+                    repair_summary = {**dict(repair_summary or {}), "grammatical_agreement": agreement}
+            except Exception as exc:
+                print(f"[HEBE][GRAMMATICAL_AGREEMENT_GUARD] viewer={viewer} action=allow reason=store_error error={exc!r}", flush=True)
         if source in {"twitch", "spontaneity"} and not self._get_twitch_interaction_coordinator().allows_final_emission(event_id):
             output_route = OutputRoute.SUPPRESS
             output_targets = []
@@ -7667,6 +7836,7 @@ class HebeEngine:
             normalized_text=normalized,
         )
         planner = self._get_stream_action_planner()
+        print("[HEBE][ACTION_PERMISSION_PRECHECK] action=promotion_shoutout status=undecided", flush=True)
         plan = planner.plan(InputEvent(
             source=input_event.source,
             raw_text=input_event.raw_text,
@@ -7680,6 +7850,10 @@ class HebeEngine:
         ))
         if plan is None:
             return None
+        if plan.action_type == "twitch_shoutout":
+            allowed = plan.status in {"complete", "needs_confirmation", "missing_target"}
+            reason = "trusted_explicit_stream_op" if allowed else str(plan.reason or "invalid_command")
+            print(f"[HEBE][ACTION_PERMISSION_FINAL] action=promotion_shoutout allowed={str(allowed).lower()} reason={reason}", flush=True)
         if plan.action_type == "twitch_shoutout":
             event_id = str(
                 getattr(input_event, "timestamp", "")
@@ -8082,6 +8256,13 @@ class HebeEngine:
             candidates=list(plan.candidates or []),
             reason=plan.reason,
             fallback_text=fallback,
+            starts_after_tts_end=float(getattr(self, "_tts_until", 0.0) or 0.0),
+            capture_window_seconds=12,
+            owner_voice_only=True,
+            wake_not_required=True,
+            minimum_target_confidence=0.78,
+            actual_tts_completion_time=0.0,
+            buffered_answers=[],
         ), reason="promotion_target_clarification")
         print(
             f"[HEBE][PROMOTION_PENDING] created id={pending['id']} reason={plan.reason} candidates={pending['candidates']!r}",
@@ -11148,11 +11329,16 @@ class HebeEngine:
             return
 
     def _latest_response_debug_payload(self) -> dict:
+        route_state = dict(getattr(self, "_last_twitch_route_state", {}) or {})
+        payload = {}
+        if route_state:
+            viewer = str(route_state.get("username") or "")
+            payload.update({"intended_recipient": viewer, "source_viewer": viewer, "user_login": viewer})
         synthesizer = getattr(self, "response_synthesizer", None)
         debug_contract = getattr(synthesizer, "last_response_debug_contract", None)
         if isinstance(debug_contract, dict) and debug_contract:
-            return {"debug_contract": debug_contract}
-        return {}
+            payload["debug_contract"] = debug_contract
+        return payload
 
     def _deliver_manual_reply(self, text: str, *, source: str) -> None:
         if source == "ui":

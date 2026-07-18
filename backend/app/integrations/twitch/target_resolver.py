@@ -10,6 +10,9 @@ from typing import Any
 
 
 DEFAULT_VIEWER_ALIASES = {
+    "ciber": "cibernoman",
+    "cibernoman": "cibernoman",
+    "ivanxi": "ivanxi_kun",
     "charlie": "er_tito_xarly",
     "xarly": "er_tito_xarly",
     "laurichu": "laurichutv",

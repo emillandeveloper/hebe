@@ -6,6 +6,7 @@ from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse
+from pydantic import BaseModel, Field
 
 from app.api.capabilities import (
     capability_backlog_payload,
@@ -27,8 +28,41 @@ from app.core.persistent_logs import (
 )
 from app.stream.live_session import latest_live_session_debug
 from app.stream import memory as stream_memory
+from app.stream.viewer_profiles import ViewerLinguisticProfileStore
 
 router = APIRouter(prefix="/debug", tags=["debug"])
+
+
+class ViewerProfileUpdate(BaseModel):
+    twitch_user_id: str = ""
+    display_name: str = ""
+    preferred_grammatical_gender: str = "unknown"
+    pronouns: dict[str, str] = Field(default_factory=dict)
+
+
+@router.get("/viewer-profiles")
+def get_viewer_profiles():
+    return {"ok": True, "profiles": ViewerLinguisticProfileStore().list_profiles()}
+
+
+@router.put("/viewer-profiles/{login}")
+def update_viewer_profile(login: str, body: ViewerProfileUpdate):
+    store = ViewerLinguisticProfileStore()
+    profile, action = store.apply_evidence(
+        twitch_user_id=body.twitch_user_id or f"login:{login.casefold()}", login=login,
+        display_name=body.display_name or login,
+        candidate_gender=body.preferred_grammatical_gender, confidence=1.0,
+        source_type="manual", evidence_summary="manual debug/settings correction",
+    )
+    profile.pronouns = dict(body.pronouns or {})
+    profile.owner_locked = True
+    store.save(profile)
+    return {"ok": True, "action": action, "profile": profile.to_dict()}
+
+
+@router.delete("/viewer-profiles/{login}")
+def clear_viewer_profile(login: str):
+    return {"ok": True, "cleared": ViewerLinguisticProfileStore().clear(login=login)}
 
 SENSITIVE_COLUMN_PARTS = (
     "token",

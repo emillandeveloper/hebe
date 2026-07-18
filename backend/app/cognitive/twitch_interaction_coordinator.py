@@ -393,11 +393,19 @@ class TrollEngagementBudget:
         "porros": {"porro", "porros", "marihuana", "canuto"},
         "picnic": {"picnic", "merienda"},
         "unknown_bait": {"crotolamo", "padalustro", "permanganato"},
+        "compliment_fishing": {"cumplido", "cumplidos", "piropo", "piropos", "halago", "halagos"},
+        "flirt_bait": {"flirtea", "coquetea", "ligar", "ligue", "guapo", "guapa"},
+        "jealousy_bait": {"celoso", "celosa", "celos"},
+        "obedience_test": {"obedece", "desobedece", "atreves", "mandato"},
+        "degrading_identity_bait": {"esclava", "sirvienta", "sumisa", "mascota"},
+        "sexual_innuendo_loop": {"sexual", "sexy", "innuendo", "doble", "sentido"},
+        "repeated_command_fishing": {"hazlo", "repitelo", "otra", "vez"},
     }
 
     def __init__(self, *, window_seconds: float = 300.0) -> None:
         self.window_seconds = float(window_seconds)
         self._engagements: dict[tuple[str, str], list[float]] = {}
+        self._topic_state: dict[tuple[str, str], dict[str, Any]] = {}
 
     def topic_for(self, text: str) -> str:
         tokens = set(_normalize(text).split())
@@ -414,10 +422,18 @@ class TrollEngagementBudget:
         key = (str(viewer or "viewer").casefold(), topic)
         recent = [ts for ts in self._engagements.get(key, []) if now - ts <= self.window_seconds]
         self._engagements[key] = recent
+        state = dict(self._topic_state.get(key) or {})
+        if state.get("closed_by_owner"):
+            print(f"[HEBE][BAIT_TOPIC_STATE] viewer={viewer} topic={topic} engagements={len(recent)} closed_by_owner=true", flush=True)
+            print(f"[HEBE][BAIT_LOOP_GUARD] viewer={viewer} topic={topic} engagements={len(recent)} action=boundary reason=owner_closed_topic", flush=True)
+            return {"topic": topic, "engagements": len(recent), "action": "boundary", "reason": "owner_closed_topic", "closed_by_owner": True}
         action = "allow" if len(recent) == 0 else "close" if len(recent) == 1 else "observe"
         reason = "first_safe_bait" if action == "allow" else "second_closes_topic" if action == "close" else "bait_topic_budget_exhausted"
         print(f"[HEBE][BAIT_LOOP_GUARD] viewer={viewer} topic={topic} engagements={len(recent)} action={action} reason={reason}", flush=True)
-        return {"topic": topic, "engagements": len(recent), "action": action, "reason": reason}
+        state.update({"viewer": key[0], "topic": topic, "engagements": len(recent), "closed": action in {"close", "observe"}, "closed_by_owner": False, "updated_at": now})
+        self._topic_state[key] = state
+        print(f"[HEBE][BAIT_TOPIC_STATE] viewer={viewer} topic={topic} engagements={len(recent)} closed_by_owner=false", flush=True)
+        return {"topic": topic, "engagements": len(recent), "action": action, "reason": reason, "closed_by_owner": False}
 
     def record_engagement(self, *, viewer: str, text: str) -> None:
         topic = self.topic_for(text)
@@ -425,3 +441,10 @@ class TrollEngagementBudget:
             return
         key = (str(viewer or "viewer").casefold(), topic)
         self._engagements.setdefault(key, []).append(time.time())
+
+    def close_topic_by_owner(self, *, viewer: str, topic: str) -> None:
+        key = (str(viewer or "viewer").casefold(), str(topic or "").strip())
+        state = dict(self._topic_state.get(key) or {})
+        state.update({"viewer": key[0], "topic": key[1], "closed": True, "closed_by_owner": True, "owner_intervention": True, "updated_at": time.time()})
+        self._topic_state[key] = state
+        print(f"[HEBE][BAIT_TOPIC_STATE] viewer={viewer} topic={topic} engagements={len(self._engagements.get(key, []))} closed_by_owner=true", flush=True)

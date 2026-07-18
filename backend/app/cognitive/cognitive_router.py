@@ -346,11 +346,12 @@ class CognitiveRouter:
     def _is_promotion_command(text: str) -> bool:
         value = f" {text or ''} "
         patterns = (
-            r"\b(?:haz(?:le)?|dale|tira)\s+(?:una?\s+)?promo\s+a\b",
+            r"\b(?:haz(?:le)?|dale|tira)\s+(?:una?\s+)?promo(?:\s+a\b|\b)",
             r"\bpromociona\s+a\b",
             r"\bshoutout\s+(?:a|to)\b",
             r"\b(?:haz(?:le)?|dale|manda|give)\s+(?:un\s+)?shoutout\s+(?:a|to)\b",
             r"\b(?:dale|haz)\s+so\s+a\b",
+            r"\b(?:haz(?:le)?|dale|tira)\s+(?:una?\s+)?(?:prom[a-z0-9_]{3,}|so[a-z0-9_]{3,}|shoutout[a-z0-9_]{3,})\b",
         )
         return any(re.search(pattern, value) for pattern in patterns)
 

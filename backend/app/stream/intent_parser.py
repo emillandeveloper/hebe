@@ -21,6 +21,9 @@ class PromotionRequest:
     requested_by: str = "owner"
     source: str = "owner_stt_direct"
     confidence: float = 0.0
+    command_detected: bool = True
+    target_detected: bool = False
+    reason: str = ""
 
 
 class StreamIntentParser:
@@ -162,6 +165,14 @@ class StreamIntentParser:
                 requested_by="owner",
                 source=source,
                 confidence=0.96 if target else 0.88,
+                target_detected=bool(target),
+                reason="parsed" if target else "missing_target",
+            )
+        if self._looks_like_missing_target_promotion_command(raw):
+            print("[HEBE][PROMOTION_PARSE_RESULT] command_detected=true target_detected=false target_phrase='' reason=missing_target", flush=True)
+            return PromotionRequest(
+                raw_text=raw, target_phrase="", requested_by="owner", source=source, confidence=0.88,
+                target_detected=False, reason="missing_target",
             )
         promo_language = bool(set(normalized_command.split()) & (self.shoutout_concepts | {"promos"}))
         reason = "meta_or_no_explicit_command" if promo_language else "not_promotion_language"
