@@ -31,7 +31,7 @@ def speak(
         return
 
     if emit and emit_chat:
-        emit("chat.assistant", {"text": text})
+        emit("debug.tts_candidate", {"text": text, "response_stage": "generated"})
 
     audio_path = ""
     try:

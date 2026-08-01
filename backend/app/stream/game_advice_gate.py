@@ -70,6 +70,19 @@ class GameAdviceValidation:
     blocked: list[str]
     reason: str
     confidence: float = 0.0
+    validated_claims: list[dict[str, Any]] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class ValidatedClaim:
+    claim: str
+    evidence_type: str
+    evidence_id: str
+    exact_supporting_text: str
+    confidence: float
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -132,6 +145,16 @@ class GameAdviceGate:
                     break
         return sorted(dict.fromkeys(found))
 
+    def detects_specific_advice(self, text: str) -> bool:
+        normalized = _normalize(text)
+        prescription = bool(re.search(
+            r"\b(?:deberias|debes|haz|usa|guarda|espera|vende|equipa|ataca|cura|lanza|reserva|"
+            r"you should|save before|wait until|use the|sell the|equip|attack when|heal before)\b",
+            normalized,
+        ))
+        sequence = bool(re.search(r"\b(?:antes de|despues de|cuando termine|luego|then|before|after|until)\b", normalized))
+        return prescription or sequence
+
     def validate(
         self,
         *,
@@ -139,22 +162,62 @@ class GameAdviceGate:
         proposed_advice: str,
         game_run_state: dict | None = None,
         known_game_mechanics: list[str] | None = None,
-        source_evidence: list[str] | None = None,
+        source_evidence: list[str | dict[str, Any]] | None = None,
     ) -> GameAdviceValidation:
         mechanics = self.detect_mechanics(proposed_advice)
         game = str(current_game or (game_run_state or {}).get("game") or "").strip()
+        advice_detected = self.detects_specific_advice(proposed_advice)
         if not mechanics:
-            return GameAdviceValidation(True, game, [], [], [], "no_specific_mechanics", confidence=0.88)
+            allowed = not advice_detected
+            result = GameAdviceValidation(
+                allowed, game, [], [], ["unvalidated_specific_advice"] if advice_detected else [],
+                "empty_validation_specific_advice" if advice_detected else "generic_reaction",
+                confidence=0.2 if advice_detected else 0.88,
+            )
+            print(
+                "[HEBE][GAME_ADVICE_GATE] "
+                f"advice_detected={str(advice_detected).lower()} claims={mechanics!r} "
+                f"validated=[] decision={'allow' if allowed else 'rewrite_reaction'}",
+                flush=True,
+            )
+            return result
 
         profile = self.registry.lookup(game)
         explicit = {str(item) for item in (known_game_mechanics or [])}
-        evidence_text = " ".join(str(item or "") for item in (source_evidence or []))
-        evidence_mechanics = set(self.detect_mechanics(evidence_text))
+        evidence_mechanics: set[str] = set()
+        provenance: dict[str, ValidatedClaim] = {}
+        allowed_evidence_types = {
+            "raw_owner_evidence", "confirmed_game_knowledge",
+            "current_structured_game_state", "external_validated_mechanic",
+        }
+        for index, item in enumerate(source_evidence or []):
+            if isinstance(item, dict):
+                evidence_type = str(item.get("evidence_type") or item.get("type") or "")
+                evidence_id = str(item.get("evidence_id") or item.get("fact_id") or f"evidence:{index}")
+                exact_text = str(item.get("exact_supporting_text") or item.get("raw_text") or "")
+                confidence = float(item.get("confidence", 0.0) or 0.0)
+                if evidence_type not in allowed_evidence_types:
+                    continue
+            else:
+                evidence_type = "raw_owner_evidence"
+                evidence_id = f"raw:{index}"
+                exact_text = str(item or "")
+                confidence = 0.8
+            for mechanic in self.detect_mechanics(exact_text):
+                evidence_mechanics.add(mechanic)
+                provenance[mechanic] = ValidatedClaim(
+                    mechanic, evidence_type, evidence_id, exact_text, confidence,
+                )
+        for mechanic in explicit:
+            provenance.setdefault(mechanic, ValidatedClaim(
+                mechanic, "confirmed_game_knowledge", f"game:{_normalize(game)}:{mechanic}",
+                mechanic, 0.9,
+            ))
 
         if profile is None:
             validated = sorted(set(mechanics) & (explicit | evidence_mechanics))
             blocked = [mechanic for mechanic in mechanics if mechanic not in set(validated)]
-            return GameAdviceValidation(
+            result = GameAdviceValidation(
                 allowed=not blocked,
                 game=game or "unknown",
                 mechanics=mechanics,
@@ -162,13 +225,26 @@ class GameAdviceGate:
                 blocked=blocked,
                 reason="unknown_game_requires_source" if blocked else "validated_by_source",
                 confidence=0.55 if blocked else 0.82,
+                validated_claims=[provenance[item].to_dict() for item in validated if item in provenance],
             )
+            print(
+                "[HEBE][GAME_ADVICE_GATE] "
+                f"advice_detected={str(advice_detected).lower()} claims={mechanics!r} "
+                f"validated={validated!r} decision={'allow' if result.allowed else 'rewrite_reaction'}",
+                flush=True,
+            )
+            return result
 
         allowed = set(profile.allowed_mechanics) | explicit | evidence_mechanics
         forbidden = set(profile.forbidden_mechanics)
         blocked = [mechanic for mechanic in mechanics if mechanic in forbidden or mechanic not in allowed]
         validated = [mechanic for mechanic in mechanics if mechanic not in blocked]
-        return GameAdviceValidation(
+        for mechanic in validated:
+            provenance.setdefault(mechanic, ValidatedClaim(
+                mechanic, "confirmed_game_knowledge", f"profile:{_normalize(profile.canonical_title)}:{mechanic}",
+                mechanic, 0.92,
+            ))
+        result = GameAdviceValidation(
             allowed=not blocked,
             game=profile.canonical_title,
             mechanics=mechanics,
@@ -176,4 +252,26 @@ class GameAdviceGate:
             blocked=blocked,
             reason="mechanic_not_validated" if blocked else "validated_for_game",
             confidence=0.92 if not blocked else 0.35,
+            validated_claims=[provenance[item].to_dict() for item in validated if item in provenance],
         )
+        print(
+            "[HEBE][GAME_ADVICE_GATE] "
+            f"advice_detected={str(advice_detected).lower()} claims={mechanics!r} "
+            f"validated={validated!r} decision={'allow' if result.allowed else 'rewrite_reaction'}",
+            flush=True,
+        )
+        return result
+
+
+class ReactionFirstContributionPolicy:
+    def choose_mode(
+        self, *, current_game: str | None, grounded_mechanics: list[str] | None = None,
+        validated_mechanics: list[str] | None = None, spoiler_safe: bool = True,
+    ) -> str:
+        grounded = list(grounded_mechanics or [])
+        validated = list(validated_mechanics or [])
+        if grounded and validated and spoiler_safe and set(grounded) <= set(validated):
+            return "validated_tip"
+        if str(current_game or "").strip():
+            return "contextual_reaction"
+        return "contextual_reaction"

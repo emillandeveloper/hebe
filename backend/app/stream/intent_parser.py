@@ -134,10 +134,12 @@ class StreamIntentParser:
 
     def parse_promotion_request(self, text: str, *, source: str = "owner_stt_direct") -> PromotionRequest | None:
         raw = str(text or "").strip()
-        print(f"[HEBE][PROMOTION_PARSE_ATTEMPT] raw={raw!r} source={source}", flush=True)
         if not raw:
-            print("[HEBE][PROMOTION_PARSE_RESULT] command_detected=false target_phrase='' reason=empty", flush=True)
             return None
+        if not self.promotion_prefilter(raw):
+            print(f"[HEBE][PROMOTION_PARSE_SKIP] source={source} reason=prefilter_no_match", flush=True)
+            return None
+        print(f"[HEBE][PROMOTION_PARSE_ATTEMPT] raw={raw!r} source={source}", flush=True)
         command = self.wake_prefix_re.sub("", raw).strip()
         normalized_command = self.normalize(command)
         for pattern_name, pattern in self.promotion_patterns:
@@ -181,6 +183,19 @@ class StreamIntentParser:
             flush=True,
         )
         return None
+
+    def promotion_prefilter(self, text: str, *, pending_active: bool = False) -> bool:
+        if pending_active:
+            return True
+        normalized = self.normalize(str(text or ""))
+        tokens = set(normalized.split())
+        promo_terms = self.shoutout_concepts | {
+            "promo", "promos", "promocion", "promoción", "shout", "out",
+            "shoutout", "shout-out",
+        }
+        if tokens & promo_terms:
+            return True
+        return bool(re.search(r"\b(?:s\s+o|ese\s+o|show\s+out|chau\s+taut)\b", normalized))
 
     def _looks_like_broken_promotion_command(self, normalized: str) -> bool:
         tokens = set(str(normalized or "").split())

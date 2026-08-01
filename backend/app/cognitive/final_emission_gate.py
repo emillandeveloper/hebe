@@ -17,6 +17,36 @@ class OutputRoute(StrEnum):
     SUPPRESS = "suppress"
 
 
+@dataclass(slots=True)
+class FinalGuardDecision:
+    passed: bool = True
+    action: str = "allow"
+    violations: list[str] = field(default_factory=list)
+    source_guards: list[str] = field(default_factory=list)
+    final_route_override: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "passed": self.passed,
+            "action": self.action,
+            "violations": list(self.violations),
+            "source_guards": list(self.source_guards),
+            "final_route_override": self.final_route_override,
+        }
+
+    @classmethod
+    def from_value(cls, value: dict[str, Any] | None) -> "FinalGuardDecision":
+        data = dict(value or {})
+        action = str(data.get("action") or ("allow" if data.get("passed", True) else "suppress"))
+        return cls(
+            passed=bool(data.get("passed", action == "allow")),
+            action=action,
+            violations=[str(item) for item in data.get("violations") or []],
+            source_guards=[str(item) for item in data.get("source_guards") or []],
+            final_route_override=str(data.get("final_route_override") or ""),
+        )
+
+
 TEXT_ROUTES = {
     OutputRoute.LOCAL_UI_DEBUG_ONLY,
     OutputRoute.LOCAL_OWNER_REPLY,
@@ -32,10 +62,15 @@ PUBLIC_TEXT_ROUTES = {
 
 FORBIDDEN_NORMAL_EMISSION_STAGES = {
     "candidate",
+    "generated",
+    "validating",
+    "repair",
+    "too_similar",
     "failed_guard",
     "fallback_candidate",
     "repair_attempt",
     "suppressed",
+    "observed",
 }
 
 RESPONSE_STAGES = FORBIDDEN_NORMAL_EMISSION_STAGES | {"final"}
@@ -102,8 +137,13 @@ class FinalEmissionGate:
         speak: Callable[[str], Any] | None = None,
         logger: Callable[[str], None] | None = None,
     ) -> FinalEmissionResult:
-        route = normalize_output_route(output_route)
+        final_guard = FinalGuardDecision.from_value(guard_result)
+        route = normalize_output_route(final_guard.final_route_override or output_route)
+        if final_guard.action == "suppress":
+            route = OutputRoute.SUPPRESS
         targets = [str(target) for target in (output_targets or []) if str(target or "").strip()]
+        if route == OutputRoute.SUPPRESS:
+            targets = []
         text = str(final_response or "").strip()
         event_key = str(event_id or "").strip()
         debug = dict(debug_payload or {})
@@ -124,20 +164,31 @@ class FinalEmissionGate:
             else:
                 print(message, flush=True)
 
+        log(
+            "[HEBE][FINAL_GUARD_DECISION] "
+            f"action={final_guard.action} violations={final_guard.violations} "
+            f"route_override={final_guard.final_route_override or 'none'}"
+        )
+
         if route in {OutputRoute.OBSERVE_ONLY, OutputRoute.SUPPRESS, OutputRoute.TWITCH_ACTION_ONLY}:
             reason = "observe_only" if route == OutputRoute.OBSERVE_ONLY else "suppressed_route"
             if route == OutputRoute.TWITCH_ACTION_ONLY:
                 reason = "action_only"
             if emit_debug is not None:
-                emit_debug({**debug, "response_stage": stage or "suppressed", "suppress_reason": reason})
+                emit_debug({
+                    **debug,
+                    "response_stage": stage or "suppressed",
+                    "suppress_reason": reason,
+                    **({"failed_guard_response": text} if route == OutputRoute.SUPPRESS and text else {}),
+                })
             log(
                 f"[HEBE][FINAL_EMISSION_GATE] ui_allowed=false twitch_allowed=false tts_allowed=false "
                 f"suppressed=true reason={reason} route={route.value} event_id={event_key}"
             )
             log(f"[HEBE][FINAL_EMISSION_GATE] suppressed=true reason={reason} route={route.value} event_id={event_key}")
             log(
-                f"[HEBE][OUTPUT_VISIBILITY_INVARIANT] passed=true route={route.value} "
-                "ui_count=0 twitch_sent=false tts_sent=false"
+                f"[HEBE][OUTPUT_VISIBILITY_INVARIANT] route={route.value} "
+                "ui_count=0 twitch_count=0 tts_count=0 passed=true"
             )
             return FinalEmissionResult(False, route.value, targets, event_key, suppressed=True, reason=reason)
 
@@ -158,9 +209,7 @@ class FinalEmissionGate:
             return FinalEmissionResult(False, route.value, targets, event_key, suppressed=True, reason=reason)
 
         if route in PUBLIC_TEXT_ROUTES:
-            guard_passed = True
-            if isinstance(guard_result, dict) and "passed" in guard_result:
-                guard_passed = bool(guard_result.get("passed"))
+            guard_passed = final_guard.passed and final_guard.action == "allow"
             if not guard_passed:
                 reason = "guard_failed"
                 if emit_debug is not None:

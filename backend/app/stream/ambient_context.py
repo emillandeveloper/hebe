@@ -4,6 +4,80 @@ from dataclasses import dataclass, field
 import re
 import time
 import unicodedata
+from typing import Any
+
+
+@dataclass(frozen=True)
+class GameplayReferentResolution:
+    subject: str = "unknown"
+    object: str = ""
+    predicate: str = ""
+    confidence: float = 0.0
+    decision: str = "ambiguous"
+
+
+class GameplayReferentResolver:
+    def resolve(self, raw: str, normalized: str, *, recent_fragments: list[str] | None = None) -> GameplayReferentResolution:
+        text = str(normalized or "")
+        if re.search(r"\b(?:estos|esos|aquellos)\s+(?:son|estan)\s+(?:de\s+)?nivel\s+bajo\b", text):
+            result = GameplayReferentResolution("enemies", "level", "low_level", 0.78, "plural_game_entity")
+        elif re.search(r"\b(?:yo\s+)?(?:estoy|voy|mi personaje esta)\s+(?:a\s+|en\s+)?nivel\s+(?:1|uno)\b", text):
+            result = GameplayReferentResolution("owner_player", "level", "level_one", 0.96, "explicit_first_person")
+        elif re.search(r"\bno\s+se\s+le\s+baja\s+(?:la\s+)?(?:barra\s+de\s+)?vida\b", text):
+            result = GameplayReferentResolution("enemies", "health_bar", "health_not_decreasing", 0.82, "indirect_enemy_object")
+        elif re.search(r"\b(?:enemigo|boss|jefe|bicho).*\b(?:se\s+cura|recupera\s+(?:hp|vida)|regenera)\b|\bse\s+cura\b", text):
+            result = GameplayReferentResolution("enemies", "health", "heals", 0.88, "explicit_enemy_recovery")
+        elif re.search(r"\b(?:me|mi personaje|yo).*\b(?:vida|hp)\b|\b(?:me curo|recupero vida)\b", text):
+            result = GameplayReferentResolution("owner_player", "health", "owner_health_state", 0.86, "explicit_first_person")
+        elif re.search(r"\b(?:ellos|estos|esos|enemigos|boss|jefe)\b", text):
+            result = GameplayReferentResolution("enemies", "", "observation", 0.68, "game_entity_reference")
+        else:
+            result = GameplayReferentResolution()
+        print(
+            "[HEBE][GAMEPLAY_REFERENT] "
+            f"raw={raw!r} subject={result.subject} predicate={result.predicate or 'unknown'} "
+            f"confidence={result.confidence:.3f} decision={result.decision}",
+            flush=True,
+        )
+        return result
+
+
+@dataclass(frozen=True)
+class AmbientFact:
+    fact_id: str
+    raw_text: str
+    conservative_normalized_text: str
+    utterance_role: str
+    timestamp: float
+    topic_id: str
+    category: str
+    extracted_subject: str
+    extracted_object: str
+    extracted_predicate: str
+    confidence: float
+    inference_level: str
+    supported_claims: list[str]
+    unsupported_claims: list[str]
+    expires_at: float
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "fact_id": self.fact_id,
+            "raw_text": self.raw_text,
+            "conservative_normalized_text": self.conservative_normalized_text,
+            "utterance_role": self.utterance_role,
+            "timestamp": self.timestamp,
+            "topic_id": self.topic_id,
+            "category": self.category,
+            "extracted_subject": self.extracted_subject,
+            "extracted_object": self.extracted_object,
+            "extracted_predicate": self.extracted_predicate,
+            "confidence": self.confidence,
+            "inference_level": self.inference_level,
+            "supported_claims": list(self.supported_claims),
+            "unsupported_claims": list(self.unsupported_claims),
+            "expires_at": self.expires_at,
+        }
 
 
 @dataclass(frozen=True)
@@ -17,17 +91,46 @@ class AmbientContextExtraction:
 class AmbientContextExtractor:
     """Extract current stream/run facts from accepted ambient STT."""
 
-    def extract(self, text: str, *, event_type: str | None = None, now: float | None = None) -> AmbientContextExtraction:
+    def __init__(self, referent_resolver: GameplayReferentResolver | None = None) -> None:
+        self.referent_resolver = referent_resolver or GameplayReferentResolver()
+
+    def extract(
+        self,
+        text: str,
+        *,
+        event_type: str | None = None,
+        now: float | None = None,
+        utterance_role: str = "owner_commentary",
+        language: str | None = None,
+        topic_id: str | None = None,
+    ) -> AmbientContextExtraction:
         raw = str(text or "").strip()
         normalized = self._normalize(raw)
         if not normalized:
             return AmbientContextExtraction(useful=False, reason="empty")
+        if utterance_role in {"game_audio_bleed", "conversational_filler", "uncertain"}:
+            return AmbientContextExtraction(useful=False, reason=f"role_excluded:{utterance_role}")
+        if utterance_role == "quoted_or_read_dialogue":
+            now = time.time() if now is None else float(now)
+            return AmbientContextExtraction(
+                useful=True,
+                facts=[self._fact(
+                    "transient_game_narrative", raw[:180], 0.3, now, ttl_sec=30,
+                    data={
+                        "raw_text": raw, "normalized_text": normalized,
+                        "utterance_role": utterance_role, "language": language,
+                        "topic_id": topic_id, "proactive_eligible": False,
+                    },
+                )],
+                reason="quoted_dialogue_transient_context",
+            )
 
         now = time.time() if now is None else float(now)
         facts: list[dict] = []
         mood: str | None = None
+        referent = self.referent_resolver.resolve(raw, normalized)
 
-        gameplay_facts = self._extract_gameplay_facts(raw, normalized, now)
+        gameplay_facts = self._extract_gameplay_facts(raw, normalized, now, referent=referent)
         if gameplay_facts:
             facts.extend(gameplay_facts)
             mood = next((fact.get("data", {}).get("mood") for fact in gameplay_facts if fact.get("data", {}).get("mood")), mood)
@@ -46,6 +149,15 @@ class AmbientContextExtractor:
             facts.append(objective_fact)
 
         if facts:
+            for fact in facts:
+                fact["utterance_role"] = utterance_role
+                fact["language"] = language
+                fact["topic_id"] = topic_id
+                fact["raw_evidence"] = fact.get("raw_text") or raw
+                fact["normalized_evidence"] = fact.get("normalized_text") or normalized
+                fact.setdefault("conservative_normalized_text", normalized)
+                fact.setdefault("utterance_role", utterance_role)
+                fact.setdefault("topic_id", topic_id or "")
             return AmbientContextExtraction(useful=True, facts=facts, mood=mood, reason="facts_extracted")
 
         if event_type in {"gameplay_failure", "victory", "boss_attempt", "grinding", "confusion/lost"}:
@@ -69,7 +181,10 @@ class AmbientContextExtractor:
 
         return AmbientContextExtraction(useful=False, reason="low_value")
 
-    def _extract_gameplay_facts(self, raw: str, normalized: str, now: float) -> list[dict]:
+    def _extract_gameplay_facts(
+        self, raw: str, normalized: str, now: float, *,
+        referent: GameplayReferentResolution,
+    ) -> list[dict]:
         tokens = set(normalized.split())
         if not tokens:
             return []
@@ -95,9 +210,10 @@ class AmbientContextExtractor:
         failure_terms = {"muerto", "morir", "matado", "mataron", "game", "over", "wipe", "fallado", "intento"}
         progress_terms = {"pasado", "pasamos", "derrotado", "avance", "avanzamos", "llegamos", "conseguido", "victoria"}
 
-        if tokens & combat_risk_terms and (
-            tokens & {"vida", "hp", "15", "poca", "poco", "rojo", "muero", "counter", "contraataque", "counterattack"}
-        ):
+        first_person_health = referent.subject == "owner_player" and bool(
+            tokens & {"vida", "hp", "15", "poca", "poco", "rojo", "muero"}
+        )
+        if first_person_health or tokens & {"counter", "contraataque", "counterattack"}:
             facts.append(self._category_fact(
                 "combat_risk",
                 "Leo is weighing a dangerous combat state with low HP or counterattack risk.",
@@ -106,8 +222,14 @@ class AmbientContextExtractor:
                 0.86,
                 now,
                 mood="combat tension",
+                referent=referent,
+                supported_claims=["owner health is at risk"] if first_person_health else ["counterattack risk"],
             ))
-        if tokens & healing_terms:
+        explicit_healing = bool(
+            re.search(r"\b(?:cura|curan|curar|curarse|se cura|recupera|recuperar|regenera|heal|healing|autopocion|autopotion|pocion|pociones)\b", normalized)
+        )
+        hp_not_decreasing = referent.predicate == "health_not_decreasing"
+        if explicit_healing and not hp_not_decreasing:
             facts.append(self._category_fact(
                 "healing_or_recovery",
                 "Leo mentioned healing, HP recovery, or autopotion behavior in the fight.",
@@ -116,8 +238,10 @@ class AmbientContextExtractor:
                 0.82,
                 now,
                 mood="resource tension",
+                referent=referent,
+                supported_claims=[raw],
             ))
-        if tokens & enemy_mechanic_terms:
+        if tokens & enemy_mechanic_terms and not hp_not_decreasing:
             facts.append(self._category_fact(
                 "enemy_mechanic",
                 "Leo mentioned a combat mechanic such as counters, survival, or auto-healing.",
@@ -126,6 +250,8 @@ class AmbientContextExtractor:
                 0.84,
                 now,
                 mood="mechanic tension",
+                referent=referent,
+                supported_claims=[raw],
             ))
         if tokens & rng_terms:
             facts.append(self._category_fact(
@@ -136,8 +262,13 @@ class AmbientContextExtractor:
                 0.86,
                 now,
                 mood="rng tension",
+                referent=referent,
             ))
-        if tokens & challenge_terms and (tokens & rng_terms or tokens & {"level", "nivel", "exp", "recursos", "forzado", "obligatorio"}):
+        explicit_owner_constraint = bool(
+            referent.subject == "owner_player" and referent.predicate == "level_one"
+            or re.search(r"\b(?:sin exp|no exp|no gano exp|desafio|challenge|limitado a|sin usar|no puedo usar|forzado|obligatorio)\b", normalized)
+        )
+        if explicit_owner_constraint and tokens & challenge_terms:
             facts.append(self._category_fact(
                 "challenge_constraint",
                 "Leo described a challenge constraint such as Level 1, no EXP, forced fights, or limited resources.",
@@ -146,6 +277,33 @@ class AmbientContextExtractor:
                 0.8,
                 now,
                 mood="challenge tension",
+                referent=referent,
+                supported_claims=["owner is explicitly constrained to level one"] if referent.predicate == "level_one" else [raw],
+            ))
+        if hp_not_decreasing:
+            facts.append(self._category_fact(
+                "uncertain_combat_observation",
+                "The referenced enemy health bar is not decreasing.",
+                raw,
+                normalized,
+                0.78,
+                now,
+                mood="mechanic uncertainty",
+                referent=referent,
+                supported_claims=["enemy health is not decreasing"],
+                unsupported_claims=["autopotion", "healing", "regeneration", "player low HP"],
+            ))
+        if referent.predicate == "low_level":
+            facts.append(self._category_fact(
+                "entity_level_observation",
+                "The referenced enemies are low level.",
+                raw,
+                normalized,
+                0.78,
+                now,
+                referent=referent,
+                supported_claims=["the referenced enemies are low level"],
+                unsupported_claims=["Leo is low level", "Level 1 challenge", "no EXP run"],
             ))
         if ("game" in tokens and "over" in tokens) or tokens & {"muerto", "matado", "mataron", "wipe"}:
             facts.append(self._category_fact(
@@ -346,16 +504,41 @@ class AmbientContextExtractor:
     ) -> dict:
         data = data or {}
         category = data.get("category", kind)
+        fact_id = f"ambient:{category}:{int(now)}"
+        raw_text = str(data.get("raw_text") or "")
+        normalized_text = str(data.get("normalized_text") or "")
+        ambient_fact = AmbientFact(
+            fact_id=fact_id,
+            raw_text=raw_text,
+            conservative_normalized_text=normalized_text,
+            utterance_role=str(data.get("utterance_role") or "owner_commentary"),
+            timestamp=now,
+            topic_id=str(data.get("topic_id") or ""),
+            category=str(category),
+            extracted_subject=str(data.get("extracted_subject") or "unknown"),
+            extracted_object=str(data.get("extracted_object") or ""),
+            extracted_predicate=str(data.get("extracted_predicate") or ""),
+            confidence=confidence,
+            inference_level=str(data.get("inference_level") or "direct_observation"),
+            supported_claims=[str(item) for item in data.get("supported_claims") or ([raw_text] if raw_text else [])],
+            unsupported_claims=[str(item) for item in data.get("unsupported_claims") or []],
+            expires_at=now + ttl_sec,
+        )
         return {
             "kind": kind,
             "text": text,
             "category": category,
             "summary": text,
-            "id": f"ambient:{category}:{int(now)}",
+            "id": fact_id,
+            **ambient_fact.to_dict(),
             "game": data.get("game"),
             "source": "stt_voice",
-            "raw_text": data.get("raw_text"),
-            "normalized_text": data.get("normalized_text"),
+            "raw_evidence": raw_text,
+            "normalized_text": normalized_text,
+            "normalized_evidence": normalized_text,
+            "utterance_role": data.get("utterance_role", "owner_commentary"),
+            "topic_id": data.get("topic_id"),
+            "language": data.get("language"),
             "timestamp": now,
             "confidence": confidence,
             "ttl_sec": ttl_sec,
@@ -372,9 +555,23 @@ class AmbientContextExtractor:
         confidence: float,
         now: float,
         *,
-        ttl_sec: float = 25 * 60,
+        ttl_sec: float | None = None,
         mood: str | None = None,
+        referent: GameplayReferentResolution | None = None,
+        supported_claims: list[str] | None = None,
+        unsupported_claims: list[str] | None = None,
     ) -> dict:
+        if ttl_sec is None:
+            ttl_sec = {
+                "combat_risk": 60,
+                "healing_or_recovery": 120,
+                "enemy_mechanic": 120,
+                "failure_or_death": 30,
+                "navigation_confusion": 60,
+                "progress_marker": 60,
+                "rng_dependency": 120,
+                "challenge_constraint": 120,
+            }.get(category, 60)
         return self._fact(
             category,
             summary,
@@ -386,6 +583,12 @@ class AmbientContextExtractor:
                 "raw_text": raw,
                 "normalized_text": normalized,
                 "mood": mood,
+                "extracted_subject": (referent or GameplayReferentResolution()).subject,
+                "extracted_object": (referent or GameplayReferentResolution()).object,
+                "extracted_predicate": (referent or GameplayReferentResolution()).predicate,
+                "inference_level": "direct_observation" if (referent or GameplayReferentResolution()).confidence >= 0.75 else "heuristic",
+                "supported_claims": supported_claims or [raw],
+                "unsupported_claims": unsupported_claims or [],
             },
         )
 

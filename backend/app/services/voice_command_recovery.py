@@ -14,12 +14,34 @@ class TranscriptNormalizationResult:
     confidence: float = 1.0
     reason: str = "normalized"
     metadata: dict = field(default_factory=dict)
+    conservative_normalized_text: str = ""
+    alternative_candidates: list[str] = field(default_factory=list)
+    candidate_scores: dict[str, float] = field(default_factory=dict)
+    detected_language: str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.conservative_normalized_text:
+            self.conservative_normalized_text = self.normalized_text
+        if not self.alternative_candidates:
+            self.alternative_candidates = [
+                item for item in self.normalized_candidates
+                if item != self.conservative_normalized_text
+            ]
+        if not self.normalized_candidates:
+            self.normalized_candidates = [
+                self.conservative_normalized_text,
+                *self.alternative_candidates,
+            ]
 
     def as_event(self) -> dict:
         return {
             "raw_text": self.raw_text,
             "normalized_text": self.normalized_text,
             "normalized_candidates": self.normalized_candidates,
+            "conservative_normalized_text": self.conservative_normalized_text,
+            "alternative_candidates": self.alternative_candidates,
+            "candidate_scores": self.candidate_scores,
+            "detected_language": self.detected_language,
             "confidence": round(float(self.confidence), 3),
             "reason": self.reason,
             "metadata": self.metadata,
@@ -33,7 +55,12 @@ def normalize_for_voice(text: str) -> str:
     return " ".join(value.split())
 
 
-def normalize_stt_transcript(raw_text: str, *, known_targets: list[str] | None = None) -> TranscriptNormalizationResult:
+def normalize_stt_transcript(
+    raw_text: str,
+    *,
+    known_targets: list[str] | None = None,
+    detected_language: str | None = None,
+) -> TranscriptNormalizationResult:
     raw = str(raw_text or "").strip()
     base = normalize_for_voice(raw)
     if not base:
@@ -43,30 +70,37 @@ def normalize_stt_transcript(raw_text: str, *, known_targets: list[str] | None =
     notes: list[str] = []
     candidates: list[str] = [base]
 
-    tokens, wake_conf = _fix_wakeword(tokens)
-    if wake_conf < 1.0:
+    wake_tokens, wake_conf = _fix_wakeword(tokens, detected_language=detected_language)
+    if wake_tokens != tokens:
         notes.append("wakeword_fuzzy")
 
-    fixed_tokens = _fix_command_tokens(tokens)
-    if fixed_tokens != tokens:
+    fixed_tokens = _fix_command_tokens(wake_tokens)
+    if fixed_tokens != wake_tokens:
         notes.append("command_words")
-    normalized = " ".join(fixed_tokens)
+    hypothesis = " ".join(fixed_tokens)
 
-    target_fixed = _fix_attached_known_target(normalized, known_targets or [])
-    if target_fixed != normalized:
+    target_fixed = _fix_attached_known_target(hypothesis, known_targets or [])
+    if target_fixed != hypothesis:
         notes.append("known_target_spacing")
-        normalized = target_fixed
+        hypothesis = target_fixed
 
-    if normalized not in candidates:
-        candidates.append(normalized)
-    confidence = 0.75 if notes else 1.0
+    if hypothesis not in candidates:
+        candidates.append(hypothesis)
+    alternatives = [item for item in candidates if item != base]
+    scores = {base: 1.0}
+    if alternatives:
+        scores.update({item: min(0.9, wake_conf) for item in alternatives})
     return TranscriptNormalizationResult(
         raw_text=raw,
-        normalized_text=normalized,
+        normalized_text=base,
         normalized_candidates=candidates,
-        confidence=confidence,
+        confidence=1.0,
         reason=";".join(notes) if notes else "no_changes",
-        metadata={"normalization_only": True},
+        metadata={"normalization_only": True, "canonical_is_conservative": True},
+        conservative_normalized_text=base,
+        alternative_candidates=alternatives,
+        candidate_scores=scores,
+        detected_language=detected_language,
     )
 
 
@@ -76,10 +110,14 @@ def _similar(left: str, right: str) -> float:
     return SequenceMatcher(None, left, right).ratio()
 
 
-def _fix_wakeword(tokens: list[str]) -> tuple[list[str], float]:
+def _fix_wakeword(tokens: list[str], *, detected_language: str | None = None) -> tuple[list[str], float]:
     if not tokens:
         return tokens, 0.0
     first = tokens[0]
+    if str(detected_language or "").lower() == "en" and first in {
+        "here", "he", "her", "hero", "heavy", "hear", "heir",
+    }:
+        return tokens, 1.0
     if first == "hebe":
         return tokens, 1.0
     if first in {"ebe", "jebe", "heve"}:

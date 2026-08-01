@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import re
+import unicodedata
 from pathlib import Path
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -74,13 +76,29 @@ class AppRegistryEntry:
 
 
 def _normalize_alias(value: str) -> str:
-    return " ".join(str(value or "").strip().lower().split())
+    normalized = "".join(
+        ch for ch in unicodedata.normalize("NFKD", str(value or "").strip().casefold())
+        if not unicodedata.combining(ch)
+    )
+    normalized = re.sub(r"[^a-z0-9]+", " ", normalized)
+    return " ".join(normalized.split())
+
+
+def _alias_keys(value: str) -> set[str]:
+    normalized = _normalize_alias(value)
+    return {normalized, normalized.replace(" ", "")} if normalized else set()
 
 
 def _safe_builtin_registry() -> list[AppRegistryEntry]:
     obs_env = (os.getenv("HEBE_APP_OBS_PATH") or "").strip()
     default_obs = r"C:\Program Files\obs-studio\bin\64bit\obs64.exe"
     obs_path = obs_env or (default_obs if Path(default_obs).exists() else "")
+    melonds_env = (os.getenv("HEBE_APP_MELONDS_PATH") or "").strip()
+    melonds_candidates = [
+        Path(r"C:\Program Files\melonDS\melonDS.exe"),
+        Path(os.getenv("LOCALAPPDATA", "")) / "melonDS" / "melonDS.exe",
+    ]
+    melonds_path = melonds_env or next((str(path) for path in melonds_candidates if path.exists()), "")
     now = datetime.now(timezone.utc).isoformat()
     return [
         AppRegistryEntry(
@@ -93,7 +111,21 @@ def _safe_builtin_registry() -> list[AppRegistryEntry]:
             created_at=now,
             updated_at=now,
             source="env" if obs_env else "builtin",
-        )
+        ),
+        AppRegistryEntry(
+            app_id="melonds",
+            display_name="melonDS",
+            aliases=(
+                "melonds", "melon ds", "melón ds", "melon de ese",
+                "melón de ese", "melon deese",
+            ),
+            executable_path=melonds_path,
+            enabled=True,
+            requires_confirmation=False,
+            created_at=now,
+            updated_at=now,
+            source="env" if melonds_env else "builtin",
+        ),
     ]
 
 
@@ -109,9 +141,10 @@ def resolve_whitelisted_app(name: str) -> Optional[Dict[str, Any]]:
     for entry in _safe_builtin_registry():
         if not entry.enabled:
             continue
-        aliases = {_normalize_alias(entry.app_id), _normalize_alias(entry.display_name)}
-        aliases.update(_normalize_alias(alias) for alias in entry.aliases)
-        if normalized in aliases:
+        aliases: set[str] = set()
+        for alias in (entry.app_id, entry.display_name, *entry.aliases):
+            aliases.update(_alias_keys(alias))
+        if _alias_keys(normalized) & aliases:
             app = entry.as_dict()
             print(
                 "[HEBE][APP_RESOLVER] "

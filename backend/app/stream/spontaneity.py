@@ -383,7 +383,14 @@ class StreamSpontaneityService:
             "game_profile": profile.compact_prompt_context(),
         }
 
-    def record_idle_message(self, stream: StreamSessionState | None, text: str, *, topic: str | None = None) -> None:
+    def record_idle_message(
+        self,
+        stream: StreamSessionState | None,
+        text: str,
+        *,
+        topic: str | None = None,
+        used_fact_id: str | None = None,
+    ) -> None:
         if not stream:
             return
         now = self._now()
@@ -395,6 +402,7 @@ class StreamSpontaneityService:
             "game": getattr(stream, "current_game", None) or getattr(stream, "current_category", None),
             "playthrough": getattr(stream, "current_playthrough_type", None),
             "challenge": getattr(stream, "current_challenge", None),
+            "used_fact_id": str(used_fact_id or "").strip() or None,
         }
         messages = list(getattr(stream, "recent_idle_messages", []) or [])
         messages.append(entry)
@@ -503,9 +511,19 @@ class StreamSpontaneityService:
         return available[0]
 
     def _recent_run_context_fact(self, stream: StreamSessionState, now: float) -> dict | None:
+        used_fact_ids = {
+            str(item.get("used_fact_id") or "")
+            for item in list(getattr(stream, "recent_idle_messages", []) or [])
+            if item.get("used_fact_id")
+        }
         facts = [
             item for item in list(getattr(stream, "recent_run_context_facts", []) or [])
             if item.get("text") and float(item.get("expires_at", 0.0) or 0.0) > now
+            and str(item.get("id") or item.get("fact_id") or "") not in used_fact_ids
+            and bool(item.get("proactive_eligible", True))
+            and str(item.get("utterance_role") or "owner_commentary") not in {
+                "quoted_or_read_dialogue", "game_audio_bleed",
+            }
         ]
         if not facts:
             return None

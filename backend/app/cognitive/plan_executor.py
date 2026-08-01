@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import threading
+import time
+
 from app.cognitive.memory_store import MemoryStore
 from app.cognitive.models import (
     Plan,
@@ -49,18 +52,45 @@ class PlanExecutor:
         self.memory_store = memory_store
         self.action_runtime = action_runtime
         self.last_guard_results: list[dict] = []
+        self.accepting_jobs = True
+        self._active_jobs = 0
+        self._lifecycle_lock = threading.Condition()
+
+    def _lifecycle(self, event_id: str, stage: str, reason: str = "") -> None:
+        print(f"[HEBE][COMMAND_LIFECYCLE] event_id={event_id} stage={stage} reason={reason or '-'}", flush=True)
+
+    def begin_shutdown(self, *, drain_seconds: float = 2.0) -> None:
+        with self._lifecycle_lock:
+            self.accepting_jobs = False
+            deadline = time.monotonic() + max(0.0, drain_seconds)
+            while self._active_jobs and time.monotonic() < deadline:
+                self._lifecycle("active", "executing", "shutdown_wait")
+                self._lifecycle_lock.wait(timeout=min(0.1, max(0.0, deadline - time.monotonic())))
+            if self._active_jobs:
+                self._lifecycle("active", "cancelled_by_shutdown", "drain_timeout")
 
     # =========================
     # Entry point
     # =========================
 
     def execute(self, plan: Plan) -> ExecutionResult:
+        event_id = str(plan.message_id or (plan.metadata or {}).get("message_id") or f"command-{time.time_ns()}")
+        with self._lifecycle_lock:
+            if not self.accepting_jobs:
+                self._lifecycle(event_id, "cancelled_by_shutdown", "not_accepting_new_jobs")
+                return ExecutionResult(results=[StepExecutionResult(step_type="cancelled", success=False, data={"cancelled_by_shutdown": True}, error="cancelled_by_shutdown")])
+            self._active_jobs += 1
+        self._lifecycle(event_id, "received")
+        self._lifecycle(event_id, "decoded")
+        self._lifecycle(event_id, "routed")
         results: list[StepExecutionResult] = []
         context: dict = {}
         self.last_guard_results = []
         decision = (plan.metadata or {}).get("cognitive_decision")
 
-        for step in plan.steps:
+        try:
+          for step in plan.steps:
+            self._lifecycle(event_id, "executing", step.type)
             blocked_reason = self._guard_step(step, decision, plan)
             if blocked_reason:
                 capability = self._step_capability(step)
@@ -100,11 +130,15 @@ class PlanExecutor:
                     "guard_reason": "",
                 })
             results.append(result)
+            self._lifecycle(event_id, "succeeded" if result.success else "failed", result.error or step.type)
 
             if result.success:
                 self._merge_result_into_context(step, result, context)
-
-        return ExecutionResult(results=results)
+          return ExecutionResult(results=results)
+        finally:
+            with self._lifecycle_lock:
+                self._active_jobs = max(0, self._active_jobs - 1)
+                self._lifecycle_lock.notify_all()
 
     def _guard_step(self, step: PlanStep, decision: dict | None, plan: Plan) -> str | None:
         if step.type == "noop":

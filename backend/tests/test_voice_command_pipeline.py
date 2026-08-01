@@ -16,6 +16,7 @@ from app.hebe_engine import HebeEngine
 from app.integrations.twitch.chat_cache import TwitchChatCache
 from app.integrations.twitch.target_resolver import TwitchTargetResolver
 from app.services.voice_command_recovery import normalize_stt_transcript
+from app.services.direct_stt_command import parse_direct_stt_command
 from app.stream.action_planner import StreamActionPlanner
 from app.stream.state import StreamSessionState
 
@@ -81,14 +82,23 @@ class FakeWin:
 
 
 class RetrySTT:
-    def __init__(self, retry_text, *, speech_detected=True):
+    def __init__(self, retry_text, *, speech_detected=True, accepted=True, selected_language="es"):
         self.last_speech_detected = speech_detected
         self.retry_text = retry_text
+        self.accepted = accepted
+        self.selected_language = selected_language
         self.calls = []
 
-    def retry_last_command_transcript(self, *, language=None):
-        self.calls.append({"language": language})
-        return {"text": self.retry_text, "attempted": True, "speech_detected": self.last_speech_detected}
+    def retry_last_language_recovery(self, *, initial_language=None):
+        self.calls.append({"initial_language": initial_language})
+        return {
+            "text": self.retry_text,
+            "selected_text": self.retry_text if self.accepted else "",
+            "selected_language": self.selected_language if self.accepted else "",
+            "accepted": self.accepted,
+            "attempted": True,
+            "speech_detected": self.last_speech_detected,
+        }
 
 
 class FakeContextBuilder:
@@ -202,7 +212,8 @@ class VoiceCommandPipelineTests(unittest.TestCase):
     def test_stt_normalization_only_does_not_execute(self):
         result = normalize_stt_transcript("ebe az promo anuria", known_targets=["nuria"])
 
-        self.assertEqual(result.normalized_text, "hebe haz promo a nuria")
+        self.assertEqual(result.normalized_text, "ebe az promo anuria")
+        self.assertIn("hebe haz promo a nuria", result.alternative_candidates)
         self.assertTrue(result.metadata["normalization_only"])
         self.assertFalse(hasattr(result, "action_type"))
 
@@ -244,6 +255,99 @@ class VoiceCommandPipelineTests(unittest.TestCase):
         self.assertEqual(result, "continue")
         self.assertEqual(engine.runtime.win.opened[0]["app_id"], "obs")
         self.assertEqual(delivered, [("stt_voice", "modelo:open_application:obs")])
+
+    def test_stt_canonical_melonds_command_executes_once(self):
+        variants = (
+            "Hebe, abre melonDS",
+            "Ebe, abre Melón DS",
+            "Eve, abre Melón de Ese",
+        )
+        for index, transcript in enumerate(variants):
+            with self.subTest(transcript=transcript):
+                engine = make_engine()
+                emitted = []
+                engine._deliver_manual_reply = lambda text, *, source: None
+                direct = parse_direct_stt_command(transcript, event_id=f"melon-{index}")
+                metadata = {
+                    "command_hypothesis": {
+                        "wake_detected": True,
+                        "wake_score": 1.0,
+                        "hypothesis_agreement": 1.0,
+                        "action_structure_score": 1.0,
+                    },
+                    "direct_stt_command": direct.to_dict(),
+                    "command_mode": True,
+                    "action_eligible": True,
+                    "detected_language": "es",
+                }
+                with patch.dict(os.environ, {"HEBE_APP_MELONDS_PATH": r"C:\Tools\melonDS\melonDS.exe"}), \
+                     patch("app.hebe_engine.emit", lambda event_type, data=None: emitted.append((event_type, data or {}))):
+                    result = engine._process_stt_voice_transcript(transcript, stt_metadata=metadata)
+
+                self.assertEqual(result, "continue")
+                self.assertEqual(len(engine.runtime.win.opened), 1)
+                self.assertEqual(engine.runtime.win.opened[0]["app_id"], "melonds")
+                outcomes = [
+                    data for event_type, data in emitted
+                    if event_type == "voice.command" and data.get("status") == "outcome"
+                ]
+                self.assertEqual(len(outcomes), 1)
+                self.assertEqual(outcomes[0]["outcome"], "action_executed")
+
+    def test_addressed_question_bypasses_app_resolver_and_replies(self):
+        engine = make_engine()
+        engine.runtime.state.stream.enabled = False
+        engine.context_builder = FakeContextBuilder()
+        engine.deliberation_service = FakeDeliberationService()
+        engine.plan_executor = FakePlanExecutor()
+        engine.response_synthesizer = FixedResponseSynth("Aquí estoy.")
+        engine._deliver_voice_reply = lambda _text: None
+        planner = Mock()
+        planner.command_markers.return_value = {"abre"}
+        planner.plan.side_effect = AssertionError("App resolver must not run for direct conversation")
+        engine.local_app_planner = planner
+        emitted = []
+
+        with patch("app.hebe_engine.emit", lambda event_type, data=None: emitted.append((event_type, data or {}))), \
+             patch("app.hebe_engine.log_chat"):
+            result = engine._process_stt_voice_transcript("Ebe, ¿estás ahí?")
+
+        self.assertEqual(result, "continue")
+        planner.plan.assert_not_called()
+        self.assertEqual(engine.context_builder.inputs, ["ebe estas ahi"])
+        outcomes = [data for event_type, data in emitted if event_type == "voice.command" and data.get("status") == "outcome"]
+        self.assertEqual(outcomes[-1]["outcome"], "conversational_reply")
+
+    def test_incomplete_direct_app_command_clarifies(self):
+        engine = make_engine()
+        engine.runtime.state.stream.enabled = False
+        delivered = []
+        emitted = []
+        engine._deliver_manual_reply = lambda text, *, source: delivered.append((source, text))
+
+        with patch("app.hebe_engine.emit", lambda event_type, data=None: emitted.append((event_type, data or {}))):
+            result = engine._process_stt_voice_transcript("Hebe, abre")
+
+        self.assertEqual(result, "continue")
+        self.assertEqual(delivered, [("stt_voice", "¿Qué aplicación quieres que abra?")])
+        outcomes = [data for event_type, data in emitted if event_type == "voice.command" and data.get("status") == "outcome"]
+        self.assertEqual(outcomes[-1]["outcome"], "clarification")
+
+    def test_direct_command_pipeline_failure_is_not_silent(self):
+        engine = make_engine()
+        engine.runtime.state.stream.enabled = False
+        delivered = []
+        emitted = []
+        engine._deliver_manual_reply = lambda text, *, source: delivered.append((source, text))
+        engine.handle_command = Mock(side_effect=RuntimeError("parser exploded"))
+
+        with patch("app.hebe_engine.emit", lambda event_type, data=None: emitted.append((event_type, data or {}))):
+            result = engine._process_stt_voice_transcript("Hebe, ¿estás ahí?")
+
+        self.assertEqual(result, "continue")
+        self.assertTrue(delivered)
+        outcomes = [data for event_type, data in emitted if event_type == "voice.command" and data.get("status") == "outcome"]
+        self.assertEqual(outcomes[-1]["outcome"], "action_failed")
 
     def test_obs_path_missing_returns_structured_action_result_not_generic_advice(self):
         engine = make_engine()
@@ -646,11 +750,13 @@ class VoiceCommandPipelineTests(unittest.TestCase):
     def test_noisy_stt_enters_planner_as_normalized_candidate(self):
         engine = make_engine(["nuria"])
         normalization = normalize_stt_transcript("ebe az promo anuria", known_targets=engine._known_voice_command_targets())
+        command_hypothesis = normalization.alternative_candidates[-1]
         plan = engine._get_stream_action_planner().plan(
-            InputEvent(source="stt_voice", raw_text=normalization.raw_text, normalized_text=normalization.normalized_text, is_voice=True)
+            InputEvent(source="stt_voice", raw_text=normalization.raw_text, normalized_text=command_hypothesis, is_voice=True)
         )
 
-        self.assertEqual(normalization.normalized_text, "hebe haz promo a nuria")
+        self.assertEqual(normalization.normalized_text, "ebe az promo anuria")
+        self.assertEqual(command_hypothesis, "hebe haz promo a nuria")
         self.assertEqual(plan.action_type, "twitch_shoutout")
         self.assertEqual(plan.status, "complete")
         self.assertEqual(plan.target, "nuriiia___")
@@ -769,14 +875,15 @@ class VoiceCommandPipelineTests(unittest.TestCase):
         with patch("builtins.print", lambda *args, **kwargs: logs.append(" ".join(str(arg) for arg in args))), \
              patch("app.hebe_engine.emit", lambda event_type, data=None: emits.append((event_type, data or {}))):
             normalization = engine._normalize_stt_input("ebe az promo anuria")
+            command_hypothesis = normalization.alternative_candidates[-1]
             engine._current_input_event = engine._build_input_event(
                 source="stt_voice",
                 raw_text=normalization.raw_text,
-                normalized_text=normalization.normalized_text,
+                normalized_text=command_hypothesis,
                 stt_metadata=normalization.as_event(),
             )
-            result = engine._handle_stream_manual_command(normalization.normalized_text)
-            engine._synthesize_command_result(result, input_text=normalization.normalized_text)
+            result = engine._handle_stream_manual_command(command_hypothesis)
+            engine._synthesize_command_result(result, input_text=command_hypothesis)
 
         joined = "\n".join(logs)
         self.assertIn("[HEBE][INPUT]", joined)
@@ -2564,7 +2671,7 @@ class VoiceCommandPipelineTests(unittest.TestCase):
         self.assertNotIn("Hija de puta", guarded)
         self.assertIn("aquÃ­ sobreviviendo", guarded)
 
-    def test_unsupported_script_retries_forced_spanish_and_routes_valid_latin_result(self):
+    def test_unsupported_script_uses_dual_recovery_and_routes_valid_latin_result(self):
         engine = make_engine(["nuria"])
         engine.runtime.stt = RetrySTT("Hebe abre OBS")
         routed = []
@@ -2578,12 +2685,12 @@ class VoiceCommandPipelineTests(unittest.TestCase):
 
         joined = "\n".join(logs)
         self.assertEqual(result, "continue")
-        self.assertEqual(engine.runtime.stt.calls, [{"language": "es"}])
+        self.assertEqual(engine.runtime.stt.calls, [{"initial_language": "devanagari"}])
         self.assertEqual(routed[0][0], "stt_voice")
         self.assertEqual(routed[0][1], "abre obs")
         self.assertEqual(routed[0][2].raw_text, "à¤¯à¤¬ à¤†à¤¬à¤°à¥‡ à¤…à¤¬à¥‡ à¤¯à¤¶à¥‡")
         self.assertEqual(routed[0][2].normalized_text, "hebe abre obs")
-        self.assertIn("[HEBE][STT][RETRY] reason=unsupported_script forcing_language=es", joined)
+        self.assertIn("[HEBE][STT][RETRY] reason=unsupported_script policy=dual_decode_then_drop", joined)
         self.assertIn("[HEBE][STT][RETRY_RESULT] raw='Hebe abre OBS' accepted=true", joined)
         debug_events = [data for event_type, data in emitted if event_type == "voice.command"]
         self.assertTrue(any(data.get("retry_attempted") is True and data.get("retry_transcript") == "Hebe abre OBS" for data in debug_events))
@@ -2609,7 +2716,10 @@ class VoiceCommandPipelineTests(unittest.TestCase):
 
     def test_unsupported_script_retry_still_unsupported_is_rejected(self):
         engine = make_engine(["nuria"])
-        engine.runtime.stt = RetrySTT("à¤¯à¤¬ à¤†à¤¬à¤°à¥‡ à¤…à¤¬à¥‡ à¤¯à¤¶à¥‡")
+        engine.runtime.stt = RetrySTT(
+            "à¤¯à¤¬ à¤†à¤¬à¤°à¥‡ à¤…à¤¬à¥‡ à¤¯à¤¶à¥‡",
+            accepted=False,
+        )
         handled = []
         engine.handle_command = lambda command, source="voice": handled.append((source, command)) or "continue"
         emitted = []

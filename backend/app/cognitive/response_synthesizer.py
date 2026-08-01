@@ -1813,6 +1813,8 @@ class ResponseSynthesizer:
         specific_context_anchors = payload.get("specific_context_anchors") or []
         recent_motifs = payload.get("recent_style_motifs") or []
         live_session_context = payload.get("live_session_context") or {}
+        anchor_evidence = payload.get("anchor_evidence") or {}
+        output_language = os.getenv("HEBE_STREAM_OUTPUT_LANGUAGE", "es").strip().lower() or "es"
 
         system = (
             f"{self._build_stream_style_block()}\n\n"
@@ -1821,7 +1823,10 @@ class ResponseSynthesizer:
             "Rules:\n"
             "- One line, max 220 characters.\n"
             "- No markdown.\n"
-            "- Spanish by default.\n"
+            f"- Output language is {output_language}; English game dialogue never changes it.\n"
+            "- When game knowledge is incomplete, react or make a concise observation; do not prescribe strategy.\n"
+            "- Every gameplay claim must be directly supported by anchor_evidence.exact_supported_claims.\n"
+            "- Never combine evidence from different topic IDs.\n"
             "- Prioritize current category/game, then stream title, then playthrough/challenge, then ambient STT.\n"
             "- Use the local game_profile when present, but only claim facts listed there or in stream_context.\n"
             "- Add flavor from game_profile.tone_vibe, safe_comment_topics, gameplay_systems_non_spoiler, or challenge_hooks.\n"
@@ -1854,6 +1859,7 @@ class ResponseSynthesizer:
             f"- presence_mode: {presence_mode}\n"
             f"- idle_topic: {idle_topic}\n\n"
             f"- specific_context_anchors: {', '.join(specific_context_anchors) or 'none'}\n\n"
+            f"- anchor_evidence: {anchor_evidence}\n\n"
             "run_context:\n"
             f"- objective: {run_context.get('objective') or 'unknown'}\n"
             f"- location: {run_context.get('location') or 'unknown'}\n"

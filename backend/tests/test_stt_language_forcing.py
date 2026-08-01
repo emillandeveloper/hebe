@@ -78,7 +78,9 @@ class STTLanguageForcingTests(unittest.TestCase):
         self.assertEqual(model.calls[-1]["temperature"], 0)
         self.assertGreater(model.calls[-1]["beam_size"], 1)
         self.assertIn("Hebe", model.calls[-1]["initial_prompt"])
-        self.assertEqual(model.calls[-1]["initial_prompt"], service.cfg.command_prompt)
+        self.assertIn("OBS", model.calls[-1]["initial_prompt"])
+        self.assertIn("melonDS", model.calls[-1]["initial_prompt"])
+        self.assertNotIn("Persona", model.calls[-1]["initial_prompt"])
         self.assertEqual(metadata["task"], "transcribe")
 
     def test_stt_prompt_is_only_transcriber_config_not_published_as_user_text(self):

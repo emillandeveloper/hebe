@@ -32,11 +32,11 @@ from app.integrations.twitch.event_adapter import TwitchEventAdapter
 from app.integrations.twitch.helix_client import TwitchHelixClient
 
 
-def build_speak(state: HebeState) -> Callable[..., None]:
+def build_speak(state: HebeState, stt: STTService | None = None) -> Callable[..., None]:
     def speak(text: str, language: str = "es", *, emit_chat: bool = True) -> None:
         if not getattr(state, "tts_enabled", False):
             if emit_chat:
-                emit("chat.assistant", {"text": text})
+                emit("debug.tts_candidate", {"text": text, "response_stage": "generated"})
             print("[HEBE][TTS] skipped reason=global_disabled", flush=True)
             log_jsonl_event("tts", {
                 "output_target": "local_tts",
@@ -56,6 +56,8 @@ def build_speak(state: HebeState) -> Callable[..., None]:
             "text": text,
         })
         try:
+            if stt is not None:
+                stt.set_tts_playback(True, text)
             result = _speak(
                 text=text,
                 language=language,
@@ -81,6 +83,9 @@ def build_speak(state: HebeState) -> Callable[..., None]:
                 "error": safe_error,
             })
             raise
+        finally:
+            if stt is not None:
+                stt.set_tts_playback(False, text)
 
     return speak
 
@@ -104,8 +109,6 @@ class HebeRuntime:
 def build_runtime() -> HebeRuntime:
     state = HebeState()
     state.tts_enabled = os.getenv("HEBE_TTS_ENABLED", "false").strip().lower() in ("1", "true", "yes", "on")
-
-    speak = build_speak(state)
 
     stt_config = STTConfig()
     persisted_device = get_setting("stt.input_device_id", os.getenv("HEBE_STT_INPUT_DEVICE", "") or "")
@@ -132,6 +135,7 @@ def build_runtime() -> HebeRuntime:
         emit=emit,
         log_chat=log_chat,
     )
+    speak = build_speak(state, stt)
     if persisted_device or persisted_device_name:
         try:
             stt.set_input_device(

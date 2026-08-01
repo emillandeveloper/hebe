@@ -25,8 +25,17 @@ class STTWorker:
                 try:
                     text = self.stt.listen()
                     if text:
+                        metadata = dict(getattr(self.stt, "last_result_metadata", {}) or {})
+                        if not self._language_metadata_allows_submission(metadata):
+                            print(
+                                "[HEBE][STT_REJECTED] "
+                                "reason=unsupported_language_recovery_failed "
+                                f"initial_language={metadata.get('detected_language') or ''}",
+                                flush=True,
+                            )
+                            continue
                         print(f"[STT_WORKER] voice -> {text!r}", flush=True)
-                        submit_text_from_voice(text)
+                        submit_text_from_voice(text, metadata)
                 except STTDeviceOpenFailure as e:
                     print(f"[STT_WORKER] paused: {e}", flush=True)
                     break
@@ -35,6 +44,20 @@ class STTWorker:
 
         self._thread = threading.Thread(target=run, daemon=True)
         self._thread.start()
+
+    @staticmethod
+    def _language_metadata_allows_submission(metadata: dict | None) -> bool:
+        data = dict(metadata or {})
+        language = str(data.get("detected_language") or "").lower()
+        if not language:
+            return True
+        if language in {"es", "en"} and data.get("language_allowed", True):
+            return True
+        recovery = dict(data.get("language_recovery") or {})
+        return bool(
+            recovery.get("accepted")
+            and str(recovery.get("selected_language") or "").lower() in {"es", "en"}
+        )
 
     def is_running(self) -> bool:
         return self._thread is not None and self._thread.is_alive()

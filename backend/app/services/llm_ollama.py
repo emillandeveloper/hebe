@@ -58,7 +58,7 @@ class OllamaLLM:
 
     def _emit_final(self, text: str) -> None:
         if text and self.emit:
-            self.emit("llm.final", {"text": text})
+            self.emit("debug.llm_candidate", {"text": text, "response_stage": "generated"})
 
     def _emit_error(self, where: str, error: str) -> None:
         if self.emit:

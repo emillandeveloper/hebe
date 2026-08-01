@@ -50,6 +50,11 @@ class WakeNameResolver:
         source: str = "",
         is_sleeping: bool = False,
         command_markers: Iterable[str] | None = None,
+        detected_language: str | None = None,
+        alternative_candidates: Iterable[str] | None = None,
+        command_redecode_supports_wake: bool = False,
+        acoustic_wake_score: float = 0.0,
+        owner_trusted: bool | None = None,
     ) -> WakeNameResolution:
         normalized = self._normalize(normalized_text or raw_text)
         tokens = normalized.split()
@@ -57,6 +62,41 @@ class WakeNameResolver:
             return WakeNameResolution(stripped_text="")
 
         name_index, matched_name, name_score = self._find_name(tokens)
+        language = str(detected_language or "").lower()
+        lexical_collisions = {"here", "he", "her", "hero", "heavy", "hear", "heir"}
+        raw_first = self._normalize(raw_text).split()
+        raw_token = raw_first[0] if raw_first else ""
+        lexical_collision = bool(language == "en" and raw_token in lexical_collisions)
+        if lexical_collision:
+            print(
+                "[HEBE][WAKE_CANDIDATE] "
+                f"raw_token={raw_token} candidate={matched_name or 'hebe'} language={language} "
+                "lexical_collision=true score=0.000 accepted=false",
+                flush=True,
+            )
+            name_index, matched_name, name_score = None, None, 0.0
+        elif not matched_name and alternative_candidates:
+            for alternative in alternative_candidates:
+                alt_tokens = self._normalize(alternative).split()
+                alt_index, alt_name, alt_score = self._find_name(alt_tokens)
+                meaningful = self._has_command_context(alt_tokens, command_markers) or self._has_direct_context(alt_tokens)
+                trusted = owner_trusted if owner_trusted is not None else source in {"stt_voice", "voice", "ui", "typed_ui"}
+                accepted = bool(
+                    alt_name and command_redecode_supports_wake and acoustic_wake_score >= 0.6
+                    and meaningful and trusted
+                )
+                print(
+                    "[HEBE][WAKE_CANDIDATE] "
+                    f"raw_token={raw_token} candidate={alt_name or ''} language={language or 'unknown'} "
+                    f"lexical_collision=false score={min(alt_score, acoustic_wake_score):.3f} "
+                    f"accepted={str(accepted).lower()}",
+                    flush=True,
+                )
+                if accepted:
+                    name_index, matched_name, name_score = alt_index, alt_name, min(alt_score, acoustic_wake_score)
+                    tokens = alt_tokens
+                    normalized = " ".join(tokens)
+                    break
         stripped = self._strip_name(tokens, name_index)
         stripped_tokens = stripped.split()
         has_wake = any(token in self.wake_concepts for token in stripped_tokens)
@@ -67,6 +107,12 @@ class WakeNameResolver:
 
         if matched_name:
             confidence = name_score
+            print(
+                "[HEBE][WAKE_CANDIDATE] "
+                f"raw_token={raw_token} candidate={matched_name} language={language or 'unknown'} "
+                f"lexical_collision=false score={confidence:.3f} accepted=true",
+                flush=True,
+            )
             if matched_name == "eve" and not (
                 has_wake
                 or has_sleep

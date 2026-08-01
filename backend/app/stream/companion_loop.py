@@ -26,6 +26,46 @@ class StreamCompanionTick:
     readiness: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(slots=True)
+class CompanionAnchorEvidence:
+    anchor_id: str
+    anchor_type: str
+    raw_owner_fragments: list[str]
+    exact_supported_claims: list[str]
+    timestamps: list[float]
+    topic_id: str
+    currentness: float
+    confidence: float
+    allowed_contribution_types: list[str]
+    forbidden_claims: list[str]
+    expires_at: float
+    extracted_subject: str = ""
+    extracted_object: str = ""
+    extracted_predicate: str = ""
+    supported_claims: list[str] = field(default_factory=list)
+    unsupported_claims: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "anchor_id": self.anchor_id,
+            "anchor_type": self.anchor_type,
+            "raw_owner_fragments": self.raw_owner_fragments,
+            "exact_supported_claims": self.exact_supported_claims,
+            "timestamps": self.timestamps,
+            "topic_id": self.topic_id,
+            "currentness": self.currentness,
+            "confidence": self.confidence,
+            "allowed_contribution_types": self.allowed_contribution_types,
+            "forbidden_claims": self.forbidden_claims,
+            "expires_at": self.expires_at,
+            "extracted_subject": self.extracted_subject,
+            "extracted_object": self.extracted_object,
+            "extracted_predicate": self.extracted_predicate,
+            "supported_claims": self.supported_claims,
+            "unsupported_claims": self.unsupported_claims,
+        }
+
+
 class StreamCompanionLoop:
     """Live-stream heartbeat for safe solo companion comments.
 
@@ -48,6 +88,7 @@ class StreamCompanionLoop:
         )
         self.last_tick_ts = 0.0
         self.last_summary_ts = 0.0
+        self._used_anchor_ids: set[str] = set()
         self.ticks = 0
         self.should_speak_count = 0
         self.emitted_count = 0
@@ -124,6 +165,7 @@ class StreamCompanionLoop:
                 event.payload["source"] = "stream_companion_tick"
                 event.payload["anchor_type"] = anchor.get("type")
                 event.payload["anchor_quality"] = anchor.get("quality")
+                event.payload["anchor_evidence"] = anchor.get("evidence") or {}
                 event.payload["core_loop"] = {"intervention": presence}
         else:
             self.blocked_reasons[blocked_reason] += 1
@@ -166,6 +208,9 @@ class StreamCompanionLoop:
         self.emitted_count += 1
         if stream is None:
             return
+        anchor_id = str((getattr(stream, "last_proactive_decision", {}) or {}).get("anchor_id") or "")
+        if anchor_id:
+            self._used_anchor_ids.add(anchor_id)
         decision = getattr(stream, "last_proactive_decision", None)
         if isinstance(decision, dict) and decision.get("trigger") == "stream_companion_tick":
             decision = dict(decision)
@@ -307,9 +352,15 @@ class StreamCompanionLoop:
         return "observe_only"
 
     def _selected_anchor(self, stream: StreamSessionState, readiness: dict[str, Any], now: float) -> dict[str, Any]:
+        current_topic = str((getattr(stream, "current_discourse_topic", {}) or {}).get("topic_id") or "")
         facts = [
             fact for fact in list(getattr(stream, "recent_run_context_facts", []) or [])
             if float(fact.get("expires_at", 0.0) or 0.0) > now
+            and str(fact.get("utterance_role") or "owner_commentary") not in {
+                "quoted_or_read_dialogue", "game_audio_bleed",
+            }
+            and bool(fact.get("proactive_eligible", True))
+            and str(fact.get("id") or fact.get("fact_id") or "") not in self._used_anchor_ids
         ]
         high = sorted(
             facts,
@@ -317,11 +368,43 @@ class StreamCompanionLoop:
         )
         if high:
             fact = high[-1]
+            fact_topic = str(fact.get("topic_id") or "")
+            topic_match = not (current_topic and fact_topic) or current_topic == fact_topic
+            age = max(0.0, now - float(fact.get("timestamp", now) or now))
+            allowed = bool(topic_match and float(fact.get("expires_at", 0.0) or 0.0) > now)
+            print(
+                "[HEBE][ANCHOR_FRESHNESS] "
+                f"anchor={fact.get('id') or fact.get('fact_id') or ''} age_seconds={age:.3f} "
+                f"topic_match={str(topic_match).lower()} allowed={str(allowed).lower()}",
+                flush=True,
+            )
+            if not allowed:
+                return {"id": "", "type": "stream_silence", "quality": 0.0, "reason": "stale_or_topic_mismatch"}
+            raw = str(fact.get("raw_evidence") or fact.get("raw_text") or fact.get("text") or "")
+            evidence = CompanionAnchorEvidence(
+                anchor_id=str(fact.get("id") or fact.get("fact_id") or ""),
+                anchor_type=str(fact.get("category") or fact.get("kind") or "ambient_context"),
+                raw_owner_fragments=[raw] if raw else [],
+                exact_supported_claims=[raw] if raw else [],
+                timestamps=[float(fact.get("timestamp", now) or now)],
+                topic_id=fact_topic,
+                currentness=max(0.0, 1.0 - age / max(1.0, float(fact.get("ttl_sec", 60) or 60))),
+                confidence=float(fact.get("confidence", 0.0) or 0.0),
+                allowed_contribution_types=["contextual_reaction", "emotional_banter", "concise_observation"],
+                forbidden_claims=["unsupported strategy", "save instruction", "unrelated mechanic", "stale topic fusion"],
+                expires_at=float(fact.get("expires_at", 0.0) or 0.0),
+                extracted_subject=str(fact.get("extracted_subject") or ""),
+                extracted_object=str(fact.get("extracted_object") or ""),
+                extracted_predicate=str(fact.get("extracted_predicate") or ""),
+                supported_claims=[str(item) for item in fact.get("supported_claims") or []],
+                unsupported_claims=[str(item) for item in fact.get("unsupported_claims") or []],
+            )
             return {
                 "id": fact.get("id") or "",
                 "type": fact.get("category") or fact.get("kind") or "ambient_context",
                 "quality": float(fact.get("confidence", 0.0) or 0.0),
                 "reason": "recent_ambient_context",
+                "evidence": evidence.to_dict(),
             }
         anchors = list(readiness.get("specific_context_anchors") or [])
         quality = float((readiness.get("spontaneity_score") or {}).get("anchor_quality") or 0.0)

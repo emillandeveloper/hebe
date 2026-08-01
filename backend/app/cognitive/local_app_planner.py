@@ -8,6 +8,10 @@ from app.cognitive.action_plan import ActionPlan
 from app.cognitive.input_event import InputEvent
 from app.cognitive.wake_name_resolver import WakeNameResolver
 from app.services.app_registry import resolve_whitelisted_app
+from app.services.direct_stt_command import (
+    DirectUtteranceIntentFamily,
+    parse_direct_stt_command,
+)
 
 
 OPEN_APP_MARKERS = {
@@ -35,7 +39,18 @@ class LocalAppActionPlanner:
         self.wake_resolver = wake_resolver or WakeNameResolver()
 
     def plan(self, input_event: InputEvent, *, is_awake: bool = True) -> ActionPlan | None:
-        normalized = self._normalize(input_event.normalized_text or input_event.raw_text)
+        direct_metadata = dict((input_event.stt_metadata or {}).get("direct_stt_command") or {})
+        canonical_text = str(
+            direct_metadata.get("command_text")
+            or input_event.normalized_text
+            or input_event.raw_text
+        )
+        parsed = parse_direct_stt_command(
+            canonical_text,
+            ambient_text=input_event.raw_text,
+            event_id=direct_metadata.get("event_id"),
+        )
+        normalized = self._normalize(canonical_text)
         if not normalized:
             return None
 
@@ -57,7 +72,11 @@ class LocalAppActionPlanner:
             return None
 
         command_text = resolution.stripped_text or normalized
-        target = self._extract_target(command_text)
+        target = (
+            parsed.raw_target
+            if parsed.detected_intent_family == DirectUtteranceIntentFamily.APPLICATION_ACTION.value
+            else self._extract_target(command_text)
+        )
         candidates = ["open_application"] if target else []
         print(f"[HEBE][COG] intent_candidates={candidates!r}", flush=True)
         if not target:

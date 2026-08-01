@@ -18,6 +18,7 @@ from .api.capabilities import router as capabilities_router
 from .core.log_bus import get_recent_logs, install_log_capture
 from .core.persistent_logs import ensure_log_dirs, log_jsonl_event
 from .services.vts_client import get_vts_status
+from .cognitive.final_emission_gate import FinalEmissionGate, OutputRoute
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -40,6 +41,7 @@ ws_manager = WSManager()
 event_q: asyncio.Queue[Event] = asyncio.Queue()
 hebe = HebeAdapter(event_q)
 app.state.adapter = hebe
+_dev_final_emission_gate = FinalEmissionGate()
 
 
 def _get_stream_stats():
@@ -301,23 +303,35 @@ async def dev_test_ui_message():
     event_id = f"evt_{uuid.uuid4().hex}"
     message_id = f"msg_{uuid.uuid4().hex}"
     text = "Hebe UI test message"
-    await event_q.put(
-        Event(
-            type="chat.assistant",
-            event_id=event_id,
-            ts=time.time(),
-            data={
-                "event_id": event_id,
-                "message_id": message_id,
-                "text": text,
-                "speaker": "Hebe",
-                "source": "system",
-                "output_target": "local_ui",
-                "metadata": {"dev_test": True},
-            },
-        )
+    result = _dev_final_emission_gate.emit(
+        event_id=event_id,
+        source="system",
+        final_response=text,
+        output_route=OutputRoute.LOCAL_OWNER_REPLY,
+        output_targets=["local_ui"],
+        guard_result={"passed": True},
+        debug_payload={"response_stage": "final", "dev_test": True},
+        emit_ui=lambda payload: event_q.put_nowait(
+            Event(
+                type="chat.assistant",
+                event_id=event_id,
+                ts=time.time(),
+                data={
+                    **payload,
+                    "event_id": event_id,
+                    "message_id": message_id,
+                    "speaker": "Hebe",
+                    "metadata": {"dev_test": True},
+                },
+            )
+        ),
     )
-    return {"ok": True, "event_id": event_id, "message_id": message_id, "text": text}
+    return {
+        "ok": bool(result.emitted),
+        "event_id": event_id,
+        "message_id": message_id,
+        "text": text,
+    }
 
 
 @app.on_event("shutdown")

@@ -339,7 +339,7 @@ class CognitiveTwitchTests(unittest.TestCase):
         self.assertTrue(reply)
 
     def test_spontaneous_prompt_includes_stream_context(self):
-        model = CapturingModel("Mi senor, revisa recursos antes de avanzar.")
+        model = CapturingModel("Mi senor, ese reto va a pedir paciencia.")
         event = InternalEvent(
             event_type="twitch_idle_prompt",
             payload={
@@ -373,7 +373,7 @@ class CognitiveTwitchTests(unittest.TestCase):
         )
 
         prompt_text = "\n".join(message["content"] for message in model.messages)
-        self.assertEqual(reply, "Mi senor, revisa recursos antes de avanzar.")
+        self.assertEqual(reply, "Mi senor, ese reto va a pedir paciencia.")
         self.assertIn("Challenge Playthrough Level 1", prompt_text)
         self.assertIn("Final Fantasy X", prompt_text)
         self.assertIn("challenge", prompt_text)
