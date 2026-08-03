@@ -166,6 +166,9 @@ class CommentKnowledgeContract:
     allowed_claims: list[str]
     forbidden_claims: list[str]
     contribution_mode: str
+    scene_id: str = ""
+    topic_id: str = ""
+    scene_fact_ids: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -173,6 +176,7 @@ class GameResearchJob:
     job_id: str
     plan: GameSearchPlan
     scene_id: str
+    mode: str = ResearchMode.CONTEXTUAL_LOOKUP.value
     status: str = "queued"
     queued_at: float = 0.0
     expires_at: float = 0.0
@@ -201,6 +205,10 @@ class GameIntelligenceDiagnostics:
     current_comment_fact_ids: list[str] = field(default_factory=list)
     current_comment_mode: str = "contextual_reaction"
     current_comment_provenance: list[dict[str, Any]] = field(default_factory=list)
+    research_provider: str = "none"
+    research_provider_configured: bool = False
+    research_provider_available: bool = False
+    research_provider_reason: str = "provider_missing"
 
 
 class GameResearchProvider(Protocol):
@@ -595,7 +603,23 @@ class CommentKnowledgePolicy:
         requested_tip: bool = False,
         high_social_value: bool = False,
         low_interruption_cost: bool = False,
+        scene_facts: list[dict[str, Any]] | None = None,
+        current_scene_id: str = "",
+        current_topic_id: str = "",
+        now: float | None = None,
     ) -> CommentKnowledgeContract:
+        filtered_scene_facts = self.filter_scene_facts(
+            scene_facts or [],
+            current_scene_id=current_scene_id,
+            current_topic_id=current_topic_id,
+            now=now,
+        )
+        if scene_facts is not None:
+            scene_evidence = [
+                str(item.get("raw_evidence") or item.get("raw_text") or item.get("text") or item.get("summary") or "")
+                for item in filtered_scene_facts
+                if str(item.get("raw_evidence") or item.get("raw_text") or item.get("text") or item.get("summary") or "").strip()
+            ]
         allowed_facts: list[RetrievedGameFact] = []
         forbidden: list[str] = []
         provenance: list[dict[str, str]] = []
@@ -629,7 +653,40 @@ class CommentKnowledgePolicy:
             [fact.claim for fact in allowed_facts],
             list(dict.fromkeys(forbidden)),
             mode,
+            str(current_scene_id or ""),
+            str(current_topic_id or ""),
+            [
+                str(item.get("id") or item.get("fact_id") or "")
+                for item in filtered_scene_facts
+                if str(item.get("id") or item.get("fact_id") or "")
+            ],
         )
+
+    @staticmethod
+    def filter_scene_facts(
+        facts: list[dict[str, Any]],
+        *,
+        current_scene_id: str,
+        current_topic_id: str,
+        now: float | None = None,
+    ) -> list[dict[str, Any]]:
+        now = time.time() if now is None else float(now)
+        selected: list[dict[str, Any]] = []
+        for source in facts:
+            fact = dict(source)
+            timestamp = float(fact.get("timestamp", now) or now)
+            ttl = max(1.0, float(fact.get("ttl_sec", 60.0) or 60.0))
+            age = max(0.0, now - timestamp)
+            fact["age_seconds"] = age
+            fact["currentness_score"] = 0.0 if fact.get("superseded") else max(0.0, 1.0 - age / ttl)
+            if bool(fact.get("superseded")) or float(fact.get("expires_at", now + 1.0) or 0.0) <= now:
+                continue
+            if current_scene_id and str(fact.get("scene_id") or "") != str(current_scene_id):
+                continue
+            if current_topic_id and str(fact.get("topic_id") or "") != str(current_topic_id):
+                continue
+            selected.append(fact)
+        return selected
 
 
 class KnowledgeGapTracker:
@@ -688,9 +745,13 @@ class GameResearchService:
         cache_ttl_seconds: float = 30 * 86400,
         max_workers: int = 2,
         now_fn: Callable[[], float] = time.time,
+        provider_name: str = "",
+        provider_configured: bool | None = None,
     ) -> None:
         self.store = store or GameIntelligenceStore()
         self.provider = provider
+        self.provider_name = str(provider_name or (type(provider).__name__ if provider is not None else "none"))
+        self.provider_configured = bool(provider is not None if provider_configured is None else provider_configured)
         self.cache_ttl_seconds = max(60.0, float(cache_ttl_seconds))
         self.now_fn = now_fn
         self.progress = GameProgressTracker(self.store)
@@ -700,6 +761,13 @@ class GameResearchService:
         self.comment_policy = CommentKnowledgePolicy(self.spoiler_firewall)
         self.advice_guard = GameAssistanceGuard()
         self.diagnostics = GameIntelligenceDiagnostics()
+        self.diagnostics.research_provider = self.provider_name
+        self.diagnostics.research_provider_configured = self.provider_configured
+        self.diagnostics.research_provider_available = provider is not None
+        self.diagnostics.research_provider_reason = (
+            "ready" if provider is not None else "configured_provider_unavailable" if self.provider_configured else "provider_not_configured"
+        )
+        self._log_provider_availability()
         self._executor = ThreadPoolExecutor(max_workers=max(1, max_workers), thread_name_prefix="hebe-game-research")
         self._jobs: dict[str, tuple[GameResearchJob, Future[list[RetrievedGameFact]]]] = {}
         self._job_lock = threading.RLock()
@@ -767,8 +835,14 @@ class GameResearchService:
             question_type="dossier",
             expected_fact_type="general_mechanics",
         )
-        job = self.queue_research(plan, progress=None, scene_id="pre_stream", ttl_seconds=300)
-        job.metadata.update({"game_title": canonical, "platform": platform, "version": version, "build_dossier": True})
+        job = self.queue_research(
+            plan,
+            progress=None,
+            scene_id="pre_stream",
+            ttl_seconds=300,
+            mode=ResearchMode.PRE_STREAM_DOSSIER.value,
+            metadata={"game_title": canonical, "platform": platform, "version": version, "build_dossier": True},
+        )
         return job
 
     def plan_search(
@@ -796,7 +870,14 @@ class GameResearchService:
         pieces.append("spoiler-safe no future story information")
         query = " ".join(piece for piece in pieces if piece)
         key = _cache_key(game_id, query, expected_fact_type)
-        return GameSearchPlan(query, _slug(game_id), str(entity or ""), question_type, spoiler_limit, expected_fact_type, key)
+        plan = GameSearchPlan(query, _slug(game_id), str(entity or ""), question_type, spoiler_limit, expected_fact_type, key)
+        print(
+            "[HEBE][GAME_SEARCH_PLAN] "
+            f"game={plan.game_id} mode={question_type} entity={plan.entity!r} "
+            f"spoiler_limit={plan.spoiler_limit} cache_key={plan.cache_key}",
+            flush=True,
+        )
+        return plan
 
     def research(
         self,
@@ -818,6 +899,8 @@ class GameResearchService:
         progress: GameProgressState | None,
         scene_id: str,
         ttl_seconds: float = 20.0,
+        mode: ResearchMode | str = ResearchMode.CONTEXTUAL_LOOKUP.value,
+        metadata: dict[str, Any] | None = None,
     ) -> GameResearchJob:
         with self._job_lock:
             for existing_job, existing_future in self._jobs.values():
@@ -828,20 +911,22 @@ class GameResearchService:
             job_id=f"research_{uuid.uuid4().hex}",
             plan=plan,
             scene_id=scene_id,
+            mode=str(mode),
             queued_at=now,
             expires_at=now + max(0.1, ttl_seconds),
+            metadata=dict(metadata or {}),
         )
 
         def work() -> list[RetrievedGameFact]:
             job.status = "running"
-            print(f"[HEBE][GAME_RESEARCH_JOB] status=running job_id={job.job_id} cache_key={plan.cache_key}", flush=True)
+            print(f"[HEBE][GAME_RESEARCH_JOB] status=running mode={job.mode} job_id={job.job_id} cache_key={plan.cache_key}", flush=True)
             return self.research(plan, progress=progress)
 
         future = self._executor.submit(work)
         with self._job_lock:
             self._jobs[job.job_id] = (job, future)
         self.diagnostics.active_research_job = asdict(job)
-        print(f"[HEBE][GAME_RESEARCH_JOB] status=queued job_id={job.job_id} cache_key={plan.cache_key}", flush=True)
+        print(f"[HEBE][GAME_RESEARCH_JOB] status=queued mode={job.mode} job_id={job.job_id} cache_key={plan.cache_key}", flush=True)
         return job
 
     def collect_job(self, job_id: str, *, scene_still_current: bool = True) -> tuple[GameResearchJob, list[RetrievedGameFact]]:
@@ -855,13 +940,20 @@ class GameResearchService:
         if self.now_fn() > job.expires_at or not scene_still_current:
             job.status = "stale"
             future.cancel()
-            print(f"[HEBE][GAME_RESEARCH_JOB] status=stale job_id={job.job_id}", flush=True)
+            print(f"[HEBE][GAME_RESEARCH_JOB] status=stale mode={job.mode} job_id={job.job_id}", flush=True)
             return job, []
         try:
             facts = future.result()
         except Exception as exc:
             job.status, job.error = "failed", f"{type(exc).__name__}: {exc}"
-            print(f"[HEBE][GAME_RESEARCH_JOB] status=failed job_id={job.job_id} error={type(exc).__name__}", flush=True)
+            if job.mode == ResearchMode.PRE_STREAM_DOSSIER.value:
+                self.diagnostics.dossier_status = "failed"
+                self.diagnostics.current_comment_mode = "contextual_reaction"
+            print(
+                f"[HEBE][GAME_RESEARCH_JOB] status=failed mode={job.mode} job_id={job.job_id} "
+                f"error={type(exc).__name__} reason={str(exc) or type(exc).__name__}",
+                flush=True,
+            )
             return job, []
         job.status = "completed"
         job.completed_at = self.now_fn()
@@ -879,11 +971,16 @@ class GameResearchService:
                 [],
                 existing,
             )
-            self.store.save_dossier(dossier)
-            self.diagnostics.dossier_status = "created" if existing is None else "loaded"
-            self._log_dossier(dossier, self.diagnostics.dossier_status)
+            if self._dossier_sufficient(dossier):
+                self.store.save_dossier(dossier)
+                self.diagnostics.dossier_status = "created" if existing is None else "loaded"
+                self._log_dossier(dossier, self.diagnostics.dossier_status)
+            else:
+                self.diagnostics.dossier_status = "insufficient"
+                self.diagnostics.current_comment_mode = "contextual_reaction"
+                self._log_dossier(existing, "insufficient", game=title)
         self.diagnostics.active_research_job = asdict(job)
-        print(f"[HEBE][GAME_RESEARCH_JOB] status=completed job_id={job.job_id} facts={len(facts)}", flush=True)
+        print(f"[HEBE][GAME_RESEARCH_JOB] status=completed mode={job.mode} job_id={job.job_id} facts={len(facts)}", flush=True)
         return job, facts
 
     def cancel_job(self, job_id: str) -> bool:
@@ -912,7 +1009,7 @@ class GameResearchService:
         payload = {
             "comment_id": comment_id,
             "mode": contract.contribution_mode,
-            "scene_fact_ids": [hashlib.sha256(item.encode("utf-8")).hexdigest()[:10] for item in contract.scene_evidence],
+            "scene_fact_ids": list(contract.scene_fact_ids) or [hashlib.sha256(item.encode("utf-8")).hexdigest()[:10] for item in contract.scene_evidence],
             "game_fact_ids": fact_ids,
             "lookup_used": bool(fact_ids),
             "spoiler_guard": "passed" if not contract.forbidden_claims else "filtered",
@@ -932,6 +1029,7 @@ class GameResearchService:
         text: str,
         game: str,
         scene_evidence: list[str] | None = None,
+        scene_fact_ids: list[str] | None = None,
         advice_mode: GameAssistanceMode | str = GameAssistanceMode.MECHANICS_WITHOUT_SOLUTIONS,
     ) -> dict[str, Any]:
         dossier = self.store.get_dossier(game)
@@ -952,7 +1050,7 @@ class GameResearchService:
         payload = {
             "comment_id": comment_id,
             "mode": "informed_observation" if fact_ids else "contextual_reaction",
-            "scene_fact_ids": [
+            "scene_fact_ids": list(dict.fromkeys(scene_fact_ids or [])) or [
                 hashlib.sha256(item.encode("utf-8")).hexdigest()[:10]
                 for item in (scene_evidence or []) if item
             ],
@@ -1007,6 +1105,14 @@ class GameResearchService:
             rows = []
         sources = [dict(row) for row in rows if isinstance(row, dict)]
         facts = self._normalize_facts(plan, sources, progress)
+        for fact in facts:
+            print(
+                "[HEBE][RETRIEVED_GAME_FACT] "
+                f"fact_id={fact.fact_id} confidence={fact.confidence:.3f} "
+                f"usable_for_comment={str(fact.usable_for_comment).lower()} "
+                f"source={fact.source_location or 'none'}",
+                flush=True,
+            )
         self.store.save_cache(plan, sources, facts, ttl_seconds=self.cache_ttl_seconds, now=self.now_fn())
         self.diagnostics.sources_found = len(sources)
         self.diagnostics.facts_accepted = [fact.fact_id for fact in facts if fact.usable_for_comment]
@@ -1216,6 +1322,16 @@ class GameResearchService:
             f"game={game or (dossier.canonical_title if dossier else 'unknown')} status={status} "
             f"facts={len(dossier.confirmed_general_mechanics) if dossier else 0} "
             f"sources={len(dossier.sources) if dossier else 0}",
+            flush=True,
+        )
+
+    def _log_provider_availability(self) -> None:
+        print(
+            "[HEBE][GAME_RESEARCH_PROVIDER] "
+            f"provider={self.provider_name} "
+            f"configured={str(self.provider_configured).lower()} "
+            f"available={str(self.provider is not None).lower()} "
+            f"reason={self.diagnostics.research_provider_reason}",
             flush=True,
         )
 

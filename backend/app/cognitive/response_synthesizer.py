@@ -41,6 +41,7 @@ from app.cognitive.speech_act_pipeline import (
 )
 from app.core.ui_bridge import emit
 from app.stream.game_advice_gate import GameAdviceGate
+from app.stream.output_language import StreamOutputLanguagePolicy
 
 
 # Cuantas veces reintentamos la generacion si detectamos un patron helper.
@@ -114,6 +115,9 @@ class ResponseSynthesizer:
         self._stream_stats = StreamReplyStats()
         self._dataset_logger = StreamDatasetLogger()
         self.game_advice_gate = GameAdviceGate()
+        self.stream_output_language = StreamOutputLanguagePolicy()
+        self.scene_timeline = None
+        self.spontaneous_opportunities = None
         self._style_guard_fallback_counts: dict[str, int] = {}
         self._game_guidance_classifier = GameGuidanceCapability()
         self.last_response_debug_contract: dict[str, Any] | None = None
@@ -1934,6 +1938,20 @@ class ResponseSynthesizer:
         text = (reply or "").strip()
         lowered = text.lower()
         payload = payload or {}
+        scene_timeline = getattr(self, "scene_timeline", None)
+        if scene_timeline is not None:
+            scene_decision = scene_timeline.revalidate(payload.get("scene_guard"))
+            if not scene_decision.valid:
+                self._finish_spontaneous_opportunity(
+                    payload, "invalidated", scene_decision.reason, "SceneTimelineGuard",
+                )
+                print(
+                    "[HEBE][SCENE_REVALIDATION] "
+                    f"decision=cancel reason={scene_decision.reason} "
+                    f"scene_id={scene_decision.current_scene_id} state_version={scene_decision.current_state_version}",
+                    flush=True,
+                )
+                return ""
         if not self._has_specific_anchor(payload):
             return ""
         if lowered in {".", "..", "...", "....", ".....", "......", ""}:
@@ -2009,14 +2027,66 @@ class ResponseSynthesizer:
                     flush=True,
                 )
             print("[HEBE][SPONTANEITY] skipped reason=game_advice_not_validated", flush=True)
-            return ""
+            rewritten = self._rewrite_blocked_opportunity_once(
+                payload, reason=validation.reason, guard="GameAdviceGate",
+            )
+            return rewritten
         print(
             "[HEBE][GAME_ADVICE_GATE] "
             f"game={validation.game or 'unknown'} mechanics={validation.mechanics} "
             f"validated={validation.validated} blocked=[]",
             flush=True,
         )
-        return text
+        language = self.stream_output_language.enforce(
+            text,
+            event_type="spontaneous_stream_comment",
+            fallback=fallback,
+        )
+        if language.action != "allow":
+            print(
+                "[HEBE][STREAM_OUTPUT_LANGUAGE] "
+                f"expected={language.expected_language} detected={language.detected_language} "
+                f"action={language.action} reason={language.reason}",
+                flush=True,
+            )
+        return language.text
+
+    def _rewrite_blocked_opportunity_once(self, payload: dict, *, reason: str, guard: str) -> str:
+        opportunity_id = str(payload.get("opportunity_id") or "")
+        manager = getattr(self, "spontaneous_opportunities", None)
+        if manager is None or not opportunity_id or not manager.safe_rewrite_once(opportunity_id):
+            self._finish_spontaneous_opportunity(payload, "consumed", reason, guard)
+            return ""
+        anchor = dict(payload.get("anchor_evidence") or {})
+        expected = self.stream_output_language.expected_language(event_type="spontaneous_stream_comment")
+        reaction = "Uf, qué tensión." if expected == "es" else "Oof, that was tense."
+        if bool(anchor.get("terminal")) or str(anchor.get("current_state") or "") in {"enemy_dead", "battle_ended"}:
+            reaction = "Vaya momento." if expected == "es" else "What a moment."
+        decision = self.stream_output_language.enforce(
+            reaction,
+            event_type="spontaneous_stream_comment",
+        )
+        if not decision.text:
+            self._finish_spontaneous_opportunity(payload, "consumed", "safe_rewrite_failed", guard)
+            return ""
+        self._finish_spontaneous_opportunity(payload, "reaction_only", reason, guard)
+        print(
+            "[HEBE][SPONTANEOUS_OPPORTUNITY] "
+            f"opportunity_id={opportunity_id} status=reaction_only guard={guard} reason={reason}",
+            flush=True,
+        )
+        return decision.text
+
+    def _finish_spontaneous_opportunity(self, payload: dict, status: str, reason: str, guard: str) -> None:
+        payload["opportunity_guard_result"] = {
+            "status": status,
+            "reason": reason,
+            "guard": guard,
+        }
+        manager = getattr(self, "spontaneous_opportunities", None)
+        opportunity_id = str(payload.get("opportunity_id") or "")
+        if manager is not None and opportunity_id:
+            manager.mark(opportunity_id, status, reason=reason, guard=guard)
 
     def _validate_spontaneous_game_advice(self, text: str, payload: dict):
         game_profile = payload.get("game_profile") or {}

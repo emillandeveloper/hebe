@@ -131,6 +131,31 @@ class GameMechanicsRegistry:
 
 
 class GameAdviceGate:
+    _CLAIM_PATTERNS: dict[str, tuple[str, ...]] = {
+        "save_instruction": (
+            r"\b(?:guarda|guardar|guardalo|salva|salvar|haz un guardado|save|save it)\b",
+        ),
+        "heal_instruction": (
+            r"\b(?:cura|curar|curate|curarte|curalo|recupera vida|heal|heal up|restore health)\b",
+        ),
+        "buy_instruction": (r"\b(?:compra|compralo|buy|purchase)\b",),
+        "equip_instruction": (r"\b(?:equipa|equipate|ponte|equip|wear)\b",),
+        "use_instruction": (r"\b(?:usa|utiliza|gastalo|use|spend it)\b",),
+        "attack_instruction": (r"\b(?:ataca|golpealo|dale|attack|hit it|strike)\b",),
+        "movement_instruction": (r"\b(?:ve a|vete a|entra en|sal de|gira|go to|head to|enter|leave|turn left|turn right)\b",),
+        "wait_instruction": (r"\b(?:espera|aguanta|no ataques aun|wait|hold on|do not attack yet|dont attack yet)\b",),
+        "stash_instruction": (r"\b(?:reserva|guardate|almacena|stash|keep it for later|hold onto)\b",),
+        "level_up_condition": (r"\b(?:sube de nivel|subir de nivel|farmea|farmear|entrena|entrenar|level up|grind|gain levels)\b",),
+        "enemy_alive_assumption": (
+            r"\b(?:le queda poca vida|esta casi muerto|casi lo tienes|sigue vivo|"
+            r"low hp|almost dead|nearly dead|you almost have it|still alive)\b",
+        ),
+    }
+    _RECOMMENDATION = re.compile(
+        r"\b(?:deberias|debes|tienes que|te conviene|mejor|recuerda|no olvides|"
+        r"you should|you need to|you had better|remember|do not forget|dont forget)\b"
+    )
+
     def __init__(self, registry: GameMechanicsRegistry | None = None):
         self.registry = registry or GameMechanicsRegistry()
 
@@ -148,12 +173,31 @@ class GameAdviceGate:
     def detects_specific_advice(self, text: str) -> bool:
         normalized = _normalize(text)
         prescription = bool(re.search(
-            r"\b(?:deberias|debes|haz|usa|guarda|espera|vende|equipa|ataca|cura|lanza|reserva|"
-            r"you should|save before|wait until|use the|sell the|equip|attack when|heal before)\b",
+            r"\b(?:deberias|debes|tienes que|te conviene|mejor|recuerda|no olvides|haz|usa|utiliza|"
+            r"guarda|salva|espera|aguanta|vende|compra|equipa|ataca|cura|lanza|reserva|ve a|vete a|"
+            r"you should|you need to|you had better|remember|do not forget|dont forget|save|wait|"
+            r"use|sell|buy|equip|attack|heal|stash|go to|head to|hold onto)\b",
             normalized,
         ))
         sequence = bool(re.search(r"\b(?:antes de|despues de|cuando termine|luego|then|before|after|until)\b", normalized))
         return prescription or sequence
+
+    def extract_substantive_claims(self, text: str) -> list[str]:
+        normalized = _normalize(text)
+        claims = [
+            claim
+            for claim, patterns in self._CLAIM_PATTERNS.items()
+            if any(re.search(pattern, normalized) for pattern in patterns)
+        ]
+        if "save_instruction" in claims and (
+            re.search(r"\bguarda(?:r)?\s+(?:sp|mp|mana|pm|recursos?|objetos?|items?)\b", normalized)
+            or re.search(r"\bguarda\b.*\ben mente\b", normalized)
+        ):
+            claims.remove("save_instruction")
+        # An attack instruction necessarily assumes that the target/combat is still active.
+        if "attack_instruction" in claims and "enemy_alive_assumption" not in claims:
+            claims.append("enemy_alive_assumption")
+        return sorted(dict.fromkeys(claims))
 
     def validate(
         self,
@@ -164,7 +208,10 @@ class GameAdviceGate:
         known_game_mechanics: list[str] | None = None,
         source_evidence: list[str | dict[str, Any]] | None = None,
     ) -> GameAdviceValidation:
-        mechanics = self.detect_mechanics(proposed_advice)
+        mechanics = sorted(dict.fromkeys([
+            *self.detect_mechanics(proposed_advice),
+            *self.extract_substantive_claims(proposed_advice),
+        ]))
         game = str(current_game or (game_run_state or {}).get("game") or "").strip()
         advice_detected = self.detects_specific_advice(proposed_advice)
         if not mechanics:
@@ -203,7 +250,7 @@ class GameAdviceGate:
                 evidence_id = f"raw:{index}"
                 exact_text = str(item or "")
                 confidence = 0.8
-            for mechanic in self.detect_mechanics(exact_text):
+            for mechanic in [*self.detect_mechanics(exact_text), *self.extract_substantive_claims(exact_text)]:
                 evidence_mechanics.add(mechanic)
                 provenance[mechanic] = ValidatedClaim(
                     mechanic, evidence_type, evidence_id, exact_text, confidence,

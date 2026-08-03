@@ -5,6 +5,8 @@ import unicodedata
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
+from app.stream.game_advice_gate import GameAdviceGate
+
 
 def _normalize(value: str) -> str:
     raw = "".join(
@@ -50,6 +52,15 @@ class EvidenceEntailmentGuard:
         ),
     }
 
+    _PURE_EMOTIONAL = re.compile(
+        r"^(?:vaya|vaya momento|uf+|uff|uf+ que tension|madre mia|bien|brutal|vamos|que tension|menudo momento|"
+        r"eso tiene pinta de ser (?:durisimo|dificil|intenso)|"
+        r"wow|oof|nice|damn|lets go|that was close|close one|that looks rough)[!. ]*$"
+    )
+
+    def __init__(self, advice_gate: GameAdviceGate | None = None) -> None:
+        self.advice_gate = advice_gate or GameAdviceGate()
+
     def evaluate(self, candidate: str, anchor_evidence: dict | None) -> EvidenceEntailmentDecision:
         evidence = dict(anchor_evidence or {})
         candidate_norm = _normalize(candidate)
@@ -69,32 +80,50 @@ class EvidenceEntailmentGuard:
             claim for claim, aliases in self._MECHANICS.items()
             if any(_normalize(alias) in candidate_norm for alias in aliases)
         ]
+        claims = list(dict.fromkeys([
+            *claims,
+            *self.advice_gate.detect_mechanics(candidate),
+            *self.advice_gate.extract_substantive_claims(candidate),
+        ]))
         entailed: list[str] = []
         unsupported: list[str] = []
         wrong_referent: list[str] = []
         contradicted: list[str] = []
+        terminal = bool(evidence.get("terminal"))
+        current_state = _normalize(str(evidence.get("current_state") or ""))
         for claim in claims:
-            aliases = self._MECHANICS[claim]
+            aliases = self._MECHANICS.get(claim, (claim.replace("_", " "),))
             exact_match = any(_normalize(alias) in evidence_norm for alias in aliases)
+            if not exact_match:
+                exact_match = claim in set(self.advice_gate.extract_substantive_claims(evidence_norm))
+            if claim == "enemy_alive_assumption" and (
+                terminal or current_state in {"enemy dead", "battle ended", "puzzle completed"}
+            ):
+                contradicted.append(claim)
             if claim == "player_low_level" and subject in {"enemies", "unknown_plural_entity"}:
                 wrong_referent.append(claim)
             elif claim == "enemy_low_level" and subject == "owner_player":
                 wrong_referent.append(claim)
             elif claim in unsupported_evidence:
                 unsupported.append(claim)
+            elif claim in contradicted:
+                continue
             elif exact_match:
                 entailed.append(claim)
             else:
                 unsupported.append(claim)
+        pure_emotional = bool(self._PURE_EMOTIONAL.fullmatch(candidate_norm))
+        extraction_failure = bool(candidate_norm and not claims and not pure_emotional)
         violations = [
             *(f"unsupported:{item}" for item in unsupported),
             *(f"contradicted:{item}" for item in contradicted),
             *(f"wrong_referent:{item}" for item in wrong_referent),
+            *(["extraction_failure"] if extraction_failure else []),
         ]
-        action = "suppress" if wrong_referent or contradicted else "repair" if unsupported else "allow"
+        action = "suppress" if wrong_referent or contradicted else "repair" if unsupported or extraction_failure else "allow"
         result = (
             "wrong_referent" if wrong_referent else "contradicted" if contradicted
-            else "unsupported" if unsupported else "entailed" if claims
+            else "unsupported" if unsupported else "extraction_failure" if extraction_failure else "entailed" if claims
             else "reasonable_low-risk_reaction"
         )
         decision = EvidenceEntailmentDecision(

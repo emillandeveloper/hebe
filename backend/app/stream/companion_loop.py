@@ -11,6 +11,7 @@ from app.cognitive.core_loop import PerceivedEvent, PolicyContract, PresenceEngi
 from app.cognitive.scheduler import InternalEvent
 from app.stream.proactive import ProactiveDecision, log_proactive_decision, semantic_cooldown_key
 from app.stream.spontaneity import StreamSpontaneityService
+from app.stream.scene_timeline import SceneTimelineManager, SpontaneousOpportunityManager
 from app.stream.state import StreamSessionState
 
 
@@ -39,6 +40,10 @@ class CompanionAnchorEvidence:
     allowed_contribution_types: list[str]
     forbidden_claims: list[str]
     expires_at: float
+    scene_id: str = ""
+    state_version: int = 0
+    current_state: str = "active"
+    terminal: bool = False
     extracted_subject: str = ""
     extracted_object: str = ""
     extracted_predicate: str = ""
@@ -58,6 +63,10 @@ class CompanionAnchorEvidence:
             "allowed_contribution_types": self.allowed_contribution_types,
             "forbidden_claims": self.forbidden_claims,
             "expires_at": self.expires_at,
+            "scene_id": self.scene_id,
+            "state_version": self.state_version,
+            "current_state": self.current_state,
+            "terminal": self.terminal,
             "extracted_subject": self.extracted_subject,
             "extracted_object": self.extracted_object,
             "extracted_predicate": self.extracted_predicate,
@@ -78,10 +87,14 @@ class StreamCompanionLoop:
         *,
         spontaneity: StreamSpontaneityService | None = None,
         presence_engine: PresenceEngine | None = None,
+        scene_timeline: SceneTimelineManager | None = None,
+        opportunities: SpontaneousOpportunityManager | None = None,
         now_fn: Callable[[], float] | None = None,
     ):
         self.spontaneity = spontaneity or StreamSpontaneityService()
         self.presence_engine = presence_engine or PresenceEngine()
+        self.scene_timeline = scene_timeline or SceneTimelineManager(now_fn=now_fn or time.time)
+        self.opportunities = opportunities or SpontaneousOpportunityManager(now_fn=now_fn or time.time)
         self._now_fn = now_fn
         self.min_seconds_after_owner_speech = float(
             os.getenv("HEBE_COMPANION_MIN_SECONDS_AFTER_OWNER_SPEECH", "30")
@@ -98,6 +111,7 @@ class StreamCompanionLoop:
         self.last_tick_ts = 0.0
         self.last_summary_ts = 0.0
         self._used_anchor_ids.clear()
+        self.opportunities.reset()
         self.ticks = 0
         self.should_speak_count = 0
         self.emitted_count = 0
@@ -175,6 +189,15 @@ class StreamCompanionLoop:
                 event.payload["anchor_type"] = anchor.get("type")
                 event.payload["anchor_quality"] = anchor.get("quality")
                 event.payload["anchor_evidence"] = anchor.get("evidence") or {}
+                scene_guard = dict(anchor.get("scene_guard") or self.scene_timeline.snapshot())
+                event.payload["scene_guard"] = scene_guard
+                opportunity = self.opportunities.open(
+                    str(anchor.get("id") or ""),
+                    expires_at=float((anchor.get("evidence") or {}).get("expires_at", 0.0) or 0.0),
+                )
+                if opportunity is not None:
+                    event.payload["opportunity_id"] = opportunity.opportunity_id
+                    stream.spontaneous_opportunities = self.opportunities.all_states()
                 event.payload["core_loop"] = {"intervention": presence}
         else:
             self.blocked_reasons[blocked_reason] += 1
@@ -220,6 +243,10 @@ class StreamCompanionLoop:
         anchor_id = str((getattr(stream, "last_proactive_decision", {}) or {}).get("anchor_id") or "")
         if anchor_id:
             self._used_anchor_ids.add(anchor_id)
+            opportunity = self.opportunities.for_anchor(anchor_id)
+            if opportunity is not None:
+                self.opportunities.mark(opportunity.opportunity_id, "emitted")
+                stream.spontaneous_opportunities = self.opportunities.all_states()
         decision = getattr(stream, "last_proactive_decision", None)
         if isinstance(decision, dict) and decision.get("trigger") == "stream_companion_tick":
             decision = dict(decision)
@@ -370,7 +397,14 @@ class StreamCompanionLoop:
             }
             and bool(fact.get("proactive_eligible", True))
             and str(fact.get("id") or fact.get("fact_id") or "") not in self._used_anchor_ids
+            and self.opportunities.eligible(str(fact.get("id") or fact.get("fact_id") or ""))
         ]
+        facts = self.scene_timeline.filter_current_facts(
+            facts,
+            topic_id=current_topic,
+            now=now,
+            anchor_relevant=True,
+        )
         high = sorted(
             facts,
             key=lambda item: (float(item.get("confidence", 0.0) or 0.0), float(item.get("timestamp", 0.0) or 0.0)),
@@ -402,6 +436,10 @@ class StreamCompanionLoop:
                 allowed_contribution_types=["contextual_reaction", "emotional_banter", "concise_observation"],
                 forbidden_claims=["unsupported strategy", "save instruction", "unrelated mechanic", "stale topic fusion"],
                 expires_at=float(fact.get("expires_at", 0.0) or 0.0),
+                scene_id=str(fact.get("scene_id") or ""),
+                state_version=int(fact.get("state_version", 0) or 0),
+                current_state=str(fact.get("current_state") or "active"),
+                terminal=bool(fact.get("terminal")),
                 extracted_subject=str(fact.get("extracted_subject") or ""),
                 extracted_object=str(fact.get("extracted_object") or ""),
                 extracted_predicate=str(fact.get("extracted_predicate") or ""),
@@ -414,6 +452,12 @@ class StreamCompanionLoop:
                 "quality": float(fact.get("confidence", 0.0) or 0.0),
                 "reason": "recent_ambient_context",
                 "evidence": evidence.to_dict(),
+                "scene_guard": {
+                    "scene_id": evidence.scene_id,
+                    "state_version": evidence.state_version,
+                    "current_state": evidence.current_state,
+                    "terminal": evidence.terminal,
+                },
             }
         anchors = list(readiness.get("specific_context_anchors") or [])
         quality = float((readiness.get("spontaneity_score") or {}).get("anchor_quality") or 0.0)

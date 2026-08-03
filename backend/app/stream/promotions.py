@@ -511,10 +511,18 @@ class PromotionProfileManager:
         display_name: str = "",
         owner_command: str = "",
         stream_session_id: str | int = "",
+        known_aliases: list[str] | None = None,
+        source_promotion_event: str = "",
         now: float | None = None,
     ) -> ViewerPromotionProfile | None:
         command = _normalize(owner_command)
         if _only_this_time(command):
+            print(
+                "[HEBE][PROMOTION_PROFILE_LEARN] "
+                f"viewer={_login(login)} source_promotion_event={source_promotion_event or 'none'} "
+                "auto_promo_mode=manual_only persisted=false",
+                flush=True,
+            )
             return None
         explicit_always = bool(re.search(r"\b(?:siempre|automaticamente|automatico|cada directo|cuando aparezca|always|every stream)\b", command))
         if not explicit_always and not self.default_auto_after_success:
@@ -529,14 +537,25 @@ class PromotionProfileManager:
         )
         profile.current_login = _login(login)
         profile.display_name = display_name or profile.display_name or login
-        profile.known_aliases = sorted(set([*profile.known_aliases, _login(login)]))
+        profile.known_aliases = sorted(set([
+            *profile.known_aliases,
+            _login(login),
+            *(_login(alias) for alias in (known_aliases or []) if _login(alias)),
+        ]))
         profile.auto_promo_mode = AutoPromoMode.FIRST_MESSAGE_EACH_STREAM.value
         profile.active = True
         profile.owner_locked = True
         profile.last_promoted_at = _now_iso(now)
         profile.last_promoted_stream_id = str(stream_session_id or "") or None
         profile.updated_at = _now_iso(now)
-        return self.store.upsert_profile(profile)
+        persisted = self.store.upsert_profile(profile)
+        print(
+            "[HEBE][PROMOTION_PROFILE_LEARN] "
+            f"viewer={profile.current_login} source_promotion_event={source_promotion_event or 'none'} "
+            f"auto_promo_mode={profile.auto_promo_mode} persisted={str(persisted is not None).lower()}",
+            flush=True,
+        )
+        return persisted
 
     def apply_command(self, command: PromotionProfileCommand) -> Any:
         if command.action == "list":
@@ -583,6 +602,7 @@ class AutomaticPromotionService:
         self._seen_viewers: set[str] = set()
         self._greeted_viewers: set[str] = set()
         self._seen_message_ids: set[str] = set()
+        self._profile_miss_logged: set[str] = set()
         self._queue: deque[dict[str, Any]] = deque()
         self._last_send_at = float("-inf")
         self._lock = threading.RLock()
@@ -596,6 +616,7 @@ class AutomaticPromotionService:
             self._seen_viewers.clear()
             self._greeted_viewers.clear()
             self._seen_message_ids.clear()
+            self._profile_miss_logged.clear()
             self._queue.clear()
             self._last_send_at = float("-inf")
 
@@ -631,6 +652,14 @@ class AutomaticPromotionService:
             return self._decision(user_login, "", first_message, "skip", "profile_missing")
         if twitch_user_id and profile.twitch_user_id.startswith("login:"):
             profile = self.store.bind_twitch_user_id(profile, twitch_user_id)
+        elif twitch_user_id and profile.twitch_user_id == twitch_user_id and user_login != profile.current_login:
+            profile.known_aliases = sorted(set([
+                *profile.known_aliases, profile.current_login, user_login,
+            ]))
+            profile.current_login = user_login
+            profile.display_name = display_name or profile.display_name or user_login
+            profile.updated_at = _now_iso(self.now_fn())
+            profile = self.store.upsert_profile(profile)
         if not profile.active or profile.auto_promo_mode in {AutoPromoMode.DISABLED.value, AutoPromoMode.MANUAL_ONLY.value}:
             return self._decision(user_login, profile.auto_promo_mode, first_message, "skip", "profile_disabled")
         if profile.auto_promo_mode == AutoPromoMode.FIRST_GREETING_EACH_STREAM.value:
@@ -720,9 +749,12 @@ class AutomaticPromotionService:
             return False
         return self.now_fn() - then < profile.cooldown_hours * 3600
 
-    @staticmethod
-    def _decision(viewer: str, profile: str, first_message: bool, decision: str, reason: str, event_id: str = "") -> AutoPromotionDecision:
+    def _decision(self, viewer: str, profile: str, first_message: bool, decision: str, reason: str, event_id: str = "") -> AutoPromotionDecision:
         result = AutoPromotionDecision(viewer, profile, first_message, decision, reason, event_id)
+        if reason == "profile_missing":
+            if viewer in self._profile_miss_logged:
+                return result
+            self._profile_miss_logged.add(viewer)
         print(
             "[HEBE][AUTO_PROMO_TRIGGER] "
             f"viewer={viewer} profile={profile or 'none'} first_message={str(first_message).lower()} "

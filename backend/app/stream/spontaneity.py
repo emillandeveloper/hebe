@@ -318,6 +318,7 @@ class StreamSpontaneityService:
         title_context = self._title_marker_context(stream, now)
         chat_snapshot = self._chat_activity_snapshot(stream, now)
         recent_idle = list(getattr(stream, "recent_idle_messages", []) or [])
+        selected_fact = self._recent_run_context_fact(stream, now)
         return {
             "reason": "stream_companion_prompt",
             "presence_mode": mode,
@@ -356,7 +357,7 @@ class StreamSpontaneityService:
                         "raw_text": item.get("raw_text"),
                         "normalized_text": item.get("normalized_text"),
                     }
-                    for item in list(getattr(stream, "recent_run_context_facts", []) or [])[-8:]
+                    for item in ([selected_fact] if selected_fact else [])
                     if item.get("text")
                 ],
                 "completed_markers": list(getattr(stream, "completed_run_markers", []) or []),
@@ -370,7 +371,8 @@ class StreamSpontaneityService:
                 "summary": chat_snapshot["summary"],
             },
             "specific_context_anchors": self._specific_context_anchors(stream, now, title_context=title_context, chat_snapshot=chat_snapshot),
-            "used_fact_id": (self._recent_run_context_fact(stream, now) or {}).get("id"),
+            "used_fact_id": (selected_fact or {}).get("id"),
+            "scene_guard": dict(getattr(stream, "current_scene_timeline", None) or {}),
             "proactive_type": "contextual_spontaneity",
             "proactive_decision": getattr(stream, "last_proactive_decision", None),
             "recent_idle_topics": [item.get("topic") for item in recent_idle[-8:] if item.get("topic")],
@@ -519,12 +521,20 @@ class StreamSpontaneityService:
         facts = [
             item for item in list(getattr(stream, "recent_run_context_facts", []) or [])
             if item.get("text") and float(item.get("expires_at", 0.0) or 0.0) > now
+            and not bool(item.get("superseded"))
             and str(item.get("id") or item.get("fact_id") or "") not in used_fact_ids
             and bool(item.get("proactive_eligible", True))
             and str(item.get("utterance_role") or "owner_commentary") not in {
                 "quoted_or_read_dialogue", "game_audio_bleed",
             }
         ]
+        scene = dict(getattr(stream, "current_scene_timeline", None) or {})
+        scene_id = str(scene.get("scene_id") or "")
+        topic_id = str(scene.get("topic_id") or "")
+        if scene_id:
+            facts = [item for item in facts if str(item.get("scene_id") or "") == scene_id]
+        if topic_id:
+            facts = [item for item in facts if str(item.get("topic_id") or "") == topic_id]
         if not facts:
             return None
         high_quality = [fact for fact in facts if self._is_high_quality_fact(fact)]

@@ -849,6 +849,19 @@ class STTService:
             f"selected_language={selected_language or 'none'} decision={recovery['decision']}",
             flush=True,
         )
+        rejection_class = ""
+        if not accepted:
+            if not best["text"] and not runner_up["text"]:
+                rejection_class = "no_speech" if max(
+                    float(best.get("no_speech_probability", 0.0)),
+                    float(runner_up.get("no_speech_probability", 0.0)),
+                ) >= 0.6 else "low_quality_audio"
+            elif short_audio and initial_allowed:
+                rejection_class = "bilingual_recovery_conflict"
+            elif not initial_allowed:
+                rejection_class = "unsupported_language"
+            else:
+                rejection_class = "low_quality_audio"
         return {
             **recovery,
             "metadata": {
@@ -865,8 +878,28 @@ class STTService:
                 "action_eligible": False,
                 "command_mode": False,
                 "rejection_reason": "unsupported_language_recovery_failed",
+                "rejection_class": rejection_class,
             },
         }
+
+    def classify_empty_transcript(
+        self,
+        *,
+        metadata: dict | None = None,
+        audio_np: np.ndarray | None = None,
+        speech_detected: bool | None = None,
+    ) -> str:
+        data = dict(metadata or {})
+        if audio_np is None or len(audio_np) == 0:
+            return "empty_audio"
+        rms = float(np.sqrt(np.mean(np.square(audio_np)))) if len(audio_np) else 0.0
+        detected = bool(rms >= self.cfg.silence_rms_threshold) if speech_detected is None else bool(speech_detected)
+        if not detected:
+            return "empty_audio"
+        no_speech = float(data.get("no_speech_probability", 0.5) or 0.0)
+        if no_speech >= 0.6:
+            return "no_speech"
+        return "low_quality_audio"
 
     def retry_last_language_recovery(self, *, initial_language: str | None = None) -> dict:
         if self.last_audio_np is None or not self.last_speech_detected:
@@ -1222,6 +1255,34 @@ class STTService:
     def _publish_transcript_or_reject(self, text: str, metadata: dict | None = None) -> str:
         texto = str(text or "").strip()
         metadata = dict(metadata or {})
+        audio_rejection = str(metadata.get("audio_rejection_reason") or "")
+        if audio_rejection in {
+            "empty_audio", "no_speech", "low_quality_audio",
+            "unsupported_language", "bilingual_recovery_conflict",
+        }:
+            print(
+                f"[HEBE][STT_REJECTED] reason={audio_rejection} level=debug",
+                flush=True,
+            )
+            self.last_rejected_stt = {
+                "raw_text": "",
+                "status": "rejected",
+                "reason": audio_rejection,
+                "ts": time.time(),
+            }
+            if audio_rejection != "no_speech":
+                self.rejected_transcripts += 1
+            self.last_rejection_reason = audio_rejection
+            self._emit("voice.command", {
+                "raw_text": "",
+                "normalized_text": "",
+                "status": "rejected",
+                "reason": audio_rejection,
+                "final_decision": "rejected",
+            })
+            self._emit("status", {"stt": "listening", "last_rejected_stt": self.last_rejected_stt})
+            self._emit("stt.partial", {"text": ""})
+            return ""
         detected_language = str(metadata.get("detected_language") or "")
         recovery = dict(metadata.get("language_recovery") or {})
         language_rejected = bool(
@@ -1682,6 +1743,11 @@ class STTService:
         self.last_speech_detected = bool(max_abs >= self.cfg.silence_threshold)
 
         if max_abs < self.cfg.silence_threshold:
+            reason = self.classify_empty_transcript(
+                metadata={}, audio_np=audio_np, speech_detected=False,
+            )
+            self.last_result_metadata = {"audio_rejection_reason": reason, "speech_detected": False}
+            self._publish_transcript_or_reject("", self.last_result_metadata)
             self._emit("status", {"stt": "listening"})
             self._emit("stt.partial", {"text": ""})
             return ""
@@ -1698,6 +1764,18 @@ class STTService:
         self.last_ambient_transcript = texto
         initial_language = str(metadata.get("detected_language") or "")
         short_audio = duration < self.cfg.short_audio_language_threshold_seconds
+        if not str(texto or "").strip():
+            reason = self.classify_empty_transcript(
+                metadata=metadata,
+                audio_np=audio_np,
+                speech_detected=self.last_speech_detected,
+            )
+            metadata = {**metadata, "audio_rejection_reason": reason, "action_eligible": False, "command_mode": False}
+            self.last_result_metadata = metadata
+            self._publish_transcript_or_reject("", metadata)
+            self._emit("status", {"stt": "listening"})
+            self._emit("stt.partial", {"text": ""})
+            return ""
         if (
             initial_language not in self.cfg.allowed_languages
             or short_audio
@@ -1713,6 +1791,9 @@ class STTService:
                 metadata = dict(recovery.get("metadata") or {})
             else:
                 metadata = dict(recovery.get("metadata") or {})
+                metadata["audio_rejection_reason"] = str(
+                    metadata.get("rejection_class") or "unsupported_language"
+                )
                 texto = ""
                 self.last_result_metadata = metadata
                 self._publish_transcript_or_reject("", metadata)

@@ -29,6 +29,8 @@ VOLATILE_STREAM_DEFAULTS: dict[str, Any] = {
     "invalidated_anchors": [],
     "recent_progress_markers": [],
     "recent_run_context_facts": [],
+    "current_scene_timeline": None,
+    "spontaneous_opportunities": [],
     "completed_run_markers": [],
     "last_raid_event": None,
     "recent_raid_contexts": [],

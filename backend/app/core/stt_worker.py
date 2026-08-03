@@ -48,6 +48,8 @@ class STTWorker:
     @staticmethod
     def _language_metadata_allows_submission(metadata: dict | None) -> bool:
         data = dict(metadata or {})
+        if data.get("audio_rejection_reason") or data.get("rejection_reason"):
+            return False
         language = str(data.get("detected_language") or "").lower()
         if not language:
             return True

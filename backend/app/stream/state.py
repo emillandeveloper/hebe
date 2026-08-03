@@ -69,6 +69,7 @@ class StreamSessionState:
     current_stream_slot: Optional[str] = None
     bilingual_mode: bool = False
     language_mode: Optional[str] = None
+    stream_output_language: str = "es"
     spoiler_policy: str = "no_spoilers"
     stream_started_at: Optional[str] = None
     stream_context_updated_ts: float = 0.0
@@ -76,6 +77,8 @@ class StreamSessionState:
     current_run_location: Optional[str] = None
     current_run_phase: Optional[str] = None
     recent_run_context_facts: list[dict] = field(default_factory=list)
+    current_scene_timeline: Optional[dict] = None
+    spontaneous_opportunities: list[dict] = field(default_factory=list)
     completed_run_markers: list[str] = field(default_factory=list)
     current_activity: str = "unknown"
     stream_output_mode: str = "tts_enabled"
