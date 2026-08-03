@@ -328,6 +328,19 @@ def get_live_session_debug(request: Request):
     return {"ok": False, "reason": "no live session state yet"}
 
 
+@router.get("/game-intelligence")
+def get_game_intelligence_debug(request: Request):
+    adapter = getattr(request.app.state, "adapter", None)
+    engine = getattr(adapter, "_engine", None) if adapter is not None else None
+    service = getattr(engine, "game_intelligence", None) if engine is not None else None
+    if service is None:
+        return {"ok": False, "reason": "game intelligence not running"}
+    try:
+        return {"ok": True, **service.debug_snapshot()}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Game intelligence debug failed: {type(exc).__name__}: {exc}")
+
+
 @router.get("/policy/last")
 def get_last_policy_decision(request: Request):
     adapter = getattr(request.app.state, "adapter", None)

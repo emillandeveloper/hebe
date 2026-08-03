@@ -94,6 +94,18 @@ class TwitchInteractionCoordinator:
         self.max_generation_in_flight = 0
         self._generation_in_flight = 0
 
+    def reset_session(self) -> None:
+        """Drop queued work and semantic outcomes from the previous stream."""
+        with self._lock:
+            self._drain_token += 1
+            self._queue.clear()
+            self._active = None
+            self._draining = False
+            self.jobs.clear()
+            self.direct_outcomes.clear()
+            self.max_generation_in_flight = 0
+            self._generation_in_flight = 0
+
     @property
     def active_job(self) -> TwitchInteractionJob | None:
         with self._lock:
@@ -406,6 +418,10 @@ class TrollEngagementBudget:
         self.window_seconds = float(window_seconds)
         self._engagements: dict[tuple[str, str], list[float]] = {}
         self._topic_state: dict[tuple[str, str], dict[str, Any]] = {}
+
+    def reset_session(self) -> None:
+        self._engagements.clear()
+        self._topic_state.clear()
 
     def topic_for(self, text: str) -> str:
         tokens = set(_normalize(text).split())

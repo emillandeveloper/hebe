@@ -94,6 +94,15 @@ class StreamCompanionLoop:
         self.emitted_count = 0
         self.blocked_reasons: Counter[str] = Counter()
 
+    def reset_session(self) -> None:
+        self.last_tick_ts = 0.0
+        self.last_summary_ts = 0.0
+        self._used_anchor_ids.clear()
+        self.ticks = 0
+        self.should_speak_count = 0
+        self.emitted_count = 0
+        self.blocked_reasons.clear()
+
     def due(self, *, last_poll_ts: float, interval_sec: float) -> bool:
         return self._now() - float(last_poll_ts or 0.0) >= float(interval_sec or 45.0)
 

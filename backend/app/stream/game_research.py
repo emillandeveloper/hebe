@@ -299,3 +299,32 @@ class GameKnowledgeResearchService:
 def _slugify(value: str) -> str:
     text = re.sub(r"[^a-z0-9]+", "_", str(value or "").lower()).strip("_")
     return text or "unknown_game"
+
+
+# Hebe Live v1 fact-level intelligence. The legacy profile service above stays
+# available for existing callers while new live/replay code imports these
+# provider-neutral contracts from the same module.
+from app.stream.game_intelligence import (  # noqa: E402
+    CommentKnowledgeContract,
+    CommentKnowledgePolicy,
+    GameAssistanceGuard,
+    GameAssistanceMode,
+    GameDossier,
+    GameIntelligenceDiagnostics,
+    GameIntelligenceStore,
+    GameProgressState,
+    GameProgressTracker,
+    GameResearchJob,
+    GameResearchService,
+    GameSearchPlan,
+    KnowledgeGap,
+    KnowledgeGapTracker,
+    ResearchMode,
+    ResearchTriggerDecision,
+    ResearchTriggerEngine,
+    RetrievedGameFact,
+    SpoilerClassification,
+    SpoilerFirewall,
+    SpoilerGuardResult,
+    default_assistance_mode,
+)

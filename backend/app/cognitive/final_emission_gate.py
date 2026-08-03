@@ -119,6 +119,12 @@ class FinalEmissionGate:
         self._seen_message_keys: set[tuple[str, str, str]] = set()
         self._commit_lock = threading.Lock()
 
+    def reset_session(self) -> None:
+        """Forget delivery dedupe keys that are meaningful only within one stream."""
+        with self._commit_lock:
+            self._seen_event_ids.clear()
+            self._seen_message_keys.clear()
+
     def emit(
         self,
         *,
@@ -131,6 +137,7 @@ class FinalEmissionGate:
         repair_summary: dict[str, Any] | None = None,
         execution_result: dict[str, Any] | None = None,
         debug_payload: dict[str, Any] | None = None,
+        runtime_context: str | None = None,
         emit_ui: Callable[[dict[str, Any]], None] | None = None,
         emit_debug: Callable[[dict[str, Any]], None] | None = None,
         send_twitch: Callable[[str], Any] | None = None,
@@ -169,6 +176,33 @@ class FinalEmissionGate:
             f"action={final_guard.action} violations={final_guard.violations} "
             f"route_override={final_guard.final_route_override or 'none'}"
         )
+
+        if runtime_context:
+            from app.stream.runtime_context import HebeLiveContextPolicy
+
+            context_decision = HebeLiveContextPolicy().authorize_output(runtime_context, targets)
+            debug["runtime_context"] = context_decision.context
+            debug["runtime_context_decision"] = {
+                "allowed": context_decision.allowed,
+                "reason": context_decision.reason,
+            }
+            if not context_decision.allowed:
+                reason = context_decision.reason
+                if emit_debug is not None:
+                    emit_debug({**debug, "response_stage": stage or "suppressed", "suppress_reason": reason})
+                log(
+                    "[HEBE][LIVE_CONTEXT_GATE] "
+                    f"context={context_decision.context} allowed=false reason={reason} "
+                    f"targets={targets}"
+                )
+                return FinalEmissionResult(
+                    False,
+                    OutputRoute.SUPPRESS.value,
+                    [],
+                    event_key,
+                    suppressed=True,
+                    reason=reason,
+                )
 
         if route in {OutputRoute.OBSERVE_ONLY, OutputRoute.SUPPRESS, OutputRoute.TWITCH_ACTION_ONLY}:
             reason = "observe_only" if route == OutputRoute.OBSERVE_ONLY else "suppressed_route"

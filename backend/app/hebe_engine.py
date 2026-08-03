@@ -5,7 +5,7 @@ import threading
 import unicodedata
 import hashlib
 import uuid
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from types import SimpleNamespace
 from queue import Empty
 from difflib import SequenceMatcher
@@ -95,8 +95,24 @@ from app.stream.companion_loop import StreamCompanionLoop
 from app.stream.game_knowledge import GameKnowledgeConfig, GameKnowledgeResolver
 from app.stream.game_profiles import GameProfileStore
 from app.stream.game_research import GameKnowledgeResearchConfig, GameKnowledgeResearchService
+from app.stream.game_intelligence import (
+    GameAssistanceMode,
+    GameResearchService as LiveGameResearchService,
+    default_assistance_mode,
+)
 from app.stream import memory as stream_memory
 from app.stream.live_session import LiveSessionBrain, init_live_session_schema
+from app.stream.live_runtime import LiveSessionStateManager
+from app.stream.runtime_context import HebeLiveContextPolicy, HebeLiveRuntimeContext
+from app.stream.promotions import (
+    AutomaticPromotionService,
+    AutoPromoMode,
+    PromotionExecutionStatus,
+    PromotionProfileManager,
+    PromotionStore,
+    PromotionTriggerType,
+    parse_promotion_profile_command,
+)
 from app.stream.ambient_context import AmbientContextExtractor
 from app.stream.audio_state import EffectiveStreamAudioState
 from app.stream.discourse import (
@@ -322,6 +338,13 @@ class HebeEngine:
             research_service=self.game_research,
             config=GameKnowledgeConfig.from_env(),
         )
+        self.game_intelligence = LiveGameResearchService(
+            provider=(
+                getattr(self.game_research, "search_provider", None)
+                if getattr(getattr(self.game_research, "config", None), "enabled", False)
+                else None
+            ),
+        )
         self._last_game_research_category = None
         self.stream_spontaneity = StreamSpontaneityService(
             game_profiles=self.game_profiles,
@@ -349,6 +372,20 @@ class HebeEngine:
             twitch_api=getattr(self.runtime, "twitch", None),
         )
         self.live_session_brain = LiveSessionBrain(getattr(self.runtime.state, "stream", None))
+        self.live_session_state_manager = LiveSessionStateManager()
+        self.live_context_policy = HebeLiveContextPolicy()
+        self.promotion_store = PromotionStore()
+        self.promotion_profile_manager = PromotionProfileManager(self.promotion_store)
+        self.automatic_promotions = AutomaticPromotionService(
+            self.promotion_store,
+            spacing_seconds=float(os.getenv("HEBE_AUTO_PROMO_SPACING_SECONDS", "8") or 8),
+            max_retries=int(os.getenv("HEBE_AUTO_PROMO_MAX_RETRIES", "1") or 1),
+            bot_usernames=self._input_firewall_bot_usernames(),
+            self_usernames={
+                str(getattr(getattr(self.runtime, "twitch", None), "channel_name", "") or ""),
+                str(getattr(getattr(self.runtime, "twitch", None), "bot_username", "") or ""),
+            },
+        )
         initial_output_mode = os.getenv("HEBE_STREAM_OUTPUT_MODE", "").strip()
         if initial_output_mode in {"ui_only", "tts_enabled", "twitch_chat_only", "silent"}:
             stream_state = getattr(self.runtime.state, "stream", None)
@@ -2080,7 +2117,16 @@ class HebeEngine:
 
     def _live_session_debug_snapshot(self) -> dict:
         try:
-            return self._get_live_session_brain().as_debug_dict()
+            snapshot = self._get_live_session_brain().as_debug_dict()
+            intelligence = getattr(self, "game_intelligence", None)
+            if intelligence is not None:
+                snapshot["game_intelligence"] = intelligence.debug_snapshot()
+            promotion_store = getattr(self, "promotion_store", None)
+            if promotion_store is not None:
+                snapshot["automatic_promotion_profiles"] = [
+                    asdict(profile) for profile in promotion_store.list_profiles(active_only=True)
+                ]
+            return snapshot
         except Exception as exc:
             print(f"[HEBE][LIVE_SESSION] debug snapshot failed: {exc!r}", flush=True)
             return {}
@@ -2336,6 +2382,13 @@ class HebeEngine:
             f"[HEBE][TWITCH_PIPELINE_START] event_id={event_id} username={username} raw={message!r}",
             flush=True,
         )
+        self._observe_automatic_promotion(
+            username=username,
+            display_name=display_name,
+            message=message,
+            irc_tags=irc_tags or {},
+            fallback_message_id=event_id,
+        )
         self.observe_twitch_chat_message(
             username,
             display_name,
@@ -2369,6 +2422,61 @@ class HebeEngine:
             created_at=datetime.now(timezone.utc).isoformat(),
         ))
         self._log_twitch_pipeline_health_if_due()
+
+    def _observe_automatic_promotion(
+        self,
+        *,
+        username: str,
+        display_name: str,
+        message: str,
+        irc_tags: dict,
+        fallback_message_id: str,
+    ) -> None:
+        service = getattr(self, "automatic_promotions", None)
+        stream = self._get_stream_state()
+        if service is None or stream is None:
+            return
+        session_id = self._ensure_stream_memory_session_if_live(stream)
+        if not session_id:
+            return
+        tags = dict(irc_tags or {})
+        try:
+            service.observe_chat_message(
+                stream_session_id=session_id,
+                twitch_user_id=str(tags.get("user-id") or tags.get("user_id") or ""),
+                login=username,
+                display_name=display_name or username,
+                message_text=message,
+                message_id=str(tags.get("id") or tags.get("message-id") or fallback_message_id),
+                channel_live=bool(getattr(stream, "is_live", False)),
+                is_bot=self._is_known_twitch_bot_user(username),
+                is_self=self._is_owner_twitch_user(username),
+            )
+            service.drain_ready(self._send_automatic_promotion)
+        except Exception as exc:
+            print(f"[HEBE][AUTO_PROMO_OUTCOME] viewer={username} status=failed reason={type(exc).__name__}", flush=True)
+
+    def _send_automatic_promotion(self, login: str) -> dict:
+        context = getattr(self, "live_context_policy", None) or HebeLiveContextPolicy()
+        authorization = context.authorize_action(
+            HebeLiveRuntimeContext.STREAM_PUBLIC,
+            "promotion.automatic_first_message",
+            trusted_automation=True,
+        )
+        print(
+            "[HEBE][LIVE_CONTEXT_GATE] "
+            f"context={authorization.context} operation={authorization.operation} "
+            f"allowed={str(authorization.allowed).lower()} reason={authorization.reason}",
+            flush=True,
+        )
+        if not authorization.allowed:
+            return {"success": False, "reason": authorization.reason}
+        ok, _normalized, reason = self._send_shoutout(
+            login,
+            source="automatic_first_message",
+            force=False,
+        )
+        return {"success": bool(ok), "reason": reason}
 
     def observe_twitch_chat_message(
         self,
@@ -2871,10 +2979,43 @@ class HebeEngine:
         if not stream or not getattr(stream, "is_live", False):
             return getattr(stream, "active_stream_session_id", None) if stream else None
         try:
-            return stream_memory.ensure_active_stream_session(stream, source="engine")
+            session_id = stream_memory.ensure_active_stream_session(stream, source="engine")
+            manager = getattr(self, "live_session_state_manager", None)
+            if session_id and manager is not None and str(manager.current_session_id) != str(session_id):
+                reset = manager.begin_session(stream, session_id)
+                if reset.changed:
+                    self._reset_live_session_subsystems()
+                auto_promotions = getattr(self, "automatic_promotions", None)
+                if auto_promotions is not None:
+                    auto_promotions.start_session(session_id)
+                self.live_session_brain = LiveSessionBrain(stream)
+            return session_id
         except Exception as exc:
             print(f"[HEBE][STREAM_MEMORY] ensure session failed: {exc!r}", flush=True)
             return None
+
+    def _reset_live_session_subsystems(self) -> None:
+        reset_names: list[str] = []
+        for name in (
+            "stream_companion_loop",
+            "owner_discourse_buffer",
+            "stream_turn_detector",
+            "discourse_participation_budget",
+            "cheer_deduplicator",
+            "final_emission_gate",
+            "twitch_interaction_coordinator",
+            "troll_engagement_budget",
+        ):
+            component = getattr(self, name, None)
+            reset = getattr(component, "reset_session", None)
+            if callable(reset):
+                reset()
+                reset_names.append(name)
+        print(
+            "[HEBE][LIVE_SESSION_SUBSYSTEM_RESET] "
+            f"components={','.join(reset_names) or 'none'}",
+            flush=True,
+        )
 
     def _record_stream_event_safe(self, event_type: str, payload: dict | None = None, *, stream=None) -> None:
         try:
@@ -3974,13 +4115,14 @@ class HebeEngine:
             stream.idle_prompts_sent_stream = 0
             stream.recent_idle_messages = []
             self._auto_enable_stream_if_live(stream, source="stream_online_event")
-            self._ensure_stream_memory_session_if_live(stream)
+            session_id = self._ensure_stream_memory_session_if_live(stream)
             self._record_stream_event_safe("stream_online", payload, stream=stream)
             try:
                 self._get_live_session_brain().observe_stream_metadata(stream, source="stream_online")
             except Exception as exc:
                 print(f"[HEBE][LIVE_SESSION] stream_online failed: {exc!r}", flush=True)
             self.poll_stream_context(force=True, require_enabled=False)
+            self._prepare_live_game_intelligence(stream)
             print("[HEBE][STREAM_CONTEXT] stream_online event handled", flush=True)
             return
         if event.event_type == "stream_offline":
@@ -4002,6 +4144,34 @@ class HebeEngine:
                 print(f"[HEBE][LIVE_SESSION] stream_offline failed: {exc!r}", flush=True)
             self._close_stream_memory_session_safe(stream, reason="stream_offline_event")
             print("[HEBE][STREAM_CONTEXT] stream_offline event handled", flush=True)
+
+    def _prepare_live_game_intelligence(self, stream) -> None:
+        service = getattr(self, "game_intelligence", None)
+        game = str(getattr(stream, "current_game", None) or getattr(stream, "current_category", None) or "").strip()
+        session_id = getattr(stream, "active_stream_session_id", None)
+        if service is None or not game or not session_id:
+            return
+        try:
+            progress = service.progress.start(
+                game,
+                session_id,
+                title=str(getattr(stream, "current_stream_title", None) or ""),
+            )
+            service.diagnostics.progress_state = asdict(progress)
+            service.diagnostics.spoiler_mode = progress.spoiler_policy
+            existing = service.store.get_dossier(game)
+            if existing is not None and service._dossier_sufficient(existing):
+                service.diagnostics.current_game = existing.canonical_title
+                service.diagnostics.dossier_status = "loaded"
+                service._log_dossier(existing, "loaded")
+            elif service.provider is not None:
+                service.prepare_game_async(game_title=game)
+            else:
+                service.diagnostics.current_game = game
+                service.diagnostics.dossier_status = "insufficient"
+                service._log_dossier(existing, "insufficient", game=game)
+        except Exception as exc:
+            print(f"[HEBE][GAME_DOSSIER] game={game} status=failed facts=0 sources=0 error={type(exc).__name__}", flush=True)
 
     def _auto_enable_stream_if_live(self, stream, *, source: str) -> bool:
         if not stream or not getattr(stream, "is_live", False):
@@ -4514,6 +4684,21 @@ class HebeEngine:
 
     def poll_stream_presence(self) -> None:
         now = time.time()
+        game_intelligence = getattr(self, "game_intelligence", None)
+        if game_intelligence is not None:
+            try:
+                for job_id in list(getattr(game_intelligence, "_jobs", {}).keys()):
+                    job, _facts = game_intelligence.collect_job(job_id, scene_still_current=True)
+                    if job.status in {"completed", "failed", "cancelled", "stale"}:
+                        getattr(game_intelligence, "_jobs", {}).pop(job_id, None)
+            except Exception as exc:
+                print(f"[HEBE][GAME_RESEARCH_JOB] status=failed error={type(exc).__name__}", flush=True)
+        auto_promotions = getattr(self, "automatic_promotions", None)
+        if auto_promotions is not None:
+            try:
+                auto_promotions.drain_ready(self._send_automatic_promotion, now=now)
+            except Exception as exc:
+                print(f"[HEBE][AUTO_PROMO_OUTCOME] viewer=queued status=failed reason={type(exc).__name__}", flush=True)
         if now - self._last_presence_poll_ts < self.presence_poll_interval_sec:
             return
         self._last_presence_poll_ts = now
@@ -6821,11 +7006,20 @@ class HebeEngine:
         repair_summary: dict | None = None,
         execution_result: dict | None = None,
         debug_payload: dict | None = None,
+        runtime_context: str | HebeLiveRuntimeContext | None = None,
         send_twitch_fn=None,
         speak_fn=None,
     ) -> dict:
         debug_payload = dict(debug_payload or {})
         debug_payload["response_stage"] = "final"
+        context_policy = getattr(self, "live_context_policy", None) or HebeLiveContextPolicy()
+        requested_context = runtime_context or debug_payload.get("runtime_context")
+        resolved_context = (
+            HebeLiveRuntimeContext(str(requested_context))
+            if requested_context
+            else context_policy.from_source(source)
+        )
+        debug_payload["runtime_context"] = resolved_context.value
         viewer = str(
             debug_payload.get("intended_recipient") or debug_payload.get("user_login")
             or debug_payload.get("username") or debug_payload.get("speaker") or ""
@@ -6893,6 +7087,7 @@ class HebeEngine:
             repair_summary=repair_summary,
             execution_result=execution_result,
             debug_payload=debug_payload,
+            runtime_context=resolved_context.value,
             emit_ui=emit_ui,
             emit_debug=emit_debug,
             send_twitch=send_twitch_fn,
@@ -6960,6 +7155,9 @@ class HebeEngine:
             session_context["live_session"] = live_context.get("live_state")
             session_context["recent_timeline_events"] = live_context.get("recent_events")
             session_context["rolling_summaries"] = live_context.get("rolling_summaries")
+        intelligence_context = self._game_intelligence_context_for_event(event, classification)
+        if intelligence_context:
+            session_context["game_intelligence"] = intelligence_context
         frame = ResponseFrame(
             input_type=classification.input_type,
             source=classification.source,
@@ -6984,6 +7182,90 @@ class HebeEngine:
             event.stt_metadata["response_frame"] = frame.as_dict()
         return frame
 
+    def _game_intelligence_context_for_event(self, event: InputEvent | None, classification) -> dict:
+        service = getattr(self, "game_intelligence", None)
+        stream = self._get_stream_state()
+        game = str(getattr(stream, "current_game", None) or getattr(stream, "current_category", None) or "").strip() if stream else ""
+        if service is None or not game:
+            return {}
+        session_id = getattr(stream, "active_stream_session_id", None) or "current"
+        try:
+            progress = service.progress.start(
+                game,
+                session_id,
+                title=str(getattr(stream, "current_stream_title", None) or ""),
+            )
+            service.diagnostics.progress_state = asdict(progress)
+            service.diagnostics.spoiler_mode = progress.spoiler_policy
+            dossier = service.store.get_dossier(game)
+            raw = str(getattr(event, "raw_text", "") or "") if event is not None else ""
+            normalized = self._normalize_text(raw)
+            game_question = bool(
+                re.search(r"\b(?:juego|game|mecanica|mecánica|combate|boss|jefe|vida|hp|daño|damage|como funciona|cómo funciona)\b", normalized)
+            )
+            uncertainty = bool(
+                re.search(r"\b(?:no entiendo|por que|por qué|no baja|no funciona|como funciona|cómo funciona|que pasa|qué pasa)\b", normalized)
+            )
+            quoted = bool((getattr(event, "stt_metadata", {}) or {}).get("quoted_game_dialogue")) if event is not None else False
+            decision = service.trigger_engine.decide(
+                game_id=progress.game_id,
+                text=raw,
+                entity=raw[:120],
+                explicit_direct_question=bool(classification.input_type == "explicit_question" and game_question),
+                owner_uncertainty=uncertainty,
+                unknown_mechanic=bool(uncertainty and game_question),
+                quoted_dialogue=quoted,
+                filler=len(normalized.split()) <= 2 and not game_question,
+                confidence=float(getattr(classification, "confidence", 0.0) or 0.0),
+            )
+            service.diagnostics.last_research_trigger = asdict(decision)
+            if decision.should_research and service.provider is not None:
+                plan = service.plan_search(
+                    game_title=game,
+                    game_id=progress.game_id,
+                    entity=decision.query_scope,
+                    question_type="owner_question" if classification.input_type == "explicit_question" else "unknown_mechanic",
+                    expected_fact_type="general_or_current_mechanic",
+                    owner_uncertainty=raw,
+                    spoiler_limit=progress.spoiler_policy,
+                )
+                job = service.queue_research(
+                    plan,
+                    progress=progress,
+                    scene_id=str((getattr(event, "stt_metadata", {}) or {}).get("event_id") or getattr(event, "timestamp", "") or "scene"),
+                    ttl_seconds=45 if classification.input_type == "explicit_question" else 15,
+                )
+                if event is not None:
+                    event.stt_metadata["game_research_job_id"] = job.job_id
+            if dossier is None:
+                return {
+                    "game_id": progress.game_id,
+                    "dossier_status": service.diagnostics.dossier_status,
+                    "progress": asdict(progress),
+                    "contribution_mode": "contextual_reaction",
+                    "allowed_claims": [],
+                    "forbidden_claims": ["unverified mechanics", "future story information", "walkthrough solutions"],
+                    "lookup_used": False,
+                }
+            safe_claims = list(dossier.confirmed_general_mechanics)[:12]
+            fact_ids = [str(source.get("fact_id") or "") for source in dossier.sources if source.get("fact_id")]
+            service.diagnostics.lookup_used = bool(safe_claims and dossier.sources)
+            return {
+                "game_id": dossier.game_id,
+                "dossier_status": "loaded",
+                "progress": asdict(progress),
+                "contribution_mode": "informed_observation" if safe_claims else "contextual_reaction",
+                "allowed_claims": safe_claims,
+                "source_provenance": list(dossier.sources)[:12],
+                "candidate_fact_ids": fact_ids[:12],
+                "forbidden_claims": list(dossier.unsafe_story_topics),
+                "lookup_used": bool(safe_claims and dossier.sources),
+                "instruction": "Use only allowed claims; otherwise make a scene reaction. Never turn this into unsolicited walkthrough advice.",
+            }
+        except Exception as exc:
+            print(f"[HEBE][GAME_INTELLIGENCE] context_failed={type(exc).__name__}", flush=True)
+            return {}
+
     def _log_input_classification(self, classification) -> None:
         print(
             "[HEBE][INPUT_CLASSIFY] "
@@ -7005,10 +7287,18 @@ class HebeEngine:
             stream=self._get_stream_state(),
             profile_store=getattr(self, "game_profiles", None),
         )
+        diagnostics = getattr(getattr(self, "game_intelligence", None), "diagnostics", None)
+        lookup_used = bool(getattr(diagnostics, "lookup_used", False))
+        if not lookup_used and knowledge.game:
+            try:
+                dossier = self.game_intelligence.store.get_dossier(knowledge.game)
+                lookup_used = bool(dossier and dossier.sources and dossier.confirmed_general_mechanics)
+            except Exception:
+                pass
         print(
             "[HEBE][KNOWLEDGE] "
             f"game={knowledge.game!r} profile_found={str(knowledge.profile_found).lower()} "
-            f"lookup_used={str(knowledge.lookup_used).lower()} confidence={knowledge.confidence} "
+            f"lookup_used={str(lookup_used).lower()} confidence={knowledge.confidence} "
             f"provenance={knowledge.provenance}",
             flush=True,
         )
@@ -7678,6 +7968,10 @@ class HebeEngine:
         if alias_result is not None:
             return alias_result
 
+        promotion_profile_result = self._handle_promotion_profile_command(raw_command)
+        if promotion_profile_result is not None:
+            return promotion_profile_result
+
         pending_promo = self._resolve_pending_promotion_target(raw_command, normalized, stream)
         if pending_promo is not None:
             return pending_promo
@@ -8186,6 +8480,80 @@ class HebeEngine:
             self.stream_action_planner = planner
         return planner
 
+    def _handle_promotion_profile_command(self, raw_command: str) -> CommandResult | None:
+        parsed = parse_promotion_profile_command(raw_command)
+        if parsed is None:
+            return None
+        authorization = (getattr(self, "live_context_policy", None) or HebeLiveContextPolicy()).authorize_action(
+            HebeLiveRuntimeContext.OWNER_LIVE_CONTROL,
+            "promotion.profile.configure",
+        )
+        if not authorization.allowed:
+            return CommandResult(
+                action_type="promotion_profile",
+                success=False,
+                user_visible_summary="Promotion profile change blocked by runtime context.",
+                fallback_text="No cambio esa preferencia desde este contexto.",
+                requires_model_response=False,
+            )
+        manager = getattr(self, "promotion_profile_manager", None)
+        if manager is None:
+            return CommandResult(
+                action_type="promotion_profile",
+                success=False,
+                user_visible_summary="Promotion profile storage is unavailable.",
+                fallback_text="No puedo cambiar la lista de promos automáticas ahora.",
+                requires_model_response=False,
+            )
+        result = manager.apply_command(parsed)
+        if parsed.action == "list":
+            profiles = list(result or [])
+            active = [
+                profile for profile in profiles
+                if profile.active and profile.auto_promo_mode not in {AutoPromoMode.DISABLED.value, AutoPromoMode.MANUAL_ONLY.value}
+            ]
+            summary = (
+                "Promos automáticas: " + ", ".join(
+                    f"{profile.current_login} ({profile.auto_promo_mode})" for profile in active
+                )
+                if active
+                else "No hay promociones automáticas configuradas."
+            )
+            return CommandResult(
+                action_type="promotion_profile_list",
+                success=True,
+                user_visible_summary=summary,
+                fallback_text=summary,
+                requires_model_response=False,
+            )
+        if parsed.action == "enable":
+            ok = result is not None
+            summary = (
+                f"Promocionaré a {parsed.target} cuando escriba por primera vez en cada directo."
+                if ok else f"No he podido guardar la promoción automática de {parsed.target}."
+            )
+        elif parsed.action == "disable":
+            ok = result is not None
+            summary = (
+                f"Promoción automática desactivada para {parsed.target}."
+                if ok else f"No tenía una promoción automática para {parsed.target}."
+            )
+        else:
+            ok = bool(result)
+            summary = (
+                f"Preferencia de promoción borrada para {parsed.target}."
+                if ok else f"No tenía una preferencia de promoción para {parsed.target}."
+            )
+        return CommandResult(
+            action_type=f"promotion_profile_{parsed.action}",
+            success=ok,
+            user_visible_summary=summary,
+            fallback_text=summary,
+            requires_model_response=False,
+            state_changes={"target": parsed.target, "action": parsed.action},
+            constraints=["Acknowledge locally only.", "Do not write a Twitch message."],
+        )
+
     def _plan_and_execute_stream_action(self, raw_command: str, normalized: str, stream) -> CommandResult | None:
         input_event = getattr(self, "_current_input_event", None) or self._build_input_event(
             source="typed_ui",
@@ -8217,7 +8585,11 @@ class HebeEngine:
                 or (getattr(input_event, "stt_metadata", {}) or {}).get("event_id")
                 or f"promotion_{uuid.uuid4().hex}"
             )
-            plan.slots = {**dict(plan.slots or {}), "event_id": event_id}
+            plan.slots = {
+                **dict(plan.slots or {}),
+                "event_id": event_id,
+                "owner_command_text": raw_command,
+            }
             print(
                 f"[HEBE][STREAM_OPS_COMMAND] event_id={event_id} type=promotion_shoutout detected=true source={input_event.source}",
                 flush=True,
@@ -8443,6 +8815,26 @@ class HebeEngine:
                 metadata={"action_plan": plan.as_log_dict(), "message_goal": "Tell Leo the command was not clear enough to execute."},
             )
 
+        authorization = (getattr(self, "live_context_policy", None) or HebeLiveContextPolicy()).authorize_action(
+            HebeLiveRuntimeContext.OWNER_LIVE_CONTROL,
+            "promotion.owner_manual",
+        )
+        print(
+            "[HEBE][LIVE_CONTEXT_GATE] "
+            f"context={authorization.context} operation={authorization.operation} "
+            f"allowed={str(authorization.allowed).lower()} reason={authorization.reason}",
+            flush=True,
+        )
+        if not authorization.allowed:
+            return CommandResult(
+                action_type="twitch_shoutout",
+                success=False,
+                user_visible_summary="Shoutout blocked by runtime context.",
+                constraints=["Do not claim the shoutout was sent."],
+                fallback_text="No ejecuto esa promo desde este contexto.",
+                requires_model_response=False,
+            )
+
         print(f"[HEBE][ACTION_EXECUTOR] executing action_type={plan.action_type} target={plan.target}", flush=True)
         print(f"[HEBE][PROMOTION_EXECUTION_DECISION] allowed=true reason=resolved_owner_command target={plan.target}", flush=True)
         if stream is not None:
@@ -8452,7 +8844,49 @@ class HebeEngine:
                 "target": plan.target,
                 "ts": time.time(),
             }
+        persistent_event = None
+        promotion_store = getattr(self, "promotion_store", None)
+        if promotion_store is not None:
+            try:
+                owner_command = str((plan.slots or {}).get("owner_command_text") or "")
+                trigger_type = (
+                    PromotionTriggerType.OWNER_MANUAL
+                    if re.search(r"\b(?:solo esta vez|una sola vez|only this time|just this once)\b", self._normalize_text(owner_command))
+                    else PromotionTriggerType.OWNER_LEARN_AND_EXECUTE
+                )
+                persistent_event = promotion_store.create_event(
+                    stream_session_id=getattr(stream, "active_stream_session_id", None) or "offline",
+                    source_event_id=event_id,
+                    requested_by="leo",
+                    raw_target_text=str((plan.slots or {}).get("target_raw") or plan.target or ""),
+                    resolved_twitch_user_id=f"login:{self._normalize_shoutout_target(plan.target)}",
+                    resolved_login=self._normalize_shoutout_target(plan.target),
+                    resolution_confidence=float(plan.confidence or 0.0),
+                    trigger_type=trigger_type,
+                )
+                if persistent_event.execution_status == PromotionExecutionStatus.PROPOSED.value:
+                    promotion_store.transition(persistent_event.id, PromotionExecutionStatus.RESOLVING)
+                    persistent_event = promotion_store.transition(persistent_event.id, PromotionExecutionStatus.QUEUED)
+            except Exception as exc:
+                persistent_event = None
+                print(f"[HEBE][PROMOTION_EVENT] persist_failed={type(exc).__name__}", flush=True)
         ok, normalized_target, send_reason = self._send_shoutout(plan.target, source="manual", force=False)
+        if persistent_event is not None and persistent_event.execution_status == PromotionExecutionStatus.QUEUED.value:
+            try:
+                terminal_status = (
+                    PromotionExecutionStatus.SENT
+                    if ok
+                    else PromotionExecutionStatus.BLOCKED
+                    if send_reason in {"blocked_bot_user", "own_channel", "invalid_target", "cooldown_active"}
+                    else PromotionExecutionStatus.FAILED
+                )
+                persistent_event = promotion_store.transition(
+                    persistent_event.id,
+                    terminal_status,
+                    failure_reason="" if ok else send_reason,
+                )
+            except Exception as exc:
+                print(f"[HEBE][PROMOTION_EVENT] transition_failed={type(exc).__name__}", flush=True)
         if ok:
             print(
                 f"[HEBE][PROMOTION_EXECUTE] target={normalized_target} command={self._build_shoutout_command_preview(normalized_target)} success=true",
@@ -8479,6 +8913,18 @@ class HebeEngine:
                 target=normalized_target,
             )
             self._mark_recent_raid_shoutout_done(stream, normalized_target)
+            profile_manager = getattr(self, "promotion_profile_manager", None)
+            if profile_manager is not None:
+                try:
+                    profile_manager.learn_after_success(
+                        twitch_user_id=f"login:{normalized_target.lower()}",
+                        login=normalized_target,
+                        display_name=normalized_target,
+                        owner_command=str((plan.slots or {}).get("owner_command_text") or ""),
+                        stream_session_id=getattr(stream, "active_stream_session_id", None) or "offline",
+                    )
+                except Exception as exc:
+                    print(f"[HEBE][PROMOTION_PROFILE] update_failed={type(exc).__name__}", flush=True)
             if stream is not None:
                 stream.last_promo_rejected_reason = ""
             return CommandResult(
@@ -11496,6 +11942,19 @@ class HebeEngine:
                     print(f"[HEBE][LIVE_SESSION] anchor create failed: {exc!r}", flush=True)
         final_event_id = input_id or str((payload or {}).get("assistant_message_id") or f"evt_{uuid.uuid4().hex}")
         gate_source = "spontaneity" if is_spontaneous else "simulation" if is_simulated else "twitch"
+        advice_allowed, advice_reason = self._gameplay_comment_advice_allowed(text, event_type=event_type)
+        if not advice_allowed:
+            print(f"[HEBE][GAME_ASSISTANCE_GUARD] allowed=false reason={advice_reason}", flush=True)
+            self._emit_final_response(
+                event_id=final_event_id,
+                source=gate_source,
+                final_response=text,
+                output_route=OutputRoute.SUPPRESS,
+                output_targets=[],
+                guard_result={"passed": False, "action": "suppress", "violations": [advice_reason]},
+                debug_payload=self._latest_response_debug_payload(),
+            )
+            return
 
         def speak_stream_once(final_text: str) -> None:
             safe_text = str(final_text or "").replace('"', '\\"')
@@ -11558,6 +12017,7 @@ class HebeEngine:
                 speak_fn=speak_stream_once if OUTPUT_TARGET_STREAM_TTS in gate_targets and tts_gate_allowed else None,
             )
             if gate_result.get("emitted"):
+                self._record_final_gameplay_comment(final_event_id, text, event_type=event_type, payload=payload)
                 if (payload or {}).get("source") == "stream_companion_tick":
                     loop = getattr(self, "stream_companion_loop", None)
                     if loop is not None:
@@ -11605,6 +12065,7 @@ class HebeEngine:
                 debug_payload=self._latest_response_debug_payload(),
             )
             if gate_result.get("emitted"):
+                self._record_final_gameplay_comment(final_event_id, text, event_type=event_type, payload=payload)
                 self._remember_assistant_text(text, source="simulation" if is_simulated else "twitch")
                 try:
                     self._get_live_session_brain().observe_hebe_utterance(
@@ -11646,6 +12107,7 @@ class HebeEngine:
                     if event_type == "twitch_chat_react":
                         self._record_twitch_pipeline_final(route="suppress", emitted=False, reason="final_emission_gate")
                     return
+                self._record_final_gameplay_comment(final_event_id, text, event_type=event_type, payload=payload)
                 self._update_policy_trace_response(
                     text,
                     candidate_response=text,
@@ -11688,18 +12150,48 @@ class HebeEngine:
             if event_type == "twitch_chat_react":
                 self._record_twitch_pipeline_final(route="suppress", emitted=False, reason="twitch_service_unavailable")
 
-        if not getattr(self.runtime.state, "tts_enabled", False):
-            print("[HEBE][TTS] skipped reason=global_disabled", flush=True)
+    def _gameplay_comment_advice_allowed(self, text: str, *, event_type: str | None) -> tuple[bool, str]:
+        if event_type in {"twitch_raid", "twitch_cheer", "twitch_follow", "twitch_follow_batch", "twitch_sub"}:
+            return True, "not_gameplay_comment"
+        stream = self._get_stream_state()
+        service = getattr(self, "game_intelligence", None)
+        game = str(getattr(stream, "current_game", None) or getattr(stream, "current_category", None) or "").strip() if stream else ""
+        if service is None or not game:
+            return True, "no_game_context"
+        progress = service.progress.start(
+            game,
+            getattr(stream, "active_stream_session_id", None) or "current",
+            title=str(getattr(stream, "current_stream_title", None) or ""),
+        )
+        return service.advice_guard.allow(text, mode=default_assistance_mode(progress), explicit_owner_request=False)
+
+    def _record_final_gameplay_comment(self, comment_id: str, text: str, *, event_type: str | None, payload: dict | None) -> None:
+        if event_type in {"twitch_raid", "twitch_cheer", "twitch_follow", "twitch_follow_batch", "twitch_sub"}:
             return
-        if is_simulated:
-            print("[HEBE][TTS] skipped reason=dev_simulation", flush=True)
+        stream = self._get_stream_state()
+        service = getattr(self, "game_intelligence", None)
+        game = str(getattr(stream, "current_game", None) or getattr(stream, "current_category", None) or "").strip() if stream else ""
+        if service is None or not game:
             return
-        if is_spontaneous and spontaneous_chat_allowed and not tts_allowed:
-            print("[HEBE][TTS] skipped reason=spontaneous_twitch_chat_text_only", flush=True)
-            return
-        if not tts_allowed:
-            print("[HEBE][TTS] skipped reason=stream_tts_disabled", flush=True)
-            return
+        try:
+            progress = service.progress.start(
+                game,
+                getattr(stream, "active_stream_session_id", None) or "current",
+                title=str(getattr(stream, "current_stream_title", None) or ""),
+            )
+            evidence = [
+                str((payload or {}).get("message_text") or ""),
+                *[str(item) for item in (payload or {}).get("specific_context_anchors") or []],
+            ]
+            service.record_final_comment(
+                comment_id=comment_id,
+                text=text,
+                game=game,
+                scene_evidence=[item for item in evidence if item],
+                advice_mode=default_assistance_mode(progress),
+            )
+        except Exception as exc:
+            print(f"[HEBE][COMMENT_PROVENANCE] comment_id={comment_id} mode=unknown lookup_used=false error={type(exc).__name__}", flush=True)
 
 
     def _deliver_voice_reply(
@@ -11755,6 +12247,11 @@ class HebeEngine:
             output_targets=targets_for_gate or [OUTPUT_TARGET_LOCAL_UI],
             guard_result={"passed": True},
             debug_payload=self._latest_response_debug_payload(),
+            runtime_context=(
+                HebeLiveRuntimeContext.STREAM_PUBLIC
+                if output_target == OUTPUT_TARGET_STREAM_TTS
+                else HebeLiveRuntimeContext.OWNER_LOCAL
+            ),
             speak_fn=speak_once if tts_can_speak else None,
         )
         if not gate_result.get("emitted"):

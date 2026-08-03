@@ -127,6 +127,9 @@ class CheerDeduplicator:
         self.window_seconds = float(window_seconds)
         self._seen: list[dict[str, Any]] = []
 
+    def reset_session(self) -> None:
+        self._seen.clear()
+
     def check_and_record(self, event: TwitchCheerEvent, *, now: float | None = None) -> tuple[bool, str]:
         now = float(now if now is not None else event.timestamp or time.time())
         self._seen = [item for item in self._seen if now - float(item["timestamp"]) <= self.window_seconds]

@@ -209,6 +209,10 @@ class OwnerDiscourseBuffer:
         self.sessions: list[OwnerDiscourseSession] = []
         self.current_session: OwnerDiscourseSession | None = None
 
+    def reset_session(self) -> None:
+        self.sessions.clear()
+        self.current_session = None
+
     def add_fragment(self, text: str, *, timestamp: float | None = None, confidence: float = 1.0, language: str = "es") -> DiscourseTopic:
         ts = float(timestamp if timestamp is not None else time.time())
         normalized = normalize_discourse_text(text)
@@ -339,6 +343,11 @@ class StreamTurnDetector:
         self.last_sentence_complete = False
         self.owner_speaking = False
 
+    def reset_session(self) -> None:
+        self.last_owner_speech_at = 0.0
+        self.last_sentence_complete = False
+        self.owner_speaking = False
+
     def record_owner_fragment(self, text: str, *, timestamp: float | None = None) -> None:
         self.last_owner_speech_at = float(timestamp if timestamp is not None else time.time())
         self.last_sentence_complete = bool(re.search(r"[.!?…]\s*$", str(text or "").strip()))
@@ -362,6 +371,9 @@ class DiscourseParticipationBudget:
         self.max_per_hour = int(max_per_hour)
         self.max_per_topic = int(max_per_topic)
         self.contributions: list[dict[str, Any]] = []
+
+    def reset_session(self) -> None:
+        self.contributions.clear()
 
     def allows(self, topic: DiscourseTopic, *, now: float | None = None, direct_priority: bool = False, event_type: str = "") -> dict[str, Any]:
         now = float(now if now is not None else time.time())

@@ -50,6 +50,15 @@ class StreamIntentParser:
         ("bare_promo", re.compile(r"\bpromo\s+(?:a|al|para)\s+(.+)$", re.IGNORECASE)),
     )
     trailing_banter_patterns = (
+        r"\bsolo\s+esta\s+vez\b.*$",
+        r"\buna\s+sola\s+vez\b.*$",
+        r"\bonly\s+this\s+time\b.*$",
+        r"\bjust\s+this\s+once\b.*$",
+        r"\bsiempre\b.*$",
+        r"\bcada\s+directo\b.*$",
+        r"\bcuando\s+aparezca\b.*$",
+        r"\balways\b.*$",
+        r"\bevery\s+stream\b.*$",
         r"\ba\s+ver\s+si\b.*$",
         r"\bsi\s+ahora\s+lo\s+hace\b.*$",
         r"\bque\s+lo\s+haga\b.*$",
