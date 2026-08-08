@@ -49,7 +49,18 @@ class StreamTTSSafetyManager:
             return False, "low_gpu_headroom", gpu
         return True, "safe", gpu
 
-    def schedule(self, text: str, speak: Callable[[str], None], *, event_type: str = "social") -> dict:
+    def schedule(
+        self,
+        text: str,
+        speak: Callable[[str], None],
+        *,
+        event_type: str = "social",
+        output_enabled: bool = True,
+        disabled_reason: str = "stream_tts_disabled",
+    ) -> dict:
+        if not output_enabled:
+            print(f"[HEBE][RAID_ACK_TTS] status=skipped reason={disabled_reason}", flush=True)
+            return {"scheduled": False, "reason": disabled_reason, "gpu_before": {}}
         allowed, reason, gpu_before = self.can_schedule_optional()
         if not allowed:
             print(f"[HEBE][RAID_ACK_TTS] status=skipped reason={reason}", flush=True)

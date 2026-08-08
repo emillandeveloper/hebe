@@ -123,6 +123,7 @@ class ContextualGroundingReliabilityTests(unittest.TestCase):
         with patch("app.hebe_engine.emit"):
             self.assertTrue(engine._log_direct_stt_outcome(
                 result, outcome="action_executed", reason="application_launch_succeeded",
+                action_receipt={"action_type": "open_application", "target": "obs", "executor_invoked": True, "success": True, "timestamp": time.time()},
             ))
             self.assertFalse(engine._log_direct_stt_outcome(
                 result, outcome="rejected", reason="application_parser_or_resolver_failed",

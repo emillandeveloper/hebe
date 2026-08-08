@@ -36,6 +36,8 @@ class PromotionExecutionStatus(StrEnum):
     FAILED = "failed"
     BLOCKED = "blocked"
     CANCELLED = "cancelled"
+    CLARIFICATION_REQUIRED = "clarification_required"
+    TARGET_NOT_FOUND = "target_not_found"
 
 
 class AutoPromoMode(StrEnum):
@@ -55,6 +57,8 @@ TERMINAL_PROMOTION_STATUSES = {
     PromotionExecutionStatus.FAILED,
     PromotionExecutionStatus.BLOCKED,
     PromotionExecutionStatus.CANCELLED,
+    PromotionExecutionStatus.CLARIFICATION_REQUIRED,
+    PromotionExecutionStatus.TARGET_NOT_FOUND,
 }
 
 _ALLOWED_TRANSITIONS = {
@@ -90,6 +94,34 @@ class PromotionEvent:
     created_at: str = ""
     executed_at: str | None = None
     failure_reason: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class ActionReceipt:
+    action_type: str
+    target: str
+    executor_invoked: bool
+    success: bool
+    external_confirmation: str = ""
+    timestamp: str = field(default_factory=_now_iso)
+
+
+@dataclass(slots=True)
+class PromotionCommandTransaction:
+    transaction_id: str
+    source_event_id: str
+    raw_owner_text: str
+    parsed_target: str = ""
+    candidate_targets: list[str] = field(default_factory=list)
+    resolved_twitch_user_id: str = ""
+    resolved_login: str = ""
+    resolution_confidence: float = 0.0
+    execution_requested: bool = False
+    execution_receipt: ActionReceipt | None = None
+    public_command_message_id: str = ""
+    final_status: str = PromotionExecutionStatus.CLARIFICATION_REQUIRED.value
+    profile_learning_status: str = "not_attempted"
+    correction_of_transaction_id: str = ""
 
 
 @dataclass(slots=True)
@@ -133,6 +165,7 @@ class PromotionStore:
             self._connection.row_factory = sqlite3.Row
         self._lock = threading.RLock()
         self.init_schema()
+        self.invalidate_orphaned_profiles()
 
     def _connect(self) -> tuple[sqlite3.Connection, bool]:
         if self._connection is not None:
@@ -341,7 +374,9 @@ class PromotionStore:
         now = profile.updated_at or _now_iso()
         created = profile.created_at or now
         login = _login(profile.current_login)
-        user_id = str(profile.twitch_user_id or "").strip() or f"login:{login}"
+        user_id = str(profile.twitch_user_id or "").strip()
+        if not _confirmed_twitch_user_id(user_id):
+            raise ValueError("confirmed_twitch_identity_required")
         aliases = sorted({_login(item) for item in [*profile.known_aliases, login] if _login(item)})
         conn, close = self._connect()
         with self._lock:
@@ -464,6 +499,21 @@ class PromotionStore:
             conn.close()
         return changed
 
+    def invalidate_orphaned_profiles(self) -> int:
+        """Automatically disable legacy profiles backed only by an arbitrary login."""
+        conn, close = self._connect()
+        cur = conn.execute(
+            "UPDATE viewer_promotion_profiles SET active = 0, auto_promo_mode = 'disabled' "
+            "WHERE twitch_user_id = '' OR twitch_user_id LIKE 'login:%'"
+        )
+        conn.commit()
+        changed = max(0, int(cur.rowcount or 0))
+        if close:
+            conn.close()
+        if changed:
+            print(f"[HEBE][PROMOTION_PROFILE_MIGRATION] orphaned_invalidated={changed}", flush=True)
+        return changed
+
     def mark_profile_promoted(self, profile: ViewerPromotionProfile, session_id: str | int, *, now: float | None = None) -> None:
         profile.last_promoted_at = _now_iso(now)
         profile.last_promoted_stream_id = str(session_id or "")
@@ -515,6 +565,16 @@ class PromotionProfileManager:
         source_promotion_event: str = "",
         now: float | None = None,
     ) -> ViewerPromotionProfile | None:
+        if not _confirmed_twitch_user_id(twitch_user_id) or not _login(login):
+            print(
+                f"[HEBE][PROMOTION_PROFILE_LEARN] viewer={_login(login)} persisted=false "
+                "reason=confirmed_twitch_identity_and_success_event_required",
+                flush=True,
+            )
+            return None
+        source_event = self.store.get_event(source_promotion_event) if source_promotion_event else None
+        if source_event is not None and source_event.execution_status != PromotionExecutionStatus.SENT.value:
+            return None
         command = _normalize(owner_command)
         if _only_this_time(command):
             print(
@@ -529,7 +589,7 @@ class PromotionProfileManager:
             return None
         existing = self.store.get_profile(twitch_user_id=twitch_user_id, login=login)
         profile = existing or ViewerPromotionProfile(
-            twitch_user_id=str(twitch_user_id or "").strip() or f"login:{_login(login)}",
+            twitch_user_id=str(twitch_user_id or "").strip(),
             current_login=_login(login),
             display_name=display_name or login,
             created_by=PromotionProfileCreator.OWNER_COMMAND.value,
@@ -567,13 +627,7 @@ class PromotionProfileManager:
         if command.action == "enable":
             profile = self.store.get_profile(login=command.target)
             if profile is None:
-                profile = ViewerPromotionProfile(
-                    twitch_user_id=f"login:{_login(command.target)}",
-                    current_login=_login(command.target),
-                    display_name=command.target,
-                    created_by=PromotionProfileCreator.OWNER_COMMAND.value,
-                    created_at=_now_iso(),
-                )
+                return None
             profile.auto_promo_mode = command.mode or AutoPromoMode.FIRST_MESSAGE_EACH_STREAM.value
             profile.active = True
             profile.updated_at = _now_iso()
@@ -842,6 +896,11 @@ def _login(value: str) -> str:
     return cleaned[:25]
 
 
+def _confirmed_twitch_user_id(value: str) -> bool:
+    candidate = str(value or "").strip()
+    return bool(candidate and not candidate.casefold().startswith("login:") and re.fullmatch(r"[0-9]+", candidate))
+
+
 def _normalize(value: str) -> str:
     text = str(value or "").casefold()
     text = text.translate(str.maketrans("áéíóúüñ", "aeiouun"))
@@ -861,7 +920,9 @@ __all__ = [
     "AutoPromoMode",
     "AutoPromotionDecision",
     "AutomaticPromotionService",
+    "ActionReceipt",
     "PromotionEvent",
+    "PromotionCommandTransaction",
     "PromotionExecutionStatus",
     "PromotionProfileCommand",
     "PromotionProfileCreator",

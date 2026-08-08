@@ -384,8 +384,9 @@ class HebeLiveV11PromotionAndSTTTests(unittest.TestCase):
     def test_success_terminal_cannot_be_overwritten_by_rejection(self):
         engine = object.__new__(HebeEngine)
         result = DirectSTTCommandResult(event_id="terminal-1", detected_intent_family="application_action")
+        receipt = {"action_type": "test", "target": "test", "executor_invoked": True, "success": True, "timestamp": time.time()}
         with patch("app.hebe_engine.emit"):
-            self.assertTrue(engine._log_direct_stt_outcome(result, outcome="action_executed", reason="success"))
+            self.assertTrue(engine._log_direct_stt_outcome(result, outcome="action_executed", reason="success", action_receipt=receipt))
             self.assertFalse(engine._log_direct_stt_outcome(result, outcome="rejected", reason="fallback"))
         self.assertEqual(result.final_outcome, "action_executed")
 
@@ -397,7 +398,10 @@ class HebeLiveV11PromotionAndSTTTests(unittest.TestCase):
             stt_metadata={"direct_stt_command": direct.to_dict()},
         )
         with patch("app.hebe_engine.emit"):
-            self.assertTrue(engine._commit_current_direct_stt_terminal(outcome="action_executed", reason="success"))
+            self.assertTrue(engine._commit_current_direct_stt_terminal(
+                outcome="action_executed", reason="success",
+                action_receipt={"action_type": "test", "target": "test", "executor_invoked": True, "success": True, "timestamp": time.time()},
+            ))
         self.assertEqual(engine._current_direct_stt_terminal_outcome()["outcome"], "action_executed")
 
     def test_duplicate_terminal_write_is_ignored(self):

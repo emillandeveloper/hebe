@@ -150,6 +150,7 @@ from app.stream.viewer_profiles import (
     ViewerLinguisticProfileStore,
     ViewerProfileCommandParser,
 )
+from app.stream.social_response_guards import ChannelRetentionGuard, SocialAuthorityCommitmentGuard
 from app.stream.input_firewall import (
     ACTION_PROMOTION_SHOUTOUT,
     ACTION_TWITCH_ACTION,
@@ -535,6 +536,8 @@ class HebeEngine:
         self.viewer_intent_policy = ViewerIntentPolicy()
         self.behavior_constraint_output_guard = BehaviorConstraintOutputGuard()
         self.grammatical_agreement_guard = GrammaticalAgreementGuard()
+        self.social_authority_commitment_guard = SocialAuthorityCommitmentGuard()
+        self.channel_retention_guard = ChannelRetentionGuard()
         self.viewer_profile_command_parser = ViewerProfileCommandParser()
         self.viewer_linguistic_profiles = ViewerLinguisticProfileStore()
         self.input_authority_firewall = self._build_input_firewall()
@@ -4513,11 +4516,18 @@ class HebeEngine:
             flush=True,
         )
         tts_scheduled = False
-        if not is_simulated and self._stream_tts_output_enabled_for_event("twitch_raid") and getattr(self.runtime.state, "tts_enabled", False):
+        raid_tts_enabled = bool(
+            not is_simulated
+            and self._stream_tts_output_enabled_for_event("twitch_raid")
+            and getattr(self.runtime.state, "tts_enabled", False)
+        )
+        if not is_simulated:
             scheduled = self._get_stream_tts_safety().schedule(
                 reply_text,
                 lambda value: self.runtime.speak(value, emit_chat=False),
                 event_type="raid",
+                output_enabled=raid_tts_enabled,
+                disabled_reason="stream_tts_disabled",
             )
             tts_scheduled = bool(scheduled.get("scheduled"))
         print(
@@ -6001,6 +6011,7 @@ class HebeEngine:
             self._log_stt_non_command_decision(command, "owner_mute_command", reason=mute_mode)
             self._log_direct_stt_outcome(
                 direct_stt, outcome="action_executed", reason=f"owner_mute_{mute_mode}",
+                action_receipt={"action_type": "owner_mute", "target": mute_mode, "executor_invoked": True, "success": True, "timestamp": time.time()},
             )
             return "continue"
         if self._owner_unmute_command(command) and self._is_stream_enabled():
@@ -6008,6 +6019,7 @@ class HebeEngine:
             self._log_stt_non_command_decision(command, "owner_unmute_command", reason="normal")
             self._log_direct_stt_outcome(
                 direct_stt, outcome="action_executed", reason="owner_unmute",
+                action_receipt={"action_type": "owner_unmute", "target": "stream", "executor_invoked": True, "success": True, "timestamp": time.time()},
             )
             return "continue"
         self._current_input_event = self._build_input_event(
@@ -6255,7 +6267,7 @@ class HebeEngine:
             if handled:
                 if not stream_command:
                     self._log_direct_stt_outcome(
-                        direct_stt, outcome="action_executed", reason="stream_operation_handled",
+                        direct_stt, outcome="context_only", reason="stream_operation_handled",
                     )
                     self._current_input_event = None
                     return "continue"
@@ -6338,7 +6350,7 @@ class HebeEngine:
             else:
                 outcome, reason = "rejected", "application_parser_or_resolver_failed"
         else:
-            outcome, reason = "action_executed", "routed_to_command_pipeline"
+            outcome, reason = "context_only", "routed_to_command_pipeline"
         self._log_direct_stt_outcome(direct_stt, outcome=outcome, reason=reason)
         print("[HEBE][COG] decision=conversation_followup" if pending_followup else "[HEBE][COG] decision=command", flush=True)
         self._current_input_event = None
@@ -6350,6 +6362,7 @@ class HebeEngine:
         *,
         outcome: str,
         reason: str,
+        action_receipt: dict | None = None,
     ) -> bool:
         aliases = {
             "action_clarification": "clarification",
@@ -6357,9 +6370,17 @@ class HebeEngine:
             "error": "action_failed",
         }
         outcome = aliases.get(outcome, outcome)
+        if action_receipt is not None:
+            result.action_receipt = dict(action_receipt)
+        receipt = dict(result.action_receipt or {})
+        if outcome == "action_executed" and not (
+            receipt.get("executor_invoked") is True and receipt.get("success") is True
+        ):
+            outcome = "action_failed"
+            reason = "missing_success_action_receipt"
         terminals = {
             "action_executed", "action_failed", "clarification",
-            "conversational_reply", "rejected", "cancelled",
+            "conversational_reply", "context_only", "rejected", "cancelled",
         }
         if outcome not in terminals:
             outcome = "rejected"
@@ -6394,13 +6415,13 @@ class HebeEngine:
         emit("voice.command", {**payload, "status": "outcome", "final_decision": outcome})
         return True
 
-    def _commit_current_direct_stt_terminal(self, *, outcome: str, reason: str) -> bool:
+    def _commit_current_direct_stt_terminal(self, *, outcome: str, reason: str, action_receipt: dict | None = None) -> bool:
         event = getattr(self, "_current_input_event", None)
         raw = dict((getattr(event, "stt_metadata", {}) or {}).get("direct_stt_command") or {})
         if not raw:
             return False
         committed = self._log_direct_stt_outcome(
-            DirectSTTCommandResult.from_dict(raw), outcome=outcome, reason=reason,
+            DirectSTTCommandResult.from_dict(raw), outcome=outcome, reason=reason, action_receipt=action_receipt,
         )
         if committed and isinstance(getattr(event, "stt_metadata", None), dict):
             event.stt_metadata["direct_stt_terminal_committed"] = {
@@ -6811,7 +6832,7 @@ class HebeEngine:
             is_direct_stt = input_event.source in {"stt_voice", "owner_stt_direct", "owner_stt_command"}
             if not is_direct_stt:
                 return None
-            if self._current_input_event is not None:
+            if getattr(self, "_current_input_event", None) is not None:
                 self._current_input_event.stt_metadata["direct_stt_execution"] = {
                     "success": False,
                     "reason": "application_not_found",
@@ -6856,8 +6877,9 @@ class HebeEngine:
                 flush=True,
             )
             app_name = plan.slots.get("display_name") or plan.target or "la aplicacion"
-            if self._current_input_event is not None:
-                self._current_input_event.stt_metadata["direct_stt_execution"] = {
+            current_input_event = getattr(self, "_current_input_event", None)
+            if current_input_event is not None:
+                current_input_event.stt_metadata["direct_stt_execution"] = {
                     "success": False,
                     "reason": "app_path_missing",
                     "target": plan.slots.get("app_id") or plan.target,
@@ -6927,6 +6949,11 @@ class HebeEngine:
         self._commit_current_direct_stt_terminal(
             outcome="action_executed" if success else "action_failed",
             reason="application_launch_succeeded" if success else str(error_code or "launch_failed"),
+            action_receipt={
+                "action_type": "open_application", "target": payload.get("app_id") or plan.slots.get("app_id") or plan.target,
+                "executor_invoked": True, "success": success, "external_confirmation": str(payload.get("process_id") or ""),
+                "timestamp": time.time(),
+            } if success else None,
         )
         app_name = payload.get("app_name") or plan.slots.get("display_name") or plan.target or "la aplicacion"
         fallback = f"Abriendo {app_name}." if success else f"Reconozco {app_name}, pero no he podido abrirla."
@@ -7097,6 +7124,25 @@ class HebeEngine:
         source_viewer = str(debug_payload.get("source_viewer") or debug_payload.get("user_login") or viewer)
         stream = self._get_stream_state()
         if final_response and viewer and stream is not None:
+            requester_is_owner = bool(
+                debug_payload.get("requester_is_owner")
+                or debug_payload.get("authority") in {"owner", "leo"}
+            )
+            authority_guard = getattr(self, "social_authority_commitment_guard", None) or SocialAuthorityCommitmentGuard()
+            authority_result = authority_guard.evaluate(final_response, requester_is_owner=requester_is_owner)
+            if authority_result.action != "allow":
+                final_response = authority_result.text
+                repair_summary = {**dict(repair_summary or {}), "social_authority": authority_result.reason}
+            retention_guard = getattr(self, "channel_retention_guard", None) or ChannelRetentionGuard()
+            retention_result = retention_guard.evaluate(
+                final_response,
+                owner_directed_moderation=bool(debug_payload.get("owner_directed_moderation")),
+                safety_required=bool(debug_payload.get("safety_required")),
+                quoted_or_discussed=bool(debug_payload.get("quoted_or_discussed")),
+            )
+            if retention_result.action != "allow":
+                final_response = retention_result.text
+                repair_summary = {**dict(repair_summary or {}), "channel_retention": retention_result.reason}
             constraint_guard = getattr(self, "behavior_constraint_output_guard", None) or BehaviorConstraintOutputGuard()
             constraint_result = constraint_guard.evaluate(
                 active_behavior_blocks(stream), intended_recipient=viewer,
@@ -9038,6 +9084,23 @@ class HebeEngine:
             print(f"[HEBE][PROMOTION_EXECUTION_DECISION] allowed=false reason={send_reason} target={normalized_target or plan.target}", flush=True)
             print(f"[HEBE][PROMOTION_DROPPED_GUARD] dropped=true reason={send_reason}", flush=True)
         if ok:
+            action_receipt = {
+                "action_type": "twitch_shoutout",
+                "target": normalized_target,
+                "executor_invoked": True,
+                "success": True,
+                "external_confirmation": str(getattr(persistent_event, "twitch_message_id", "") or send_reason or "twitch_send_success"),
+                "timestamp": time.time(),
+            }
+            current_input_event = getattr(self, "_current_input_event", None)
+            if current_input_event is not None:
+                current_input_event.stt_metadata["direct_stt_execution"] = {
+                    "success": True, "reason": send_reason, "target": normalized_target,
+                    "action_receipt": action_receipt,
+                }
+            self._commit_current_direct_stt_terminal(
+                outcome="action_executed", reason="promotion_send_succeeded", action_receipt=action_receipt,
+            )
             self._record_promotion_outcome(
                 stream, event_id=event_id, outcome="executed", reason=send_reason,
                 target=normalized_target,
@@ -9084,6 +9147,7 @@ class HebeEngine:
                 requires_model_response=False,
                 metadata={
                     "action_plan": plan.as_log_dict(),
+                    "action_receipt": action_receipt,
                     "message_goal": f"Tell Leo that the promo/shoutout for {normalized_target} was sent.",
                 },
             )

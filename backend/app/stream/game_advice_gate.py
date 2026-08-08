@@ -77,7 +77,7 @@ class GameAdviceValidation:
 
 
 @dataclass(frozen=True)
-class ValidatedClaim:
+class ClaimSupport:
     claim: str
     evidence_type: str
     evidence_id: str
@@ -86,6 +86,10 @@ class ValidatedClaim:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+# Backwards-compatible name used by v1.1 callers.
+ValidatedClaim = ClaimSupport
 
 
 def _normalize(value: str) -> str:
@@ -131,6 +135,14 @@ class GameMechanicsRegistry:
 
 
 class GameAdviceGate:
+    _SUBSTANTIVE_ASSERTION_PATTERNS: dict[str, tuple[str, ...]] = {
+        "counterattack": (r"\b(?:contraataques?|counterattacks?)\b",),
+        "automatic_healing": (r"\b(?:curacion(?:es)? automatica(?:s)?|autohealing|auto heal)\b",),
+        "regeneration": (r"\b(?:regeneracion|regeneration|regenera)\b",),
+        "weakness": (r"\b(?:debilidad(?:es)?|weakness(?:es)?)\b",),
+        "invulnerability": (r"\b(?:invulnerabilidad|invulnerability|invulnerable)\b",),
+        "status_effect": (r"\b(?:efecto(?:s)? de estado|status effects?)\b",),
+    }
     _CLAIM_PATTERNS: dict[str, tuple[str, ...]] = {
         "save_instruction": (
             r"\b(?:guarda|guardar|guardalo|salva|salvar|haz un guardado|save|save it)\b",
@@ -189,6 +201,11 @@ class GameAdviceGate:
             for claim, patterns in self._CLAIM_PATTERNS.items()
             if any(re.search(pattern, normalized) for pattern in patterns)
         ]
+        claims.extend(
+            claim
+            for claim, patterns in self._SUBSTANTIVE_ASSERTION_PATTERNS.items()
+            if any(re.search(pattern, normalized) for pattern in patterns)
+        )
         if "save_instruction" in claims and (
             re.search(r"\bguarda(?:r)?\s+(?:sp|mp|mana|pm|recursos?|objetos?|items?)\b", normalized)
             or re.search(r"\bguarda\b.*\ben mente\b", normalized)
@@ -232,7 +249,7 @@ class GameAdviceGate:
         profile = self.registry.lookup(game)
         explicit = {str(item) for item in (known_game_mechanics or [])}
         evidence_mechanics: set[str] = set()
-        provenance: dict[str, ValidatedClaim] = {}
+        provenance: dict[str, ClaimSupport] = {}
         allowed_evidence_types = {
             "raw_owner_evidence", "confirmed_game_knowledge",
             "current_structured_game_state", "external_validated_mechanic",
@@ -252,11 +269,11 @@ class GameAdviceGate:
                 confidence = 0.8
             for mechanic in [*self.detect_mechanics(exact_text), *self.extract_substantive_claims(exact_text)]:
                 evidence_mechanics.add(mechanic)
-                provenance[mechanic] = ValidatedClaim(
+                provenance[mechanic] = ClaimSupport(
                     mechanic, evidence_type, evidence_id, exact_text, confidence,
                 )
         for mechanic in explicit:
-            provenance.setdefault(mechanic, ValidatedClaim(
+            provenance.setdefault(mechanic, ClaimSupport(
                 mechanic, "confirmed_game_knowledge", f"game:{_normalize(game)}:{mechanic}",
                 mechanic, 0.9,
             ))
@@ -287,7 +304,7 @@ class GameAdviceGate:
         blocked = [mechanic for mechanic in mechanics if mechanic in forbidden or mechanic not in allowed]
         validated = [mechanic for mechanic in mechanics if mechanic not in blocked]
         for mechanic in validated:
-            provenance.setdefault(mechanic, ValidatedClaim(
+            provenance.setdefault(mechanic, ClaimSupport(
                 mechanic, "confirmed_game_knowledge", f"profile:{_normalize(profile.canonical_title)}:{mechanic}",
                 mechanic, 0.92,
             ))

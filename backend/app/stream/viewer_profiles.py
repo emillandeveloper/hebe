@@ -179,7 +179,14 @@ class GrammaticalAgreementGuard:
             elif gender in {"unknown", "neutral"}:
                 pattern = rf"\b(?:{re.escape(masculine)}|{re.escape(feminine)})\b"
                 if re.search(pattern, repaired, re.I):
+                    # Remove the complete vocative/adjectival span, including its
+                    # punctuation, rather than leaving fragments such as "Ismael,:".
+                    repaired = re.sub(rf"^\s*{pattern}\s*[,;:]?\s*", "", repaired, flags=re.I)
+                    repaired = re.sub(rf"([,:;])\s*{pattern}\s*(?=[,:;])", r"\1", repaired, flags=re.I)
                     repaired = re.sub(pattern, "", repaired, flags=re.I); violations.append("gendered_form_neutralized")
+        repaired = re.sub(r"^[\s,;:]+", "", repaired)
+        repaired = re.sub(r",\s*:", ":", repaired)
+        repaired = re.sub(r"([,;:])\s*\1+", r"\1", repaired)
         repaired = re.sub(r"\s+([,.;:!?])", r"\1", re.sub(r"\s{2,}", " ", repaired)).strip()
         action = "allow" if not violations else "neutralize" if gender in {"neutral", "unknown"} else "repair"
         return self._result(repaired, viewer, profile, violations, action)

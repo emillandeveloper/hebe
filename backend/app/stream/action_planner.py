@@ -168,7 +168,8 @@ class StreamActionPlanner:
         target = guarded_target
         command = self.build_shoutout_command(target)
         status = "complete" if confidence >= 0.78 else "needs_confirmation"
-        if reason in {"medium_confidence", "unverified_username"}:
+        spoken_source = str(input_event.source or "") in {"stt_voice", "owner_stt_direct", "owner_stt_command"}
+        if reason in {"medium_confidence", "unverified_username"} or (spoken_source and reason == "valid_username"):
             status = "needs_confirmation"
         if status != "complete":
             print(f"[HEBE][PROMOTION_CLARIFY] reason=medium_confidence candidates={candidates!r}", flush=True)

@@ -91,6 +91,14 @@ class TwitchTargetResolver:
             compact_target = self._compact(normalized)
             compact_username = self._compact(username_norm)
             compact_display = self._compact(display_name_norm)
+            # Speech recognition often prefixes the Spanish preposition "a"
+            # to a short spoken nickname ("a DK" -> "ADK"). Active chatter
+            # is stronger identity evidence than that syntactically valid token.
+            spoken_key = compact_target[1:] if compact_target.startswith("a") and len(compact_target) >= 3 else compact_target
+            if source == "active_chatter" and len(spoken_key) >= 2 and (
+                compact_username.startswith(spoken_key) or compact_display.startswith(spoken_key)
+            ):
+                return TargetResolution(username, 0.96, [username], "phonetic_active_chatter", source)
             if normalized in {username_norm, display_name_norm} or compact_target in {compact_username, compact_display}:
                 return TargetResolution(username, 1.0, [username], "exact_target", source or "exact")
             score = max(

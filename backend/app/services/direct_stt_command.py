@@ -5,6 +5,7 @@ from enum import StrEnum
 import re
 import unicodedata
 import uuid
+from typing import Any
 
 
 class DirectUtteranceIntentFamily(StrEnum):
@@ -32,6 +33,7 @@ class DirectSTTCommandResult:
     target_candidates: list[str] = field(default_factory=list)
     final_outcome: str = ""
     rejection_reason: str = ""
+    action_receipt: dict[str, Any] | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)

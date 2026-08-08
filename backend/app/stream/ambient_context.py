@@ -19,7 +19,9 @@ class GameplayReferentResolution:
 class GameplayReferentResolver:
     def resolve(self, raw: str, normalized: str, *, recent_fragments: list[str] | None = None) -> GameplayReferentResolution:
         text = str(normalized or "")
-        if re.search(r"\b(?:estos|esos|aquellos)\s+(?:son|estan)\s+(?:de\s+)?nivel\s+bajo\b", text):
+        if re.search(r"\b(?:solo\s+)?queda\s+(?:ese|esa|uno|una)\b", text):
+            result = GameplayReferentResolution("unknown_game_entity", "remaining_count", "one_remaining", 0.72, "uncertain_singular_game_entity")
+        elif re.search(r"\b(?:estos|esos|aquellos)\s+(?:son|estan)\s+(?:de\s+)?nivel\s+bajo\b", text):
             result = GameplayReferentResolution("enemies", "level", "low_level", 0.78, "plural_game_entity")
         elif re.search(r"\b(?:yo\s+)?(?:estoy|voy|mi personaje esta)\s+(?:a\s+|en\s+)?nivel\s+(?:1|uno)\b", text):
             result = GameplayReferentResolution("owner_player", "level", "level_one", 0.96, "explicit_first_person")
@@ -60,6 +62,30 @@ class AmbientFact:
     unsupported_claims: list[str]
     expires_at: float
 
+    @property
+    def subject(self) -> str:
+        return self.extracted_subject
+
+    @property
+    def predicate(self) -> str:
+        return self.extracted_predicate
+
+    @property
+    def object(self) -> str:
+        return self.extracted_object
+
+    @property
+    def referent_confidence(self) -> float:
+        return self.confidence
+
+    @property
+    def directly_supported_claims(self) -> list[str]:
+        return self.supported_claims
+
+    @property
+    def heuristic_category(self) -> str:
+        return self.category
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "fact_id": self.fact_id,
@@ -69,12 +95,18 @@ class AmbientFact:
             "timestamp": self.timestamp,
             "topic_id": self.topic_id,
             "category": self.category,
+            "heuristic_category": self.category,
             "extracted_subject": self.extracted_subject,
+            "subject": self.extracted_subject,
             "extracted_object": self.extracted_object,
+            "object": self.extracted_object,
             "extracted_predicate": self.extracted_predicate,
+            "predicate": self.extracted_predicate,
             "confidence": self.confidence,
+            "referent_confidence": self.confidence,
             "inference_level": self.inference_level,
             "supported_claims": list(self.supported_claims),
+            "directly_supported_claims": list(self.supported_claims),
             "unsupported_claims": list(self.unsupported_claims),
             "expires_at": self.expires_at,
         }
@@ -200,7 +232,7 @@ class AmbientContextExtractor:
         }
         enemy_mechanic_terms = {
             "counter", "contraataque", "counterattack", "autopocion", "autopotion",
-            "aguanta", "sobrevive", "queda", "cura", "curarse", "autoheal", "autocura",
+            "aguanta", "sobrevive", "cura", "curarse", "autoheal", "autocura",
         }
         rng_terms = {"rng", "suerte", "azar", "random", "aleatorio", "dados", "dado", "parchis", "depender"}
         challenge_terms = {
@@ -229,6 +261,19 @@ class AmbientContextExtractor:
             re.search(r"\b(?:cura|curan|curar|curarse|se cura|recupera|recuperar|regenera|heal|healing|autopocion|autopotion|pocion|pociones)\b", normalized)
         )
         hp_not_decreasing = referent.predicate == "health_not_decreasing"
+        if referent.predicate == "one_remaining":
+            facts.append(self._category_fact(
+                "remaining_entity_observation",
+                "One referenced game entity remains; the referent is uncertain.",
+                raw,
+                normalized,
+                referent.confidence,
+                now,
+                mood="combat tension",
+                referent=referent,
+                supported_claims=["one referenced game entity remains"],
+                unsupported_claims=["auto_healing", "counterattack", "healing", "regeneration"],
+            ))
         if explicit_healing and not hp_not_decreasing:
             facts.append(self._category_fact(
                 "healing_or_recovery",

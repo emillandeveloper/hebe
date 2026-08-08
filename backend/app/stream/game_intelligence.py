@@ -212,7 +212,17 @@ class GameIntelligenceDiagnostics:
 
 
 class GameResearchProvider(Protocol):
-    def search(self, query: str) -> list[dict[str, Any]]:
+    provider_name: str
+    available: bool
+
+    def search(
+        self,
+        query: str,
+        constraints: dict[str, Any] | None = None,
+        *,
+        timeout: float | None = None,
+        cancellation: threading.Event | None = None,
+    ) -> list[dict[str, Any]]:
         ...
 
 
@@ -750,7 +760,7 @@ class GameResearchService:
     ) -> None:
         self.store = store or GameIntelligenceStore()
         self.provider = provider
-        self.provider_name = str(provider_name or (type(provider).__name__ if provider is not None else "none"))
+        self.provider_name = str(provider_name or getattr(provider, "provider_name", "") or (type(provider).__name__ if provider is not None else "none"))
         self.provider_configured = bool(provider is not None if provider_configured is None else provider_configured)
         self.cache_ttl_seconds = max(60.0, float(cache_ttl_seconds))
         self.now_fn = now_fn
@@ -763,9 +773,10 @@ class GameResearchService:
         self.diagnostics = GameIntelligenceDiagnostics()
         self.diagnostics.research_provider = self.provider_name
         self.diagnostics.research_provider_configured = self.provider_configured
-        self.diagnostics.research_provider_available = provider is not None
+        provider_available = bool(provider is not None and getattr(provider, "available", True))
+        self.diagnostics.research_provider_available = provider_available
         self.diagnostics.research_provider_reason = (
-            "ready" if provider is not None else "configured_provider_unavailable" if self.provider_configured else "provider_not_configured"
+            "ready" if provider_available else "configured_provider_unavailable" if self.provider_configured else "provider_not_configured"
         )
         self._log_provider_availability()
         self._executor = ThreadPoolExecutor(max_workers=max(1, max_workers), thread_name_prefix="hebe-game-research")
@@ -973,14 +984,19 @@ class GameResearchService:
             )
             if self._dossier_sufficient(dossier):
                 self.store.save_dossier(dossier)
-                self.diagnostics.dossier_status = "created" if existing is None else "loaded"
+                self.diagnostics.dossier_status = "ready" if dossier.confirmed_general_mechanics else "partial"
                 self._log_dossier(dossier, self.diagnostics.dossier_status)
             else:
                 self.diagnostics.dossier_status = "insufficient"
                 self.diagnostics.current_comment_mode = "contextual_reaction"
                 self._log_dossier(existing, "insufficient", game=title)
         self.diagnostics.active_research_job = asdict(job)
-        print(f"[HEBE][GAME_RESEARCH_JOB] status=completed mode={job.mode} job_id={job.job_id} facts={len(facts)}", flush=True)
+        print(
+            f"[HEBE][GAME_RESEARCH_JOB] status=completed mode={job.mode} job_id={job.job_id} "
+            f"accepted_fact_count={len([fact for fact in facts if fact.usable_for_comment])} "
+            f"source_count={len({fact.source_location for fact in facts if fact.source_location})}",
+            flush=True,
+        )
         return job, facts
 
     def cancel_job(self, job_id: str) -> bool:
@@ -1098,9 +1114,18 @@ class GameResearchService:
             if cached is not None:
                 checked = self._recheck_progress(cached, progress)
                 return checked, [], True
-        if self.provider is None:
+        if self.provider is None or not getattr(self.provider, "available", True):
             raise RuntimeError("research_provider_missing")
-        rows = self.provider.search(plan.query)
+        constraints = {
+            "spoiler_limit": plan.spoiler_limit,
+            "expected_fact_type": plan.expected_fact_type,
+            "entity": plan.entity,
+            "strict_first_playthrough": progress is None or progress.spoiler_policy == "strict",
+        }
+        try:
+            rows = self.provider.search(plan.query, constraints, timeout=20.0)
+        except TypeError:
+            rows = self.provider.search(plan.query)
         if not isinstance(rows, list):
             rows = []
         sources = [dict(row) for row in rows if isinstance(row, dict)]
@@ -1330,7 +1355,7 @@ class GameResearchService:
             "[HEBE][GAME_RESEARCH_PROVIDER] "
             f"provider={self.provider_name} "
             f"configured={str(self.provider_configured).lower()} "
-            f"available={str(self.provider is not None).lower()} "
+            f"available={str(self.diagnostics.research_provider_available).lower()} "
             f"reason={self.diagnostics.research_provider_reason}",
             flush=True,
         )
