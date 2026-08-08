@@ -92,7 +92,10 @@ class OpenAIResponsesWebSearchProvider:
         self.api_key = str(api_key or "").strip()
         self.model = model or os.getenv("HEBE_GAME_RESEARCH_OPENAI_MODEL", os.getenv("HEBE_OPENAI_MODEL", "gpt-5-mini"))
         self.base_url = (base_url or os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")).rstrip("/")
-        self.timeout = float(timeout or os.getenv("HEBE_GAME_RESEARCH_TIMEOUT_SECONDS", "20"))
+        self.timeout = float(timeout or os.getenv(
+            "HEBE_GAME_RESEARCH_PROVIDER_TIMEOUT_SECONDS",
+            os.getenv("HEBE_GAME_RESEARCH_TIMEOUT_SECONDS", "10"),
+        ))
         self.available = bool(self.api_key)
 
     def search(

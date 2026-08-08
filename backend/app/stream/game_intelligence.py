@@ -176,11 +176,18 @@ class GameResearchJob:
     job_id: str
     plan: GameSearchPlan
     scene_id: str
+    session_id: str = ""
+    game_id: str = ""
     mode: str = ResearchMode.CONTEXTUAL_LOOKUP.value
+    attempt: int = 1
     status: str = "queued"
     queued_at: float = 0.0
+    started_at: float = 0.0
+    timeout_seconds: float = 0.0
     expires_at: float = 0.0
     completed_at: float = 0.0
+    failure_reason: str = ""
+    next_retry_at: float = 0.0
     fact_ids: list[str] = field(default_factory=list)
     error: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
@@ -757,6 +764,10 @@ class GameResearchService:
         now_fn: Callable[[], float] = time.time,
         provider_name: str = "",
         provider_configured: bool | None = None,
+        contextual_timeout_seconds: float = 10.0,
+        dossier_timeout_seconds: float = 15.0,
+        max_attempts: int = 3,
+        retry_base_seconds: float = 2.0,
     ) -> None:
         self.store = store or GameIntelligenceStore()
         self.provider = provider
@@ -764,6 +775,10 @@ class GameResearchService:
         self.provider_configured = bool(provider is not None if provider_configured is None else provider_configured)
         self.cache_ttl_seconds = max(60.0, float(cache_ttl_seconds))
         self.now_fn = now_fn
+        self.contextual_timeout_seconds = max(1.0, float(contextual_timeout_seconds))
+        self.dossier_timeout_seconds = max(self.contextual_timeout_seconds, float(dossier_timeout_seconds))
+        self.max_attempts = max(1, int(max_attempts))
+        self.retry_base_seconds = max(0.1, float(retry_base_seconds))
         self.progress = GameProgressTracker(self.store)
         self.spoiler_firewall = SpoilerFirewall()
         self.trigger_engine = ResearchTriggerEngine(self.store)
@@ -836,7 +851,9 @@ class GameResearchService:
         self._log_dossier(dossier, status)
         return dossier, status
 
-    def prepare_game_async(self, *, game_title: str, platform: str = "", version: str = "") -> GameResearchJob:
+    def prepare_game_async(
+        self, *, game_title: str, platform: str = "", version: str = "", session_id: str | int = "",
+    ) -> GameResearchJob:
         game_id, canonical, _ = self.canonical_game(game_title)
         plan = self.plan_search(
             game_title=canonical,
@@ -846,12 +863,35 @@ class GameResearchService:
             question_type="dossier",
             expected_fact_type="general_mechanics",
         )
+        canonical_session = str(session_id or "pre_stream")
+        with self._job_lock:
+            matching = [
+                job for job, _future in self._jobs.values()
+                if job.game_id == game_id and job.session_id == canonical_session
+                and job.mode == ResearchMode.PRE_STREAM_DOSSIER.value
+            ]
+        if matching:
+            latest = max(matching, key=lambda item: (item.attempt, item.queued_at))
+            if latest.status in {"queued", "running", "completed"}:
+                return latest
+            if (
+                latest.attempt >= self.max_attempts
+                or not latest.next_retry_at
+                or self.now_fn() < latest.next_retry_at
+            ):
+                return latest
+            attempt = latest.attempt + 1
+        else:
+            attempt = 1
         job = self.queue_research(
             plan,
             progress=None,
             scene_id="pre_stream",
             ttl_seconds=300,
             mode=ResearchMode.PRE_STREAM_DOSSIER.value,
+            session_id=canonical_session,
+            attempt=attempt,
+            timeout_seconds=self.dossier_timeout_seconds,
             metadata={"game_title": canonical, "platform": platform, "version": version, "build_dossier": True},
         )
         return job
@@ -896,8 +936,12 @@ class GameResearchService:
         *,
         progress: GameProgressState | None,
         allow_cache: bool = True,
+        timeout_seconds: float | None = None,
     ) -> list[RetrievedGameFact]:
-        facts, _sources, cache_hit = self._retrieve(plan, progress=progress, allow_cache=allow_cache)
+        facts, _sources, cache_hit = self._retrieve(
+            plan, progress=progress, allow_cache=allow_cache,
+            timeout_seconds=timeout_seconds or self.contextual_timeout_seconds,
+        )
         self.diagnostics.lookup_used = True
         if cache_hit:
             self.diagnostics.cache_hits += 1
@@ -911,27 +955,43 @@ class GameResearchService:
         scene_id: str,
         ttl_seconds: float = 20.0,
         mode: ResearchMode | str = ResearchMode.CONTEXTUAL_LOOKUP.value,
+        session_id: str | int = "",
+        attempt: int = 1,
+        timeout_seconds: float | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> GameResearchJob:
         with self._job_lock:
             for existing_job, existing_future in self._jobs.values():
-                if existing_job.plan.cache_key == plan.cache_key and not existing_future.done() and existing_job.status in {"queued", "running"}:
+                if (
+                    existing_job.plan.cache_key == plan.cache_key
+                    and existing_job.session_id == str(session_id or "")
+                    and existing_job.mode == str(mode)
+                    and not existing_future.done() and existing_job.status in {"queued", "running"}
+                ):
                     return existing_job
         now = self.now_fn()
         job = GameResearchJob(
             job_id=f"research_{uuid.uuid4().hex}",
             plan=plan,
             scene_id=scene_id,
+            session_id=str(session_id or ""),
+            game_id=plan.game_id,
             mode=str(mode),
+            attempt=max(1, int(attempt)),
             queued_at=now,
+            timeout_seconds=float(timeout_seconds or (
+                self.dossier_timeout_seconds if str(mode) == ResearchMode.PRE_STREAM_DOSSIER.value
+                else self.contextual_timeout_seconds
+            )),
             expires_at=now + max(0.1, ttl_seconds),
             metadata=dict(metadata or {}),
         )
 
         def work() -> list[RetrievedGameFact]:
             job.status = "running"
+            job.started_at = self.now_fn()
             print(f"[HEBE][GAME_RESEARCH_JOB] status=running mode={job.mode} job_id={job.job_id} cache_key={plan.cache_key}", flush=True)
-            return self.research(plan, progress=progress)
+            return self.research(plan, progress=progress, timeout_seconds=job.timeout_seconds)
 
         future = self._executor.submit(work)
         with self._job_lock:
@@ -946,7 +1006,27 @@ class GameResearchService:
         if pair is None:
             raise KeyError(job_id)
         job, future = pair
+        if job.status in {"completed", "failed", "cancelled", "stale"}:
+            return job, []
         if not future.done():
+            now = self.now_fn()
+            if job.status == "running" and now - job.started_at >= job.timeout_seconds:
+                job.status = "failed"
+                job.completed_at = now
+                job.failure_reason = f"provider_timeout: exceeded {job.timeout_seconds:.1f}s"
+                job.error = job.failure_reason
+                if job.attempt < self.max_attempts:
+                    job.next_retry_at = now + self.retry_base_seconds * (2 ** (job.attempt - 1))
+                future.cancel()
+                if job.mode == ResearchMode.PRE_STREAM_DOSSIER.value:
+                    self.diagnostics.dossier_status = "failed"
+                    self.diagnostics.current_comment_mode = "contextual_reaction"
+                self.diagnostics.active_research_job = asdict(job)
+                print(
+                    f"[HEBE][GAME_RESEARCH_JOB] status=failed mode={job.mode} job_id={job.job_id} "
+                    f"error=TimeoutError reason={job.failure_reason}",
+                    flush=True,
+                )
             return job, []
         if self.now_fn() > job.expires_at or not scene_still_current:
             job.status = "stale"
@@ -956,7 +1036,12 @@ class GameResearchService:
         try:
             facts = future.result()
         except Exception as exc:
-            job.status, job.error = "failed", f"{type(exc).__name__}: {exc}"
+            job.status = "failed"
+            job.completed_at = self.now_fn()
+            job.failure_reason = f"{type(exc).__name__}: {exc}"
+            job.error = job.failure_reason
+            if job.attempt < self.max_attempts and _is_transient_research_failure(job.failure_reason):
+                job.next_retry_at = job.completed_at + self.retry_base_seconds * (2 ** (job.attempt - 1))
             if job.mode == ResearchMode.PRE_STREAM_DOSSIER.value:
                 self.diagnostics.dossier_status = "failed"
                 self.diagnostics.current_comment_mode = "contextual_reaction"
@@ -998,6 +1083,32 @@ class GameResearchService:
             flush=True,
         )
         return job, facts
+
+    def retry_due_jobs(self) -> list[GameResearchJob]:
+        """Queue due retries without ever waiting for provider I/O on the cognition thread."""
+        now = self.now_fn()
+        with self._job_lock:
+            due = [
+                job for job, _future in self._jobs.values()
+                if job.status == "failed" and job.next_retry_at and job.next_retry_at <= now
+                and job.attempt < self.max_attempts
+            ]
+        queued: list[GameResearchJob] = []
+        for job in due:
+            # Mark the failed attempt consumed before queueing to make repeated ticks idempotent.
+            job.next_retry_at = 0.0
+            queued.append(self.queue_research(
+                job.plan,
+                progress=None,
+                scene_id=job.scene_id,
+                ttl_seconds=max(0.1, job.expires_at - job.queued_at),
+                mode=job.mode,
+                session_id=job.session_id,
+                attempt=job.attempt + 1,
+                timeout_seconds=job.timeout_seconds,
+                metadata=job.metadata,
+            ))
+        return queued
 
     def cancel_job(self, job_id: str) -> bool:
         with self._job_lock:
@@ -1107,6 +1218,7 @@ class GameResearchService:
         *,
         progress: GameProgressState | None,
         allow_cache: bool,
+        timeout_seconds: float | None = None,
     ) -> tuple[list[RetrievedGameFact], list[dict[str, Any]], bool]:
         self.diagnostics.last_query = plan.query
         if allow_cache:
@@ -1123,7 +1235,10 @@ class GameResearchService:
             "strict_first_playthrough": progress is None or progress.spoiler_policy == "strict",
         }
         try:
-            rows = self.provider.search(plan.query, constraints, timeout=20.0)
+            rows = self.provider.search(
+                plan.query, constraints,
+                timeout=float(timeout_seconds or self.contextual_timeout_seconds),
+            )
         except TypeError:
             rows = self.provider.search(plan.query)
         if not isinstance(rows, list):
@@ -1370,6 +1485,21 @@ def default_assistance_mode(progress: GameProgressState) -> GameAssistanceMode:
 def _cache_key(game_id: str, scope: str, expected: str) -> str:
     normalized = f"{_slug(game_id)}|{_norm(scope)}|{_norm(expected)}"
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def _is_transient_research_failure(reason: str) -> bool:
+    normalized = _norm(reason)
+    permanent = {
+        "auth", "unauthorized", "forbidden", "invalid api key", "api key missing",
+        "research provider missing", "policy", "invalid profile", "bad request",
+    }
+    if any(marker in normalized for marker in permanent):
+        return False
+    transient = {
+        "timeout", "timed out", "connection", "network", "temporar", "rate limit",
+        "provider down", "429", "502", "503", "504", "service unavailable",
+    }
+    return any(marker in normalized for marker in transient)
 
 
 __all__ = [

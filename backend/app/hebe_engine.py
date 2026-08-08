@@ -116,6 +116,7 @@ from app.stream.promotions import (
     parse_promotion_profile_command,
 )
 from app.stream.ambient_context import AmbientContextExtractor
+from app.stream.conversation_ownership import ConversationOwnershipGate
 from app.stream.audio_state import EffectiveStreamAudioState
 from app.stream.discourse import (
     DiscourseContributionPlanner,
@@ -2479,7 +2480,20 @@ class HebeEngine:
         except Exception as exc:
             print(f"[HEBE][AUTO_PROMO_OUTCOME] viewer={username} status=failed reason={type(exc).__name__}", flush=True)
 
-    def _send_automatic_promotion(self, login: str) -> dict:
+    def _send_automatic_promotion(
+        self, login: str, *, source: str = "automatic_promotion_policy", authority: str = "owner_delegated",
+        twitch_user_id: str = "",
+    ) -> dict:
+        service = getattr(self, "automatic_promotions", None)
+        store = getattr(service, "store", None)
+        if store is not None:
+            profile = store.get_profile(twitch_user_id=twitch_user_id, login=login)
+            if (
+                profile is None or not profile.active
+                or str(profile.current_login or "").casefold() != str(login or "").casefold()
+                or (twitch_user_id and str(profile.twitch_user_id) != str(twitch_user_id))
+            ):
+                return {"success": False, "reason": "invalid_identity"}
         context = getattr(self, "live_context_policy", None) or HebeLiveContextPolicy()
         authorization = context.authorize_action(
             HebeLiveRuntimeContext.STREAM_PUBLIC,
@@ -2496,7 +2510,8 @@ class HebeEngine:
             return {"success": False, "reason": authorization.reason}
         ok, _normalized, reason = self._send_shoutout(
             login,
-            source="automatic_first_message",
+            source=source,
+            authority=authority,
             force=False,
         )
         return {"success": bool(ok), "reason": reason}
@@ -2820,7 +2835,10 @@ class HebeEngine:
             return "own_channel"
         return None
 
-    def _send_shoutout(self, target: str, *, source: str, force: bool = False, explicit_self: bool = False) -> tuple[bool, str, str]:
+    def _send_shoutout(
+        self, target: str, *, source: str, authority: str = "", force: bool = False,
+        explicit_self: bool = False,
+    ) -> tuple[bool, str, str]:
         stream = self._get_stream_state()
         normalized = self._normalize_shoutout_target(target)
         stream_live = bool(stream and getattr(stream, "is_live", False))
@@ -2831,7 +2849,8 @@ class HebeEngine:
             print(f"[HEBE][PROMOTION_GATE] blocked reason={reason} target={target}", flush=True)
             print(f"[HEBE][ACTION_PERMISSIONS] action={ACTION_PROMOTION_SHOUTOUT} allowed=false reason={reason}", flush=True)
             return False, normalized, reason
-        if source not in {"manual", "raid"}:
+        delegated_automatic = source == "automatic_promotion_policy" and authority == "owner_delegated"
+        if source not in {"manual", "raid"} and not delegated_automatic:
             reason = "untrusted_source"
             if source in {"ambient_stt", "media_or_music"}:
                 reason = "ambient_stt_not_allowed"
@@ -2842,7 +2861,8 @@ class HebeEngine:
             return False, normalized, reason
         print(
             "[HEBE][PROMOTION_GATE] "
-            f"allowed reason={'approved_stream_event' if source == 'raid' else 'owner_direct_command'} target={normalized}",
+            f"allowed reason={'owner_delegated_profile' if delegated_automatic else 'approved_stream_event' if source == 'raid' else 'owner_direct_command'} "
+            f"source={source} authority={authority or 'direct'} target={normalized}",
             flush=True,
         )
         reason = self._shoutout_block_reason(normalized, explicit_self=explicit_self)
@@ -3779,6 +3799,21 @@ class HebeEngine:
                     authority=firewall.authority,
                 ))
                 return
+            if event_type == "twitch_chat_react":
+                ownership = ConversationOwnershipGate().decide(raw_text, payload=payload)
+                if isinstance(payload, dict):
+                    payload["conversation_ownership"] = ownership.to_dict()
+                    event.payload = payload
+                print(
+                    "[HEBE][CONVERSATION_OWNERSHIP] "
+                    f"addressee={ownership.addressee} allowed={str(ownership.allow_assistant).lower()} "
+                    f"reason={ownership.reason} confidence={ownership.confidence:.3f}",
+                    flush=True,
+                )
+                if not ownership.allow_assistant:
+                    self._increment_twitch_pipeline_counter("twitch_messages_early_skipped", reason=ownership.reason)
+                    self._get_twitch_interaction_coordinator().record_policy_suppression(event_id, ownership.reason)
+                    return
             stream = self._get_stream_state()
             route_context = SimpleNamespace(
                 input_text=raw_text,
@@ -3817,6 +3852,27 @@ class HebeEngine:
                     f"event_id={getattr(event_decision, 'message_id', '')} should_reply=true next=twitch_response_pipeline",
                     flush=True,
                 )
+            if (
+                event_decision.should_stop_pipeline
+                and (
+                    str(getattr(event_decision, "response_mode", "")) == "viewer_context_only"
+                    or str(getattr(event_decision, "reason", "")) == "viewer_context_only"
+                )
+            ):
+                self._get_twitch_interaction_coordinator().record_policy_suppression(
+                    event_id, str(getattr(event_decision, "reason", "") or "viewer_context_only"),
+                )
+                self._set_last_twitch_route_state(
+                    output_route="context_only", should_generate=False,
+                    suppress_reason=str(getattr(event_decision, "reason", "") or "viewer_context_only"),
+                    emitted_to_twitch=False, tts_sent=False,
+                )
+                print(
+                    "[HEBE][TWITCH_PIPELINE_FINAL] route=context_only emitted=false "
+                    f"reason={getattr(event_decision, 'reason', 'viewer_context_only')}",
+                    flush=True,
+                )
+                return
             if event_decision.should_stop_pipeline:
                 if event_type == "twitch_chat_react":
                     stream = self._get_stream_state()
@@ -4211,7 +4267,7 @@ class HebeEngine:
                 service.diagnostics.dossier_status = "loaded"
                 service._log_dossier(existing, "loaded")
             else:
-                service.prepare_game_async(game_title=game)
+                service.prepare_game_async(game_title=game, session_id=session_id)
         except Exception as exc:
             print(f"[HEBE][GAME_DOSSIER] game={game} status=failed facts=0 sources=0 error={type(exc).__name__}", flush=True)
 
@@ -4714,31 +4770,25 @@ class HebeEngine:
         self.runtime.state.game_run_state = current
 
     def _maybe_research_game_after_context_sync(self, stream) -> None:
-        service = getattr(self, "game_research", None)
-        if service is None or not getattr(service.config, "enabled", False):
-            return
         category = getattr(stream, "current_category", None) or getattr(stream, "current_game", None)
         if not category or category == getattr(self, "_last_game_research_category", None):
             return
         self._last_game_research_category = category
-        ok, profile, reason = service.maybe_research_on_category_change(
-            current_category=getattr(stream, "current_category", None),
-            current_title=getattr(stream, "current_stream_title", None),
-            current_game=getattr(stream, "current_game", None),
-        )
-        print(
-            f"[HEBE][GAME_RESEARCH] category_check ok={ok} reason={reason} profile={profile.game_slug}",
-            flush=True,
-        )
+        # The legacy service performs provider I/O synchronously. All automatic
+        # category research now enters through the bounded background job.
+        self._prepare_live_game_intelligence(stream)
 
     def poll_stream_presence(self) -> None:
         now = time.time()
         game_intelligence = getattr(self, "game_intelligence", None)
         if game_intelligence is not None:
             try:
+                game_intelligence.retry_due_jobs()
                 for job_id in list(getattr(game_intelligence, "_jobs", {}).keys()):
                     job, _facts = game_intelligence.collect_job(job_id, scene_still_current=True)
-                    if job.status in {"completed", "failed", "cancelled", "stale"}:
+                    # Completed and failed attempts remain as the session-scoped
+                    # idempotency ledger. Only explicitly invalidated work is removed.
+                    if job.status in {"cancelled", "stale"}:
                         getattr(game_intelligence, "_jobs", {}).pop(job_id, None)
             except Exception as exc:
                 print(f"[HEBE][GAME_RESEARCH_JOB] status=failed error={type(exc).__name__}", flush=True)

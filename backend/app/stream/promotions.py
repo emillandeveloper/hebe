@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import inspect
 import os
 import re
 import sqlite3
@@ -731,7 +732,7 @@ class AutomaticPromotionService:
         event = self.store.create_event(
             stream_session_id=self.session_id,
             source_event_id=source_id,
-            requested_by="owner_profile",
+            requested_by="owner_delegated",
             raw_target_text=user_login,
             resolved_twitch_user_id=twitch_user_id,
             resolved_login=user_login,
@@ -752,7 +753,13 @@ class AutomaticPromotionService:
             item = self._queue.popleft()
         event: PromotionEvent = item["event"]
         profile: ViewerPromotionProfile = item["profile"]
-        success, twitch_message_id, reason = _send_result(send_shoutout, event.resolved_login)
+        success, twitch_message_id, reason = _send_result(
+            send_shoutout,
+            event.resolved_login,
+            source="automatic_promotion_policy",
+            authority="owner_delegated",
+            twitch_user_id=profile.twitch_user_id,
+        )
         if success:
             updated = self.store.transition(
                 event.id,
@@ -771,7 +778,7 @@ class AutomaticPromotionService:
             now=current,
         )
         retry = int(item.get("retry") or 0)
-        if retry < self.max_retries:
+        if retry < self.max_retries and _is_transient_promotion_failure(reason):
             retry_event = self.store.create_event(
                 stream_session_id=self.session_id,
                 source_event_id=f"{event.source_event_id}:retry:{retry + 1}",
@@ -878,9 +885,12 @@ def record_manual_promotion(
     return store.transition(event.id, PromotionExecutionStatus.FAILED, failure_reason=reason or "twitch_send_failed")
 
 
-def _send_result(send_shoutout: Callable[[str], Any], login: str) -> tuple[bool, str, str]:
+def _send_result(send_shoutout: Callable[[str], Any], login: str, **context: Any) -> tuple[bool, str, str]:
     try:
-        raw = send_shoutout(login)
+        signature = inspect.signature(send_shoutout)
+        accepts_kwargs = any(param.kind == inspect.Parameter.VAR_KEYWORD for param in signature.parameters.values())
+        accepted = context if accepts_kwargs else {key: value for key, value in context.items() if key in signature.parameters}
+        raw = send_shoutout(login, **accepted)
     except Exception as exc:
         return False, "", f"{type(exc).__name__}: {exc}"
     if isinstance(raw, dict):
@@ -888,6 +898,24 @@ def _send_result(send_shoutout: Callable[[str], Any], login: str) -> tuple[bool,
     if isinstance(raw, tuple):
         return bool(raw[0] if raw else False), str(raw[1] if len(raw) > 1 else ""), str(raw[2] if len(raw) > 2 else "")
     return bool(raw), "", "" if raw else "twitch_send_returned_false"
+
+
+def _is_transient_promotion_failure(reason: str) -> bool:
+    normalized = _normalize(reason)
+    permanent = {
+        "untrusted_source", "unauthorized", "profile_disabled", "invalid_identity",
+        "invalid_target", "policy_blocked", "offline_stream", "wrong_runtime_context",
+        "blocked_bot_user", "own_channel", "ambient_stt_not_allowed", "cooldown_active",
+        "profile_cooldown", "authentication", "auth_failed", "forbidden",
+    }
+    if any(marker in normalized for marker in permanent):
+        return False
+    transient = {
+        "timeout", "timed out", "connection", "network", "temporar", "rate limit",
+        "429", "502", "503", "504", "service unavailable", "send failed", "send_failed",
+        "twitch send returned false",
+    }
+    return any(marker in normalized for marker in transient)
 
 
 def _login(value: str) -> str:

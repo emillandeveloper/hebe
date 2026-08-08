@@ -60,6 +60,10 @@ class AmbientFact:
     inference_level: str
     supported_claims: list[str]
     unsupported_claims: list[str]
+    evidence_span: str
+    evidence_tokens: list[str]
+    semantic_rule: str
+    model_reason: str
     expires_at: float
 
     @property
@@ -108,6 +112,10 @@ class AmbientFact:
             "supported_claims": list(self.supported_claims),
             "directly_supported_claims": list(self.supported_claims),
             "unsupported_claims": list(self.unsupported_claims),
+            "evidence_span": self.evidence_span,
+            "evidence_tokens": list(self.evidence_tokens),
+            "semantic_rule": self.semantic_rule,
+            "model_reason": self.model_reason,
             "expires_at": self.expires_at,
         }
 
@@ -389,7 +397,7 @@ class AmbientContextExtractor:
         low_hp = {"muero", "muriendo", "morir", "vida", "hp", "rojo", "red", "oneshot", "one"}
         resource = {"comida", "food", "exp", "experiencia", "recurso", "recursos", "dinero", "oro", "mana", "mp", "farmear", "farm"}
         progress = {"pasado", "pasamos", "derrotado", "avance", "avanzamos", "llegamos", "conseguido", "success", "victoria"}
-        confusion = {"donde", "perdido", "perdida", "confuso", "confundido", "voy", "ir"}
+        confusion = {"donde", "adonde", "perdido", "perdida", "confuso", "confundido"}
         failure = {"otra", "vez", "again", "muerto", "matado", "fallado", "fallo", "intento"}
         difficulty = {"facil", "dificil", "hard", "easy", "imposible", "complicado"}
 
@@ -455,7 +463,11 @@ class AmbientContextExtractor:
                 now,
                 mood="difficulty read",
             )
-        if tokens & confusion and len(tokens) >= 4:
+        explicit_navigation_confusion = bool(
+            tokens & confusion
+            or re.search(r"\bno se (?:por )?donde (?:ir|voy|seguir)\b", normalized)
+        )
+        if explicit_navigation_confusion and len(tokens) >= 4:
             return self._category_fact("navigation_confusion", "Leo is unsure where to go next.", raw, normalized, 0.7, now, mood="confused")
         if tokens & failure and len(tokens) >= 4:
             return self._category_fact("failure_or_death", "Leo mentioned repeated failure or another death.", raw, normalized, 0.68, now, mood="frustrated")
@@ -567,6 +579,10 @@ class AmbientContextExtractor:
             inference_level=str(data.get("inference_level") or "direct_observation"),
             supported_claims=[str(item) for item in data.get("supported_claims") or ([raw_text] if raw_text else [])],
             unsupported_claims=[str(item) for item in data.get("unsupported_claims") or []],
+            evidence_span=str(data.get("evidence_span") or raw_text),
+            evidence_tokens=[str(item) for item in data.get("evidence_tokens") or normalized_text.split()],
+            semantic_rule=str(data.get("semantic_rule") or f"category:{category}"),
+            model_reason=str(data.get("model_reason") or f"Observed utterance supports {category}."),
             expires_at=now + ttl_sec,
         )
         return {
@@ -634,6 +650,10 @@ class AmbientContextExtractor:
                 "inference_level": "direct_observation" if (referent or GameplayReferentResolution()).confidence >= 0.75 else "heuristic",
                 "supported_claims": supported_claims or [raw],
                 "unsupported_claims": unsupported_claims or [],
+                "evidence_span": raw,
+                "evidence_tokens": normalized.split(),
+                "semantic_rule": f"ambient_category:{category}",
+                "model_reason": summary,
             },
         )
 

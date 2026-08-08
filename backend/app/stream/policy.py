@@ -683,11 +683,21 @@ def classify_viewer_semantic_intent(text: str) -> SemanticIntent:
             matched_by=["semantic_classifier"],
             execute_as_command=False,
         )
-    if any(term in normalized for term in ("condon", "preservativo", "sexo", "sexual", "educacion sexual", "anticonceptivo")):
+    sexual_context = _sexual_context_kind(normalized)
+    allowed_sexual_context = {"none", "sexual_reference", "sexual_joke_not_addressed_to_hebe"}
+    if sexual_context not in allowed_sexual_context:
         return SemanticIntent(
             intent="viewer_unsafe_or_offbrand_request",
-            requested_behavior="sexual_stream_topic",
+            requested_behavior=sexual_context,
             behavior_family="stream_safety",
+            matched_by=["semantic_classifier"],
+            execute_as_command=False,
+        )
+    if sexual_context in {"sexual_reference", "sexual_joke_not_addressed_to_hebe"}:
+        return SemanticIntent(
+            intent="viewer_allowed_banter",
+            requested_behavior=sexual_context,
+            behavior_family="contextual_banter",
             matched_by=["semantic_classifier"],
             execute_as_command=False,
         )
@@ -732,6 +742,27 @@ def _is_dark_humor_request(normalized: str) -> bool:
     return ("humor" in tokens and bool(tokens & dark_markers)) or (
         "chiste" in tokens and bool(tokens & (dark_markers - {"negro"}))
     )
+
+
+def _sexual_context_kind(normalized: str) -> str:
+    """Classify sexual vocabulary by communicative act, not by keyword alone."""
+    text = str(normalized or "")
+    markers = ("condon", "preservativo", "sexo", "sexual", "educacion sexual", "anticonceptivo")
+    if not any(marker in text for marker in markers):
+        return "none"
+    if re.search(r"\b(?:sexualiza|sexualizar|ponte sexy|hazte sexy|seduce|describe.*(?:sexy|sexual))\b", text):
+        return "sexualization_of_hebe"
+    if re.search(r"\b(?:chiste|broma)\b.*\b(?:sexo|sexual|condon|preservativo)\b", text):
+        if re.search(r"\b(?:hebe|ebe|eve|jebe)\b", text):
+            return "sexual_request_to_hebe"
+        return "sexual_joke_not_addressed_to_hebe"
+    if re.search(
+        r"\b(?:habla|cuenta|dime|explica|ensena|muestra|haz|describe|opina|quiero|puedes|podrias)\b.*"
+        r"\b(?:sexo|sexual|condon|preservativo|anticonceptivo)\b",
+        text,
+    ):
+        return "sexual_request_to_hebe"
+    return "sexual_reference"
 
 
 def requested_behavior_for_text(text: str | None) -> str:
@@ -919,7 +950,8 @@ class ViewerIntentPolicy:
                 execute_as_command=False,
             )
 
-        if any(term in normalized for term in ("condon", "preservativo", "sexo", "sexual", "educacion sexual", "anticonceptivo")):
+        sexual_context = _sexual_context_kind(normalized)
+        if sexual_context not in {"none", "sexual_reference", "sexual_joke_not_addressed_to_hebe"}:
             print("[HEBE][VIEWER_POLICY] decision=blocked reason=sexual_topic_stream_mode", flush=True)
             return PolicyDecision(
                 allow_reply=True,
@@ -931,7 +963,7 @@ class ViewerIntentPolicy:
                 response_constraints=list(POLICY_RESPONSE_CONSTRAINTS),
                 response_intent="hebe_playful_boundary",
                 response_tone="sarcastic_loyal_playful",
-                requested_behavior=semantic.requested_behavior or "sexual_stream_topic",
+                requested_behavior=semantic.requested_behavior or sexual_context,
                 behavior_family=semantic.behavior_family or "stream_safety",
                 matched_by=semantic.matched_by,
                 execute_as_command=False,
