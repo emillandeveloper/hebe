@@ -1,9 +1,11 @@
 from app.services.app_registry import resolve_candidates, register_app, resolve_whitelisted_app
+from app.services.local_capability import LocalCapabilityResolver
 from app.cognitive.models import ActionResult
 
 class ActionRuntime:
     def __init__(self, runtime):
         self.runtime = runtime
+        self.local_capability = LocalCapabilityResolver()
 
     def execute(self, action_name: str, params: dict) -> ActionResult:
         print(f"[HEBE][ACTION] execute name={action_name!r} params={params!r}", flush=True)
@@ -75,20 +77,36 @@ class ActionRuntime:
 
         app_id = str(app_record.get("app_id") or app_id).strip()
         display_name = str(app_record.get("display_name") or app_record.get("name") or app_id).strip()
-        executable_path = str(app_record.get("executable_path") or app_record.get("command") or "").strip()
-        if not executable_path:
+
+        resolution = self.local_capability.resolve_open_application(app_record, requested_target=params.get("requested_target") or display_name)
+        implementation = resolution.implementation
+
+        if resolution.status == "not_found":
             return ActionResult(
                 success=False,
-                error="app_path_missing",
+                error="app_not_found",
                 data={
-                    "error_code": "app_path_missing",
+                    "error_code": "app_not_found",
                     "app_id": app_id,
                     "app_name": display_name,
                     "app_record": app_record,
-                    "message_goal": (
-                        "Tell Leo that OBS is recognized but the executable path is not configured, "
-                        "and ask him to configure HEBE_APP_OBS_PATH or app registry path."
-                    ),
+                    "clarification_question": resolution.clarification_question,
+                    "diagnostics": resolution.diagnostics,
+                },
+            )
+
+        if resolution.status == "ambiguous" or implementation is None:
+            return ActionResult(
+                success=False,
+                error="ambiguous_app_selection",
+                data={
+                    "error_code": "ambiguous_app_selection",
+                    "app_id": app_id,
+                    "app_name": display_name,
+                    "app_record": app_record,
+                    "clarification_question": resolution.clarification_question,
+                    "candidate_count": resolution.candidate_count,
+                    "diagnostics": resolution.diagnostics,
                 },
             )
 
@@ -104,11 +122,17 @@ class ActionRuntime:
                 },
             )
 
+        executable_path = implementation.executable_path
         print(
             "[HEBE][ACTION_EXECUTOR] "
-            f"action_type=open_application launching app_id={app_id} path={executable_path!r}",
+            f"action_type=open_application launching app_id={app_id} path={executable_path!r} source={implementation.source_type}",
             flush=True,
         )
+
+        app_record = dict(app_record)
+        app_record["executable_path"] = executable_path
+        app_record["command"] = implementation.command
+
         ok = bool(self.runtime.win.open_app(app_record))
         return ActionResult(
             success=ok,
@@ -118,6 +142,9 @@ class ActionRuntime:
                 "app_id": app_id,
                 "app_name": display_name,
                 "app_record": app_record,
+                "executed_command": implementation.command,
+                "launch_source": implementation.source_type,
+                "persisted": resolution.persisted,
             },
         )
 

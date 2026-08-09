@@ -183,6 +183,29 @@ def init_db() -> None:
         """
     )
 
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS learned_apps (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            app_id TEXT NOT NULL UNIQUE,
+            canonical_name TEXT NOT NULL,
+            aliases TEXT,
+            executable_path TEXT NOT NULL,
+            launch_arguments TEXT,
+            source TEXT,
+            confidence REAL,
+            validated_at TEXT,
+            learned_at TEXT NOT NULL,
+            last_successful_launch TEXT,
+            last_failed_launch TEXT,
+            validation_version TEXT,
+            process_name TEXT,
+            window_title TEXT,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+
     # Log opcional de eventos internos
     cur.execute(
         """

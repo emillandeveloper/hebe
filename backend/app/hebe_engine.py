@@ -6951,11 +6951,11 @@ class HebeEngine:
                 constraints=[
                     "Do not ask for remote access.",
                     "Do not give manual app-opening instructions.",
-                    "Ask Leo to configure HEBE_APP_OBS_PATH or the app registry path.",
+                    "Do not ask whether to open it.",
                 ],
                 fallback_text=(
                     f"Reconozco {app_name}, pero no tengo configurada su ruta ejecutable. "
-                    "Configura HEBE_APP_OBS_PATH o la ruta en el registro de apps."
+                    "Todavía estoy intentando encontrarla."
                 ),
                 requires_model_response=True,
                 metadata={
@@ -6963,8 +6963,8 @@ class HebeEngine:
                     "error_code": "app_path_missing",
                     "app_id": plan.slots.get("app_id") or plan.target,
                     "message_goal": (
-                        "Tell Leo that OBS is recognized but the executable path is not configured, "
-                        "and ask him to configure HEBE_APP_OBS_PATH or app registry path."
+                        "Tell Leo that the application is recognized but its executable path is not configured, "
+                        "and that Hebe is attempting local discovery."
                     ),
                 },
             )

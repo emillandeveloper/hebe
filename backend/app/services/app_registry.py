@@ -161,7 +161,145 @@ def resolve_whitelisted_app(name: str) -> Optional[Dict[str, Any]]:
     return None
 
 
-def _app_commands_table_exists(conn: sqlite3.Connection) -> bool:
+def _learned_apps_table_exists(conn: sqlite3.Connection) -> bool:
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT name
+            FROM sqlite_master
+            WHERE type='table' AND name='learned_apps'
+            LIMIT 1
+            """
+        )
+        return cur.fetchone() is not None
+    except Exception:
+        return False
+
+
+def _ensure_learned_apps_table(conn: sqlite3.Connection) -> None:
+    if _learned_apps_table_exists(conn):
+        return
+    cur = conn.cursor()
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS learned_apps (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            app_id TEXT NOT NULL UNIQUE,
+            canonical_name TEXT NOT NULL,
+            aliases TEXT,
+            executable_path TEXT NOT NULL,
+            launch_arguments TEXT,
+            source TEXT,
+            confidence REAL,
+            validated_at TEXT,
+            learned_at TEXT NOT NULL,
+            last_successful_launch TEXT,
+            last_failed_launch TEXT,
+            validation_version TEXT,
+            process_name TEXT,
+            window_title TEXT,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.commit()
+
+
+def persist_learned_app(
+    app_id: str,
+    canonical_name: str,
+    aliases: Sequence[str] | str,
+    executable_path: str,
+    launch_arguments: str = "",
+    source: str = "discovered",
+    confidence: float = 0.5,
+    process_name: str = "",
+    window_title: str = "",
+    validation_version: str = "",
+) -> Optional[Dict[str, Any]]:
+    conn = _connect()
+    if not conn:
+        return None
+
+    try:
+        _ensure_learned_apps_table(conn)
+        alias_text = ",".join([alias.strip() for alias in aliases]) if isinstance(aliases, (list, tuple)) else str(aliases or "")
+        now = datetime.now(timezone.utc).isoformat()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO learned_apps
+            (app_id, canonical_name, aliases, executable_path, launch_arguments, source, confidence,
+             validated_at, learned_at, last_successful_launch, last_failed_launch, validation_version,
+             process_name, window_title, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(app_id) DO UPDATE SET
+                canonical_name=excluded.canonical_name,
+                aliases=excluded.aliases,
+                executable_path=excluded.executable_path,
+                launch_arguments=excluded.launch_arguments,
+                source=excluded.source,
+                confidence=excluded.confidence,
+                validated_at=excluded.validated_at,
+                learned_at=COALESCE(learned_apps.learned_at, excluded.learned_at),
+                last_successful_launch=COALESCE(learned_apps.last_successful_launch, excluded.last_successful_launch),
+                last_failed_launch=COALESCE(learned_apps.last_failed_launch, excluded.last_failed_launch),
+                validation_version=excluded.validation_version,
+                process_name=excluded.process_name,
+                window_title=excluded.window_title,
+                updated_at=excluded.updated_at
+            """,
+            (
+                app_id,
+                canonical_name,
+                alias_text,
+                executable_path,
+                launch_arguments,
+                source,
+                float(confidence),
+                now,
+                now,
+                None,
+                None,
+                validation_version,
+                process_name,
+                window_title,
+                now,
+            ),
+        )
+        conn.commit()
+        return lookup_learned_app_record(app_id)
+    except Exception as e:
+        print(f"[HEBE][APP_REGISTRY] persist_learned_app failed: {e}")
+    finally:
+        conn.close()
+    return None
+
+
+def lookup_learned_app_record(app_id: str) -> Optional[Dict[str, Any]]:
+    conn = _connect()
+    if not conn:
+        return None
+
+    try:
+        if not _learned_apps_table_exists(conn):
+            return None
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT * FROM learned_apps WHERE lower(app_id) = ? LIMIT 1",
+            (app_id.strip().lower(),),
+        )
+        row = cur.fetchone()
+        return dict(row) if row else None
+    except Exception as e:
+        print(f"[HEBE][APP_REGISTRY] lookup_learned_app_record failed: {e}")
+        return None
+    finally:
+        conn.close()
+
+
+def _resolve_db_candidates(normalized: str) -> list[Dict[str, Any]]:
     try:
         cur = conn.cursor()
         cur.execute(
@@ -190,7 +328,15 @@ def resolve_candidates(name: str) -> list[Dict[str, Any]]:
     out: list[Dict[str, Any]] = []
     seen: set[str] = set()
 
-    # 1. BD
+    # 1. Learned registry
+    learned_candidates = _resolve_learned_app_candidates(normalized)
+    for candidate in learned_candidates:
+        key = _candidate_key(candidate)
+        if key not in seen:
+            out.append(candidate)
+            seen.add(key)
+
+    # 2. BD
     db_candidates = _resolve_db_candidates(normalized)
     for candidate in db_candidates:
         key = _candidate_key(candidate)
@@ -198,7 +344,7 @@ def resolve_candidates(name: str) -> list[Dict[str, Any]]:
             out.append(candidate)
             seen.add(key)
 
-    # 2. Start Menu
+    # 3. Start Menu
     start_menu_candidates = discover_from_start_menu(normalized)
     for candidate in start_menu_candidates:
         key = _candidate_key(candidate)
@@ -206,7 +352,7 @@ def resolve_candidates(name: str) -> list[Dict[str, Any]]:
             out.append(candidate)
             seen.add(key)
 
-    # 3. EXE scan
+    # 4. EXE scan
     exe_candidates = discover_exe(normalized)
     for candidate in exe_candidates:
         key = _candidate_key(candidate)
@@ -215,6 +361,55 @@ def resolve_candidates(name: str) -> list[Dict[str, Any]]:
             seen.add(key)
 
     return out
+
+
+def _resolve_learned_app_candidates(normalized: str) -> list[Dict[str, Any]]:
+    conn = _connect()
+    if not conn:
+        return []
+
+    try:
+        if not _learned_apps_table_exists(conn):
+            return []
+
+        cur = conn.cursor()
+        like_term = f"%{normalized}%"
+        cur.execute(
+            """
+            SELECT *
+            FROM learned_apps
+            WHERE lower(app_id) = ?
+               OR lower(canonical_name) = ?
+               OR lower(aliases) LIKE ?
+            LIMIT 50
+            """,
+            (normalized, normalized, like_term),
+        )
+        rows = cur.fetchall()
+
+        candidates: list[Dict[str, Any]] = []
+        for row in rows:
+            row_dict = dict(row)
+            if not row_dict.get("executable_path"):
+                continue
+            candidates.append(
+                {
+                    "name": row_dict.get("canonical_name") or row_dict.get("app_id"),
+                    "alias": row_dict.get("app_id"),
+                    "aliases": row_dict.get("aliases"),
+                    "command": row_dict.get("executable_path"),
+                    "process_name": row_dict.get("process_name"),
+                    "window_title": row_dict.get("window_title"),
+                    "enabled": 1,
+                    "source": "learned_db",
+                }
+            )
+        return candidates
+    except Exception as e:
+        print(f"[app_registry] resolve_learned_app_candidates error: {e}")
+        return []
+    finally:
+        conn.close()
 
 
 def register_app(app: Dict[str, Any]) -> Optional[Dict[str, Any]]:
