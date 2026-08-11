@@ -16,6 +16,8 @@ EVENT_TYPES = {
     "stream_ended", "stream_metadata_changed", "advance_time", "restart_hebe",
     "maintenance", "configure_external_outcome", "game_research",
     "open_conversation",
+    "propose_belief", "seed_known_belief", "correct_belief", "retrieve_beliefs",
+    "add_legacy_memory_fact", "project_legacy_memory_fact", "add_vector_context",
 }
 
 

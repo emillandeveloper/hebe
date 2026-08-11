@@ -71,14 +71,31 @@ def build_report(
     else:
         status = STATUS_VERIFIED
     repo = _repository_identity(workdir)
-    first = scenario_results[0] if scenario_results else {}
+    flag_values: dict[str, set[bool]] = {}
+    for item in scenario_results:
+        for key,value in dict(item.get("feature_flags") or {}).items():
+            flag_values.setdefault(str(key),set()).add(bool(value))
+    aggregate_flags = {
+        key:(next(iter(values)) if len(values)==1 else sorted(values))
+        for key,values in sorted(flag_values.items())
+    }
+    is_phase2 = any(
+        bool((item.get("feature_flags") or {}).get("belief_v2_reads"))
+        or bool((item.get("feature_flags") or {}).get("belief_v2_writes"))
+        or str(item.get("scenario_id") or "").startswith("phase2_")
+        for item in scenario_results
+    )
     is_phase1 = any(
         bool((item.get("feature_flags") or {}).get("conversation_continuity_v2"))
         or str(item.get("scenario_id") or "").startswith("phase1_")
         for item in scenario_results
     )
     phase_result = (
-        f"PHASE 1 {status.replace('_', ' ')}" if is_phase1 else status
+        f"PHASE 2 {status.replace('_', ' ')}"
+        if is_phase2
+        else f"PHASE 1 {status.replace('_', ' ')}"
+        if is_phase1
+        else status
     )
     return VerificationReport(
         overall_status=status,
@@ -89,7 +106,7 @@ def build_report(
             "python": sys.version.split()[0],
             "scenario_schema_versions": sorted({item.get("scenario_schema_version") for item in scenario_results if item.get("scenario_schema_version") is not None}),
             "deterministic_seeds": sorted({item.get("seed") for item in scenario_results if item.get("seed") is not None}),
-            "feature_flags": first.get("feature_flags") or {},
+            "feature_flags": aggregate_flags,
         },
         commands=[asdict(item) for item in commands or []],
         tests=dict(tests or {}),

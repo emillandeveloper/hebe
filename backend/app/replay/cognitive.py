@@ -38,6 +38,7 @@ from app.replay.scenario import CognitiveReplayEvent, CognitiveReplayScenario, S
 from app.replay.workspace import ScenarioWorkspace
 from app.stream.context_sync import StreamContextSyncService
 from app.continuity.models import ConversationContext, ExpectedReply, ExpectedReplyType
+from app.epistemics.models import BeliefStatus, EvidenceRef, EvidenceRelation, RetrievalRequest
 
 
 _REAL_PERF_COUNTER = time.perf_counter
@@ -105,11 +106,13 @@ class CognitiveReplayRunner:
         self._active_scenario: CognitiveReplayScenario | None = None
         self._old_embedder: Any = None
         self._id_counter = 0
+        self._belief_aliases: dict[str, str] = {}
 
     def run(self, scenario: CognitiveReplayScenario | str | Path) -> ScenarioRunResult:
         if not isinstance(scenario, CognitiveReplayScenario):
             scenario = CognitiveReplayScenario.load(scenario)
         self._active_scenario = scenario
+        self._belief_aliases = {}
         started = _REAL_PERF_COUNTER()
         random.seed(scenario.seed)
         self.clock = ScenarioClock(scenario.initial_time)
@@ -281,6 +284,8 @@ class CognitiveReplayRunner:
                 bool(self._active_scenario and self._active_scenario.feature_flags.conversation_continuity_v2)
             ).lower(),
             "HEBE_CONVERSATION_CONTINUITY_SHADOW": "true",
+            "HEBE_BELIEF_V2_READS": str(bool(self._active_scenario and self._active_scenario.feature_flags.belief_v2_reads)).lower(),
+            "HEBE_BELIEF_V2_WRITES": str(bool(self._active_scenario and self._active_scenario.feature_flags.belief_v2_writes)).lower(),
         }
         with patch.dict(os.environ, env, clear=False), self._deterministic_context():
             engine = HebeEngine(runtime=runtime, use_wakeword=True, say_hello=False)
@@ -346,6 +351,39 @@ class CognitiveReplayRunner:
             "volatile_state_recreated": before.get("runtime") != after.get("runtime") or old_id != id(self.engine),
         })
 
+    def _record_canonical_belief_evidence(self, event: CognitiveReplayEvent, payload: dict[str, Any]) -> tuple[str,str,str]:
+        """Materialize replay evidence in the same canonical timeline projection used by live experience."""
+        assert self.workspace is not None and self.clock is not None
+        source_event_id=str(payload.get("source_event_id") or event.event_id)
+        source_record_type=str(payload.get("source_record_type") or "live_session_timeline")
+        source_record_id=str(payload.get("source_record_id") or source_event_id)
+        if source_record_type!="live_session_timeline":
+            return source_event_id,source_record_type,source_record_id
+        literal=dict(payload.get("literal_span") or {})
+        raw_text=str(payload.get("text") or literal.get("excerpt") or "")
+        conn=self.workspace.connection()
+        try:
+            conn.execute(
+                """INSERT OR IGNORE INTO live_session_timeline(
+                    session_id,event_uid,event_type,event_ts,source,raw_text,normalized_text,speaker,
+                    confidence,provenance,index_for_rag,payload_json,created_at,context_kind,
+                    source_record_type,source_record_id,authority,literal_evidence_json,valid_from,
+                    valid_until,schema_version
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    "cognitive-replay",source_event_id,"belief_evidence",self.clock.iso(),"cognitive_replay",
+                    raw_text,raw_text,"leo" if str(payload.get("authority_class") or "")=="owner" else "",
+                    float(payload.get("confidence") or 1.0),"deterministic_replay",0,"{}",self.clock.iso(),
+                    str(payload.get("context_kind") or "owner_local"),"cognitive_replay_event",event.event_id,
+                    str(payload.get("authority_class") or "extractor"),json.dumps(literal,ensure_ascii=False),
+                    self.clock.now(),float(payload.get("valid_until") or 0),1,
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        return source_event_id,source_record_type,source_record_id
+
     def _dispatch(self, event: CognitiveReplayEvent) -> None:
         assert self.engine is not None and self.clock is not None and self.twitch is not None and self.outcomes is not None
         payload = dict(event.payload)
@@ -380,6 +418,37 @@ class CognitiveReplayRunner:
                 domain_payload=dict(payload.get("domain_payload") or {}),
             )
             return
+        if event_type in {"propose_belief", "seed_known_belief"}:
+            payload.setdefault("authority_class","owner" if event_type=="seed_known_belief" else "extractor")
+            source_event_id,source_record_type,source_record_id=self._record_canonical_belief_evidence(event,payload)
+            relation = EvidenceRelation(str(payload.get("relation") or "SUPPORTS"))
+            evidence = EvidenceRef(
+                source_event_id=source_event_id,
+                source_record_type=source_record_type,
+                source_record_id=source_record_id,
+                relation=relation, weight=float(payload.get("weight") or 1.0), observed_at=self.clock.now(),
+                extractor=str(payload.get("extractor") or "replay_fixture"), extractor_version="v1",
+                literal_span=dict(payload.get("literal_span") or {}),
+            )
+            common=dict(namespace=str(payload.get("namespace") or "verification"),scope_kind=str(payload.get("scope_kind") or "owner_local"),scope_id=str(payload.get("scope_id") or "leo"),subject_ref=str(payload.get("subject_ref") or "subject"),predicate=str(payload.get("predicate") or "value"),object_value=payload.get("object"),authority_class=str(payload.get("authority_class") or ("owner" if event_type=="seed_known_belief" else "extractor")),evidence=evidence)
+            if event_type == "seed_known_belief": result=self.engine.belief_lifecycle.seed_known(**common)
+            else: result=self.engine.belief_lifecycle.propose(**common,confidence=float(payload.get("confidence") or 0.5),status=BeliefStatus(str(payload.get("status") or "INFERRED")),sensitivity=str(payload.get("sensitivity") or "normal"))
+            if result is not None:self._belief_aliases[event.event_id]=result.id
+            return
+        if event_type == "correct_belief":
+            old_ref=str(payload.get("old_belief_ref") or ""); old_id=self._belief_aliases.get(old_ref,old_ref)
+            payload.setdefault("authority_class","owner"); payload.setdefault("literal_span",{"start":0,"end":len(str(payload.get("text") or "")),"excerpt":str(payload.get("text") or "")[:80]})
+            source_event_id,source_record_type,source_record_id=self._record_canonical_belief_evidence(event,payload)
+            evidence=EvidenceRef(source_event_id=source_event_id,source_record_type=source_record_type,source_record_id=source_record_id,relation=EvidenceRelation.CORRECTS,weight=1.0,observed_at=self.clock.now(),extractor="owner_correction",extractor_version="v1",literal_span=dict(payload["literal_span"]))
+            result=self.engine.belief_lifecycle.correct(old_id,object_value=payload.get("object"),evidence=evidence,authority_class=str(payload.get("authority_class") or "owner"));self._belief_aliases[event.event_id]=result.id;return
+        if event_type == "retrieve_beliefs":
+            self.engine.memory_retrieval.retrieve(RetrievalRequest(context_kind=str(payload.get("context_kind") or "owner_local"),purpose=str(payload.get("purpose") or "current_context"),subject=str(payload.get("subject_ref") or ""),allowed_scopes=tuple(payload.get("allowed_scopes") or ()),allowed_sensitivity=tuple(payload.get("allowed_sensitivity") or ("normal",)),temporal_intent=str(payload.get("temporal_intent") or "current"),max_results=int(payload.get("max_results") or 10)));return
+        if event_type == "add_legacy_memory_fact":
+            conn=self.workspace.connection();now=self.clock.iso();cur=conn.execute("INSERT INTO memory_facts(kind,subject,payload_json,source_text,confidence,created_at,updated_at,active) VALUES(?,?,?,?,?,?,?,1)",(str(payload.get("kind") or "fact"),str(payload.get("subject_ref") or "legacy"),json.dumps(payload.get("payload") or {},ensure_ascii=False),str(payload.get("source_text") or ""),float(payload.get("confidence") or .5),now,now));conn.commit();conn.close();self._belief_aliases[event.event_id]=str(cur.lastrowid);return
+        if event_type == "project_legacy_memory_fact":
+            fact_ref=str(payload.get("fact_ref") or "");result=self.engine.legacy_memory_fact_adapter.shadow_project(int(self._belief_aliases.get(fact_ref,fact_ref)));self._belief_aliases[event.event_id]=getattr(result,"id","");return
+        if event_type == "add_vector_context":
+            conn=self.workspace.connection();conn.execute("INSERT INTO memory_chunks(text,kind,subject,source_session,embedding,embedding_model,embedding_dim,importance,created_at,tags,active) VALUES(?,?,?,?,?,?,?,?,?,?,1)",(str(payload.get("text") or "vector context"),"misc",str(payload.get("subject_ref") or "subject"),"replay",b'0',"replay",1,.5,self.clock.iso(),"{}"));conn.commit();conn.close();return
         if event_type == "ambient_stt":
             self.engine.ingest_ambient_stt(str(payload.get("text") or ""))
             return

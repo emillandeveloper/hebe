@@ -179,7 +179,11 @@ from app.continuity import (
     LegacyPendingAdapter,
     OpenThreadRepository,
 )
-from app.replay.migrations import MigrationRunner, conversation_continuity_migrations
+from app.replay.migrations import MigrationRunner, conversation_continuity_migrations, belief_v2_migrations
+from app.epistemics.repository import BeliefRepository
+from app.epistemics.service import BeliefLifecycleService
+from app.epistemics.retrieval import MemoryRetrievalCoordinator
+from app.epistemics.legacy_adapter import LegacyMemoryFactAdapter
 from app.services import db_sqlite
 
 WAKE_WORDS = ["hebe despierta", "eve despierta", "jebe despierta"]
@@ -532,6 +536,22 @@ class HebeEngine:
         self._last_continuity_resolution: dict = {}
         self._last_continuity_shadow_diff: dict = {}
         self._initialize_conversation_continuity()
+        self.belief_v2_reads = os.getenv("HEBE_BELIEF_V2_READS", "false").strip().lower() in ("1","true","yes","on")
+        self.belief_v2_writes = os.getenv("HEBE_BELIEF_V2_WRITES", "false").strip().lower() in ("1","true","yes","on")
+        self._initialize_belief_v2()
+
+    def _initialize_belief_v2(self) -> None:
+        try:
+            runner=MigrationRunner(db_sqlite.get_db_connection)
+            self.belief_v2_migrations=runner.migrate(belief_v2_migrations())
+            repository=BeliefRepository(db_sqlite.get_db_connection)
+            self.belief_repository=repository
+            self.belief_lifecycle=BeliefLifecycleService(repository,now_fn=lambda:time.time())
+            self.memory_retrieval=MemoryRetrievalCoordinator(repository,now_fn=lambda:time.time())
+            self.legacy_memory_fact_adapter=LegacyMemoryFactAdapter(self.belief_lifecycle,db_sqlite.get_db_connection)
+        except Exception as exc:
+            self.belief_repository=None;self.belief_lifecycle=None;self.memory_retrieval=None;self.legacy_memory_fact_adapter=None;self.belief_v2_migrations=[]
+            print(f"[HEBE][BELIEF_INIT] status=failed_closed reason={type(exc).__name__}",flush=True)
 
     def _initialize_conversation_continuity(self) -> None:
         try:

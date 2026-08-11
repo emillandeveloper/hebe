@@ -31,7 +31,10 @@ class CognitiveStateSnapshot:
     conversation: dict[str, Any] = field(default_factory=dict)
     open_threads: list[dict[str, Any]] = field(default_factory=list)
     memory: dict[str, Any] = field(default_factory=dict)
-    beliefs: list[dict[str, Any]] = field(default_factory=list)
+    beliefs: dict[str, Any] = field(default_factory=dict)
+    belief_evidence: list[dict[str, Any]] = field(default_factory=list)
+    retrieval: dict[str, Any] = field(default_factory=dict)
+    memory_compatibility: dict[str, Any] = field(default_factory=dict)
     game_state: dict[str, Any] = field(default_factory=dict)
     social_state: dict[str, Any] = field(default_factory=dict)
     promotion_profiles: list[dict[str, Any]] = field(default_factory=list)
@@ -52,7 +55,7 @@ class CognitiveStateProbe:
         "chat_log", "memory_facts", "memory_chunks", "stream_sessions",
         "stream_chat_messages", "stream_events", "live_session_timeline",
         "promotion_events", "viewer_promotion_profiles", "schema_migrations",
-        "conversations", "open_threads",
+        "conversations", "open_threads", "beliefs", "belief_evidence", "scene_assertions",
     )
 
     def __init__(
@@ -151,7 +154,23 @@ class CognitiveStateProbe:
             },
             open_threads=rows["open_threads"],
             memory={"facts_count": rows["counts"].get("memory_facts", 0), "chunks_count": rows["counts"].get("memory_chunks", 0)},
-            beliefs=[],
+            beliefs={
+                "active": [item for item in rows["beliefs"] if item["epistemic_status"] in {"KNOWN","INFERRED","SUSPECTED"} and not item["superseded_by"]],
+                "historical": [item for item in rows["beliefs"] if item["epistemic_status"] == "HISTORICAL"],
+                "superseded": [item for item in rows["beliefs"] if item["epistemic_status"] == "SUPERSEDED"],
+                "suspected": [item for item in rows["beliefs"] if item["epistemic_status"] == "SUSPECTED"],
+                "all": rows["beliefs"],
+                "last_transition": _plain(getattr(getattr(engine,"belief_lifecycle",None),"last_transition",{}) or {}),
+            },
+            belief_evidence=rows["belief_evidence"],
+            retrieval={
+                "last_request": _plain(getattr(getattr(engine,"memory_retrieval",None),"last_request",{}) or {}),
+                **_plain(getattr(getattr(engine,"memory_retrieval",None),"last_result",{}) or {}),
+                "performance": _plain(getattr(getattr(engine,"memory_retrieval",None),"performance",lambda:{})()),
+                "write_performance": _plain(getattr(getattr(engine,"belief_lifecycle",None),"performance",lambda:{})()),
+                "repository_performance": _plain(getattr(getattr(engine,"belief_repository",None),"performance",lambda:{})()),
+            },
+            memory_compatibility=_plain(getattr(getattr(engine,"legacy_memory_fact_adapter",None),"telemetry",{}) or {}),
             game_state=game_state,
             social_state=social_state,
             promotion_profiles=rows["promotion_profiles"],
@@ -219,10 +238,22 @@ class CognitiveStateProbe:
                 for item in open_threads:
                     item["participant_ids"] = json.loads(item.pop("participant_ids_json") or "[]")
             active = next((item for item in conversations if item["status"] in {"OPEN", "WAITING_ON_LEO", "WAITING_ON_HEBE"}), {})
+            beliefs=[]
+            if "beliefs" in existing:
+                beliefs=[dict(row) for row in conn.execute("SELECT * FROM beliefs ORDER BY created_at DESC,id")]
+                for item in beliefs:
+                    item["object"]=json.loads(item.pop("object_json") or "null")
+                    item["owner_confirmed"]=bool(item["owner_confirmed"])
+                    item["evidence_ids"]=[str(r[0]) for r in conn.execute("SELECT id FROM belief_evidence WHERE belief_id=? ORDER BY observed_at,id",(item["id"],))]
+            belief_evidence=[]
+            if "belief_evidence" in existing:
+                belief_evidence=[dict(row) for row in conn.execute("SELECT * FROM belief_evidence ORDER BY observed_at,id")]
+                for item in belief_evidence:item["literal_span"]=json.loads(item.pop("literal_span_json") or "{}")
             return {
                 "counts": counts, "promotion_profiles": profiles, "promotion_events": promotions,
                 "schema_migrations": migrations, "conversations": conversations,
                 "active_conversation": active, "open_threads": open_threads,
+                "beliefs":beliefs,"belief_evidence":belief_evidence,
             }
         finally:
             conn.close()
