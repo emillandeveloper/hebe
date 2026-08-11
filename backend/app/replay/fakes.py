@@ -84,7 +84,7 @@ class FakeWinAutomation:
 
 
 class FakeTwitch:
-    def __init__(self, outcomes: DeterministicOutcomeQueue) -> None:
+    def __init__(self, outcomes: DeterministicOutcomeQueue, resolution_fixtures: dict[str, dict[str, Any]] | None = None) -> None:
         self.outcomes = outcomes
         self.channel_name = "leonifelheim"
         self.bot_username = "HebeNifelheim"
@@ -95,6 +95,7 @@ class FakeTwitch:
         self._channel: dict[str, Any] = {}
         self.identities: dict[str, dict[str, str]] = {}
         self.aliases: dict[str, str] = {}
+        self.resolution_fixtures = {str(key).lower(): dict(value) for key, value in (resolution_fixtures or {}).items()}
 
     @property
     def attempts(self) -> list[dict[str, Any]]:
@@ -146,6 +147,8 @@ class FakeTwitch:
         query = self.normalize_twitch_username(raw_target).lower()
         if not query:
             return None
+        if query in self.resolution_fixtures:
+            return str(self.resolution_fixtures[query].get("username") or "") or None
         if query in self.aliases:
             return self.aliases[query]
         exact = self.identities.get(query)
@@ -155,6 +158,9 @@ class FakeTwitch:
         return matches[0] if len(matches) == 1 else None
 
     def resolve_user_details(self, raw_target: str, intent: str = "") -> dict[str, Any] | None:
+        fixture = self.resolution_fixtures.get(self.normalize_twitch_username(raw_target).lower())
+        if fixture is not None:
+            return dict(fixture)
         username = self.resolve_user(raw_target)
         if not username:
             return None

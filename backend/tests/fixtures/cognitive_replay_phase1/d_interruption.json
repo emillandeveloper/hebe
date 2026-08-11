@@ -1,0 +1,5 @@
+{"schema_version":1,"scenario_id":"phase1_d_interruption","initial_time":1000,"seed":104,"feature_flags":{"cognitive_replay_enabled":true,"conversation_continuity_v2":true},"model_fixtures":{"*":"Entendido."},"events":[
+{"event_id":"open","at":1000,"type":"open_conversation","context_kind":"owner_local","expected_reply_type":"yes_no"},
+{"event_id":"new","at":"+1s","type":"owner_stt","text":"Hebe, abre OBS","assertions":[{"assertion":"equals","path":"conversation.latest.status","expected":"INTERRUPTED"},{"assertion":"equals","path":"conversation.latest.closure_reason","expected":"new_owner_command_interrupted"}]},
+{"event_id":"later","at":"+2s","type":"owner_stt","text":"sí","assertions":[{"assertion":"equals","path":"conversation.latest.status","expected":"INTERRUPTED"}]}
+]}

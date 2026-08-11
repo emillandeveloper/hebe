@@ -36,6 +36,7 @@ PHASE_05_TEST_MODULES = (
     "backend.tests.test_stream_session_primer",
     "backend.tests.test_live_session_brain",
 )
+PHASE_1_TEST_MODULES = (*PHASE_05_TEST_MODULES, "backend.tests.test_conversation_continuity_phase1")
 
 
 def _default_scenario_dir() -> Path:
@@ -45,6 +46,9 @@ def _default_scenario_dir() -> Path:
 def _resolve_scenarios(values: list[str], suite: str) -> list[Path]:
     directory = _default_scenario_dir()
     if suite:
+        if suite == "cognitive-v2-phase1":
+            phase1 = directory.parent / "cognitive_replay_phase1"
+            return sorted(directory.glob("*.json")) + sorted(phase1.glob("*.json"))
         if suite != "cognitive-v2":
             raise ValueError(f"unknown suite: {suite}")
         return sorted(directory.glob("*.json"))
@@ -65,10 +69,12 @@ def _resolve_scenarios(values: list[str], suite: str) -> list[Path]:
     return resolved
 
 
-def _run_phase_tests(workdir: Path) -> tuple[CommandVerification, dict[str, object]]:
-    command = [sys.executable, "-m", "unittest", *PHASE_05_TEST_MODULES]
+def _run_phase_tests(workdir: Path, *, phase1: bool = False) -> tuple[CommandVerification, dict[str, object]]:
+    command = [sys.executable, "-m", "unittest", *(PHASE_1_TEST_MODULES if phase1 else PHASE_05_TEST_MODULES)]
     started = time.perf_counter()
-    completed = subprocess.run(command, cwd=workdir, text=True, capture_output=True, check=False)
+    env = dict(__import__("os").environ)
+    env["PYTHONPATH"] = str(workdir / "backend") + (__import__("os").pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+    completed = subprocess.run(command, cwd=workdir, env=env, text=True, capture_output=True, check=False)
     duration = round(time.perf_counter() - started, 6)
     output = "\n".join((completed.stdout, completed.stderr))
     ran = re.search(r"Ran\s+(\d+)\s+tests?", output)
@@ -96,7 +102,7 @@ def _run_phase_tests(workdir: Path) -> tuple[CommandVerification, dict[str, obje
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run deterministic Hebe Cognitive Replay scenarios")
     parser.add_argument("--scenario", action="append", default=[], help="scenario JSON, directory, or fixture name")
-    parser.add_argument("--suite", default="", help="named scenario suite (cognitive-v2)")
+    parser.add_argument("--suite", default="", help="named scenario suite (cognitive-v2 or cognitive-v2-phase1)")
     parser.add_argument("--output", default="artifacts/cognitive-replay/latest", help="verification artifact directory")
     parser.add_argument(
         "--run-phase-tests",
@@ -130,14 +136,17 @@ def main(argv: list[str] | None = None) -> int:
     )
     commands: list[CommandVerification] = []
     if args.run_phase_tests:
-        test_command, test_summary = _run_phase_tests(repo_root)
+        test_command, test_summary = _run_phase_tests(repo_root, phase1=args.suite == "cognitive-v2-phase1")
         commands.append(test_command)
     else:
         test_summary = {"passed": 0, "failed": 0, "skipped": 0, "total": 0, "required_layer_missing": True}
     differential = {}
     if args.baseline_differential:
         differential = json.loads(Path(args.baseline_differential).resolve().read_text(encoding="utf-8"))
-        if int(differential.get("phase_0_5_tests_failed") or -1) != int(test_summary["failed"]):
+        differential_current_failures = differential.get(
+            "phase_1_tests_failed", differential.get("phase_0_5_tests_failed", -1)
+        )
+        if int(differential_current_failures) != int(test_summary["failed"]):
             raise ValueError("baseline differential does not match the current regression failure count")
     regression_failed = int(differential.get("new_regressions") or 0) > 0 if differential else bool(test_summary["failed"])
     exit_code = 1 if failed or regression_failed else 2 if incomplete or test_summary["required_layer_missing"] else 0

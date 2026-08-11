@@ -1,0 +1,5 @@
+{"schema_version":1,"scenario_id":"phase1_g_duplicate","initial_time":1000,"seed":107,"feature_flags":{"cognitive_replay_enabled":true,"conversation_continuity_v2":true},"model_fixtures":{"*":"Entendido."},"events":[
+{"event_id":"open","at":1000,"type":"open_conversation","context_kind":"owner_local","expected_reply_type":"yes_no"},
+{"event_id":"first","at":"+1s","type":"owner_stt","input_event_id":"same-reply","text":"sí"},
+{"event_id":"duplicate","at":"+2s","type":"owner_stt","input_event_id":"same-reply","text":"sí","assertions":[{"assertion":"equals","path":"conversation.latest.status","expected":"CLOSED"},{"assertion":"equals","path":"conversation.latest.consumed_event_ids[0]","expected":"same-reply"},{"assertion":"zero_external_calls","path":"actions.attempts"}]}
+]}

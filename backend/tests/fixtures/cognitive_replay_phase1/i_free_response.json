@@ -1,0 +1,4 @@
+{"schema_version":1,"scenario_id":"phase1_i_free_response","initial_time":1000,"seed":109,"feature_flags":{"cognitive_replay_enabled":true,"conversation_continuity_v2":true},"model_fixtures":{"*":"Entendido."},"events":[
+{"event_id":"open","at":1000,"type":"open_conversation","context_kind":"owner_local","expected_reply_type":"free_response","semantic_constraints":{"min_words":2,"max_words":20}},
+{"event_id":"reply","at":"+1s","type":"owner_stt","text":"porque me apetece","assertions":[{"assertion":"equals","path":"conversation.last_resolution.reply_act","expected":"FREE_RESPONSE"},{"assertion":"equals","path":"conversation.latest.status","expected":"CLOSED"}]}
+]}

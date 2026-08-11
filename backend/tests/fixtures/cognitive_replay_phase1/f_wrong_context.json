@@ -1,0 +1,4 @@
+{"schema_version":1,"scenario_id":"phase1_f_wrong_context","initial_time":1000,"seed":106,"feature_flags":{"cognitive_replay_enabled":true,"conversation_continuity_v2":true},"events":[
+{"event_id":"open","at":1000,"type":"open_conversation","context_kind":"private_ui","context_id":"leo_ui","expected_reply_type":"yes_no","allowed_sources":["owner_ui"]},
+{"event_id":"wrong","at":"+1s","type":"owner_stt","text":"sí","assertions":[{"assertion":"equals","path":"conversation.active.status","expected":"WAITING_ON_LEO"},{"assertion":"equals","path":"conversation.last_resolution.consumed","expected":false}]}
+]}

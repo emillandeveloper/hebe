@@ -37,6 +37,7 @@ from app.replay.report import STATUS_FAILED, STATUS_INCOMPLETE, STATUS_VERIFIED
 from app.replay.scenario import CognitiveReplayEvent, CognitiveReplayScenario, ScenarioAssertion
 from app.replay.workspace import ScenarioWorkspace
 from app.stream.context_sync import StreamContextSyncService
+from app.continuity.models import ConversationContext, ExpectedReply, ExpectedReplyType
 
 
 _REAL_PERF_COUNTER = time.perf_counter
@@ -209,7 +210,7 @@ class CognitiveReplayRunner:
                 database={
                     "path": str(self.workspace.db_path),
                     "type": "fresh" if not scenario.initial_database_fixture else "copied_fixture",
-                    "schema_migrations": list(self.workspace.migrations),
+                    "schema_migrations": self._applied_schema_migrations(),
                 },
                 external_boundaries={
                     "twitch": "fake", "tts_audio": "fake", "desktop": "fake",
@@ -231,7 +232,10 @@ class CognitiveReplayRunner:
     def _create_engine(self) -> None:
         assert self.outcomes and self.model and self.intent_model and self.clock
         self._instance_generation += 1
-        twitch = FakeTwitch(self.outcomes)
+        twitch = FakeTwitch(
+            self.outcomes,
+            self._active_scenario.twitch_resolution_fixtures if self._active_scenario else None,
+        )
         speech = RecordingSpeech(self.outcomes, self.speech_requests)
         win = FakeWinAutomation(self.outcomes)
         stt = FakeSTT()
@@ -273,6 +277,10 @@ class CognitiveReplayRunner:
             "HEBE_AUTO_ENABLE_STREAM_WHEN_LIVE": "true",
             "HEBE_STREAM_OUTPUT_MODE": "twitch_chat_only",
             "HEBE_COGNITIVE_REPLAY_ENABLED": "true",
+            "HEBE_CONVERSATION_CONTINUITY_V2": str(
+                bool(self._active_scenario and self._active_scenario.feature_flags.conversation_continuity_v2)
+            ).lower(),
+            "HEBE_CONVERSATION_CONTINUITY_SHADOW": "true",
         }
         with patch.dict(os.environ, env, clear=False), self._deterministic_context():
             engine = HebeEngine(runtime=runtime, use_wakeword=True, say_hello=False)
@@ -344,10 +352,33 @@ class CognitiveReplayRunner:
         event_type = event.event_type
         if event_type == "owner_stt":
             self.engine.ingest_owner_stt(str(payload.get("text") or ""), stt_metadata={
-                "replay_event_id": event.event_id,
+                "replay_event_id": str(payload.get("input_event_id") or event.event_id),
                 "authority": str(payload.get("authority") or "owner"),
                 "source_context": str(payload.get("source_context") or "owner_live_control"),
             })
+            return
+        if event_type == "open_conversation":
+            context_kind = ConversationContext(str(payload.get("context_kind") or "owner_live_control"))
+            if payload.get("context_id"):
+                context_id = str(payload["context_id"])
+            elif context_kind in {ConversationContext.OWNER_LOCAL, ConversationContext.OWNER_LIVE_CONTROL}:
+                _resolved_kind, context_id = self.engine._conversation_context_for_owner_stt()
+            else:
+                context_id = "leo_ui" if context_kind == ConversationContext.PRIVATE_UI else "stream_public"
+            expected = ExpectedReply(
+                type=ExpectedReplyType(str(payload.get("expected_reply_type") or "free_response")),
+                allowed_sources=tuple(payload.get("allowed_sources") or ("owner_stt",)),
+                allowed_participant=str(payload.get("allowed_participant") or "leo"),
+                semantic_constraints=dict(payload.get("semantic_constraints") or {}),
+                candidate_refs=tuple(str(item) for item in payload.get("candidate_refs") or ()),
+                expires_at=self.clock.now() + float(payload.get("ttl_seconds") or 60.0),
+            )
+            self.engine.conversation_continuity.open_conversation(
+                context_kind=context_kind, context_id=context_id,
+                topic=str(payload.get("topic") or "replay_handoff"),
+                origin_event_id=event.event_id, expected_reply=expected,
+                domain_payload=dict(payload.get("domain_payload") or {}),
+            )
             return
         if event_type == "ambient_stt":
             self.engine.ingest_ambient_stt(str(payload.get("text") or ""))
@@ -470,6 +501,9 @@ class CognitiveReplayRunner:
         assert self.engine is not None
         self.engine._active_pending_clarification()
         self.engine._get_pending_conversation_turn()
+        continuity = getattr(self.engine, "conversation_continuity", None)
+        if continuity is not None:
+            continuity.expire_due()
         self.engine.poll_internal_events()
         self.engine.poll_stream_presence()
 
@@ -505,6 +539,22 @@ class CognitiveReplayRunner:
                 (scenario.scenario_id, scenario.schema_version, scenario.seed, datetime.now(timezone.utc).isoformat()),
             )
             conn.commit()
+        finally:
+            conn.close()
+
+    def _applied_schema_migrations(self) -> list[dict[str, Any]]:
+        assert self.workspace is not None
+        conn = self.workspace.connection(readonly=True)
+        conn.row_factory = sqlite3.Row
+        try:
+            existing = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_migrations'"
+            ).fetchone()
+            if not existing:
+                return []
+            return [dict(row) for row in conn.execute(
+                "SELECT component,version,name,checksum,applied_at FROM schema_migrations ORDER BY component,version"
+            )]
         finally:
             conn.close()
 

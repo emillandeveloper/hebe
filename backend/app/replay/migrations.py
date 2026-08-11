@@ -101,3 +101,65 @@ def replay_foundation_migrations() -> tuple[Migration, ...]:
         )
 
     return (Migration("cognitive_replay", 1, "replay_metadata", create_metadata),)
+
+
+def conversation_continuity_migrations() -> tuple[Migration, ...]:
+    def create_phase1_tables(conn: sqlite3.Connection) -> None:
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS conversations (
+                id TEXT PRIMARY KEY,
+                context_kind TEXT NOT NULL,
+                context_id TEXT NOT NULL,
+                participants_json TEXT NOT NULL,
+                attention_state TEXT NOT NULL,
+                turn_owner TEXT NOT NULL,
+                expected_reply_type TEXT,
+                expected_reply_json TEXT,
+                topic TEXT NOT NULL,
+                origin_event_id TEXT NOT NULL,
+                last_event_id TEXT NOT NULL,
+                opened_at REAL NOT NULL,
+                last_turn_at REAL NOT NULL,
+                expires_at REAL NOT NULL,
+                status TEXT NOT NULL,
+                closure_reason TEXT NOT NULL DEFAULT '',
+                version INTEGER NOT NULL DEFAULT 1,
+                domain_payload_json TEXT NOT NULL DEFAULT '{}',
+                consumed_event_ids_json TEXT NOT NULL DEFAULT '[]'
+            );
+            CREATE INDEX IF NOT EXISTS idx_conversations_context_status
+                ON conversations(context_kind, context_id, status);
+            CREATE INDEX IF NOT EXISTS idx_conversations_status_expiry
+                ON conversations(status, expires_at);
+
+            CREATE TABLE IF NOT EXISTS open_threads (
+                id TEXT PRIMARY KEY,
+                thread_type TEXT NOT NULL,
+                scope_kind TEXT NOT NULL,
+                scope_id TEXT NOT NULL,
+                participant_ids_json TEXT NOT NULL,
+                subject_ref TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                origin_event_id TEXT NOT NULL,
+                latest_event_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                priority INTEGER NOT NULL DEFAULT 0,
+                created_at REAL NOT NULL,
+                relevance_until REAL NOT NULL,
+                valid_until REAL NOT NULL,
+                resolved_at REAL NOT NULL DEFAULT 0,
+                resolution_event_id TEXT NOT NULL DEFAULT '',
+                sensitivity TEXT NOT NULL DEFAULT 'normal',
+                version INTEGER NOT NULL DEFAULT 1
+            );
+            CREATE INDEX IF NOT EXISTS idx_open_threads_scope_status
+                ON open_threads(scope_kind, scope_id, status);
+            CREATE INDEX IF NOT EXISTS idx_open_threads_status_validity
+                ON open_threads(status, relevance_until, valid_until);
+            CREATE INDEX IF NOT EXISTS idx_open_threads_subject
+                ON open_threads(subject_ref, status);
+            """
+        )
+
+    return (Migration("conversation_continuity", 1, "conversation_and_open_threads", create_phase1_tables),)

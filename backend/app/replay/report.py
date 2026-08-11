@@ -28,6 +28,7 @@ class CommandVerification:
 @dataclass(slots=True)
 class VerificationReport:
     overall_status: str
+    phase_result: str
     repository: dict[str, Any]
     environment: dict[str, Any]
     commands: list[dict[str, Any]] = field(default_factory=list)
@@ -71,8 +72,17 @@ def build_report(
         status = STATUS_VERIFIED
     repo = _repository_identity(workdir)
     first = scenario_results[0] if scenario_results else {}
+    is_phase1 = any(
+        bool((item.get("feature_flags") or {}).get("conversation_continuity_v2"))
+        or str(item.get("scenario_id") or "").startswith("phase1_")
+        for item in scenario_results
+    )
+    phase_result = (
+        f"PHASE 1 {status.replace('_', ' ')}" if is_phase1 else status
+    )
     return VerificationReport(
         overall_status=status,
+        phase_result=phase_result,
         repository=repo,
         environment={
             "platform": platform.platform(),
@@ -119,6 +129,7 @@ def render_markdown(data: dict[str, Any]) -> str:
         "# Cognitive Replay Verification Report",
         "",
         f"Overall status: **{data.get('overall_status')}**",
+        f"Phase result: **{data.get('phase_result', data.get('overall_status'))}**",
         "",
         "## Repository and environment",
         "",

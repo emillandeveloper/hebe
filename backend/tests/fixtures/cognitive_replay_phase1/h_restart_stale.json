@@ -1,0 +1,5 @@
+{"schema_version":1,"scenario_id":"phase1_h_restart_stale","initial_time":1000,"seed":108,"feature_flags":{"cognitive_replay_enabled":true,"conversation_continuity_v2":true},"events":[
+{"event_id":"open","at":1000,"type":"open_conversation","context_kind":"owner_local","expected_reply_type":"yes_no"},
+{"event_id":"restart","at":"+1s","type":"restart_hebe"},
+{"event_id":"stale","at":"+2s","type":"owner_stt","text":"sí","assertions":[{"assertion":"equals","path":"conversation.latest.status","expected":"INTERRUPTED"},{"assertion":"equals","path":"conversation.latest.closure_reason","expected":"runtime_restart"},{"assertion":"zero_external_calls","path":"actions.attempts"}]}
+]}

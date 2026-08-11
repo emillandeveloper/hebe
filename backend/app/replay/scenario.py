@@ -15,6 +15,7 @@ EVENT_TYPES = {
     "twitch_resub", "twitch_raid", "twitch_cheer", "stream_started",
     "stream_ended", "stream_metadata_changed", "advance_time", "restart_hebe",
     "maintenance", "configure_external_outcome", "game_research",
+    "open_conversation",
 }
 
 
@@ -65,6 +66,7 @@ class CognitiveReplayScenario:
     model_fixtures: dict[str, Any] = field(default_factory=dict)
     research_fixtures: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     external_outcomes: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+    twitch_resolution_fixtures: dict[str, dict[str, Any]] = field(default_factory=dict)
     events: tuple[CognitiveReplayEvent, ...] = ()
     final_assertions: tuple[ScenarioAssertion, ...] = ()
     required_layers: tuple[str, ...] = ("integration", "replay")
@@ -117,6 +119,9 @@ class CognitiveReplayScenario:
             model_fixtures=dict(data.get("model_fixtures") or {}),
             research_fixtures={str(k): [dict(row) for row in rows] for k, rows in dict(data.get("research_fixtures") or {}).items()},
             external_outcomes={str(k): [dict(row) for row in rows] for k, rows in dict(data.get("external_outcomes") or {}).items()},
+            twitch_resolution_fixtures={
+                str(k).lower(): dict(row) for k, row in dict(data.get("twitch_resolution_fixtures") or {}).items()
+            },
             events=tuple(events),
             final_assertions=final_assertions,
             required_layers=tuple(str(item) for item in data.get("required_layers") or ("integration", "replay")),

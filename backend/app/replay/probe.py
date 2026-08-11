@@ -28,6 +28,7 @@ class CognitiveStateSnapshot:
     stream_session: dict[str, Any] = field(default_factory=dict)
     current_scene: dict[str, Any] = field(default_factory=dict)
     pending: dict[str, Any] = field(default_factory=dict)
+    conversation: dict[str, Any] = field(default_factory=dict)
     open_threads: list[dict[str, Any]] = field(default_factory=list)
     memory: dict[str, Any] = field(default_factory=dict)
     beliefs: list[dict[str, Any]] = field(default_factory=list)
@@ -51,6 +52,7 @@ class CognitiveStateProbe:
         "chat_log", "memory_facts", "memory_chunks", "stream_sessions",
         "stream_chat_messages", "stream_events", "live_session_timeline",
         "promotion_events", "viewer_promotion_profiles", "schema_migrations",
+        "conversations", "open_threads",
     )
 
     def __init__(
@@ -131,7 +133,23 @@ class CognitiveStateProbe:
             stream_session=stream_session,
             current_scene=scene,
             pending={"clarification": _plain(pending), "conversation_turn": _plain(pending_turn)},
-            open_threads=[],
+            conversation={
+                "active": rows["active_conversation"],
+                "latest": rows["conversations"][0] if rows["conversations"] else {},
+                "all": rows["conversations"],
+                "last_resolution": _plain(getattr(engine, "_last_continuity_resolution", {}) or {}),
+                "legacy_pending_projection": _plain(
+                    getattr(getattr(engine, "legacy_pending_adapter", None), "last_projection", {}) or {}
+                ),
+                "continuity_shadow_diff": _plain(getattr(engine, "_last_continuity_shadow_diff", {}) or {}),
+                "shadow_metrics": _plain(
+                    getattr(getattr(engine, "conversation_continuity", None), "shadow_metrics", lambda: {})()
+                ),
+                "performance": _plain(
+                    getattr(getattr(engine, "conversation_continuity", None), "performance", lambda: {})()
+                ),
+            },
+            open_threads=rows["open_threads"],
             memory={"facts_count": rows["counts"].get("memory_facts", 0), "chunks_count": rows["counts"].get("memory_chunks", 0)},
             beliefs=[],
             game_state=game_state,
@@ -178,7 +196,34 @@ class CognitiveStateProbe:
                 migrations = [dict(row) for row in conn.execute(
                     "SELECT component, version, name, checksum, applied_at FROM schema_migrations ORDER BY component, version"
                 )]
-            return {"counts": counts, "promotion_profiles": profiles, "promotion_events": promotions, "schema_migrations": migrations}
+            conversations = []
+            if "conversations" in existing:
+                conversations = [dict(row) for row in conn.execute(
+                    """SELECT id,context_kind,context_id,participants_json,attention_state,turn_owner,
+                        expected_reply_type,topic,origin_event_id,last_event_id,opened_at,last_turn_at,
+                        expires_at,status,closure_reason,version,domain_payload_json,consumed_event_ids_json
+                        FROM conversations ORDER BY opened_at DESC,id DESC"""
+                )]
+                for item in conversations:
+                    item["participants"] = json.loads(item.pop("participants_json") or "[]")
+                    item["domain_payload"] = json.loads(item.pop("domain_payload_json") or "{}")
+                    item["consumed_event_ids"] = json.loads(item.pop("consumed_event_ids_json") or "[]")
+            open_threads = []
+            if "open_threads" in existing:
+                open_threads = [dict(row) for row in conn.execute(
+                    """SELECT id,thread_type,scope_kind,scope_id,participant_ids_json,subject_ref,
+                        summary,origin_event_id,latest_event_id,status,priority,created_at,relevance_until,
+                        valid_until,resolved_at,resolution_event_id,sensitivity,version
+                        FROM open_threads ORDER BY created_at DESC,id DESC"""
+                )]
+                for item in open_threads:
+                    item["participant_ids"] = json.loads(item.pop("participant_ids_json") or "[]")
+            active = next((item for item in conversations if item["status"] in {"OPEN", "WAITING_ON_LEO", "WAITING_ON_HEBE"}), {})
+            return {
+                "counts": counts, "promotion_profiles": profiles, "promotion_events": promotions,
+                "schema_migrations": migrations, "conversations": conversations,
+                "active_conversation": active, "open_threads": open_threads,
+            }
         finally:
             conn.close()
 

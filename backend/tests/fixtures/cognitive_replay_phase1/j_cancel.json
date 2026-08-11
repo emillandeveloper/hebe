@@ -1,0 +1,4 @@
+{"schema_version":1,"scenario_id":"phase1_j_cancel","initial_time":1000,"seed":110,"feature_flags":{"cognitive_replay_enabled":true,"conversation_continuity_v2":true},"model_fixtures":{"*":"Entendido."},"events":[
+{"event_id":"open","at":1000,"type":"open_conversation","context_kind":"owner_local","expected_reply_type":"yes_no"},
+{"event_id":"cancel","at":"+1s","type":"owner_stt","text":"déjalo","assertions":[{"assertion":"equals","path":"conversation.last_resolution.reply_act","expected":"CANCEL"},{"assertion":"equals","path":"conversation.latest.status","expected":"CANCELLED"},{"assertion":"zero_external_calls","path":"actions.attempts"}]}
+]}

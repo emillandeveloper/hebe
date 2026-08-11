@@ -1,0 +1,5 @@
+{"schema_version":1,"scenario_id":"phase1_c_expired","initial_time":1000,"seed":103,"feature_flags":{"cognitive_replay_enabled":true,"conversation_continuity_v2":true},"events":[
+{"event_id":"open","at":1000,"type":"open_conversation","context_kind":"owner_local","expected_reply_type":"yes_no","ttl_seconds":5},
+{"event_id":"advance","at":"+1s","type":"advance_time","seconds":10},
+{"event_id":"late","at":"+12s","type":"owner_stt","text":"sí","assertions":[{"assertion":"equals","path":"conversation.latest.status","expected":"EXPIRED"},{"assertion":"zero_external_calls","path":"actions.attempts"}]}
+]}

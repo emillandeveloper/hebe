@@ -171,6 +171,16 @@ from app.stream.proactive import (
     scheduled_reminder_decision,
     semantic_cooldown_key,
 )
+from app.continuity import (
+    ConversationContext,
+    ConversationContinuityService,
+    ConversationRepository,
+    ConversationalAct,
+    LegacyPendingAdapter,
+    OpenThreadRepository,
+)
+from app.replay.migrations import MigrationRunner, conversation_continuity_migrations
+from app.services import db_sqlite
 
 WAKE_WORDS = ["hebe despierta", "eve despierta", "jebe despierta"]
 STREAM_WAKE_ALIASES = {"hebe", "ebe", "eve", "ehbe", "heve", "ebi", "heb", "jebe"}
@@ -513,6 +523,76 @@ class HebeEngine:
         self._last_policy_trace: dict = {}
         self._last_cognitive_trace: dict = {}
         self._current_input_event: InputEvent | None = None
+        self.conversation_continuity_v2 = os.getenv(
+            "HEBE_CONVERSATION_CONTINUITY_V2", "false"
+        ).strip().lower() in ("1", "true", "yes", "on")
+        self.conversation_continuity_shadow = os.getenv(
+            "HEBE_CONVERSATION_CONTINUITY_SHADOW", "true"
+        ).strip().lower() in ("1", "true", "yes", "on")
+        self._last_continuity_resolution: dict = {}
+        self._last_continuity_shadow_diff: dict = {}
+        self._initialize_conversation_continuity()
+
+    def _initialize_conversation_continuity(self) -> None:
+        try:
+            runner = MigrationRunner(db_sqlite.get_db_connection)
+            self.conversation_continuity_migrations = runner.migrate(conversation_continuity_migrations())
+            conversations = ConversationRepository(db_sqlite.get_db_connection)
+            threads = OpenThreadRepository(db_sqlite.get_db_connection)
+            self.conversation_continuity = ConversationContinuityService(
+                conversations, threads, now_fn=lambda: time.time(),
+            )
+            self.legacy_pending_adapter = LegacyPendingAdapter(
+                self.conversation_continuity, self.runtime.state,
+            )
+            invalidated = conversations.interrupt_active_on_start(reason="runtime_restart")
+            if invalidated:
+                threads.archive_interrupted_clarifications(event_id="runtime_restart", now=time.time())
+            if invalidated:
+                print(f"[HEBE][CONVERSATION_RESTART] invalidated_actionable={invalidated}", flush=True)
+        except Exception as exc:
+            self.conversation_continuity = None
+            self.legacy_pending_adapter = None
+            self.conversation_continuity_migrations = []
+            print(f"[HEBE][CONVERSATION_INIT] status=failed_closed reason={type(exc).__name__}", flush=True)
+
+    def _conversation_context_for_owner_stt(self) -> tuple[str, str]:
+        stream = self._get_stream_state()
+        if stream is not None and bool(getattr(stream, "enabled", False)) and bool(getattr(stream, "is_live", False)):
+            return ConversationContext.OWNER_LIVE_CONTROL.value, str(
+                getattr(stream, "active_stream_session_id", None) or "active_stream"
+            )
+        return ConversationContext.OWNER_LOCAL.value, "leo_local"
+
+    def _resolve_conversation_continuation(
+        self, *, text: str, event_id: str, wake: bool, force_ambient: bool,
+        legacy_match: bool,
+    ):
+        service = getattr(self, "conversation_continuity", None)
+        if service is None:
+            return None
+        context_kind, context_id = self._conversation_context_for_owner_stt()
+        source = "ambient_stt" if force_ambient else "owner_stt"
+        participant = "ambient" if force_ambient else "leo"
+        authority = "ambient" if force_ambient else "owner"
+        try:
+            resolution = service.resolve_input(
+                context_kind=context_kind, context_id=context_id, source=source,
+                participant=participant, authority=authority, text=text,
+                event_id=event_id, wake=wake,
+                consume=bool(getattr(self, "conversation_continuity_v2", False)),
+            )
+            self._last_continuity_resolution = resolution.to_dict()
+            if bool(getattr(self, "conversation_continuity_shadow", False)):
+                self._last_continuity_shadow_diff = service.record_shadow(
+                    legacy_result=legacy_match, v2_result=resolution,
+                )
+            return resolution
+        except Exception as exc:
+            self._last_continuity_resolution = {
+                "consumed": False, "decision": "reject", "reason": f"continuity_failure:{type(exc).__name__}"
+            }
+            return None
 
     def _build_input_firewall(self) -> InputAuthorityFirewall:
         return InputAuthorityFirewall(extra_bot_usernames=self._input_firewall_bot_usernames())
@@ -546,6 +626,12 @@ class HebeEngine:
 
     def _clear_pending_task(self, *, reason: str, pending: dict | None = None) -> None:
         pending = pending if isinstance(pending, dict) else getattr(self.runtime.state, "pending_clarification", None)
+        adapter = getattr(self, "legacy_pending_adapter", None)
+        if adapter is not None:
+            try:
+                adapter.close_for_legacy(pending, reason=reason)
+            except Exception as exc:
+                print(f"[HEBE][CONVERSATION_COMPAT] close_failed reason={type(exc).__name__}", flush=True)
         if isinstance(pending, dict) and pending:
             pending["status"] = "cancelled" if reason not in {"expired", "consumed"} else reason
             print(
@@ -652,6 +738,33 @@ class HebeEngine:
             f"expected_reply_type={pending.get('expected_reply_type')} reason={reason}",
             flush=True,
         )
+        adapter = getattr(self, "legacy_pending_adapter", None)
+        if adapter is not None and (
+            bool(getattr(self, "conversation_continuity_shadow", False))
+            or bool(getattr(self, "conversation_continuity_v2", False))
+        ):
+            try:
+                event = getattr(self, "_current_input_event", None)
+                source = str(getattr(event, "source", "") or "")
+                if source in {"ui", "typed_ui", "owner_ui"}:
+                    context_kind, context_id = ConversationContext.PRIVATE_UI, "leo_ui"
+                else:
+                    context_value, context_id = self._conversation_context_for_owner_stt()
+                    context_kind = ConversationContext(context_value)
+                pending["conversation_context"] = context_kind.value
+                pending["conversation_context_id"] = context_id
+                adapter.project_legacy_pending(
+                    pending,
+                    context_kind=context_kind,
+                    context_id=context_id,
+                    event_id=str(
+                        pending.get("opened_by_event_id")
+                        or getattr(event, "event_id", "")
+                        or pending.get("id") or "legacy"
+                    ),
+                )
+            except Exception as exc:
+                print(f"[HEBE][CONVERSATION_COMPAT] projection_failed reason={type(exc).__name__}", flush=True)
         return pending
 
     def _increment_pending_attempt(self, pending: dict | None, *, reason: str) -> bool:
@@ -6094,7 +6207,7 @@ class HebeEngine:
                     reason="stt_prompt_injection",
                 )
                 return "continue"
-            duplicate, similarity = self._is_duplicate_recent_stt(original_raw_text)
+            duplicate, similarity = (False, 0.0) if force_ambient else self._is_duplicate_recent_stt(original_raw_text)
             if duplicate:
                 self._emit_stt_rejection(
                     original_raw_text,
@@ -6135,7 +6248,7 @@ class HebeEngine:
                     retry_transcript=retry_text,
                 ):
                     return "continue"
-                duplicate, similarity = self._is_duplicate_recent_stt(transcript_for_cognition)
+                duplicate, similarity = (False, 0.0) if force_ambient else self._is_duplicate_recent_stt(transcript_for_cognition)
                 if duplicate:
                     self._emit_stt_rejection(
                         original_raw_text,
@@ -6239,6 +6352,45 @@ class HebeEngine:
             # They must never borrow an owner continuation window.
             possible_reply_to_hebe = False
             pending_match = False
+        legacy_continuation_match = pending_match
+        legacy_pending = getattr(self.runtime.state, "pending_clarification", None)
+        if (
+            not force_ambient and not exact_wake and isinstance(legacy_pending, dict)
+            and str(legacy_pending.get("authority") or "owner") == "owner"
+        ):
+            legacy_kind = str(legacy_pending.get("kind") or "")
+            if legacy_kind == "promotion_target_clarification":
+                legacy_continuation_match = bool(
+                    self._promotion_pending_reply_compatible(
+                        original_raw_text, command, legacy_pending,
+                    )[0]
+                )
+            elif legacy_kind == "appointment_datetime":
+                legacy_continuation_match = self._appointment_pending_reply_compatible(command)
+        continuation_event_id = str(
+            stt_metadata.get("continuation_event_id")
+            or stt_metadata.get("replay_event_id")
+            or getattr(self._current_input_event, "event_id", "")
+            or f"stt_{uuid.uuid4().hex}"
+        )
+        continuation = self._resolve_conversation_continuation(
+            text=command,
+            event_id=continuation_event_id,
+            wake=exact_wake,
+            force_ambient=force_ambient,
+            legacy_match=legacy_continuation_match,
+        )
+        if continuation is not None and self._current_input_event is not None:
+            self._current_input_event.stt_metadata["continuation"] = continuation.to_dict()
+        if bool(getattr(self, "conversation_continuity_v2", False)) and continuation is not None:
+            if continuation.decision == "interrupt":
+                active_pending = getattr(self.runtime.state, "pending_clarification", None)
+                if isinstance(active_pending, dict):
+                    self._clear_pending_task(reason="new_owner_command_interrupted", pending=active_pending)
+                pending_match = False
+            elif continuation.consumed:
+                pending_match = True
+                possible_reply_to_hebe = True
         conversation_followup = (
             not has_action_intent
             and voice_type != "direct_command_to_hebe"
