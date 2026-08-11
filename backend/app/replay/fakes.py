@@ -255,7 +255,15 @@ class FixtureResearchProvider:
             rows = self.fixtures["*"]
         else:
             raise UnexpectedFixtureCall(f"research_fixture_missing:{key}")
-        return [dict(row) for row in rows]
+        normalized=[]
+        for value in rows:
+            row=dict(value)
+            if row.get("source_url") and not row.get("url"):row["url"]=row["source_url"]
+            if row.get("spoiler_class") and not row.get("spoiler_classification"):row["spoiler_classification"]=row["spoiler_class"]
+            if row.get("source_quality") and not row.get("source_type"):row["source_type"]=row["source_quality"]
+            if row.get("spoiler_classification")=="safe_general_mechanic":row["general_mechanic"]=True
+            normalized.append(row)
+        return normalized
 
 
 class DeterministicEmbedder:

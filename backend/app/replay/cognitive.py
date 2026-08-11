@@ -107,12 +107,14 @@ class CognitiveReplayRunner:
         self._old_embedder: Any = None
         self._id_counter = 0
         self._belief_aliases: dict[str, str] = {}
+        self._game_aliases: dict[str, str] = {}
 
     def run(self, scenario: CognitiveReplayScenario | str | Path) -> ScenarioRunResult:
         if not isinstance(scenario, CognitiveReplayScenario):
             scenario = CognitiveReplayScenario.load(scenario)
         self._active_scenario = scenario
         self._belief_aliases = {}
+        self._game_aliases = {}
         started = _REAL_PERF_COUNTER()
         random.seed(scenario.seed)
         self.clock = ScenarioClock(scenario.initial_time)
@@ -286,6 +288,12 @@ class CognitiveReplayRunner:
             "HEBE_CONVERSATION_CONTINUITY_SHADOW": "true",
             "HEBE_BELIEF_V2_READS": str(bool(self._active_scenario and self._active_scenario.feature_flags.belief_v2_reads)).lower(),
             "HEBE_BELIEF_V2_WRITES": str(bool(self._active_scenario and self._active_scenario.feature_flags.belief_v2_writes)).lower(),
+            "HEBE_GAME_CONTEXT_V2": str(bool(self._active_scenario and self._active_scenario.feature_flags.game_context_v2)).lower(),
+            "HEBE_GAME_RUN_V2_READS": str(bool(self._active_scenario and self._active_scenario.feature_flags.game_run_v2_reads)).lower(),
+            "HEBE_GAME_RUN_V2_WRITES": str(bool(self._active_scenario and self._active_scenario.feature_flags.game_run_v2_writes)).lower(),
+            "HEBE_GAME_KNOWLEDGE_V2_READS": str(bool(self._active_scenario and self._active_scenario.feature_flags.game_knowledge_v2_reads)).lower(),
+            "HEBE_GAME_KNOWLEDGE_V2_WRITES": str(bool(self._active_scenario and self._active_scenario.feature_flags.game_knowledge_v2_writes)).lower(),
+            "HEBE_GAME_RESEARCH_MEMORY_FIRST": str(bool(self._active_scenario and self._active_scenario.feature_flags.game_research_memory_first)).lower(),
         }
         with patch.dict(os.environ, env, clear=False), self._deterministic_context():
             engine = HebeEngine(runtime=runtime, use_wakeword=True, say_hello=False)
@@ -312,6 +320,9 @@ class CognitiveReplayRunner:
             intelligence.provider = provider
             intelligence.provider_name = "replay_fixture"
             intelligence.provider_configured = True
+        resolver = getattr(engine,"game_context_resolver",None)
+        if resolver is not None:
+            resolver.research_service = intelligence
         legacy = getattr(engine, "game_research", None)
         if legacy is not None:
             legacy.search_provider = provider
@@ -411,13 +422,51 @@ class CognitiveReplayRunner:
                 candidate_refs=tuple(str(item) for item in payload.get("candidate_refs") or ()),
                 expires_at=self.clock.now() + float(payload.get("ttl_seconds") or 60.0),
             )
+            domain_payload=dict(payload.get("domain_payload") or {})
+            target_ref=str(domain_payload.pop("target_belief_ref","") or "")
+            if target_ref:domain_payload["target_belief_id"]=self._belief_aliases.get(target_ref,target_ref)
             self.engine.conversation_continuity.open_conversation(
                 context_kind=context_kind, context_id=context_id,
                 topic=str(payload.get("topic") or "replay_handoff"),
                 origin_event_id=event.event_id, expected_reply=expected,
-                domain_payload=dict(payload.get("domain_payload") or {}),
+                domain_payload=domain_payload,
             )
             return
+        if event_type == "resolve_game_run":
+            result=self.engine.game_run_service.resolve(game=str(payload.get("game") or "Unknown Game"),stream_session_id=str(payload.get("stream_session_id") or event.event_id),source_event_id=str(payload.get("source_event_id") or event.event_id),owner_id=str(payload.get("owner_id") or "leo"),run_kind=str(payload.get("run_kind") or "unknown"),rules=dict(payload.get("rules") or {}),explicit_new=bool(payload.get("explicit_new")),explicit_continue=bool(payload.get("explicit_continue")))
+            if result.active_run:self._game_aliases[event.event_id]=result.active_run.id
+            return
+        if event_type == "pause_game_run":
+            ref=str(payload.get("run_ref") or "");run_id=self._game_aliases.get(ref,ref);self.engine.game_run_service.pause(run_id,stream_session_id=str(payload.get("stream_session_id") or "session"),event_id=event.event_id);return
+        if event_type == "finish_game_run":
+            from app.game_context_v2.models import GameRunStatus
+            ref=str(payload.get("run_ref") or "");run_id=self._game_aliases.get(ref,ref);self.engine.game_run_service.finish(run_id,status=GameRunStatus(str(payload.get("status") or "COMPLETED")),event_id=event.event_id);return
+        if event_type in {"record_run_fact","infer_run_fact"}:
+            payload.setdefault("authority_class","owner" if event_type=="record_run_fact" else "extractor")
+            source_event_id,source_record_type,source_record_id=self._record_canonical_belief_evidence(event,payload)
+            evidence=EvidenceRef(source_event_id=source_event_id,source_record_type=source_record_type,source_record_id=source_record_id,relation=EvidenceRelation.SUPPORTS,weight=float(payload.get("weight") or 1),observed_at=self.clock.now(),extractor="owner_run_statement" if event_type=="record_run_fact" else str(payload.get("extractor") or "run_extractor"),extractor_version=str(payload.get("extractor_version") or "v1"),literal_span=dict(payload.get("literal_span") or {}))
+            ref=str(payload.get("run_ref") or "");run_id=self._game_aliases.get(ref,ref)
+            result=self.engine.game_run_service.record_fact(run_id,subject_ref=str(payload.get("subject_ref") or "run"),predicate=str(payload.get("predicate") or "state"),object_value=payload.get("object"),evidence=evidence,event_type=str(payload.get("run_event_type") or "notable_run_event"),owner_confirmed=event_type=="record_run_fact",confidence=float(payload.get("confidence") or .6),entailment_valid=bool(payload.get("entailment_valid",True)))
+            if result:self._belief_aliases[event.event_id]=result.id
+            return
+        if event_type == "correct_run_fact":
+            payload.setdefault("authority_class","owner");payload.setdefault("literal_span",{"start":0,"end":len(str(payload.get("text") or "")),"excerpt":str(payload.get("text") or "")[:80]})
+            source_event_id,source_record_type,source_record_id=self._record_canonical_belief_evidence(event,payload);old_ref=str(payload.get("belief_ref") or "");belief_id=self._belief_aliases.get(old_ref,old_ref)
+            evidence=EvidenceRef(source_event_id=source_event_id,source_record_type=source_record_type,source_record_id=source_record_id,relation=EvidenceRelation.CORRECTS,observed_at=self.clock.now(),extractor="game_run_domain_correction",extractor_version="v1",literal_span=dict(payload["literal_span"]))
+            if bool(payload.get("via_conversation")):
+                resolution=self.engine.conversation_continuity.resolve_input(context_kind="owner_local",context_id="leo_local",source="owner_stt",participant="leo",authority="owner",text=str(payload.get("text") or ""),event_id=event.event_id,wake=False,consume=True)
+                self.engine._last_continuity_resolution=resolution.to_dict();self.engine._apply_game_run_correction_continuation(resolution,event_id=event.event_id,text=str(payload.get("text") or ""));return
+            result=self.engine.game_run_service.correct_fact(belief_id,object_value=payload.get("object"),evidence=evidence);self._belief_aliases[event.event_id]=result.id;return
+        if event_type == "add_game_knowledge":
+            identity=self.engine.game_v2_repository.resolve_identity(str(payload.get("game") or "Unknown Game"));payload.setdefault("authority_class","domain_validator")
+            source_event_id,source_record_type,source_record_id=self._record_canonical_belief_evidence(event,payload)
+            evidence=EvidenceRef(source_event_id=source_event_id,source_record_type=source_record_type,source_record_id=source_record_id,observed_at=self.clock.now(),extractor="validated_fixture",extractor_version="v1",literal_span=dict(payload.get("literal_span") or {"excerpt":str(payload.get("text") or "validated fixture")}))
+            result=self.engine.game_knowledge_v2_service.add_validated(game_id=identity.game_id,subject_ref=str(payload.get("subject_ref") or "game"),predicate=str(payload.get("predicate") or "fact"),object_value=payload.get("object"),confidence=float(payload.get("confidence") or .9),evidence=evidence,source_type=str(payload.get("source_type") or "curated"),source_quality=str(payload.get("source_quality") or "validated"),spoiler_class=str(payload.get("spoiler_class") or "safe_general_mechanic"),version_tag=str(payload.get("version_tag") or ""))
+            if result:self._belief_aliases[event.event_id]=result.id
+            return
+        if event_type == "build_game_context":
+            ref=str(payload.get("run_ref") or "");run_id=self._game_aliases.get(ref,ref)
+            self.engine.game_context_resolver.build(game=str(payload.get("game") or "Unknown Game"),purpose=str(payload.get("purpose") or "run_context"),stream_session_id=str(payload.get("stream_session_id") or ""),run_id=run_id,subject_ref=str(payload.get("subject_ref") or ""),predicate=str(payload.get("predicate") or ""),question_type=str(payload.get("question_type") or ""),query_intent=str(payload.get("query_intent") or ""),spoiler_ceiling=str(payload.get("spoiler_ceiling") or "strict"),required_confidence=float(payload.get("required_confidence") or .6),event_id=event.event_id,allow_research=bool(payload.get("allow_research")),historical_run=bool(payload.get("historical_run")),scene_assertions=tuple(payload.get("scene_assertions") or ()));return
         if event_type in {"propose_belief", "seed_known_belief"}:
             payload.setdefault("authority_class","owner" if event_type=="seed_known_belief" else "extractor")
             source_event_id,source_record_type,source_record_id=self._record_canonical_belief_evidence(event,payload)

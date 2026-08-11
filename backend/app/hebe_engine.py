@@ -179,11 +179,16 @@ from app.continuity import (
     LegacyPendingAdapter,
     OpenThreadRepository,
 )
-from app.replay.migrations import MigrationRunner, conversation_continuity_migrations, belief_v2_migrations
+from app.replay.migrations import MigrationRunner, conversation_continuity_migrations, belief_v2_migrations, game_context_v2_migrations
 from app.epistemics.repository import BeliefRepository
 from app.epistemics.service import BeliefLifecycleService
 from app.epistemics.retrieval import MemoryRetrievalCoordinator
 from app.epistemics.legacy_adapter import LegacyMemoryFactAdapter
+from app.epistemics.models import EvidenceRef, EvidenceRelation
+from app.game_context_v2.adapters import LegacyGameCompatibilityAdapter
+from app.game_context_v2.context import GameContextResolver
+from app.game_context_v2.repository import GameV2Repository
+from app.game_context_v2.service import GameKnowledgeService as GameKnowledgeV2Service, GameRunService
 from app.services import db_sqlite
 
 WAKE_WORDS = ["hebe despierta", "eve despierta", "jebe despierta"]
@@ -539,6 +544,25 @@ class HebeEngine:
         self.belief_v2_reads = os.getenv("HEBE_BELIEF_V2_READS", "false").strip().lower() in ("1","true","yes","on")
         self.belief_v2_writes = os.getenv("HEBE_BELIEF_V2_WRITES", "false").strip().lower() in ("1","true","yes","on")
         self._initialize_belief_v2()
+        self.game_context_v2 = os.getenv("HEBE_GAME_CONTEXT_V2", "false").strip().lower() in ("1","true","yes","on")
+        self.game_run_v2_reads = os.getenv("HEBE_GAME_RUN_V2_READS", "false").strip().lower() in ("1","true","yes","on")
+        self.game_run_v2_writes = os.getenv("HEBE_GAME_RUN_V2_WRITES", "false").strip().lower() in ("1","true","yes","on")
+        self.game_knowledge_v2_reads = os.getenv("HEBE_GAME_KNOWLEDGE_V2_READS", "false").strip().lower() in ("1","true","yes","on")
+        self.game_knowledge_v2_writes = os.getenv("HEBE_GAME_KNOWLEDGE_V2_WRITES", "false").strip().lower() in ("1","true","yes","on")
+        self.game_research_memory_first = os.getenv("HEBE_GAME_RESEARCH_MEMORY_FIRST", "false").strip().lower() in ("1","true","yes","on")
+        self._initialize_game_context_v2()
+
+    def _initialize_game_context_v2(self) -> None:
+        try:
+            if self.belief_repository is None or self.belief_lifecycle is None: raise RuntimeError("belief_v2_unavailable")
+            runner=MigrationRunner(db_sqlite.get_db_connection);self.game_context_v2_migrations=runner.migrate(game_context_v2_migrations())
+            repository=GameV2Repository(db_sqlite.get_db_connection);runs=GameRunService(repository,self.belief_lifecycle,now_fn=lambda:time.time());knowledge=GameKnowledgeV2Service(repository,self.belief_lifecycle,now_fn=lambda:time.time())
+            self.game_v2_repository=repository;self.game_run_service=runs;self.game_knowledge_v2_service=knowledge
+            self.game_context_resolver=GameContextResolver(repository,runs,knowledge,research_service=getattr(self,"game_intelligence",None),memory_retrieval=getattr(self,"memory_retrieval",None),now_fn=lambda:time.time())
+            self.legacy_game_adapter=LegacyGameCompatibilityAdapter()
+        except Exception as exc:
+            self.game_v2_repository=None;self.game_run_service=None;self.game_knowledge_v2_service=None;self.game_context_resolver=None;self.legacy_game_adapter=None;self.game_context_v2_migrations=[]
+            print(f"[HEBE][GAME_CONTEXT_V2_INIT] status=failed_closed reason={type(exc).__name__}",flush=True)
 
     def _initialize_belief_v2(self) -> None:
         try:
@@ -613,6 +637,21 @@ class HebeEngine:
                 "consumed": False, "decision": "reject", "reason": f"continuity_failure:{type(exc).__name__}"
             }
             return None
+
+    def _apply_game_run_correction_continuation(self, continuation, *, event_id: str, text: str) -> None:
+        if not (getattr(self,"game_context_v2",False) and getattr(self,"game_run_v2_writes",False) and continuation is not None and continuation.consumed and str(getattr(continuation.reply_act,"value",continuation.reply_act))=="CORRECT"):
+            return
+        domain=dict((continuation.payload or {}).get("domain") or {})
+        if domain.get("kind")!="game_run_belief_correction":return
+        belief_id=str(domain.get("target_belief_id") or "")
+        normalized=self._normalize_text(text);value=None
+        for token,candidate in dict(domain.get("correction_values") or {}).items():
+            if self._normalize_text(str(token)) in normalized:value=candidate;break
+        if not belief_id or value is None:
+            print("[HEBE][GAME_RUN_CORRECT] decision=defer reason=ambiguous_target_or_value",flush=True);return
+        evidence=EvidenceRef(source_event_id=event_id,source_record_type="live_session_timeline",source_record_id=event_id,relation=EvidenceRelation.CORRECTS,observed_at=time.time(),extractor="conversation_game_domain",extractor_version="v1",literal_span={"start":0,"end":len(text),"excerpt":text[:80]})
+        try:getattr(self,"game_run_service",None).correct_fact(belief_id,object_value=value,evidence=evidence)
+        except Exception as exc:print(f"[HEBE][GAME_RUN_CORRECT] decision=defer reason={type(exc).__name__}",flush=True)
 
     def _build_input_firewall(self) -> InputAuthorityFirewall:
         return InputAuthorityFirewall(extra_bot_usernames=self._input_firewall_bot_usernames())
@@ -4483,6 +4522,8 @@ class HebeEngine:
             print("[HEBE][STREAM_CONTEXT] stream_online event handled", flush=True)
             return
         if event.event_type == "stream_offline":
+            active_game_run_id=str(getattr(stream,"active_game_run_id","") or "")
+            active_stream_session_id=str(getattr(stream,"active_stream_session_id","") or "")
             stream.is_live = False
             stream.live_status_known = True
             stream.last_stream_live_transition = "offline"
@@ -4499,6 +4540,9 @@ class HebeEngine:
                 brain.retrieve_context("stream ended", limit_events=20, limit_summaries=5)
             except Exception as exc:
                 print(f"[HEBE][LIVE_SESSION] stream_offline failed: {exc!r}", flush=True)
+            if active_game_run_id and getattr(self,"game_context_v2",False) and getattr(self,"game_run_v2_writes",False) and getattr(self,"game_run_service",None) is not None:
+                try:self.game_run_service.pause(active_game_run_id,stream_session_id=active_stream_session_id,event_id=str(getattr(event,"event_id","") or f"stream_offline:{active_stream_session_id}"))
+                except Exception as exc:print(f"[HEBE][GAME_RUN_RESOLVE] decision=pause_failed reason={type(exc).__name__}",flush=True)
             self._close_stream_memory_session_safe(stream, reason="stream_offline_event")
             print("[HEBE][STREAM_CONTEXT] stream_offline event handled", flush=True)
 
@@ -4509,6 +4553,12 @@ class HebeEngine:
         if service is None or not game or not session_id:
             return
         try:
+            resolution = None
+            if getattr(self,"game_context_v2",False) and getattr(self,"game_run_v2_writes",False) and getattr(self,"game_run_service",None) is not None:
+                title=str(getattr(stream,"current_stream_title",None) or "")
+                run_kind=str(getattr(stream,"current_playthrough_type",None) or "unknown").strip().lower().replace(" ","_") or "unknown"
+                resolution=self.game_run_service.resolve(game=game,stream_session_id=str(session_id),source_event_id=f"stream_session:{session_id}",run_kind=run_kind,rules={"title":title[:200]})
+                if resolution.active_run:setattr(stream,"active_game_run_id",resolution.active_run.id)
             session_primer.record_schedule_observation(
                 stream_session_id=session_id,
                 canonical_content=game,
@@ -4523,13 +4573,19 @@ class HebeEngine:
             )
             service.diagnostics.progress_state = asdict(progress)
             service.diagnostics.spoiler_mode = progress.spoiler_policy
+            if resolution is not None and resolution.active_run is not None and getattr(self,"legacy_game_adapter",None) is not None:
+                self.legacy_game_adapter.observe_progress(progress,run_id=resolution.active_run.id)
             existing = service.store.get_dossier(game)
             if existing is not None and service._dossier_sufficient(existing):
                 service.diagnostics.current_game = existing.canonical_title
                 service.diagnostics.dossier_status = "loaded"
                 service._log_dossier(existing, "loaded")
-            else:
+                if getattr(self,"legacy_game_adapter",None) is not None:
+                    self.legacy_game_adapter.observe_dossier(existing)
+            elif not (getattr(self,"game_context_v2",False) and getattr(self,"game_research_memory_first",False)):
                 service.prepare_game_async(game_title=game, session_id=session_id)
+            else:
+                print(f"[HEBE][GAME_RESEARCH_SKIP] reason=memory_first_no_typed_gap game={game}",flush=True)
         except Exception as exc:
             print(f"[HEBE][GAME_DOSSIER] game={game} status=failed facts=0 sources=0 error={type(exc).__name__}", flush=True)
 
@@ -6400,6 +6456,7 @@ class HebeEngine:
             force_ambient=force_ambient,
             legacy_match=legacy_continuation_match,
         )
+        self._apply_game_run_correction_continuation(continuation,event_id=continuation_event_id,text=command)
         if continuation is not None and self._current_input_event is not None:
             self._current_input_event.stt_metadata["continuation"] = continuation.to_dict()
         if bool(getattr(self, "conversation_continuity_v2", False)) and continuation is not None:

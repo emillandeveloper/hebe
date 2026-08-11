@@ -56,6 +56,8 @@ class CognitiveStateProbe:
         "stream_chat_messages", "stream_events", "live_session_timeline",
         "promotion_events", "viewer_promotion_profiles", "schema_migrations",
         "conversations", "open_threads", "beliefs", "belief_evidence", "scene_assertions",
+        "game_identities", "game_runs", "game_run_sessions", "game_run_events",
+        "game_knowledge_facts", "game_knowledge_v2_gaps",
     )
 
     def __init__(
@@ -121,6 +123,29 @@ class CognitiveStateProbe:
             "current_objective": getattr(stream, "current_run_objective", None),
             "current_location": getattr(stream, "current_run_location", None),
             "recent_run_context_facts": _plain(list(getattr(stream, "recent_run_context_facts", []) or [])),
+        })
+        game_context=_plain(getattr(getattr(engine,"game_context_resolver",None),"last_context",{}) or {})
+        context_diag=_plain(getattr(getattr(engine,"game_context_resolver",None),"diagnostics",lambda:{})())
+        game_state.update({
+            "identity":game_context.get("game_identity") or {},
+            "context":game_context,
+            "active_run":game_context.get("active_run") or next((item for item in rows["game_runs"] if item["status"]=="ACTIVE"),{}),
+            "runs":rows["game_runs"],"session_links":rows["game_run_sessions"],"run_events":rows["game_run_events"],
+            "run_beliefs":{
+                "current":[item for item in rows["beliefs"] if item["namespace"]=="game_run" and item["epistemic_status"] in {"KNOWN","INFERRED","SUSPECTED"} and not item["superseded_by"]],
+                "inferred":[item for item in rows["beliefs"] if item["namespace"]=="game_run" and item["epistemic_status"]=="INFERRED" and not item["superseded_by"]],
+                "superseded":[item for item in rows["beliefs"] if item["namespace"]=="game_run" and item["epistemic_status"]=="SUPERSEDED"],
+            },
+            "knowledge":{"selected":game_context.get("knowledge_claims") or [],"rejected":game_context.get("rejected_knowledge") or [],"spoiler_blocked":[item for item in game_context.get("rejected_knowledge") or [] if item.get("rejection_reason")=="spoiler_blocked"],"all":rows["game_knowledge_facts"]},
+            "gaps":rows["game_knowledge_gaps"],
+            "research":{**context_diag,"fixture_calls":_plain(self.research_calls),"status":game_context.get("research_status") or ""},
+            "compatibility":_plain(getattr(getattr(engine,"legacy_game_adapter",None),"telemetry",{}) or {}),
+            "provenance_manifest":game_context.get("provenance_manifest") or [],
+            "advice_allowed":game_context.get("advice_allowed"),"reaction_allowed":game_context.get("reaction_allowed"),
+            "performance":_plain(getattr(getattr(engine,"game_v2_repository",None),"performance",lambda:{})()),
+            "context_performance":context_diag.get("context_performance") or {},"manifest_size_bytes":game_context.get("manifest_size_bytes") or 0,
+            "last_run_resolution":_plain(getattr(getattr(engine,"game_run_service",None),"last_resolution",{}) or {}),
+            "run_resolution_performance":_plain(getattr(getattr(engine,"game_run_service",None),"performance",lambda:{})()),
         })
         social_state = {
             "recent_active_users": list(getattr(stream, "recent_active_users", []) or []),
@@ -249,11 +274,27 @@ class CognitiveStateProbe:
             if "belief_evidence" in existing:
                 belief_evidence=[dict(row) for row in conn.execute("SELECT * FROM belief_evidence ORDER BY observed_at,id")]
                 for item in belief_evidence:item["literal_span"]=json.loads(item.pop("literal_span_json") or "{}")
+            game_runs=[]
+            if "game_runs" in existing:
+                game_runs=[dict(row) for row in conn.execute("SELECT * FROM game_runs ORDER BY started_at,id")]
+                for item in game_runs:item["rules"]=json.loads(item.pop("rules_json") or "{}")
+            game_run_sessions=[dict(row) for row in conn.execute("SELECT * FROM game_run_sessions ORDER BY started_at,id")] if "game_run_sessions" in existing else []
+            game_run_events=[]
+            if "game_run_events" in existing:
+                game_run_events=[dict(row) for row in conn.execute("SELECT * FROM game_run_events ORDER BY observed_at,id")]
+                for item in game_run_events:item["object"]=json.loads(item.pop("object_json") or "null")
+            game_knowledge_facts=[dict(row) for row in conn.execute("SELECT * FROM game_knowledge_facts ORDER BY created_at,id")] if "game_knowledge_facts" in existing else []
+            game_knowledge_gaps=[]
+            if "game_knowledge_v2_gaps" in existing:
+                game_knowledge_gaps=[dict(row) for row in conn.execute("SELECT * FROM game_knowledge_v2_gaps ORDER BY created_at,id")]
+                for item in game_knowledge_gaps:item["resolved_fact_ids"]=json.loads(item.pop("resolved_fact_ids_json") or "[]")
             return {
                 "counts": counts, "promotion_profiles": profiles, "promotion_events": promotions,
                 "schema_migrations": migrations, "conversations": conversations,
                 "active_conversation": active, "open_threads": open_threads,
-                "beliefs":beliefs,"belief_evidence":belief_evidence,
+                "beliefs":beliefs,"belief_evidence":belief_evidence,"game_runs":game_runs,
+                "game_run_sessions":game_run_sessions,"game_run_events":game_run_events,
+                "game_knowledge_facts":game_knowledge_facts,"game_knowledge_gaps":game_knowledge_gaps,
             }
         finally:
             conn.close()

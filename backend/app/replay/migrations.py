@@ -215,3 +215,65 @@ def belief_v2_migrations() -> tuple[Migration, ...]:
         add("memory_chunks","belief_id","TEXT")
         add("memory_chunks","episode_id","TEXT")
     return (Migration("belief_v2",1,"beliefs_evidence_and_compatibility_columns",phase2),)
+
+
+def game_context_v2_migrations() -> tuple[Migration, ...]:
+    def phase3(conn: sqlite3.Connection) -> None:
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS game_identities (
+              game_id TEXT PRIMARY KEY, canonical_name TEXT NOT NULL, aliases_json TEXT NOT NULL,
+              platform_ids_json TEXT NOT NULL DEFAULT '{}', series TEXT NOT NULL DEFAULT '',
+              schema_version INTEGER NOT NULL DEFAULT 1
+            );
+            CREATE TABLE IF NOT EXISTS game_runs (
+              id TEXT PRIMARY KEY, game_id TEXT NOT NULL, owner_id TEXT NOT NULL, run_kind TEXT NOT NULL,
+              rules_json TEXT NOT NULL, status TEXT NOT NULL, started_at REAL NOT NULL,
+              last_active_at REAL NOT NULL, ended_at REAL NOT NULL DEFAULT 0,
+              current_checkpoint_version INTEGER NOT NULL DEFAULT 1,
+              created_from_event_id TEXT NOT NULL, schema_version INTEGER NOT NULL DEFAULT 1,
+              FOREIGN KEY(game_id) REFERENCES game_identities(game_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_game_runs_resolution ON game_runs(game_id,owner_id,status,last_active_at);
+            CREATE TABLE IF NOT EXISTS game_run_sessions (
+              id TEXT PRIMARY KEY, game_run_id TEXT NOT NULL, stream_session_id TEXT NOT NULL,
+              started_at REAL NOT NULL, ended_at REAL NOT NULL DEFAULT 0, evidence_event_id TEXT NOT NULL,
+              source TEXT NOT NULL, schema_version INTEGER NOT NULL DEFAULT 1,
+              FOREIGN KEY(game_run_id) REFERENCES game_runs(id), UNIQUE(game_run_id,stream_session_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_game_run_sessions_stream ON game_run_sessions(stream_session_id,game_run_id);
+            CREATE TABLE IF NOT EXISTS game_run_events (
+              id TEXT PRIMARY KEY, game_run_id TEXT NOT NULL, event_type TEXT NOT NULL,
+              subject_ref TEXT NOT NULL, predicate TEXT NOT NULL, object_json TEXT NOT NULL,
+              evidence_event_id TEXT NOT NULL, belief_id TEXT NOT NULL DEFAULT '', observed_at REAL NOT NULL,
+              epistemic_status TEXT NOT NULL, schema_version INTEGER NOT NULL DEFAULT 1,
+              FOREIGN KEY(game_run_id) REFERENCES game_runs(id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_game_run_events_run ON game_run_events(game_run_id,observed_at,event_type);
+            CREATE TABLE IF NOT EXISTS game_knowledge_facts (
+              id TEXT PRIMARY KEY, game_id TEXT NOT NULL, belief_id TEXT NOT NULL UNIQUE,
+              source_type TEXT NOT NULL, source_quality TEXT NOT NULL, spoiler_class TEXT NOT NULL,
+              dossier_link TEXT NOT NULL DEFAULT '', version_tag TEXT NOT NULL DEFAULT '',
+              created_at REAL NOT NULL, schema_version INTEGER NOT NULL DEFAULT 1,
+              FOREIGN KEY(game_id) REFERENCES game_identities(game_id), FOREIGN KEY(belief_id) REFERENCES beliefs(id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_game_knowledge_lookup ON game_knowledge_facts(game_id,spoiler_class,created_at);
+            CREATE TABLE IF NOT EXISTS game_knowledge_v2_gaps (
+              id TEXT PRIMARY KEY, game_id TEXT NOT NULL, run_id TEXT NOT NULL DEFAULT '',
+              subject_ref TEXT NOT NULL, question_type TEXT NOT NULL, query_intent TEXT NOT NULL,
+              spoiler_ceiling TEXT NOT NULL, required_confidence REAL NOT NULL,
+              created_from_event_id TEXT NOT NULL, normalized_gap_key TEXT NOT NULL UNIQUE,
+              status TEXT NOT NULL, created_at REAL NOT NULL, updated_at REAL NOT NULL,
+              resolved_fact_ids_json TEXT NOT NULL DEFAULT '[]', schema_version INTEGER NOT NULL DEFAULT 1
+            );
+            CREATE INDEX IF NOT EXISTS idx_game_v2_gaps_status ON game_knowledge_v2_gaps(game_id,status,updated_at);
+            """
+        )
+        tables={str(row[0]) for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        def add(table: str, column: str, declaration: str) -> None:
+            if table in tables and column not in {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})")}:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
+        add("game_dossiers","v2_projection_version","INTEGER NOT NULL DEFAULT 0")
+        add("game_progress_states","game_run_id","TEXT")
+        add("game_sessions","game_run_id","TEXT")
+    return (Migration("game_context_v2",1,"durable_runs_knowledge_and_gaps",phase3),)

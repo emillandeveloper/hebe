@@ -1,0 +1,7 @@
+{
+  "identities": [
+    {"game_id":"final_fantasy_v","canonical_name":"Final Fantasy V","aliases":["FFV","Final Fantasy 5","FF5","Crystal Roulette FF5","Final Fantasy V Crystal Roulette"],"series":"Final Fantasy"},
+    {"game_id":"persona_5_royal","canonical_name":"Persona 5 Royal","aliases":["P5R","Persona 5 R","Persona 5 Royal"],"series":"Persona"},
+    {"game_id":"srw_og_saga_endless_frontier","canonical_name":"Super Robot Wars OG Saga: Endless Frontier","aliases":["SRW OG Saga Endless Frontier","Endless Frontier"],"series":"Super Robot Wars"}
+  ]
+}

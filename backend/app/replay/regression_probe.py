@@ -28,6 +28,10 @@ DEFAULT_FAILURE_METHODS = (
     "backend.tests.test_voice_command_pipeline.VoiceCommandPipelineTests.test_twitch_normal_no_mention_chat_reaches_presence_observe",
     "backend.tests.test_voice_command_pipeline.VoiceCommandPipelineTests.test_twitch_pipeline_health_counts_messages",
     "backend.tests.test_game_knowledge.GameKnowledgeTests.test_response_synthesizer_handles_game_knowledge_command_result",
+    "backend.tests.test_game_guidance_routing.GameGuidanceRoutingTests.test_fallback_chat_blocks_ungrounded_walkthrough_claim",
+    "backend.tests.test_game_guidance_routing.GameGuidanceRoutingTests.test_fallback_chat_is_blocked_while_game_pending_is_active",
+    "backend.tests.test_game_guidance_routing.GameGuidanceRoutingTests.test_stt_answer_without_wake_is_owner_followup",
+    "backend.tests.test_game_guidance_routing.GameGuidanceRoutingTests.test_successful_state_update_mutates_runtime_game_run_state",
 )
 
 
