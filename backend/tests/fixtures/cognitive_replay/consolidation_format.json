@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "scenario_id": "consolidation_format",
+  "initial_time": "2026-08-11T18:00:00+02:00",
+  "seed": 413,
+  "feature_flags": {"cognitive_replay_enabled": true},
+  "model_fixtures": {"*": "Entendido."},
+  "events": [
+    {"event_id": "start", "at": "+0s", "type": "stream_started", "session_id": "consolidation-1"},
+    {"event_id": "chat", "at": "+5s", "type": "twitch_chat", "user_id": "88", "login": "synthetic_chatter", "message_id": "consolidation-chat-1", "text": "hola"},
+    {"event_id": "end", "at": "+10m", "type": "stream_ended", "session_id": "consolidation-1"},
+    {"event_id": "restart", "at": "+11m", "type": "restart_hebe"},
+    {"event_id": "maintenance", "at": "+12m", "type": "maintenance"}
+  ],
+  "final_assertions": [
+    {"assertion": "exists", "path": "database_watermarks.consolidation_runs", "future_phase": "5", "description": "SessionConsolidator is a Phase 5 feature."}
+  ]
+}

@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "scenario_id": "ambient_false_positive_foundation",
+  "initial_time": "2026-08-11T18:00:00+02:00",
+  "seed": 406,
+  "feature_flags": {"cognitive_replay_enabled": true},
+  "model_fixtures": {"*": "Entendido."},
+  "events": [
+    {"event_id": "start", "at": "+0s", "type": "stream_started", "session_id": "ambient-1"},
+    {
+      "event_id": "owner", "at": "+1s", "type": "owner_stt", "text": "Hebe, escucha un momento.",
+      "assertions": [{"assertion": "collection_count", "path": "final_emission_results", "count": 1}]
+    },
+    {
+      "event_id": "ambient",
+      "at": "+2s",
+      "type": "ambient_stt",
+      "text": "sí, lo decía la televisión",
+      "assertions": [
+        {"assertion": "equals", "path": "runtime.last_firewall.source", "expected": "ambient_stt"},
+        {"assertion": "equals", "path": "runtime.last_firewall.authority", "expected": "ambient"},
+        {"assertion": "collection_count", "path": "final_emission_results", "count": 1}
+      ]
+    },
+    {"event_id": "time", "at": "+2m", "type": "advance_time", "seconds": 60}
+  ],
+  "final_assertions": [
+    {"assertion": "zero_external_calls", "path": "actions.attempts"}
+  ]
+}

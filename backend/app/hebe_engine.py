@@ -258,47 +258,13 @@ class HebeEngine:
                 ))
 
             def _twitch_chat_callback(username, display_name, text, channel, tags=None):
-                if self._is_known_twitch_bot_user(username):
-                    print(
-                        f"[HEBE][TWITCH_PIPELINE_SKIP] stage=chat_callback reason=bot_or_self_ignored username={username}",
-                        flush=True,
-                    )
-                    self._increment_twitch_pipeline_counter("twitch_messages_bot_ignored")
-                    self._increment_twitch_pipeline_counter("twitch_messages_early_skipped", reason="bot_or_self_ignored")
-                    return
-                if self._is_owner_twitch_user(username) and self._is_raw_twitch_command(text):
-                    self.observe_twitch_chat_message(username, display_name, text, channel)
-                    print(
-                        "[HEBE][TWITCH][CHATBOT] owner command observed without reaction "
-                        f"user={username!r} message={text!r}",
-                        flush=True,
-                    )
-                    return
-                firewall = self._input_firewall_decision(
-                    source="twitch_viewer",
-                    text=text,
-                    username=username,
-                    event_type="twitch_chat_react",
-                    addressed_to_hebe=self._message_mentions_hebe(text),
-                )
-                if not self._firewall_allows_pipeline(firewall):
-                    self._increment_twitch_pipeline_counter("twitch_messages_early_skipped", reason=firewall.reason)
-                    print(
-                        f"[HEBE][TWITCH_PIPELINE_SKIP] stage=input_firewall reason={firewall.reason} username={username}",
-                        flush=True,
-                    )
-                    return
-                self.handle_twitch_chat_event(
+                self.ingest_normalized_twitch_chat(
                     username=username,
                     display_name=display_name,
                     text=text,
                     channel=channel,
-                    firewall_decision=firewall,
                     irc_tags=tags or {},
                 )
-                stream = self._get_stream_state()
-                if stream is not None:
-                    stream.last_chat_activity_ts = time.time()
 
             self.runtime.twitch_chat_bot.ambient_message_callback = _twitch_ambient_callback
             self.runtime.twitch_chat_bot.message_callback = _twitch_chat_callback
@@ -1648,11 +1614,14 @@ class HebeEngine:
             now = time.time()
             stream.public_reply_timestamps = [now - 5, now - 10, now - 15, now - 20, now - 25]
         try:
-            self.process_internal_event(InternalEvent(
-                event_type="twitch_chat_react",
-                payload=event_payload,
-                created_at=datetime.now(timezone.utc).isoformat(),
-            ))
+            self.ingest_normalized_twitch_chat(
+                username=viewer_name,
+                display_name=display_name,
+                text=text,
+                channel=channel,
+                irc_tags=dict((payload or {}).get("irc_tags") or {}),
+                normalized_fields=event_payload,
+            )
             firewall = self._firewall_payload()
             return self._simulation_debug_payload(extra={
                 "simulated_stream_live": bool(firewall.get("stream_is_live")) if firewall else bool(self._current_stream_is_live()),
@@ -1758,7 +1727,7 @@ class HebeEngine:
                 stream.muted_until = time.time() + 300
         try:
             if clean_source == "stt_voice":
-                self._process_stt_voice_transcript(str(text or "").strip())
+                self.ingest_owner_stt(str(text or "").strip())
             else:
                 self.cognitive_flow(str(text or "").strip(), source=clean_source)
         finally:
@@ -1796,36 +1765,8 @@ class HebeEngine:
     def simulate_ambient_stt(self, text: str) -> dict:
         self._last_cognitive_trace = {}
         self._last_input_firewall = {}
-        clean_text = str(text or "").strip()
-        voice_type, mood_hint = self._classify_voice_event(clean_text)
-        relevance = ContextRelevance(useful=False, category="none", reason="not_stream_enabled")
-        firewall = self._input_firewall_decision(
-            source="ambient_stt",
-            text=clean_text,
-            event_type=voice_type,
-            addressed_to_hebe=False,
-        )
-        if firewall.firewall_decision == "allow_context_only" and self._is_stream_enabled():
-            relevance = self._record_voice_event(clean_text, voice_type, mood_hint)
-        decision = PolicyDecision(
-            allow_reply=False,
-            allow_llm=False,
-            reason=firewall.reason if firewall.firewall_decision != "allow_context_only" else (
-                "ambient_context_updated" if getattr(relevance, "useful", False) else "ambient_stt_observed"
-            ),
-            intent=voice_type or "ambient_stt",
-            requested_behavior="ambient_context",
-        )
-        self._record_policy_trace(policy_trace(
-            source="ambient_stt",
-            speaker="ambient_stt",
-            text=clean_text,
-            decision=decision,
-            addressed_to_hebe=False,
-            authority="ambient",
-            requested_behavior="ambient_context",
-        ))
-        return self._simulation_debug_payload(extra={"relevance": getattr(relevance, "__dict__", {})})
+        result = self.ingest_ambient_stt(text)
+        return self._simulation_debug_payload(extra={"relevance": result.get("relevance") or {}})
 
     def _simulation_debug_payload(self, *, extra: dict | None = None) -> dict:
         stream = self._get_stream_state()
@@ -2380,6 +2321,137 @@ class HebeEngine:
             flush=True,
         )
 
+    def ingest_owner_stt(
+        self,
+        text: str,
+        *,
+        stt_metadata: dict | None = None,
+        allow_wakeword_prompt: bool = False,
+    ) -> str:
+        """Canonical post-transcription owner STT ingress.
+
+        Faster-whisper and replay both hand normalized transcript text to this
+        seam.  It intentionally contains no replay-specific policy.
+        """
+        return self.ingest_normalized_stt(
+            str(text or "").strip(),
+            allow_wakeword_prompt=allow_wakeword_prompt,
+            stt_metadata=dict(stt_metadata or {}),
+        )
+
+    def ingest_normalized_stt(
+        self,
+        text: str,
+        *,
+        stt_metadata: dict | None = None,
+        allow_wakeword_prompt: bool = False,
+        force_ambient: bool = False,
+    ) -> str:
+        """Shared live/replay seam immediately after transcript production."""
+        return self._process_stt_voice_transcript(
+            str(text or "").strip(),
+            allow_wakeword_prompt=allow_wakeword_prompt,
+            stt_metadata=dict(stt_metadata or {}),
+            force_ambient=force_ambient,
+        )
+
+    def ingest_ambient_stt(self, text: str) -> dict:
+        """Canonical normalized ambient transcript ingress.
+
+        The live microphone, developer simulator, and Cognitive Replay all use
+        the complete post-transcription STT orchestration.  Source/authority is
+        determined by that production classifier and firewall; this wrapper
+        does not reproduce an ambient-only policy branch.
+        """
+        result = self.ingest_normalized_stt(str(text or "").strip(), force_ambient=True)
+        trace = dict(getattr(self, "_last_policy_trace", {}) or {})
+        firewall = dict(getattr(self, "_last_input_firewall", {}) or {})
+        return {
+            "result": result,
+            "voice_type": str(trace.get("intent") or "ambient_stt"),
+            "firewall": firewall,
+            "relevance": dict(trace.get("relevance") or {}),
+        }
+
+    def ingest_normalized_twitch_chat(
+        self,
+        *,
+        username: str,
+        display_name: str,
+        text: str,
+        channel: str = "",
+        irc_tags: dict | None = None,
+        normalized_fields: dict | None = None,
+    ) -> None:
+        """Shared normalized Twitch chat ingress for live IRC and replay.
+
+        Normalization adapters supply production-shaped tags.  From this point
+        bot/self filtering, authority firewall, persistence, automatic
+        promotion observation, reply metadata and cognitive dispatch are the
+        production pipeline.
+        """
+        if self._is_known_twitch_bot_user(username):
+            print(
+                f"[HEBE][TWITCH_PIPELINE_SKIP] stage=chat_callback reason=bot_or_self_ignored username={username}",
+                flush=True,
+            )
+            self._increment_twitch_pipeline_counter("twitch_messages_bot_ignored")
+            self._increment_twitch_pipeline_counter("twitch_messages_early_skipped", reason="bot_or_self_ignored")
+            return
+        if self._is_owner_twitch_user(username) and self._is_raw_twitch_command(text):
+            self.observe_twitch_chat_message(username, display_name, text, channel)
+            print(
+                "[HEBE][TWITCH][CHATBOT] owner command observed without reaction "
+                f"user={username!r} message={text!r}",
+                flush=True,
+            )
+            return
+        firewall = self._input_firewall_decision(
+            source="twitch_viewer",
+            text=text,
+            username=username,
+            event_type="twitch_chat_react",
+            addressed_to_hebe=self._message_mentions_hebe(text),
+        )
+        if not self._firewall_allows_pipeline(firewall):
+            self._increment_twitch_pipeline_counter("twitch_messages_early_skipped", reason=firewall.reason)
+            print(
+                f"[HEBE][TWITCH_PIPELINE_SKIP] stage=input_firewall reason={firewall.reason} username={username}",
+                flush=True,
+            )
+            return
+        self.handle_twitch_chat_event(
+            username=username,
+            display_name=display_name,
+            text=text,
+            channel=channel,
+            firewall_decision=firewall,
+            irc_tags=dict(irc_tags or {}),
+            normalized_fields=dict(normalized_fields or {}),
+        )
+        stream = self._get_stream_state()
+        if stream is not None:
+            stream.last_chat_activity_ts = time.time()
+
+    def ingest_stream_lifecycle(self, event_type: str, payload: dict | None = None, *, created_at: str = "") -> None:
+        mapped = {"stream_started": "stream_online", "stream_ended": "stream_offline"}.get(event_type, event_type)
+        if mapped not in {"stream_online", "stream_offline"}:
+            raise ValueError(f"unsupported lifecycle event: {event_type}")
+        self.process_internal_event(InternalEvent(
+            event_type=mapped,
+            payload=dict(payload or {}),
+            created_at=created_at or datetime.now(timezone.utc).isoformat(),
+        ))
+
+    def ingest_stream_metadata(self, payload: dict) -> bool:
+        """Apply replay/live-normalized metadata through production context sync."""
+        twitch = getattr(self.runtime, "twitch", None)
+        configure = getattr(twitch, "configure_stream_metadata", None)
+        if not callable(configure):
+            raise RuntimeError("runtime Twitch adapter does not support normalized metadata configuration")
+        configure(dict(payload or {}))
+        return self.poll_stream_context(force=True, require_enabled=False)
+
     def handle_twitch_chat_event(
         self,
         *,
@@ -2389,9 +2461,15 @@ class HebeEngine:
         channel: str = "",
         firewall_decision: InputFirewallDecision | None = None,
         irc_tags: dict | None = None,
+        normalized_fields: dict | None = None,
     ) -> None:
         message = str(text or "").strip()
-        event_id = f"twchat_{uuid.uuid4().hex}"
+        fields = dict(normalized_fields or {})
+        tags = dict(irc_tags or {})
+        event_id = str(
+            fields.get("event_id") or fields.get("message_id")
+            or tags.get("id") or tags.get("message-id") or ""
+        ).strip() or f"twchat_{uuid.uuid4().hex}"
         if not message:
             self._increment_twitch_pipeline_counter("twitch_messages_early_skipped", reason="empty_message")
             print(
@@ -2426,6 +2504,7 @@ class HebeEngine:
             payload={**reply_metadata, "user_login": username, "display_name": display_name},
         )
         payload = {
+            **fields,
             "event_id": event_id,
             "_pipeline_started": True,
             "display_name": display_name,
@@ -2887,15 +2966,30 @@ class HebeEngine:
 
         twitch = getattr(self.runtime, "twitch", None)
         shoutout = getattr(twitch, "shoutout", None)
+        self._last_shoutout_external_confirmation = ""
         try:
             print("[HEBE][RESPONSE_PIPELINE_BYPASS] allowed=true reason=twitch_action_only_shoutout", flush=True)
             if callable(shoutout):
-                ok = bool(shoutout(normalized))
+                raw_result = shoutout(normalized)
+                if isinstance(raw_result, dict):
+                    ok = bool(raw_result.get("success") or raw_result.get("sent"))
+                    self._last_shoutout_external_confirmation = str(
+                        raw_result.get("message_id") or raw_result.get("external_reference") or ""
+                    )
+                else:
+                    ok = bool(raw_result)
                 command = getattr(twitch, "build_shoutout_command", lambda user: f"!so {user}")(normalized)
             else:
                 template = os.getenv("HEBE_SHOUTOUT_COMMAND_TEMPLATE", "!so {username}") or "!so {username}"
                 command = template.format(username=normalized)
-                ok = bool(twitch and twitch.send_message(command))
+                raw_result = twitch.send_message(command) if twitch else False
+                if isinstance(raw_result, dict):
+                    ok = bool(raw_result.get("success") or raw_result.get("sent"))
+                    self._last_shoutout_external_confirmation = str(
+                        raw_result.get("message_id") or raw_result.get("external_reference") or ""
+                    )
+                else:
+                    ok = bool(raw_result)
             if not ok:
                 raise RuntimeError("Twitch shoutout command returned false")
             self._declare_output_route(
@@ -5942,7 +6036,10 @@ class HebeEngine:
             "recovery_policy": "dual_decode_then_drop",
         }
 
-    def _process_stt_voice_transcript(self, raw_voice_command: str, *, allow_wakeword_prompt: bool = False, stt_metadata: dict | None = None) -> str:
+    def _process_stt_voice_transcript(
+        self, raw_voice_command: str, *, allow_wakeword_prompt: bool = False,
+        stt_metadata: dict | None = None, force_ambient: bool = False,
+    ) -> str:
         original_raw_text = str(raw_voice_command)
         transcript_for_cognition = original_raw_text
         stt_metadata = dict(stt_metadata or {})
@@ -6136,6 +6233,12 @@ class HebeEngine:
         except Exception:
             possible_reply_to_hebe = False
         pending_match = self._pending_conversation_matches(source="stt_voice", text=command, event_type=voice_type)
+        if force_ambient:
+            # Explicit ambient sources (Replay/dev simulation) carry source
+            # identity that live microphone audio derives through classification.
+            # They must never borrow an owner continuation window.
+            possible_reply_to_hebe = False
+            pending_match = False
         conversation_followup = (
             not has_action_intent
             and voice_type != "direct_command_to_hebe"
@@ -9204,6 +9307,10 @@ class HebeEngine:
                 persistent_event = promotion_store.transition(
                     persistent_event.id,
                     terminal_status,
+                    twitch_message_id=(
+                        str(getattr(self, "_last_shoutout_external_confirmation", "") or "")
+                        if ok else ""
+                    ),
                     failure_reason="" if ok else send_reason,
                 )
             except Exception as exc:
@@ -9234,7 +9341,11 @@ class HebeEngine:
                 "target": normalized_target,
                 "executor_invoked": True,
                 "success": True,
-                "external_confirmation": str(getattr(persistent_event, "twitch_message_id", "") or send_reason or "twitch_send_success"),
+                "external_confirmation": str(
+                    getattr(persistent_event, "twitch_message_id", "")
+                    or getattr(self, "_last_shoutout_external_confirmation", "")
+                    or send_reason or "twitch_send_success"
+                ),
                 "timestamp": time.time(),
             }
             current_input_event = getattr(self, "_current_input_event", None)
@@ -12853,7 +12964,7 @@ class HebeEngine:
                     voice_inbox = get_voice_inbox()
                     raw_voice_command = voice_inbox.get_nowait()
                     print(f"[HEBE] VOICE inbox -> {raw_voice_command!r}", flush=True)
-                    res = self._process_stt_voice_transcript(
+                    res = self.ingest_owner_stt(
                         str(raw_voice_command), allow_wakeword_prompt=True,
                         stt_metadata=getattr(raw_voice_command, "metadata", None),
                     )
@@ -12963,7 +13074,7 @@ class HebeEngine:
             # Si stream mode está activo, dejamos que command_loop gestione
             # el gate fino con wakeword corto tipo "hebe"/"eve".
             # Route every accepted STT transcript through Hebe cognition.
-            res = self._process_stt_voice_transcript(
+            res = self.ingest_owner_stt(
                 str(raw_voice_command), allow_wakeword_prompt=True,
                 stt_metadata=getattr(raw_voice_command, "metadata", None),
             )

@@ -1,0 +1,907 @@
+{
+  "commands": [
+    {
+      "command": "python -m app.replay --scenario raid_transition_foundation --output artifacts/cognitive-replay/dev-raid",
+      "duration_seconds": 6.179646,
+      "exit_code": 1
+    }
+  ],
+  "environment": {
+    "deterministic_seeds": [
+      412
+    ],
+    "feature_flags": {
+      "belief_v2_reads": false,
+      "belief_v2_writes": false,
+      "cognitive_replay_enabled": true,
+      "cognitive_v2_enabled": false,
+      "consolidation_v2": false,
+      "conversation_continuity_v2": false,
+      "game_context_v2": false,
+      "social_world_v2": false
+    },
+    "platform": "Windows-10-10.0.26200-SP0",
+    "python": "3.11.0",
+    "scenario_schema_versions": [
+      1
+    ]
+  },
+  "external_boundaries": {
+    "desktop": "fake",
+    "game_research_web": "fixture",
+    "llm_model": "fixture",
+    "network": "blocked_by_design",
+    "tts_audio": "fake",
+    "twitch": "fake"
+  },
+  "limitations": [
+    "datetime.now() reads in legacy persistence remain wall-clock based; behavioral TTL/cooldown time.time() reads are controlled during replay dispatch",
+    "faster-whisper audio decoding is outside the cognitive replay boundary and requires its separate integration suite"
+  ],
+  "overall_status": "FAILED",
+  "persistence": {
+    "database_paths": [
+      "C:\\Users\\Leo Nifelheim\\Documents\\Hebe\\hebe-ui\\artifacts\\cognitive-replay\\dev-raid\\workspaces\\raid_transition_foundation\\hebe-replay.sqlite3"
+    ],
+    "database_type": "isolated_sqlite",
+    "restart_points": 0,
+    "schema_migrations": [
+      [
+        {
+          "already_applied": false,
+          "applied_at": "2026-08-11T06:46:20.868773+00:00",
+          "checksum": "847e14d94cbcb5ad15dac895e06910750bdfd4fd44b001f5fff35688fffa5eba",
+          "component": "cognitive_replay",
+          "name": "replay_metadata",
+          "version": 1
+        }
+      ]
+    ]
+  },
+  "repository": {
+    "commit": "9f91948003ec545fbf7ae045cf78b3affb3451d7",
+    "working_tree": "34335982b46d"
+  },
+  "scenarios": [
+    {
+      "assertion_summary": {
+        "failed": 1,
+        "passed": 1,
+        "skipped": 0
+      },
+      "checkpoint_states": {
+        "end": {
+          "actions": {
+            "attempts": [],
+            "model_calls": [
+              {
+                "key": "stream_response:v1:none",
+                "method": "chat"
+              }
+            ],
+            "research_calls": [],
+            "speech_requests": []
+          },
+          "beliefs": [],
+          "current_scene": {},
+          "database_watermarks": {
+            "counts": {
+              "chat_log": 0,
+              "live_session_timeline": 3,
+              "memory_chunks": 0,
+              "memory_facts": 0,
+              "promotion_events": 0,
+              "schema_migrations": 1,
+              "stream_chat_messages": 0,
+              "stream_events": 3,
+              "stream_sessions": 1,
+              "viewer_promotion_profiles": 0
+            },
+            "final_response_digest": "",
+            "final_response_present": false,
+            "schema_migrations": [
+              {
+                "applied_at": "2026-08-11T06:46:20.868773+00:00",
+                "checksum": "847e14d94cbcb5ad15dac895e06910750bdfd4fd44b001f5fff35688fffa5eba",
+                "component": "cognitive_replay",
+                "name": "replay_metadata",
+                "version": 1
+              }
+            ]
+          },
+          "emitted_outputs": [],
+          "final_emission_results": [],
+          "game_state": {
+            "challenge": "",
+            "confidence": 0.0,
+            "current_character": "",
+            "current_game": null,
+            "current_location": null,
+            "current_objective": null,
+            "game": "",
+            "known_constraints": [],
+            "last_confirmed_progress": "",
+            "last_updated": 1786430780.8785963,
+            "party_members": [],
+            "platform_version": "",
+            "playthrough_type": "casual",
+            "provenance": "current_live_session",
+            "recent_run_context_facts": [],
+            "spoiler_policy": "no_spoilers"
+          },
+          "memory": {
+            "chunks_count": 0,
+            "facts_count": 0
+          },
+          "open_threads": [],
+          "pending": {
+            "clarification": null,
+            "conversation_turn": null
+          },
+          "promotion_profiles": [],
+          "receipts": [],
+          "runtime": {
+            "hebe_sleeping": false,
+            "is_running": false,
+            "last_input_source": null,
+            "last_intent": null,
+            "last_policy": {
+              "authority": null,
+              "decision": null,
+              "reason": null,
+              "source": null
+            },
+            "mode": "active"
+          },
+          "social_state": {
+            "last_cheer": {},
+            "last_raid": {
+              "display_name": "SyntheticRaider",
+              "source": "eventsub",
+              "ts": 1786464005.0,
+              "user_login": "synthetic_raider",
+              "viewer_count": 12
+            },
+            "recent_active_users": [],
+            "recent_chat_count": 0
+          },
+          "stream_session": {
+            "active_stream_session_id": null,
+            "category": null,
+            "enabled": true,
+            "game": null,
+            "is_live": false,
+            "last_transition": "offline",
+            "live_status_known": true,
+            "title": null
+          }
+        },
+        "raid": {
+          "actions": {
+            "attempts": [],
+            "model_calls": [
+              {
+                "key": "stream_response:v1:none",
+                "method": "chat"
+              }
+            ],
+            "research_calls": [],
+            "speech_requests": []
+          },
+          "beliefs": [],
+          "current_scene": {},
+          "database_watermarks": {
+            "counts": {
+              "chat_log": 0,
+              "live_session_timeline": 2,
+              "memory_chunks": 0,
+              "memory_facts": 0,
+              "promotion_events": 0,
+              "schema_migrations": 1,
+              "stream_chat_messages": 0,
+              "stream_events": 2,
+              "stream_sessions": 1,
+              "viewer_promotion_profiles": 0
+            },
+            "final_response_digest": "",
+            "final_response_present": false,
+            "schema_migrations": [
+              {
+                "applied_at": "2026-08-11T06:46:20.868773+00:00",
+                "checksum": "847e14d94cbcb5ad15dac895e06910750bdfd4fd44b001f5fff35688fffa5eba",
+                "component": "cognitive_replay",
+                "name": "replay_metadata",
+                "version": 1
+              }
+            ]
+          },
+          "emitted_outputs": [],
+          "final_emission_results": [],
+          "game_state": {
+            "challenge": "",
+            "confidence": 0.0,
+            "current_character": "",
+            "current_game": null,
+            "current_location": null,
+            "current_objective": null,
+            "game": "",
+            "known_constraints": [],
+            "last_confirmed_progress": "",
+            "last_updated": 1786430780.8785963,
+            "party_members": [],
+            "platform_version": "",
+            "playthrough_type": "casual",
+            "provenance": "current_live_session",
+            "recent_run_context_facts": [],
+            "spoiler_policy": "no_spoilers"
+          },
+          "memory": {
+            "chunks_count": 0,
+            "facts_count": 0
+          },
+          "open_threads": [],
+          "pending": {
+            "clarification": null,
+            "conversation_turn": null
+          },
+          "promotion_profiles": [],
+          "receipts": [],
+          "runtime": {
+            "hebe_sleeping": false,
+            "is_running": false,
+            "last_input_source": null,
+            "last_intent": null,
+            "last_policy": {
+              "authority": null,
+              "decision": null,
+              "reason": null,
+              "source": null
+            },
+            "mode": "active"
+          },
+          "social_state": {
+            "last_cheer": {},
+            "last_raid": {
+              "display_name": "SyntheticRaider",
+              "source": "eventsub",
+              "ts": 1786464005.0,
+              "user_login": "synthetic_raider",
+              "viewer_count": 12
+            },
+            "recent_active_users": [],
+            "recent_chat_count": 0
+          },
+          "stream_session": {
+            "active_stream_session_id": 1,
+            "category": null,
+            "enabled": true,
+            "game": null,
+            "is_live": true,
+            "last_transition": "online",
+            "live_status_known": true,
+            "title": null
+          }
+        },
+        "start": {
+          "actions": {
+            "attempts": [],
+            "model_calls": [],
+            "research_calls": [],
+            "speech_requests": []
+          },
+          "beliefs": [],
+          "current_scene": {},
+          "database_watermarks": {
+            "counts": {
+              "chat_log": 0,
+              "live_session_timeline": 2,
+              "memory_chunks": 0,
+              "memory_facts": 0,
+              "promotion_events": 0,
+              "schema_migrations": 1,
+              "stream_chat_messages": 0,
+              "stream_events": 1,
+              "stream_sessions": 1,
+              "viewer_promotion_profiles": 0
+            },
+            "final_response_digest": "",
+            "final_response_present": false,
+            "schema_migrations": [
+              {
+                "applied_at": "2026-08-11T06:46:20.868773+00:00",
+                "checksum": "847e14d94cbcb5ad15dac895e06910750bdfd4fd44b001f5fff35688fffa5eba",
+                "component": "cognitive_replay",
+                "name": "replay_metadata",
+                "version": 1
+              }
+            ]
+          },
+          "emitted_outputs": [],
+          "final_emission_results": [],
+          "game_state": {
+            "challenge": "",
+            "confidence": 0.0,
+            "current_character": "",
+            "current_game": null,
+            "current_location": null,
+            "current_objective": null,
+            "game": "",
+            "known_constraints": [],
+            "last_confirmed_progress": "",
+            "last_updated": 1786430780.8785963,
+            "party_members": [],
+            "platform_version": "",
+            "playthrough_type": "casual",
+            "provenance": "inferred",
+            "recent_run_context_facts": [],
+            "spoiler_policy": "spoiler_safe_hints"
+          },
+          "memory": {
+            "chunks_count": 0,
+            "facts_count": 0
+          },
+          "open_threads": [],
+          "pending": {
+            "clarification": null,
+            "conversation_turn": null
+          },
+          "promotion_profiles": [],
+          "receipts": [],
+          "runtime": {
+            "hebe_sleeping": false,
+            "is_running": false,
+            "last_input_source": null,
+            "last_intent": null,
+            "last_policy": {
+              "authority": null,
+              "decision": null,
+              "reason": null,
+              "source": null
+            },
+            "mode": "active"
+          },
+          "social_state": {
+            "last_cheer": {},
+            "last_raid": {},
+            "recent_active_users": [],
+            "recent_chat_count": 0
+          },
+          "stream_session": {
+            "active_stream_session_id": 1,
+            "category": null,
+            "enabled": true,
+            "game": null,
+            "is_live": true,
+            "last_transition": "online",
+            "live_status_known": true,
+            "title": null
+          }
+        }
+      },
+      "database": {
+        "path": "C:\\Users\\Leo Nifelheim\\Documents\\Hebe\\hebe-ui\\artifacts\\cognitive-replay\\dev-raid\\workspaces\\raid_transition_foundation\\hebe-replay.sqlite3",
+        "schema_migrations": [
+          {
+            "already_applied": false,
+            "applied_at": "2026-08-11T06:46:20.868773+00:00",
+            "checksum": "847e14d94cbcb5ad15dac895e06910750bdfd4fd44b001f5fff35688fffa5eba",
+            "component": "cognitive_replay",
+            "name": "replay_metadata",
+            "version": 1
+          }
+        ],
+        "type": "fresh"
+      },
+      "duration_seconds": 6.091764,
+      "event_results": [
+        {
+          "assertions": [],
+          "duration_seconds": 0.089231,
+          "error": "",
+          "event_id": "start",
+          "event_type": "stream_started",
+          "state": {
+            "actions": {
+              "attempts": [],
+              "model_calls": [],
+              "research_calls": [],
+              "speech_requests": []
+            },
+            "beliefs": [],
+            "current_scene": {},
+            "database_watermarks": {
+              "counts": {
+                "chat_log": 0,
+                "live_session_timeline": 2,
+                "memory_chunks": 0,
+                "memory_facts": 0,
+                "promotion_events": 0,
+                "schema_migrations": 1,
+                "stream_chat_messages": 0,
+                "stream_events": 1,
+                "stream_sessions": 1,
+                "viewer_promotion_profiles": 0
+              },
+              "final_response_digest": "",
+              "final_response_present": false,
+              "schema_migrations": [
+                {
+                  "applied_at": "2026-08-11T06:46:20.868773+00:00",
+                  "checksum": "847e14d94cbcb5ad15dac895e06910750bdfd4fd44b001f5fff35688fffa5eba",
+                  "component": "cognitive_replay",
+                  "name": "replay_metadata",
+                  "version": 1
+                }
+              ]
+            },
+            "emitted_outputs": [],
+            "final_emission_results": [],
+            "game_state": {
+              "challenge": "",
+              "confidence": 0.0,
+              "current_character": "",
+              "current_game": null,
+              "current_location": null,
+              "current_objective": null,
+              "game": "",
+              "known_constraints": [],
+              "last_confirmed_progress": "",
+              "last_updated": 1786430780.8785963,
+              "party_members": [],
+              "platform_version": "",
+              "playthrough_type": "casual",
+              "provenance": "inferred",
+              "recent_run_context_facts": [],
+              "spoiler_policy": "spoiler_safe_hints"
+            },
+            "memory": {
+              "chunks_count": 0,
+              "facts_count": 0
+            },
+            "open_threads": [],
+            "pending": {
+              "clarification": null,
+              "conversation_turn": null
+            },
+            "promotion_profiles": [],
+            "receipts": [],
+            "runtime": {
+              "hebe_sleeping": false,
+              "is_running": false,
+              "last_input_source": null,
+              "last_intent": null,
+              "last_policy": {
+                "authority": null,
+                "decision": null,
+                "reason": null,
+                "source": null
+              },
+              "mode": "active"
+            },
+            "social_state": {
+              "last_cheer": {},
+              "last_raid": {},
+              "recent_active_users": [],
+              "recent_chat_count": 0
+            },
+            "stream_session": {
+              "active_stream_session_id": 1,
+              "category": null,
+              "enabled": true,
+              "game": null,
+              "is_live": true,
+              "last_transition": "online",
+              "live_status_known": true,
+              "title": null
+            }
+          },
+          "timestamp": 1786464000.0
+        },
+        {
+          "assertions": [],
+          "duration_seconds": 0.065936,
+          "error": "",
+          "event_id": "raid",
+          "event_type": "twitch_raid",
+          "state": {
+            "actions": {
+              "attempts": [],
+              "model_calls": [
+                {
+                  "key": "stream_response:v1:none",
+                  "method": "chat"
+                }
+              ],
+              "research_calls": [],
+              "speech_requests": []
+            },
+            "beliefs": [],
+            "current_scene": {},
+            "database_watermarks": {
+              "counts": {
+                "chat_log": 0,
+                "live_session_timeline": 2,
+                "memory_chunks": 0,
+                "memory_facts": 0,
+                "promotion_events": 0,
+                "schema_migrations": 1,
+                "stream_chat_messages": 0,
+                "stream_events": 2,
+                "stream_sessions": 1,
+                "viewer_promotion_profiles": 0
+              },
+              "final_response_digest": "",
+              "final_response_present": false,
+              "schema_migrations": [
+                {
+                  "applied_at": "2026-08-11T06:46:20.868773+00:00",
+                  "checksum": "847e14d94cbcb5ad15dac895e06910750bdfd4fd44b001f5fff35688fffa5eba",
+                  "component": "cognitive_replay",
+                  "name": "replay_metadata",
+                  "version": 1
+                }
+              ]
+            },
+            "emitted_outputs": [],
+            "final_emission_results": [],
+            "game_state": {
+              "challenge": "",
+              "confidence": 0.0,
+              "current_character": "",
+              "current_game": null,
+              "current_location": null,
+              "current_objective": null,
+              "game": "",
+              "known_constraints": [],
+              "last_confirmed_progress": "",
+              "last_updated": 1786430780.8785963,
+              "party_members": [],
+              "platform_version": "",
+              "playthrough_type": "casual",
+              "provenance": "current_live_session",
+              "recent_run_context_facts": [],
+              "spoiler_policy": "no_spoilers"
+            },
+            "memory": {
+              "chunks_count": 0,
+              "facts_count": 0
+            },
+            "open_threads": [],
+            "pending": {
+              "clarification": null,
+              "conversation_turn": null
+            },
+            "promotion_profiles": [],
+            "receipts": [],
+            "runtime": {
+              "hebe_sleeping": false,
+              "is_running": false,
+              "last_input_source": null,
+              "last_intent": null,
+              "last_policy": {
+                "authority": null,
+                "decision": null,
+                "reason": null,
+                "source": null
+              },
+              "mode": "active"
+            },
+            "social_state": {
+              "last_cheer": {},
+              "last_raid": {
+                "display_name": "SyntheticRaider",
+                "source": "eventsub",
+                "ts": 1786464005.0,
+                "user_login": "synthetic_raider",
+                "viewer_count": 12
+              },
+              "recent_active_users": [],
+              "recent_chat_count": 0
+            },
+            "stream_session": {
+              "active_stream_session_id": 1,
+              "category": null,
+              "enabled": true,
+              "game": null,
+              "is_live": true,
+              "last_transition": "online",
+              "live_status_known": true,
+              "title": null
+            }
+          },
+          "timestamp": 1786464005.0
+        },
+        {
+          "assertions": [],
+          "duration_seconds": 5.573122,
+          "error": "",
+          "event_id": "end",
+          "event_type": "stream_ended",
+          "state": {
+            "actions": {
+              "attempts": [],
+              "model_calls": [
+                {
+                  "key": "stream_response:v1:none",
+                  "method": "chat"
+                }
+              ],
+              "research_calls": [],
+              "speech_requests": []
+            },
+            "beliefs": [],
+            "current_scene": {},
+            "database_watermarks": {
+              "counts": {
+                "chat_log": 0,
+                "live_session_timeline": 3,
+                "memory_chunks": 0,
+                "memory_facts": 0,
+                "promotion_events": 0,
+                "schema_migrations": 1,
+                "stream_chat_messages": 0,
+                "stream_events": 3,
+                "stream_sessions": 1,
+                "viewer_promotion_profiles": 0
+              },
+              "final_response_digest": "",
+              "final_response_present": false,
+              "schema_migrations": [
+                {
+                  "applied_at": "2026-08-11T06:46:20.868773+00:00",
+                  "checksum": "847e14d94cbcb5ad15dac895e06910750bdfd4fd44b001f5fff35688fffa5eba",
+                  "component": "cognitive_replay",
+                  "name": "replay_metadata",
+                  "version": 1
+                }
+              ]
+            },
+            "emitted_outputs": [],
+            "final_emission_results": [],
+            "game_state": {
+              "challenge": "",
+              "confidence": 0.0,
+              "current_character": "",
+              "current_game": null,
+              "current_location": null,
+              "current_objective": null,
+              "game": "",
+              "known_constraints": [],
+              "last_confirmed_progress": "",
+              "last_updated": 1786430780.8785963,
+              "party_members": [],
+              "platform_version": "",
+              "playthrough_type": "casual",
+              "provenance": "current_live_session",
+              "recent_run_context_facts": [],
+              "spoiler_policy": "no_spoilers"
+            },
+            "memory": {
+              "chunks_count": 0,
+              "facts_count": 0
+            },
+            "open_threads": [],
+            "pending": {
+              "clarification": null,
+              "conversation_turn": null
+            },
+            "promotion_profiles": [],
+            "receipts": [],
+            "runtime": {
+              "hebe_sleeping": false,
+              "is_running": false,
+              "last_input_source": null,
+              "last_intent": null,
+              "last_policy": {
+                "authority": null,
+                "decision": null,
+                "reason": null,
+                "source": null
+              },
+              "mode": "active"
+            },
+            "social_state": {
+              "last_cheer": {},
+              "last_raid": {
+                "display_name": "SyntheticRaider",
+                "source": "eventsub",
+                "ts": 1786464005.0,
+                "user_login": "synthetic_raider",
+                "viewer_count": 12
+              },
+              "recent_active_users": [],
+              "recent_chat_count": 0
+            },
+            "stream_session": {
+              "active_stream_session_id": null,
+              "category": null,
+              "enabled": true,
+              "game": null,
+              "is_live": false,
+              "last_transition": "offline",
+              "live_status_known": true,
+              "title": null
+            }
+          },
+          "timestamp": 1786464010.0
+        }
+      ],
+      "events_processed": 3,
+      "external_boundaries": {
+        "desktop": "fake",
+        "model": "fixture",
+        "network": "none",
+        "research": "fixture",
+        "tts_audio": "fake",
+        "twitch": "fake"
+      },
+      "failures": [
+        {
+          "event_id": "final",
+          "path": "actions.attempts",
+          "reason": "assertion_mismatch"
+        }
+      ],
+      "feature_flags": {
+        "belief_v2_reads": false,
+        "belief_v2_writes": false,
+        "cognitive_replay_enabled": true,
+        "cognitive_v2_enabled": false,
+        "consolidation_v2": false,
+        "conversation_continuity_v2": false,
+        "game_context_v2": false,
+        "social_world_v2": false
+      },
+      "final_assertions": [
+        {
+          "actual": [],
+          "assertion": "exactly_once",
+          "description": "",
+          "expected": {
+            "operation": "twitch.send_message"
+          },
+          "future_phase": "",
+          "passed": false,
+          "path": "actions.attempts",
+          "reason": "assertion_mismatch",
+          "skipped": false
+        },
+        {
+          "actual": false,
+          "assertion": "equals",
+          "description": "",
+          "expected": false,
+          "future_phase": "",
+          "passed": true,
+          "path": "stream_session.is_live",
+          "reason": "",
+          "skipped": false
+        }
+      ],
+      "final_state": {
+        "actions": {
+          "attempts": [],
+          "model_calls": [
+            {
+              "key": "stream_response:v1:none",
+              "method": "chat"
+            }
+          ],
+          "research_calls": [],
+          "speech_requests": []
+        },
+        "beliefs": [],
+        "current_scene": {},
+        "database_watermarks": {
+          "counts": {
+            "chat_log": 0,
+            "live_session_timeline": 3,
+            "memory_chunks": 0,
+            "memory_facts": 0,
+            "promotion_events": 0,
+            "schema_migrations": 1,
+            "stream_chat_messages": 0,
+            "stream_events": 3,
+            "stream_sessions": 1,
+            "viewer_promotion_profiles": 0
+          },
+          "final_response_digest": "",
+          "final_response_present": false,
+          "schema_migrations": [
+            {
+              "applied_at": "2026-08-11T06:46:20.868773+00:00",
+              "checksum": "847e14d94cbcb5ad15dac895e06910750bdfd4fd44b001f5fff35688fffa5eba",
+              "component": "cognitive_replay",
+              "name": "replay_metadata",
+              "version": 1
+            }
+          ]
+        },
+        "emitted_outputs": [],
+        "final_emission_results": [],
+        "game_state": {
+          "challenge": "",
+          "confidence": 0.0,
+          "current_character": "",
+          "current_game": null,
+          "current_location": null,
+          "current_objective": null,
+          "game": "",
+          "known_constraints": [],
+          "last_confirmed_progress": "",
+          "last_updated": 1786430780.8785963,
+          "party_members": [],
+          "platform_version": "",
+          "playthrough_type": "casual",
+          "provenance": "current_live_session",
+          "recent_run_context_facts": [],
+          "spoiler_policy": "no_spoilers"
+        },
+        "memory": {
+          "chunks_count": 0,
+          "facts_count": 0
+        },
+        "open_threads": [],
+        "pending": {
+          "clarification": null,
+          "conversation_turn": null
+        },
+        "promotion_profiles": [],
+        "receipts": [],
+        "runtime": {
+          "hebe_sleeping": false,
+          "is_running": false,
+          "last_input_source": null,
+          "last_intent": null,
+          "last_policy": {
+            "authority": null,
+            "decision": null,
+            "reason": null,
+            "source": null
+          },
+          "mode": "active"
+        },
+        "social_state": {
+          "last_cheer": {},
+          "last_raid": {
+            "display_name": "SyntheticRaider",
+            "source": "eventsub",
+            "ts": 1786464005.0,
+            "user_login": "synthetic_raider",
+            "viewer_count": 12
+          },
+          "recent_active_users": [],
+          "recent_chat_count": 0
+        },
+        "stream_session": {
+          "active_stream_session_id": null,
+          "category": null,
+          "enabled": true,
+          "game": null,
+          "is_live": false,
+          "last_transition": "offline",
+          "live_status_known": true,
+          "title": null
+        }
+      },
+      "limitations": [
+        "datetime.now() reads in legacy persistence remain wall-clock based; behavioral TTL/cooldown time.time() reads are controlled during replay dispatch",
+        "faster-whisper audio decoding is outside the cognitive replay boundary and requires its separate integration suite"
+      ],
+      "restart_count": 0,
+      "restart_evidence": [],
+      "scenario_id": "raid_transition_foundation",
+      "scenario_schema_version": 1,
+      "seed": 412,
+      "status": "FAILED"
+    }
+  ],
+  "tests": {
+    "replay": {
+      "failed": 1,
+      "passed": 0,
+      "skipped": 0
+    },
+    "required_layer_missing": false
+  }
+}

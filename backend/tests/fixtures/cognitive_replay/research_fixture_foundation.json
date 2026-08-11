@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "scenario_id": "research_fixture_foundation",
+  "initial_time": "2026-08-11T18:00:00+02:00",
+  "seed": 410,
+  "feature_flags": {"cognitive_replay_enabled": true},
+  "research_fixtures": {
+    "*": [
+      {
+        "claim": "The job system lets characters change combat roles.",
+        "source_title": "Synthetic official manual",
+        "title": "Synthetic official manual",
+        "url": "https://example.invalid/manual",
+        "content": "The job system changes character combat roles.",
+        "excerpt": "The job system changes character combat roles.",
+        "confidence": 0.95,
+        "source_type": "official",
+        "general_mechanic": true,
+        "spoiler_classification": "safe_general_mechanic",
+        "citation_verified": true
+      }
+    ]
+  },
+  "events": [
+    {
+      "event_id": "research",
+      "at": "+0s",
+      "type": "game_research",
+      "game": "Final Fantasy V",
+      "force_refresh": true,
+      "assertions": [
+        {"assertion": "exists", "path": "actions.research_calls[0]"}
+      ]
+    }
+  ],
+  "final_assertions": [
+    {"assertion": "collection_count", "path": "actions.research_calls", "count": 1}
+  ]
+}

@@ -1,0 +1,103 @@
+{
+  "schema_version": 1,
+  "scenario_id": "ivanxi_resub_promo_restart",
+  "initial_time": "2026-08-11T18:00:00+02:00",
+  "seed": 405,
+  "feature_flags": {
+    "cognitive_replay_enabled": true
+  },
+  "model_fixtures": {
+    "*": "Entendido."
+  },
+  "external_outcomes": {
+    "twitch.shoutout": [
+      {"success": true, "status": "sent", "message_id": "replay-so-1"}
+    ],
+    "tts.speak": [
+      {"success": true, "status": "completed"}
+    ]
+  },
+  "events": [
+    {
+      "event_id": "stream-1-start",
+      "at": "+0s",
+      "type": "stream_started",
+      "session_id": "stream-1",
+      "title": "[ENG/ESP] Crystal Roulette — Final Fantasy V",
+      "game": "Final Fantasy V"
+    },
+    {
+      "event_id": "ivanxi-resub",
+      "at": "+2s",
+      "type": "twitch_resub",
+      "user_id": "42",
+      "login": "ivanxi_kun",
+      "display_name": "Ivanxi_kun",
+      "cumulative_months": 8
+    },
+    {
+      "event_id": "ivanxi-chat",
+      "at": "+5s",
+      "type": "twitch_chat",
+      "user_id": "42",
+      "login": "ivanxi_kun",
+      "display_name": "Ivanxi_kun",
+      "message_id": "chat-ivanxi-1",
+      "text": "hola"
+    },
+    {
+      "event_id": "owner-promo",
+      "at": "+10s",
+      "type": "owner_stt",
+      "text": "Hebe, hazle una promo a Ivanxi.",
+      "assertions": [
+        {
+          "assertion": "exactly_once",
+          "path": "actions.attempts",
+          "matching": {"operation": "twitch.shoutout"}
+        },
+        {
+          "assertion": "contains_matching",
+          "path": "receipts",
+          "matching": {"resolved_login": "ivanxi_kun", "execution_status": "sent"}
+        }
+      ]
+    },
+    {
+      "event_id": "stream-1-end",
+      "at": "+10m",
+      "type": "stream_ended",
+      "session_id": "stream-1"
+    },
+    {
+      "event_id": "restart-1",
+      "at": "+11m",
+      "type": "restart_hebe"
+    },
+    {
+      "event_id": "stream-2-start",
+      "at": "+1d",
+      "type": "stream_started",
+      "session_id": "stream-2",
+      "title": "[ENG/ESP] Crystal Roulette continues — Final Fantasy V",
+      "game": "Final Fantasy V"
+    }
+  ],
+  "final_assertions": [
+    {
+      "assertion": "contains_matching",
+      "path": "promotion_profiles",
+      "matching": {"current_login": "ivanxi_kun", "active": 1}
+    },
+    {
+      "assertion": "contains_matching",
+      "path": "receipts",
+      "matching": {"execution_status": "sent"}
+    },
+    {
+      "assertion": "equals",
+      "path": "stream_session.is_live",
+      "expected": true
+    }
+  ]
+}

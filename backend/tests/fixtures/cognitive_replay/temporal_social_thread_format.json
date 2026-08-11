@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "scenario_id": "temporal_social_thread_format",
+  "initial_time": "2026-08-11T18:00:00+02:00",
+  "seed": 409,
+  "feature_flags": {"cognitive_replay_enabled": true},
+  "model_fixtures": {"*": "Entendido."},
+  "events": [
+    {"event_id": "start-1", "at": "+0s", "type": "stream_started", "session_id": "social-1"},
+    {"event_id": "ill", "at": "+5s", "type": "twitch_chat", "user_id": "77", "login": "synthetic_student", "message_id": "social-chat-1", "text": "mañana tengo examen y estoy enfermo"},
+    {"event_id": "end-1", "at": "+10m", "type": "stream_ended", "session_id": "social-1"},
+    {"event_id": "restart", "at": "+11m", "type": "restart_hebe"},
+    {"event_id": "start-2", "at": "+1d", "type": "stream_started", "session_id": "social-2"},
+    {"event_id": "return", "at": "+1d", "type": "twitch_chat", "user_id": "77", "login": "synthetic_student", "message_id": "social-chat-2", "text": "hola de nuevo"},
+    {"event_id": "expire", "at": "+7d", "type": "advance_time", "seconds": 86400}
+  ],
+  "final_assertions": [
+    {"assertion": "absent", "path": "open_threads.viewer-77", "future_phase": "4", "description": "Social thread expiry belongs to SocialWorld."}
+  ]
+}

@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "scenario_id": "raid_transition_foundation",
+  "initial_time": "2026-08-11T18:00:00+02:00",
+  "seed": 412,
+  "feature_flags": {"cognitive_replay_enabled": true},
+  "model_fixtures": {"*": "Gracias por la raid, SyntheticRaider."},
+  "external_outcomes": {
+    "twitch.send_message": [{"success": true, "status": "sent", "message_id": "raid-thanks-1"}]
+  },
+  "events": [
+    {"event_id": "start", "at": "+0s", "type": "stream_started", "session_id": "raid-1"},
+    {"event_id": "raid", "at": "+5s", "type": "twitch_raid", "user_id": "900", "login": "synthetic_raider", "display_name": "SyntheticRaider", "viewer_count": 12, "source": "eventsub"},
+    {"event_id": "end", "at": "+10s", "type": "stream_ended", "session_id": "raid-1"}
+  ],
+  "final_assertions": [
+    {"assertion": "exactly_once", "path": "actions.attempts", "matching": {"operation": "twitch.send_message"}},
+    {"assertion": "equals", "path": "stream_session.is_live", "expected": false}
+  ]
+}

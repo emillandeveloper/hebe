@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "scenario_id": "receipt_truth",
+  "initial_time": "2026-08-11T18:00:00+02:00",
+  "seed": 411,
+  "feature_flags": {"cognitive_replay_enabled": true},
+  "model_fixtures": {"*": "Entendido."},
+  "external_outcomes": {
+    "twitch.shoutout": [
+      {"success": true, "status": "sent", "message_id": "receipt-success"},
+      {"success": false, "status": "failed", "reason": "synthetic_failure"},
+      {"success": false, "status": "timeout", "reason": "synthetic_timeout"}
+    ]
+  },
+  "events": [
+    {"event_id": "start", "at": "+0s", "type": "stream_started", "session_id": "receipt-1"},
+    {"event_id": "alice-chat", "at": "+1s", "type": "twitch_chat", "user_id": "501", "login": "alice_test", "message_id": "alice-1", "text": "hola"},
+    {"event_id": "bob-chat", "at": "+2s", "type": "twitch_chat", "user_id": "502", "login": "bob_test", "message_id": "bob-1", "text": "hola"},
+    {"event_id": "carol-chat", "at": "+3s", "type": "twitch_chat", "user_id": "503", "login": "carol_test", "message_id": "carol-1", "text": "hola"},
+    {"event_id": "success", "at": "+5s", "type": "owner_stt", "text": "Hebe, haz promo a alice_test."},
+    {"event_id": "failure", "at": "+10s", "type": "owner_stt", "text": "Hebe, haz promo a bob_test."},
+    {"event_id": "timeout", "at": "+15s", "type": "owner_stt", "text": "Hebe, haz promo a carol_test."}
+  ],
+  "final_assertions": [
+    {"assertion": "exactly_once", "path": "receipts", "matching": {"resolved_login": "alice_test", "execution_status": "sent", "twitch_message_id": "receipt-success"}},
+    {"assertion": "exactly_once", "path": "receipts", "matching": {"resolved_login": "bob_test", "execution_status": "failed"}},
+    {"assertion": "exactly_once", "path": "receipts", "matching": {"resolved_login": "carol_test", "execution_status": "failed"}},
+    {"assertion": "collection_count", "path": "actions.attempts", "count": 3}
+  ]
+}

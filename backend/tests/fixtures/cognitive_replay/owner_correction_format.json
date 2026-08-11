@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "scenario_id": "owner_correction_format",
+  "initial_time": "2026-08-11T18:00:00+02:00",
+  "seed": 408,
+  "feature_flags": {"cognitive_replay_enabled": true},
+  "model_fixtures": {"*": "Entendido."},
+  "events": [
+    {"event_id": "start", "at": "+0s", "type": "stream_started", "session_id": "correction-1", "game": "Final Fantasy V"},
+    {"event_id": "third", "at": "+2s", "type": "owner_stt", "text": "Hebe, este es el tercer cristal."},
+    {"event_id": "correction", "at": "+5s", "type": "owner_stt", "text": "Hebe, no, es el segundo cristal."},
+    {"event_id": "end", "at": "+10m", "type": "stream_ended", "session_id": "correction-1"},
+    {"event_id": "restart", "at": "+11m", "type": "restart_hebe"},
+    {"event_id": "later", "at": "+1d", "type": "stream_started", "session_id": "correction-2", "game": "Final Fantasy V"}
+  ],
+  "final_assertions": [
+    {"assertion": "equals", "path": "beliefs.crystal_number.status", "expected": "SUPERSEDED", "future_phase": "2", "description": "Belief supersession is deliberately not implemented in Phase 0.5."}
+  ]
+}

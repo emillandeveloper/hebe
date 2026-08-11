@@ -1,0 +1,155 @@
+{
+  "baseline_commit": "9f91948003ec545fbf7ae045cf78b3affb3451d7",
+  "baseline_python": "3.11.0",
+  "baseline_platform": "Windows-10-10.0.26200-SP0",
+  "baseline_command": "C:\\Users\\Leo Nifelheim\\Documents\\Hebe\\hebe-ui\\backend\\.venv\\Scripts\\python.exe -m unittest backend.tests.test_cognitive_replay backend.tests.test_voice_command_pipeline backend.tests.test_cognitive_twitch backend.tests.test_stream_presence backend.tests.test_hebe_live_v1 backend.tests.test_hebe_live_v11 backend.tests.test_hebe_live_v12 backend.tests.test_hebe_live_v12_followup backend.tests.test_hebe_live_20260809_followup backend.tests.test_final_emission_gate backend.tests.test_cognitive_execution_guard backend.tests.test_game_knowledge backend.tests.test_stream_session_primer backend.tests.test_live_session_brain",
+  "baseline_command_duration_seconds": 104.272,
+  "baseline_loader_errors": 1,
+  "baseline_tests_passed": 451,
+  "baseline_tests_failed": 13,
+  "baseline_new_module_unavailable": "backend.tests.test_cognitive_replay",
+  "phase_0_5_tests_passed": 471,
+  "phase_0_5_tests_failed": 13,
+  "new_regressions": 0,
+  "pre_existing_failures": 13,
+  "fixed_existing_failures": 0,
+  "classification_counts": {
+    "PASS_BOTH": 0,
+    "PRE_EXISTING_FAILURE": 13,
+    "NEW_PHASE_0_5_REGRESSION": 0,
+    "FIXED_BY_PHASE_0_5": 0,
+    "FAILURE_CHANGED": 0
+  },
+  "tests": [
+    {
+      "test": "backend.tests.test_game_knowledge.GameKnowledgeTests.test_response_synthesizer_handles_game_knowledge_command_result",
+      "subsystem": "Game Knowledge response guard",
+      "baseline_status": "FAIL",
+      "phase_0_5_status": "FAIL",
+      "baseline_exception_or_assertion": "AssertionError: 'Persona 5 Royal' not found in <captured value>",
+      "phase_0_5_exception_or_assertion": "AssertionError: 'Persona 5 Royal' not found in <captured value>",
+      "phase_0_5_code_on_failing_path": "NO: the Phase 0.5 production seam changes are not on this failing path",
+      "classification": "PRE_EXISTING_FAILURE"
+    },
+    {
+      "test": "backend.tests.test_voice_command_pipeline.VoiceCommandPipelineTests.test_high_value_game_tip_can_reply_without_hebe_mention",
+      "subsystem": "Twitch no-mention/presence",
+      "baseline_status": "FAIL",
+      "phase_0_5_status": "FAIL",
+      "baseline_exception_or_assertion": "AssertionError: 0 != 1",
+      "phase_0_5_exception_or_assertion": "AssertionError: 0 != 1",
+      "phase_0_5_code_on_failing_path": "YES: handle_twitch_chat_event was refactored, but the baseline and current terminal assertion are identical",
+      "classification": "PRE_EXISTING_FAILURE"
+    },
+    {
+      "test": "backend.tests.test_voice_command_pipeline.VoiceCommandPipelineTests.test_no_wake_whitelisted_app_command_routes_while_stream_offline",
+      "subsystem": "local application/capability resolution",
+      "baseline_status": "ERROR",
+      "phase_0_5_status": "ERROR",
+      "baseline_exception_or_assertion": "IndexError: list index out of range",
+      "phase_0_5_exception_or_assertion": "IndexError: list index out of range",
+      "phase_0_5_code_on_failing_path": "ENTRY ONLY: the shared STT ingress wrapper is on the path; the unchanged local capability resolver produces the identical failure",
+      "classification": "PRE_EXISTING_FAILURE"
+    },
+    {
+      "test": "backend.tests.test_voice_command_pipeline.VoiceCommandPipelineTests.test_obs_path_missing_returns_structured_action_result_not_generic_advice",
+      "subsystem": "local application/capability resolution",
+      "baseline_status": "FAIL",
+      "phase_0_5_status": "FAIL",
+      "baseline_exception_or_assertion": "AssertionError: 'HEBE_APP_OBS_PATH' not found in <captured value>",
+      "phase_0_5_exception_or_assertion": "AssertionError: 'HEBE_APP_OBS_PATH' not found in <captured value>",
+      "phase_0_5_code_on_failing_path": "NO: the Phase 0.5 production seam changes are not on this failing path",
+      "classification": "PRE_EXISTING_FAILURE"
+    },
+    {
+      "test": "backend.tests.test_voice_command_pipeline.VoiceCommandPipelineTests.test_stt_canonical_melonds_command_executes_once (transcript='Ebe, abre Melón DS')",
+      "subsystem": "local application/capability resolution",
+      "baseline_status": "FAIL",
+      "phase_0_5_status": "FAIL",
+      "baseline_exception_or_assertion": "AssertionError: 0 != 1",
+      "phase_0_5_exception_or_assertion": "AssertionError: 0 != 1",
+      "phase_0_5_code_on_failing_path": "ENTRY ONLY: the shared STT ingress wrapper is on the path; the unchanged local capability resolver produces the identical failure",
+      "classification": "PRE_EXISTING_FAILURE"
+    },
+    {
+      "test": "backend.tests.test_voice_command_pipeline.VoiceCommandPipelineTests.test_stt_canonical_melonds_command_executes_once (transcript='Eve, abre Melón de Ese')",
+      "subsystem": "local application/capability resolution",
+      "baseline_status": "FAIL",
+      "phase_0_5_status": "FAIL",
+      "baseline_exception_or_assertion": "AssertionError: 0 != 1",
+      "phase_0_5_exception_or_assertion": "AssertionError: 0 != 1",
+      "phase_0_5_code_on_failing_path": "ENTRY ONLY: the shared STT ingress wrapper is on the path; the unchanged local capability resolver produces the identical failure",
+      "classification": "PRE_EXISTING_FAILURE"
+    },
+    {
+      "test": "backend.tests.test_voice_command_pipeline.VoiceCommandPipelineTests.test_stt_canonical_melonds_command_executes_once (transcript='Hebe, abre melonDS')",
+      "subsystem": "local application/capability resolution",
+      "baseline_status": "FAIL",
+      "phase_0_5_status": "FAIL",
+      "baseline_exception_or_assertion": "AssertionError: 0 != 1",
+      "phase_0_5_exception_or_assertion": "AssertionError: 0 != 1",
+      "phase_0_5_code_on_failing_path": "ENTRY ONLY: the shared STT ingress wrapper is on the path; the unchanged local capability resolver produces the identical failure",
+      "classification": "PRE_EXISTING_FAILURE"
+    },
+    {
+      "test": "backend.tests.test_voice_command_pipeline.VoiceCommandPipelineTests.test_stt_hebe_abre_obs_uses_same_open_application_pipeline",
+      "subsystem": "local application/capability resolution",
+      "baseline_status": "ERROR",
+      "phase_0_5_status": "ERROR",
+      "baseline_exception_or_assertion": "IndexError: list index out of range",
+      "phase_0_5_exception_or_assertion": "IndexError: list index out of range",
+      "phase_0_5_code_on_failing_path": "ENTRY ONLY: the shared STT ingress wrapper is on the path; the unchanged local capability resolver produces the identical failure",
+      "classification": "PRE_EXISTING_FAILURE"
+    },
+    {
+      "test": "backend.tests.test_voice_command_pipeline.VoiceCommandPipelineTests.test_twitch_normal_no_mention_chat_reaches_presence_observe",
+      "subsystem": "Twitch no-mention/presence",
+      "baseline_status": "FAIL",
+      "phase_0_5_status": "FAIL",
+      "baseline_exception_or_assertion": "AssertionError: '[HEBE][TWITCH_PIPELINE_CLASSIFY] category=normal_no_mention_chat' not found in <captured value>",
+      "phase_0_5_exception_or_assertion": "AssertionError: '[HEBE][TWITCH_PIPELINE_CLASSIFY] category=normal_no_mention_chat' not found in <captured value>",
+      "phase_0_5_code_on_failing_path": "YES: handle_twitch_chat_event was refactored, but the baseline and current terminal assertion are identical",
+      "classification": "PRE_EXISTING_FAILURE"
+    },
+    {
+      "test": "backend.tests.test_voice_command_pipeline.VoiceCommandPipelineTests.test_twitch_pipeline_health_counts_messages",
+      "subsystem": "Twitch no-mention/presence",
+      "baseline_status": "FAIL",
+      "phase_0_5_status": "FAIL",
+      "baseline_exception_or_assertion": "AssertionError: 0 != 1",
+      "phase_0_5_exception_or_assertion": "AssertionError: 0 != 1",
+      "phase_0_5_code_on_failing_path": "YES: handle_twitch_chat_event was refactored, but the baseline and current terminal assertion are identical",
+      "classification": "PRE_EXISTING_FAILURE"
+    },
+    {
+      "test": "backend.tests.test_voice_command_pipeline.VoiceCommandPipelineTests.test_ui_abre_obs_creates_open_application_when_awake_and_whitelisted",
+      "subsystem": "local application/capability resolution",
+      "baseline_status": "ERROR",
+      "phase_0_5_status": "ERROR",
+      "baseline_exception_or_assertion": "IndexError: list index out of range",
+      "phase_0_5_exception_or_assertion": "IndexError: list index out of range",
+      "phase_0_5_code_on_failing_path": "NO: the Phase 0.5 production seam changes are not on this failing path",
+      "classification": "PRE_EXISTING_FAILURE"
+    },
+    {
+      "test": "backend.tests.test_voice_command_pipeline.VoiceCommandPipelineTests.test_ui_hebe_abre_obs_creates_open_application_action_plan",
+      "subsystem": "local application/capability resolution",
+      "baseline_status": "ERROR",
+      "phase_0_5_status": "ERROR",
+      "baseline_exception_or_assertion": "IndexError: list index out of range",
+      "phase_0_5_exception_or_assertion": "IndexError: list index out of range",
+      "phase_0_5_code_on_failing_path": "NO: the Phase 0.5 production seam changes are not on this failing path",
+      "classification": "PRE_EXISTING_FAILURE"
+    },
+    {
+      "test": "backend.tests.test_voice_command_pipeline.VoiceCommandPipelineTests.test_unrelated_action_during_pending_conversation_still_uses_action_flow",
+      "subsystem": "local application/capability resolution",
+      "baseline_status": "ERROR",
+      "phase_0_5_status": "ERROR",
+      "baseline_exception_or_assertion": "IndexError: list index out of range",
+      "phase_0_5_exception_or_assertion": "IndexError: list index out of range",
+      "phase_0_5_code_on_failing_path": "ENTRY ONLY: the shared STT ingress wrapper is on the path; the unchanged local capability resolver produces the identical failure",
+      "classification": "PRE_EXISTING_FAILURE"
+    }
+  ]
+}
