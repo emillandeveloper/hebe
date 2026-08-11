@@ -59,12 +59,14 @@ class AmbientFact:
     confidence: float
     inference_level: str
     supported_claims: list[str]
+    inferred_claims: list[str]
     unsupported_claims: list[str]
     evidence_span: str
     evidence_tokens: list[str]
     semantic_rule: str
     model_reason: str
     expires_at: float
+    scene_id: str = ""
 
     @property
     def subject(self) -> str:
@@ -111,12 +113,14 @@ class AmbientFact:
             "inference_level": self.inference_level,
             "supported_claims": list(self.supported_claims),
             "directly_supported_claims": list(self.supported_claims),
+            "inferred_claims": list(self.inferred_claims),
             "unsupported_claims": list(self.unsupported_claims),
             "evidence_span": self.evidence_span,
             "evidence_tokens": list(self.evidence_tokens),
             "semantic_rule": self.semantic_rule,
             "model_reason": self.model_reason,
             "expires_at": self.expires_at,
+            "scene_id": self.scene_id,
         }
 
 
@@ -143,6 +147,7 @@ class AmbientContextExtractor:
         utterance_role: str = "owner_commentary",
         language: str | None = None,
         topic_id: str | None = None,
+        scene_id: str | None = None,
     ) -> AmbientContextExtraction:
         raw = str(text or "").strip()
         normalized = self._normalize(raw)
@@ -198,6 +203,13 @@ class AmbientContextExtractor:
                 fact.setdefault("conservative_normalized_text", normalized)
                 fact.setdefault("utterance_role", utterance_role)
                 fact.setdefault("topic_id", topic_id or "")
+                fact["scene_id"] = str(scene_id or fact.get("scene_id") or "")
+                fact.setdefault("inferred_claims", [])
+                fact.setdefault("unsupported_claims", [])
+                fact.setdefault("supported_claims", [raw])
+                if isinstance(fact.get("data"), dict):
+                    fact["data"]["scene_id"] = fact["scene_id"]
+                    fact["data"]["inferred_claims"] = list(fact.get("inferred_claims") or [])
             return AmbientContextExtraction(useful=True, facts=facts, mood=mood, reason="facts_extracted")
 
         if event_type in {"gameplay_failure", "victory", "boss_attempt", "grinding", "confusion/lost"}:
@@ -253,17 +265,30 @@ class AmbientContextExtractor:
         first_person_health = referent.subject == "owner_player" and bool(
             tokens & {"vida", "hp", "15", "poca", "poco", "rojo", "muero"}
         )
-        if first_person_health or tokens & {"counter", "contraataque", "counterattack"}:
+        ground_counter = bool(re.search(
+            r"\b(?:si|cuando|al)\s+(?:toca|toque|cae|caiga|llega|llegue)\s+(?:el\s+)?suelo\b.*\b(?:contraataca|contraataque|counterattack|counter)\b",
+            normalized,
+        ))
+        if first_person_health:
             facts.append(self._category_fact(
                 "combat_risk",
-                "Leo is weighing a dangerous combat state with low HP or counterattack risk.",
+                "Leo said his character's health is at risk.",
                 raw,
                 normalized,
                 0.86,
                 now,
                 mood="combat tension",
                 referent=referent,
-                supported_claims=["owner health is at risk"] if first_person_health else ["counterattack risk"],
+                supported_claims=["owner health is at risk"],
+            ))
+        if ground_counter:
+            facts.append(self._category_fact(
+                "enemy_mechanic",
+                "Leo said touching the ground may trigger a counterattack.",
+                raw, normalized, 0.9, now, mood="mechanic tension", referent=referent,
+                supported_claims=["touching the ground may trigger a counterattack"],
+                inferred_claims=[],
+                unsupported_claims=["the counterattack always hits", "the counterattack causes death", "the enemy heals"],
             ))
         explicit_healing = bool(
             re.search(r"\b(?:cura|curan|curar|curarse|se cura|recupera|recuperar|regenera|heal|healing|autopocion|autopotion|pocion|pociones)\b", normalized)
@@ -283,9 +308,14 @@ class AmbientContextExtractor:
                 unsupported_claims=["auto_healing", "counterattack", "healing", "regeneration"],
             ))
         if explicit_healing and not hp_not_decreasing:
+            healing_summary = (
+                "Leo mentioned automatic potion behavior in the fight."
+                if tokens & {"autopocion", "autopotion"}
+                else "Leo mentioned healing or health recovery in the fight."
+            )
             facts.append(self._category_fact(
                 "healing_or_recovery",
-                "Leo mentioned healing, HP recovery, or autopotion behavior in the fight.",
+                healing_summary,
                 raw,
                 normalized,
                 0.82,
@@ -294,10 +324,18 @@ class AmbientContextExtractor:
                 referent=referent,
                 supported_claims=[raw],
             ))
-        if tokens & enemy_mechanic_terms and not hp_not_decreasing:
+        if tokens & enemy_mechanic_terms and not hp_not_decreasing and not ground_counter:
+            if tokens & {"counter", "contraataque", "counterattack"}:
+                mechanic_summary = "Leo mentioned a counterattack mechanic."
+            elif tokens & {"autopocion", "autopotion", "autoheal", "autocura"}:
+                mechanic_summary = "Leo mentioned an automatic recovery mechanic."
+            elif tokens & {"aguanta", "sobrevive"}:
+                mechanic_summary = "Leo mentioned that an enemy survives the current attack."
+            else:
+                mechanic_summary = "Leo mentioned a healing mechanic."
             facts.append(self._category_fact(
                 "enemy_mechanic",
-                "Leo mentioned a combat mechanic such as counters, survival, or auto-healing.",
+                mechanic_summary,
                 raw,
                 normalized,
                 0.84,
@@ -578,12 +616,14 @@ class AmbientContextExtractor:
             confidence=confidence,
             inference_level=str(data.get("inference_level") or "direct_observation"),
             supported_claims=[str(item) for item in data.get("supported_claims") or ([raw_text] if raw_text else [])],
+            inferred_claims=[str(item) for item in data.get("inferred_claims") or []],
             unsupported_claims=[str(item) for item in data.get("unsupported_claims") or []],
             evidence_span=str(data.get("evidence_span") or raw_text),
             evidence_tokens=[str(item) for item in data.get("evidence_tokens") or normalized_text.split()],
             semantic_rule=str(data.get("semantic_rule") or f"category:{category}"),
             model_reason=str(data.get("model_reason") or f"Observed utterance supports {category}."),
             expires_at=now + ttl_sec,
+            scene_id=str(data.get("scene_id") or ""),
         )
         return {
             "kind": kind,
@@ -620,6 +660,7 @@ class AmbientContextExtractor:
         mood: str | None = None,
         referent: GameplayReferentResolution | None = None,
         supported_claims: list[str] | None = None,
+        inferred_claims: list[str] | None = None,
         unsupported_claims: list[str] | None = None,
     ) -> dict:
         if ttl_sec is None:
@@ -649,6 +690,7 @@ class AmbientContextExtractor:
                 "extracted_predicate": (referent or GameplayReferentResolution()).predicate,
                 "inference_level": "direct_observation" if (referent or GameplayReferentResolution()).confidence >= 0.75 else "heuristic",
                 "supported_claims": supported_claims or [raw],
+                "inferred_claims": inferred_claims or [],
                 "unsupported_claims": unsupported_claims or [],
                 "evidence_span": raw,
                 "evidence_tokens": normalized.split(),

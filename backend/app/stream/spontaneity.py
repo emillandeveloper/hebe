@@ -37,6 +37,7 @@ class StreamSpontaneityConfig:
     title_marker_ttl_sec: float = 55 * 60
     save_equip_topic_cooldown_sec: float = 60 * 60
     cooldown_key: str = "stream_idle_prompt_next_ts"
+    semantic_opportunity_cooldown_sec: float = 20 * 60
 
 
 class StreamSpontaneityService:
@@ -258,6 +259,12 @@ class StreamSpontaneityService:
             print(f"[HEBE][SPONTANEITY] skipped reason=semantic_cooldown cooldown_key={semantic_key}", flush=True)
             return result
         used_fact = self._recent_run_context_fact(stream, now)
+        opportunity_key = self.semantic_opportunity_key(stream, topic=topic, fact=used_fact)
+        if cooldown_active(stream, opportunity_key, now=now):
+            result["blocked_reason"] = "semantic_opportunity_consumed"
+            result["candidate_topic"] = topic
+            print(f"[HEBE][SPONTANEITY] skipped reason=semantic_opportunity_consumed cooldown_key={opportunity_key}", flush=True)
+            return result
         validation = validate_spontaneity_anchor(stream, topic=topic, fact=used_fact)
         if not validation.allow:
             result["blocked_reason"] = "activity_mismatch"
@@ -319,10 +326,11 @@ class StreamSpontaneityService:
         chat_snapshot = self._chat_activity_snapshot(stream, now)
         recent_idle = list(getattr(stream, "recent_idle_messages", []) or [])
         selected_fact = self._recent_run_context_fact(stream, now)
+        selected_topic = topic or self._choose_topic(stream, now) or "game_vibe"
         return {
             "reason": "stream_companion_prompt",
             "presence_mode": mode,
-            "idle_topic": topic or self._choose_topic(stream, now) or "game_vibe",
+            "idle_topic": selected_topic,
             "title": getattr(stream, "current_stream_title", None),
             "current_game": getattr(stream, "current_game", None),
             "current_category": getattr(stream, "current_category", None),
@@ -372,6 +380,9 @@ class StreamSpontaneityService:
             },
             "specific_context_anchors": self._specific_context_anchors(stream, now, title_context=title_context, chat_snapshot=chat_snapshot),
             "used_fact_id": (selected_fact or {}).get("id"),
+            "semantic_opportunity_key": self.semantic_opportunity_key(
+                stream, topic=selected_topic, fact=selected_fact,
+            ),
             "scene_guard": dict(getattr(stream, "current_scene_timeline", None) or {}),
             "proactive_type": "contextual_spontaneity",
             "proactive_decision": getattr(stream, "last_proactive_decision", None),
@@ -411,6 +422,42 @@ class StreamSpontaneityService:
         stream.recent_idle_messages = messages[-30:]
         stream.idle_prompts_sent_stream = int(getattr(stream, "idle_prompts_sent_stream", 0) or 0) + 1
         self._record_style_motifs(stream, text, now=now)
+
+    def semantic_opportunity_key(self, stream: StreamSessionState, *, topic: str, fact: dict | None) -> str:
+        scene = dict(getattr(stream, "current_scene_timeline", None) or {})
+        scene_key = str(scene.get("scene_id") or scene.get("topic_id") or "current_scene")
+        anchor_family = str((fact or {}).get("category") or (fact or {}).get("kind") or "session_context")
+        contribution_mode = str(topic or "game_vibe")
+        semantic_motif = anchor_family
+        return "spontaneity_opportunity:" + ":".join(
+            self._normalize_for_similarity(value).replace(" ", "_")
+            for value in (scene_key, anchor_family, contribution_mode, semantic_motif)
+        )
+
+    def consume_semantic_opportunity(
+        self, stream: StreamSessionState | None, payload: dict | None, *, reason: str,
+    ) -> str:
+        if stream is None:
+            return ""
+        payload = payload or {}
+        key = str(payload.get("semantic_opportunity_key") or "").strip()
+        if not key:
+            facts = list((payload.get("run_context") or {}).get("facts") or [])
+            key = self.semantic_opportunity_key(
+                stream,
+                topic=str(payload.get("idle_topic") or "game_vibe"),
+                fact=facts[0] if facts else None,
+            )
+        cooldowns = getattr(stream, "cooldowns", None)
+        if not isinstance(cooldowns, dict):
+            cooldowns = {}
+            stream.cooldowns = cooldowns
+        cooldowns[key] = self._now() + self.config.semantic_opportunity_cooldown_sec
+        consumed = list(getattr(stream, "consumed_spontaneity_opportunities", []) or [])
+        consumed.append({"key": key, "reason": reason, "timestamp": self._now()})
+        stream.consumed_spontaneity_opportunities = consumed[-50:]
+        print(f"[HEBE][SPONTANEITY] opportunity=consumed reason={reason} cooldown_key={key}", flush=True)
+        return key
 
     def is_too_similar_to_recent(self, stream: StreamSessionState | None, text: str) -> bool:
         if not stream:

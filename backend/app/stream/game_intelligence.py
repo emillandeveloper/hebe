@@ -76,6 +76,8 @@ class GameDossier:
     created_at: str = ""
     updated_at: str = ""
     dossier_version: int = 1
+    status: str = "partial"
+    research_sections: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -765,7 +767,7 @@ class GameResearchService:
         provider_name: str = "",
         provider_configured: bool | None = None,
         contextual_timeout_seconds: float = 10.0,
-        dossier_timeout_seconds: float = 15.0,
+        dossier_timeout_seconds: float = 40.0,
         max_attempts: int = 3,
         retry_base_seconds: float = 2.0,
     ) -> None:
@@ -855,46 +857,76 @@ class GameResearchService:
         self, *, game_title: str, platform: str = "", version: str = "", session_id: str | int = "",
     ) -> GameResearchJob:
         game_id, canonical, _ = self.canonical_game(game_title)
-        plan = self.plan_search(
-            game_title=canonical,
-            game_id=game_id,
-            platform=platform,
-            entity="core systems and spoiler-free premise",
-            question_type="dossier",
-            expected_fact_type="general_mechanics",
-        )
         canonical_session = str(session_id or "pre_stream")
-        with self._job_lock:
-            matching = [
-                job for job, _future in self._jobs.values()
-                if job.game_id == game_id and job.session_id == canonical_session
-                and job.mode == ResearchMode.PRE_STREAM_DOSSIER.value
-            ]
-        if matching:
-            latest = max(matching, key=lambda item: (item.attempt, item.queued_at))
-            if latest.status in {"queued", "running", "completed"}:
-                return latest
-            if (
-                latest.attempt >= self.max_attempts
-                or not latest.next_retry_at
-                or self.now_fn() < latest.next_retry_at
-            ):
-                return latest
-            attempt = latest.attempt + 1
-        else:
-            attempt = 1
-        job = self.queue_research(
-            plan,
-            progress=None,
-            scene_id="pre_stream",
-            ttl_seconds=300,
-            mode=ResearchMode.PRE_STREAM_DOSSIER.value,
-            session_id=canonical_session,
-            attempt=attempt,
-            timeout_seconds=self.dossier_timeout_seconds,
-            metadata={"game_title": canonical, "platform": platform, "version": version, "build_dossier": True},
+        existing_dossier = self.store.get_dossier(game_id)
+        sections = (
+            ("identity_premise", "identity, spoiler-free premise, and basic terminology"),
+            ("core_systems", "core progression and gameplay systems"),
+            ("combat_mechanics", "core combat mechanics and controls"),
         )
-        return job
+        selected: list[GameResearchJob] = []
+        for research_unit, entity in sections:
+            if existing_dossier and existing_dossier.research_sections.get(research_unit) == "completed":
+                continue
+            plan = self.plan_search(
+                game_title=canonical,
+                game_id=game_id,
+                platform=platform,
+                version=version,
+                entity=entity,
+                question_type="dossier",
+                expected_fact_type=research_unit,
+            )
+            with self._job_lock:
+                matching = [
+                    job for job, _future in self._jobs.values()
+                    if job.game_id == game_id and job.session_id == canonical_session
+                    and job.mode == ResearchMode.PRE_STREAM_DOSSIER.value
+                    and job.metadata.get("research_unit") == research_unit
+                ]
+            attempt = 1
+            if matching:
+                latest = max(matching, key=lambda item: (item.attempt, item.queued_at))
+                selected.append(latest)
+                if latest.status in {"queued", "running", "completed"}:
+                    if latest.status in {"queued", "running"}:
+                        return latest
+                    continue
+                if latest.attempt >= self.max_attempts or not latest.next_retry_at or self.now_fn() < latest.next_retry_at:
+                    return latest
+                attempt = latest.attempt + 1
+            queued = self.queue_research(
+                plan,
+                progress=None,
+                scene_id="pre_stream",
+                ttl_seconds=300,
+                mode=ResearchMode.PRE_STREAM_DOSSIER.value,
+                session_id=canonical_session,
+                attempt=attempt,
+                timeout_seconds=self.dossier_timeout_seconds,
+                metadata={
+                    "game_title": canonical, "platform": platform, "version": version,
+                    "build_dossier": True, "research_unit": research_unit,
+                },
+            )
+            selected.append(queued)
+            # Units are deliberately independent and serialized at admission:
+            # completing or failing one cannot cancel or consume another.
+            return queued
+        if selected:
+            return selected[-1]
+        # A completed dossier still yields a stable idempotency result for callers.
+        plan = self.plan_search(
+            game_title=canonical, game_id=game_id, platform=platform,
+            entity="dossier already complete", question_type="dossier",
+            expected_fact_type="complete",
+        )
+        return GameResearchJob(
+            job_id=f"research_complete_{game_id}", plan=plan, scene_id="pre_stream",
+            session_id=canonical_session, game_id=game_id,
+            mode=ResearchMode.PRE_STREAM_DOSSIER.value, status="completed",
+            metadata={"build_dossier": True, "research_unit": "complete"},
+        )
 
     def plan_search(
         self,
@@ -1019,7 +1051,8 @@ class GameResearchService:
                     job.next_retry_at = now + self.retry_base_seconds * (2 ** (job.attempt - 1))
                 future.cancel()
                 if job.mode == ResearchMode.PRE_STREAM_DOSSIER.value:
-                    self.diagnostics.dossier_status = "failed"
+                    existing = self.store.get_dossier(job.game_id)
+                    self.diagnostics.dossier_status = "partial" if existing and self._dossier_sufficient(existing) else "failed"
                     self.diagnostics.current_comment_mode = "contextual_reaction"
                 self.diagnostics.active_research_job = asdict(job)
                 print(
@@ -1043,7 +1076,8 @@ class GameResearchService:
             if job.attempt < self.max_attempts and _is_transient_research_failure(job.failure_reason):
                 job.next_retry_at = job.completed_at + self.retry_base_seconds * (2 ** (job.attempt - 1))
             if job.mode == ResearchMode.PRE_STREAM_DOSSIER.value:
-                self.diagnostics.dossier_status = "failed"
+                existing = self.store.get_dossier(job.game_id)
+                self.diagnostics.dossier_status = "partial" if existing and self._dossier_sufficient(existing) else "failed"
                 self.diagnostics.current_comment_mode = "contextual_reaction"
             print(
                 f"[HEBE][GAME_RESEARCH_JOB] status=failed mode={job.mode} job_id={job.job_id} "
@@ -1067,14 +1101,18 @@ class GameResearchService:
                 [],
                 existing,
             )
-            if self._dossier_sufficient(dossier):
-                self.store.save_dossier(dossier)
-                self.diagnostics.dossier_status = "ready" if dossier.confirmed_general_mechanics else "partial"
-                self._log_dossier(dossier, self.diagnostics.dossier_status)
-            else:
-                self.diagnostics.dossier_status = "insufficient"
+            research_unit = str(job.metadata.get("research_unit") or "general")
+            dossier.research_sections[research_unit] = "completed"
+            required = {"identity_premise", "core_systems", "combat_mechanics"}
+            dossier.status = "ready" if required.issubset({
+                key for key, value in dossier.research_sections.items() if value == "completed"
+            }) and self._dossier_sufficient(dossier) else "partial"
+            # Persist every successful unit. A later timeout must not erase useful evidence.
+            self.store.save_dossier(dossier)
+            self.diagnostics.dossier_status = dossier.status
+            if dossier.status == "partial" and not self._dossier_sufficient(dossier):
                 self.diagnostics.current_comment_mode = "contextual_reaction"
-                self._log_dossier(existing, "insufficient", game=title)
+            self._log_dossier(dossier, dossier.status, game=title)
         self.diagnostics.active_research_job = asdict(job)
         print(
             f"[HEBE][GAME_RESEARCH_JOB] status=completed mode={job.mode} job_id={job.job_id} "
