@@ -1,0 +1,27 @@
+{
+  "baseline_commit": "5b3cc1b",
+  "baseline_phase": 5,
+  "baseline_tests_total": 557,
+  "baseline_tests_passed": 540,
+  "baseline_tests_failed": 17,
+  "phase_5_tests_failed": 17,
+  "phase_6_tests_total": 573,
+  "phase_6_tests_passed": 556,
+  "phase_6_tests_failed": 17,
+  "shared_passing": 540,
+  "phase_6_new_passing": 16,
+  "pre_existing_failures": 17,
+  "fixed_existing_failures": 0,
+  "changed_failures": 0,
+  "new_regressions": 0,
+  "NEW_PHASE_6_REGRESSION": 0,
+  "classification_counts": {
+    "PASS_BOTH": 540,
+    "NEW_PHASE_6_PASS": 16,
+    "PRE_EXISTING_FAILURE": 17,
+    "FIXED_BY_PHASE_6": 0,
+    "FAILURE_CHANGED": 0,
+    "NEW_PHASE_6_REGRESSION": 0
+  },
+  "evidence": "Failure identifiers in the Phase 5 committed report and Phase 6 completed report are identical."
+}

@@ -1,0 +1,4837 @@
+{
+  "schema_version": 1,
+  "source_db": "C:\\Users\\Leo Nifelheim\\Documents\\Hebe\\hebe-ui\\backend\\hebe.db",
+  "copied_db": "C:\\Users\\Leo Nifelheim\\Documents\\Hebe\\hebe-ui\\artifacts\\cognitive-continuity-phase6\\scratch\\copied-production.sqlite3",
+  "source_fingerprint_before": "1852f1ac6c9972f983c589b454e7526cc356c60c4fc3637837671c1a9842e4bd",
+  "source_fingerprint_after": "1852f1ac6c9972f983c589b454e7526cc356c60c4fc3637837671c1a9842e4bd",
+  "source_untouched": true,
+  "copied_initial_fingerprint": "1852f1ac6c9972f983c589b454e7526cc356c60c4fc3637837671c1a9842e4bd",
+  "copy_matches_source": true,
+  "schema_before": {
+    "table_count": 44,
+    "index_count": 63,
+    "total_rows": 57699,
+    "tables": [
+      {
+        "name": "app_commands",
+        "columns": [
+          "id",
+          "name",
+          "command",
+          "description",
+          "aliases",
+          "enabled",
+          "usage_count",
+          "last_used_at",
+          "process_name",
+          "window_title"
+        ],
+        "row_count": 7
+      },
+      {
+        "name": "app_settings",
+        "columns": [
+          "key",
+          "value",
+          "updated_at"
+        ],
+        "row_count": 6
+      },
+      {
+        "name": "belief_evidence",
+        "columns": [
+          "id",
+          "belief_id",
+          "source_event_id",
+          "source_record_type",
+          "source_record_id",
+          "relation",
+          "weight",
+          "observed_at",
+          "extractor",
+          "extractor_version",
+          "literal_span_json",
+          "subject_key"
+        ],
+        "row_count": 0
+      },
+      {
+        "name": "beliefs",
+        "columns": [
+          "id",
+          "namespace",
+          "scope_kind",
+          "scope_id",
+          "subject_ref",
+          "predicate",
+          "object_json",
+          "epistemic_status",
+          "confidence",
+          "authority_class",
+          "created_at",
+          "last_confirmed_at",
+          "valid_from",
+          "valid_until",
+          "relevance_until",
+          "superseded_by",
+          "owner_confirmed",
+          "sensitivity",
+          "schema_version",
+          "retention_policy",
+          "version"
+        ],
+        "row_count": 0
+      },
+      {
+        "name": "chat_log",
+        "columns": [
+          "id",
+          "timestamp",
+          "role",
+          "source",
+          "text"
+        ],
+        "row_count": 1976
+      },
+      {
+        "name": "chatter_facts",
+        "columns": [
+          "id",
+          "username",
+          "fact_text",
+          "fact_type",
+          "confidence",
+          "source_message_id",
+          "source_stream_session_id",
+          "evidence_count",
+          "first_observed_at",
+          "last_confirmed_at",
+          "expires_at",
+          "public_reference_allowed",
+          "created_at",
+          "updated_at"
+        ],
+        "row_count": 0
+      },
+      {
+        "name": "chatter_presence",
+        "columns": [
+          "id",
+          "stream_session_id",
+          "username",
+          "display_name",
+          "first_seen_at",
+          "last_seen_at",
+          "first_message_at",
+          "last_message_at",
+          "first_direct_interaction_at",
+          "last_direct_interaction_at",
+          "message_count",
+          "direct_interaction_count",
+          "was_present",
+          "was_active_chatter",
+          "was_passive_viewer",
+          "was_raider",
+          "was_new_chatter",
+          "was_returning_after_absence",
+          "presence_source_json",
+          "created_at",
+          "updated_at"
+        ],
+        "row_count": 221
+      },
+      {
+        "name": "chatter_profiles",
+        "columns": [
+          "username",
+          "display_name",
+          "aliases_json",
+          "first_seen_at",
+          "last_seen_at",
+          "last_message_at",
+          "last_direct_interaction_at",
+          "last_lurk_seen_at",
+          "last_raid_at",
+          "last_follow_at",
+          "last_sub_at",
+          "streams_seen_count",
+          "streams_chatted_count",
+          "total_messages",
+          "total_direct_interactions",
+          "total_lurk_sessions",
+          "viewer_status",
+          "preferred_language",
+          "relationship_level",
+          "notes_summary",
+          "updated_at"
+        ],
+        "row_count": 36
+      },
+      {
+        "name": "conversations",
+        "columns": [
+          "id",
+          "context_kind",
+          "context_id",
+          "participants_json",
+          "attention_state",
+          "turn_owner",
+          "expected_reply_type",
+          "expected_reply_json",
+          "topic",
+          "origin_event_id",
+          "last_event_id",
+          "opened_at",
+          "last_turn_at",
+          "expires_at",
+          "status",
+          "closure_reason",
+          "version",
+          "domain_payload_json",
+          "consumed_event_ids_json"
+        ],
+        "row_count": 0
+      },
+      {
+        "name": "game_dossiers",
+        "columns": [
+          "game_id",
+          "canonical_title",
+          "dossier_json",
+          "dossier_version",
+          "created_at",
+          "updated_at",
+          "v2_projection_version"
+        ],
+        "row_count": 1
+      },
+      {
+        "name": "game_identities",
+        "columns": [
+          "game_id",
+          "canonical_name",
+          "aliases_json",
+          "platform_ids_json",
+          "series",
+          "schema_version"
+        ],
+        "row_count": 0
+      },
+      {
+        "name": "game_knowledge_facts",
+        "columns": [
+          "id",
+          "game_id",
+          "belief_id",
+          "source_type",
+          "source_quality",
+          "spoiler_class",
+          "dossier_link",
+          "version_tag",
+          "created_at",
+          "schema_version"
+        ],
+        "row_count": 0
+      },
+      {
+        "name": "game_knowledge_gaps",
+        "columns": [
+          "game_id",
+          "term",
+          "gap_json",
+          "updated_at"
+        ],
+        "row_count": 0
+      },
+      {
+        "name": "game_knowledge_v2_gaps",
+        "columns": [
+          "id",
+          "game_id",
+          "run_id",
+          "subject_ref",
+          "question_type",
+          "query_intent",
+          "spoiler_ceiling",
+          "required_confidence",
+          "created_from_event_id",
+          "normalized_gap_key",
+          "status",
+          "created_at",
+          "updated_at",
+          "resolved_fact_ids_json",
+          "schema_version"
+        ],
+        "row_count": 0
+      },
+      {
+        "name": "game_progress_states",
+        "columns": [
+          "game_id",
+          "stream_session_id",
+          "state_json",
+          "updated_at",
+          "game_run_id"
+        ],
+        "row_count": 12
+      },
+      {
+        "name": "game_research_cache",
+        "columns": [
+          "cache_key",
+          "game_id",
+          "query",
+          "sources_json",
+          "facts_json",
+          "spoiler_classification_json",
+          "created_at",
+          "expires_at"
+        ],
+        "row_count": 2
+      },
+      {
+        "name": "game_run_events",
+        "columns": [
+          "id",
+          "game_run_id",
+          "event_type",
+          "subject_ref",
+          "predicate",
+          "object_json",
+          "evidence_event_id",
+          "belief_id",
+          "observed_at",
+          "epistemic_status",
+          "schema_version"
+        ],
+        "row_count": 0
+      },
+      {
+        "name": "game_run_sessions",
+        "columns": [
+          "id",
+          "game_run_id",
+          "stream_session_id",
+          "started_at",
+          "ended_at",
+          "evidence_event_id",
+          "source",
+          "schema_version"
+        ],
+        "row_count": 0
+      },
+      {
+        "name": "game_runs",
+        "columns": [
+          "id",
+          "game_id",
+          "owner_id",
+          "run_kind",
+          "rules_json",
+          "status",
+          "started_at",
+          "last_active_at",
+          "ended_at",
+          "current_checkpoint_version",
+          "created_from_event_id",
+          "schema_version"
+        ],
+        "row_count": 0
+      },
+      {
+        "name": "game_sessions",
+        "columns": [
+          "id",
+          "game",
+          "game_key",
+          "stream_date",
+          "title",
+          "started_at",
+          "ended_at",
+          "start_summary",
+          "end_summary",
+          "current_location",
+          "current_objective",
+          "important_events_json",
+          "unresolved_threads_json",
+          "next_time_plan",
+          "spoiler_policy",
+          "source",
+          "created_at",
+          "updated_at",
+          "game_run_id"
+        ],
+        "row_count": 0
+      },
+      {
+        "name": "internal_events_log",
+        "columns": [
+          "id",
+          "event_type",
+          "payload_json",
+          "created_at"
+        ],
+        "row_count": 201
+      },
+      {
+        "name": "learned_apps",
+        "columns": [
+          "id",
+          "app_id",
+          "canonical_name",
+          "aliases",
+          "executable_path",
+          "launch_arguments",
+          "source",
+          "confidence",
+          "validated_at",
+          "learned_at",
+          "last_successful_launch",
+          "last_failed_launch",
+          "validation_version",
+          "process_name",
+          "window_title",
+          "updated_at"
+        ],
+        "row_count": 0
+      },
+      {
+        "name": "live_session_rolling_summaries",
+        "columns": [
+          "id",
+          "session_id",
+          "stream_session_id",
+          "summary_text",
+          "event_count",
+          "created_at",
+          "tags_json"
+        ],
+        "row_count": 4068
+      },
+      {
+        "name": "live_session_spontaneity_anchors",
+        "columns": [
+          "anchor_id",
+          "session_id",
+          "anchor_type",
+          "source_event_ids_json",
+          "topic",
+          "category",
+          "payload_json",
+          "created_at",
+          "consumed_at",
+          "invalidated_at",
+          "cooldown_key"
+        ],
+        "row_count": 34
+      },
+      {
+        "name": "live_session_state",
+        "columns": [
+          "session_id",
+          "stream_session_id",
+          "stream_status",
+          "current_game",
+          "current_category",
+          "current_title",
+          "language_mode",
+          "spoiler_policy",
+          "state_json",
+          "created_at",
+          "updated_at"
+        ],
+        "row_count": 3375
+      },
+      {
+        "name": "live_session_timeline",
+        "columns": [
+          "id",
+          "session_id",
+          "stream_session_id",
+          "event_uid",
+          "event_type",
+          "event_ts",
+          "source",
+          "raw_text",
+          "normalized_text",
+          "speaker",
+          "target",
+          "topic",
+          "category",
+          "confidence",
+          "provenance",
+          "related_event_id",
+          "output_target",
+          "index_for_rag",
+          "payload_json",
+          "created_at",
+          "context_kind",
+          "source_record_type",
+          "source_record_id",
+          "authority",
+          "literal_evidence_json",
+          "valid_from",
+          "valid_until",
+          "supersedes_event_uid",
+          "schema_version"
+        ],
+        "row_count": 41646
+      },
+      {
+        "name": "memories",
+        "columns": [
+          "id",
+          "key",
+          "text",
+          "category",
+          "importance",
+          "created_at",
+          "last_used_at",
+          "active"
+        ],
+        "row_count": 0
+      },
+      {
+        "name": "memory_chunks",
+        "columns": [
+          "id",
+          "text",
+          "kind",
+          "subject",
+          "source_session",
+          "embedding",
+          "embedding_model",
+          "embedding_dim",
+          "importance",
+          "access_count",
+          "last_accessed_at",
+          "created_at",
+          "tags",
+          "active",
+          "belief_id",
+          "episode_id"
+        ],
+        "row_count": 230
+      },
+      {
+        "name": "memory_facts",
+        "columns": [
+          "id",
+          "kind",
+          "subject",
+          "payload_json",
+          "source_text",
+          "confidence",
+          "created_at",
+          "updated_at",
+          "last_used_at",
+          "active",
+          "belief_id",
+          "epistemic_status"
+        ],
+        "row_count": 0
+      },
+      {
+        "name": "open_threads",
+        "columns": [
+          "id",
+          "thread_type",
+          "scope_kind",
+          "scope_id",
+          "participant_ids_json",
+          "subject_ref",
+          "summary",
+          "origin_event_id",
+          "latest_event_id",
+          "status",
+          "priority",
+          "created_at",
+          "relevance_until",
+          "valid_until",
+          "resolved_at",
+          "resolution_event_id",
+          "sensitivity",
+          "version"
+        ],
+        "row_count": 0
+      },
+      {
+        "name": "promotion_events",
+        "columns": [
+          "id",
+          "stream_session_id",
+          "source_event_id",
+          "requested_by",
+          "raw_target_text",
+          "resolved_twitch_user_id",
+          "resolved_login",
+          "resolution_confidence",
+          "trigger_type",
+          "execution_status",
+          "twitch_message_id",
+          "created_at",
+          "executed_at",
+          "failure_reason"
+        ],
+        "row_count": 8
+      },
+      {
+        "name": "reminders",
+        "columns": [
+          "id",
+          "kind",
+          "title",
+          "message",
+          "due_at",
+          "timezone",
+          "status",
+          "source_memory_id",
+          "payload_json",
+          "created_at",
+          "fired_at"
+        ],
+        "row_count": 0
+      },
+      {
+        "name": "scene_assertions",
+        "columns": [
+          "id",
+          "subject_ref",
+          "predicate",
+          "object_json",
+          "epistemic_status",
+          "confidence",
+          "evidence_ids_json",
+          "referent_data_json",
+          "observed_at",
+          "valid_from",
+          "valid_until",
+          "provenance",
+          "extractor",
+          "extractor_version",
+          "schema_version"
+        ],
+        "row_count": 0
+      },
+      {
+        "name": "schedule_hypotheses",
+        "columns": [
+          "id",
+          "weekday",
+          "time_window",
+          "canonical_content",
+          "content_key",
+          "stream_format",
+          "source",
+          "confidence",
+          "evidence_count",
+          "consecutive_matches",
+          "consecutive_misses",
+          "first_observed_at",
+          "last_observed_at",
+          "status",
+          "superseded_by"
+        ],
+        "row_count": 7
+      },
+      {
+        "name": "schedule_observations",
+        "columns": [
+          "id",
+          "stream_session_id",
+          "weekday",
+          "time_window",
+          "canonical_content",
+          "content_key",
+          "stream_format",
+          "source",
+          "observed_at"
+        ],
+        "row_count": 2
+      },
+      {
+        "name": "schema_migrations",
+        "columns": [
+          "component",
+          "version",
+          "name",
+          "checksum",
+          "applied_at"
+        ],
+        "row_count": 3
+      },
+      {
+        "name": "stream_chat_messages",
+        "columns": [
+          "id",
+          "stream_session_id",
+          "twitch_message_id",
+          "username",
+          "display_name",
+          "message_text",
+          "observed_at",
+          "is_mention_to_hebe",
+          "is_direct_reply_to_hebe",
+          "is_bot",
+          "is_mod",
+          "is_vip",
+          "is_subscriber",
+          "badges_json",
+          "source",
+          "replied_by_hebe",
+          "hebe_reply_message_id",
+          "topic_hint",
+          "language_hint",
+          "created_at"
+        ],
+        "row_count": 5512
+      },
+      {
+        "name": "stream_chatter_summaries",
+        "columns": [
+          "id",
+          "stream_session_id",
+          "username",
+          "display_name",
+          "message_count",
+          "direct_interaction_count",
+          "summary_text",
+          "topics_json",
+          "notable_quotes_json",
+          "mood_tone",
+          "inferred_facts_json",
+          "created_at"
+        ],
+        "row_count": 180
+      },
+      {
+        "name": "stream_events",
+        "columns": [
+          "id",
+          "stream_session_id",
+          "event_type",
+          "event_ts",
+          "payload_json",
+          "dedupe_key",
+          "created_at"
+        ],
+        "row_count": 63
+      },
+      {
+        "name": "stream_schedule",
+        "columns": [
+          "id",
+          "weekday",
+          "slot_name",
+          "game",
+          "category",
+          "playthrough_type",
+          "tags_json",
+          "title_style",
+          "enabled",
+          "updated_at"
+        ],
+        "row_count": 7
+      },
+      {
+        "name": "stream_sessions",
+        "columns": [
+          "id",
+          "twitch_stream_id",
+          "title",
+          "category",
+          "game",
+          "started_at",
+          "ended_at",
+          "duration_seconds",
+          "playthrough_type",
+          "challenge",
+          "language_mode",
+          "spoiler_policy",
+          "status",
+          "source",
+          "is_real_stream",
+          "created_at",
+          "updated_at"
+        ],
+        "row_count": 55
+      },
+      {
+        "name": "stream_summaries",
+        "columns": [
+          "id",
+          "stream_session_id",
+          "summary_text",
+          "key_events_json",
+          "game_progress_json",
+          "chat_topics_json",
+          "chatter_highlights_json",
+          "raids_json",
+          "shoutouts_json",
+          "next_stream_context",
+          "metadata_json",
+          "created_at"
+        ],
+        "row_count": 44
+      },
+      {
+        "name": "viewer_linguistic_profiles",
+        "columns": [
+          "twitch_user_id",
+          "login",
+          "display_name",
+          "preferred_grammatical_gender",
+          "pronouns_json",
+          "preferred_address_terms_json",
+          "confidence",
+          "source_type",
+          "source_event_id",
+          "evidence_summary",
+          "created_at",
+          "updated_at",
+          "confirmed_at",
+          "expires_at",
+          "owner_locked",
+          "user_locked",
+          "conflict"
+        ],
+        "row_count": 0
+      },
+      {
+        "name": "viewer_promotion_profiles",
+        "columns": [
+          "twitch_user_id",
+          "current_login",
+          "display_name",
+          "known_aliases_json",
+          "auto_promo_mode",
+          "created_by",
+          "created_at",
+          "updated_at",
+          "last_promoted_at",
+          "last_promoted_stream_id",
+          "cooldown_hours",
+          "owner_locked",
+          "active"
+        ],
+        "row_count": 3
+      }
+    ],
+    "indexes": [
+      {
+        "name": "idx_belief_evidence_belief",
+        "table": "belief_evidence",
+        "sql": "CREATE INDEX idx_belief_evidence_belief ON belief_evidence(belief_id,observed_at)"
+      },
+      {
+        "name": "idx_belief_evidence_idempotency",
+        "table": "belief_evidence",
+        "sql": "CREATE UNIQUE INDEX idx_belief_evidence_idempotency ON belief_evidence(source_event_id,relation,subject_key)"
+      },
+      {
+        "name": "idx_belief_evidence_source",
+        "table": "belief_evidence",
+        "sql": "CREATE INDEX idx_belief_evidence_source ON belief_evidence(source_record_type,source_record_id)"
+      },
+      {
+        "name": "idx_beliefs_identity_active",
+        "table": "beliefs",
+        "sql": "CREATE INDEX idx_beliefs_identity_active ON beliefs(namespace,scope_kind,scope_id,subject_ref,predicate,epistemic_status)"
+      },
+      {
+        "name": "idx_beliefs_scope_sensitivity",
+        "table": "beliefs",
+        "sql": "CREATE INDEX idx_beliefs_scope_sensitivity ON beliefs(scope_kind,scope_id,sensitivity)"
+      },
+      {
+        "name": "idx_beliefs_validity",
+        "table": "beliefs",
+        "sql": "CREATE INDEX idx_beliefs_validity ON beliefs(epistemic_status,valid_until,relevance_until)"
+      },
+      {
+        "name": "idx_chatter_facts_confidence",
+        "table": "chatter_facts",
+        "sql": "CREATE INDEX idx_chatter_facts_confidence ON chatter_facts(confidence)"
+      },
+      {
+        "name": "idx_chatter_facts_last_confirmed",
+        "table": "chatter_facts",
+        "sql": "CREATE INDEX idx_chatter_facts_last_confirmed ON chatter_facts(last_confirmed_at)"
+      },
+      {
+        "name": "idx_chatter_facts_type",
+        "table": "chatter_facts",
+        "sql": "CREATE INDEX idx_chatter_facts_type ON chatter_facts(fact_type)"
+      },
+      {
+        "name": "idx_chatter_facts_username",
+        "table": "chatter_facts",
+        "sql": "CREATE INDEX idx_chatter_facts_username ON chatter_facts(username)"
+      },
+      {
+        "name": "idx_chatter_presence_last_message",
+        "table": "chatter_presence",
+        "sql": "CREATE INDEX idx_chatter_presence_last_message ON chatter_presence(last_message_at)"
+      },
+      {
+        "name": "idx_chatter_presence_last_seen",
+        "table": "chatter_presence",
+        "sql": "CREATE INDEX idx_chatter_presence_last_seen ON chatter_presence(last_seen_at)"
+      },
+      {
+        "name": "idx_chatter_presence_session",
+        "table": "chatter_presence",
+        "sql": "CREATE INDEX idx_chatter_presence_session ON chatter_presence(stream_session_id)"
+      },
+      {
+        "name": "idx_chatter_presence_session_username",
+        "table": "chatter_presence",
+        "sql": "CREATE UNIQUE INDEX idx_chatter_presence_session_username ON chatter_presence(stream_session_id, username)"
+      },
+      {
+        "name": "idx_chatter_presence_username",
+        "table": "chatter_presence",
+        "sql": "CREATE INDEX idx_chatter_presence_username ON chatter_presence(username)"
+      },
+      {
+        "name": "idx_chatter_profiles_last_message",
+        "table": "chatter_profiles",
+        "sql": "CREATE INDEX idx_chatter_profiles_last_message ON chatter_profiles(last_message_at)"
+      },
+      {
+        "name": "idx_chatter_profiles_last_seen",
+        "table": "chatter_profiles",
+        "sql": "CREATE INDEX idx_chatter_profiles_last_seen ON chatter_profiles(last_seen_at)"
+      },
+      {
+        "name": "idx_chatter_profiles_status",
+        "table": "chatter_profiles",
+        "sql": "CREATE INDEX idx_chatter_profiles_status ON chatter_profiles(viewer_status)"
+      },
+      {
+        "name": "idx_chunks_kind_active",
+        "table": "memory_chunks",
+        "sql": "CREATE INDEX idx_chunks_kind_active ON memory_chunks(kind, active)"
+      },
+      {
+        "name": "idx_chunks_session",
+        "table": "memory_chunks",
+        "sql": "CREATE INDEX idx_chunks_session ON memory_chunks(source_session)"
+      },
+      {
+        "name": "idx_chunks_subject",
+        "table": "memory_chunks",
+        "sql": "CREATE INDEX idx_chunks_subject ON memory_chunks(subject)"
+      },
+      {
+        "name": "idx_conversations_context_status",
+        "table": "conversations",
+        "sql": "CREATE INDEX idx_conversations_context_status\n                ON conversations(context_kind, context_id, status)"
+      },
+      {
+        "name": "idx_conversations_status_expiry",
+        "table": "conversations",
+        "sql": "CREATE INDEX idx_conversations_status_expiry\n                ON conversations(status, expires_at)"
+      },
+      {
+        "name": "idx_game_cache_game",
+        "table": "game_research_cache",
+        "sql": "CREATE INDEX idx_game_cache_game ON game_research_cache(game_id)"
+      },
+      {
+        "name": "idx_game_gap_status",
+        "table": "game_knowledge_gaps",
+        "sql": "CREATE INDEX idx_game_gap_status ON game_knowledge_gaps(game_id, updated_at)"
+      },
+      {
+        "name": "idx_game_knowledge_lookup",
+        "table": "game_knowledge_facts",
+        "sql": "CREATE INDEX idx_game_knowledge_lookup ON game_knowledge_facts(game_id,spoiler_class,created_at)"
+      },
+      {
+        "name": "idx_game_run_events_run",
+        "table": "game_run_events",
+        "sql": "CREATE INDEX idx_game_run_events_run ON game_run_events(game_run_id,observed_at,event_type)"
+      },
+      {
+        "name": "idx_game_run_sessions_stream",
+        "table": "game_run_sessions",
+        "sql": "CREATE INDEX idx_game_run_sessions_stream ON game_run_sessions(stream_session_id,game_run_id)"
+      },
+      {
+        "name": "idx_game_runs_resolution",
+        "table": "game_runs",
+        "sql": "CREATE INDEX idx_game_runs_resolution ON game_runs(game_id,owner_id,status,last_active_at)"
+      },
+      {
+        "name": "idx_game_sessions_game_key",
+        "table": "game_sessions",
+        "sql": "CREATE INDEX idx_game_sessions_game_key ON game_sessions(game_key, stream_date, updated_at)"
+      },
+      {
+        "name": "idx_game_v2_gaps_status",
+        "table": "game_knowledge_v2_gaps",
+        "sql": "CREATE INDEX idx_game_v2_gaps_status ON game_knowledge_v2_gaps(game_id,status,updated_at)"
+      },
+      {
+        "name": "idx_live_summaries_session",
+        "table": "live_session_rolling_summaries",
+        "sql": "CREATE INDEX idx_live_summaries_session ON live_session_rolling_summaries(session_id, created_at)"
+      },
+      {
+        "name": "idx_live_timeline_session_ts",
+        "table": "live_session_timeline",
+        "sql": "CREATE INDEX idx_live_timeline_session_ts ON live_session_timeline(session_id, event_ts)"
+      },
+      {
+        "name": "idx_live_timeline_topic",
+        "table": "live_session_timeline",
+        "sql": "CREATE INDEX idx_live_timeline_topic ON live_session_timeline(topic)"
+      },
+      {
+        "name": "idx_live_timeline_type",
+        "table": "live_session_timeline",
+        "sql": "CREATE INDEX idx_live_timeline_type ON live_session_timeline(event_type)"
+      },
+      {
+        "name": "idx_memory_facts_kind_active",
+        "table": "memory_facts",
+        "sql": "CREATE INDEX idx_memory_facts_kind_active ON memory_facts(kind, active)"
+      },
+      {
+        "name": "idx_memory_facts_subject",
+        "table": "memory_facts",
+        "sql": "CREATE INDEX idx_memory_facts_subject ON memory_facts(subject)"
+      },
+      {
+        "name": "idx_open_threads_scope_status",
+        "table": "open_threads",
+        "sql": "CREATE INDEX idx_open_threads_scope_status\n                ON open_threads(scope_kind, scope_id, status)"
+      },
+      {
+        "name": "idx_open_threads_status_validity",
+        "table": "open_threads",
+        "sql": "CREATE INDEX idx_open_threads_status_validity\n                ON open_threads(status, relevance_until, valid_until)"
+      },
+      {
+        "name": "idx_open_threads_subject",
+        "table": "open_threads",
+        "sql": "CREATE INDEX idx_open_threads_subject\n                ON open_threads(subject_ref, status)"
+      },
+      {
+        "name": "idx_promotion_profile_login",
+        "table": "viewer_promotion_profiles",
+        "sql": "CREATE INDEX idx_promotion_profile_login\n            ON viewer_promotion_profiles(current_login)"
+      },
+      {
+        "name": "idx_promotion_session_login",
+        "table": "promotion_events",
+        "sql": "CREATE INDEX idx_promotion_session_login\n            ON promotion_events(stream_session_id, resolved_login, execution_status)"
+      },
+      {
+        "name": "idx_promotion_source_event",
+        "table": "promotion_events",
+        "sql": "CREATE UNIQUE INDEX idx_promotion_source_event\n            ON promotion_events(stream_session_id, source_event_id, trigger_type)"
+      },
+      {
+        "name": "idx_reminders_status_due_at",
+        "table": "reminders",
+        "sql": "CREATE INDEX idx_reminders_status_due_at ON reminders(status, due_at)"
+      },
+      {
+        "name": "idx_schedule_hypothesis_current",
+        "table": "schedule_hypotheses",
+        "sql": "CREATE INDEX idx_schedule_hypothesis_current\n            ON schedule_hypotheses(weekday, status, confidence)"
+      },
+      {
+        "name": "idx_schedule_observation_pattern",
+        "table": "schedule_observations",
+        "sql": "CREATE INDEX idx_schedule_observation_pattern\n            ON schedule_observations(weekday, time_window, content_key, stream_format, observed_at)"
+      },
+      {
+        "name": "idx_stream_chat_messages_observed_at",
+        "table": "stream_chat_messages",
+        "sql": "CREATE INDEX idx_stream_chat_messages_observed_at ON stream_chat_messages(observed_at)"
+      },
+      {
+        "name": "idx_stream_chat_messages_session",
+        "table": "stream_chat_messages",
+        "sql": "CREATE INDEX idx_stream_chat_messages_session ON stream_chat_messages(stream_session_id)"
+      },
+      {
+        "name": "idx_stream_chat_messages_session_username",
+        "table": "stream_chat_messages",
+        "sql": "CREATE INDEX idx_stream_chat_messages_session_username ON stream_chat_messages(stream_session_id, username)"
+      },
+      {
+        "name": "idx_stream_chat_messages_username",
+        "table": "stream_chat_messages",
+        "sql": "CREATE INDEX idx_stream_chat_messages_username ON stream_chat_messages(username)"
+      },
+      {
+        "name": "idx_stream_chat_messages_username_observed_at",
+        "table": "stream_chat_messages",
+        "sql": "CREATE INDEX idx_stream_chat_messages_username_observed_at ON stream_chat_messages(username, observed_at)"
+      },
+      {
+        "name": "idx_stream_events_dedupe",
+        "table": "stream_events",
+        "sql": "CREATE INDEX idx_stream_events_dedupe ON stream_events(stream_session_id, event_type, dedupe_key)"
+      },
+      {
+        "name": "idx_stream_events_session",
+        "table": "stream_events",
+        "sql": "CREATE INDEX idx_stream_events_session ON stream_events(stream_session_id)"
+      },
+      {
+        "name": "idx_stream_events_ts",
+        "table": "stream_events",
+        "sql": "CREATE INDEX idx_stream_events_ts ON stream_events(event_ts)"
+      },
+      {
+        "name": "idx_stream_events_type",
+        "table": "stream_events",
+        "sql": "CREATE INDEX idx_stream_events_type ON stream_events(event_type)"
+      },
+      {
+        "name": "idx_stream_schedule_weekday",
+        "table": "stream_schedule",
+        "sql": "CREATE INDEX idx_stream_schedule_weekday ON stream_schedule(weekday, enabled)"
+      },
+      {
+        "name": "idx_stream_sessions_game_category",
+        "table": "stream_sessions",
+        "sql": "CREATE INDEX idx_stream_sessions_game_category ON stream_sessions(game, category)"
+      },
+      {
+        "name": "idx_stream_sessions_real_status",
+        "table": "stream_sessions",
+        "sql": "CREATE INDEX idx_stream_sessions_real_status ON stream_sessions(is_real_stream, status)"
+      },
+      {
+        "name": "idx_stream_sessions_started_at",
+        "table": "stream_sessions",
+        "sql": "CREATE INDEX idx_stream_sessions_started_at ON stream_sessions(started_at)"
+      },
+      {
+        "name": "idx_stream_sessions_status",
+        "table": "stream_sessions",
+        "sql": "CREATE INDEX idx_stream_sessions_status ON stream_sessions(status)"
+      },
+      {
+        "name": "idx_stream_summaries_created_at",
+        "table": "stream_summaries",
+        "sql": "CREATE INDEX idx_stream_summaries_created_at ON stream_summaries(created_at)"
+      },
+      {
+        "name": "idx_stream_summaries_session",
+        "table": "stream_summaries",
+        "sql": "CREATE INDEX idx_stream_summaries_session ON stream_summaries(stream_session_id)"
+      },
+      {
+        "name": "idx_viewer_linguistic_login",
+        "table": "viewer_linguistic_profiles",
+        "sql": "CREATE INDEX idx_viewer_linguistic_login ON viewer_linguistic_profiles(login)"
+      }
+    ]
+  },
+  "schema_after": {
+    "table_count": 60,
+    "index_count": 74,
+    "total_rows": 57704,
+    "tables": [
+      {
+        "name": "action_ledger",
+        "columns": [
+          "id",
+          "action_type",
+          "target",
+          "status",
+          "source_store",
+          "source_record_id",
+          "requested_at",
+          "completed_at",
+          "evidence_json",
+          "schema_version"
+        ],
+        "row_count": 0
+      },
+      {
+        "name": "app_commands",
+        "columns": [
+          "id",
+          "name",
+          "command",
+          "description",
+          "aliases",
+          "enabled",
+          "usage_count",
+          "last_used_at",
+          "process_name",
+          "window_title"
+        ],
+        "row_count": 7
+      },
+      {
+        "name": "app_settings",
+        "columns": [
+          "key",
+          "value",
+          "updated_at"
+        ],
+        "row_count": 6
+      },
+      {
+        "name": "belief_evidence",
+        "columns": [
+          "id",
+          "belief_id",
+          "source_event_id",
+          "source_record_type",
+          "source_record_id",
+          "relation",
+          "weight",
+          "observed_at",
+          "extractor",
+          "extractor_version",
+          "literal_span_json",
+          "subject_key"
+        ],
+        "row_count": 0
+      },
+      {
+        "name": "beliefs",
+        "columns": [
+          "id",
+          "namespace",
+          "scope_kind",
+          "scope_id",
+          "subject_ref",
+          "predicate",
+          "object_json",
+          "epistemic_status",
+          "confidence",
+          "authority_class",
+          "created_at",
+          "last_confirmed_at",
+          "valid_from",
+          "valid_until",
+          "relevance_until",
+          "superseded_by",
+          "owner_confirmed",
+          "sensitivity",
+          "schema_version",
+          "retention_policy",
+          "version"
+        ],
+        "row_count": 0
+      },
+      {
+        "name": "chat_log",
+        "columns": [
+          "id",
+          "timestamp",
+          "role",
+          "source",
+          "text"
+        ],
+        "row_count": 1976
+      },
+      {
+        "name": "chatter_facts",
+        "columns": [
+          "id",
+          "username",
+          "fact_text",
+          "fact_type",
+          "confidence",
+          "source_message_id",
+          "source_stream_session_id",
+          "evidence_count",
+          "first_observed_at",
+          "last_confirmed_at",
+          "expires_at",
+          "public_reference_allowed",
+          "created_at",
+          "updated_at"
+        ],
+        "row_count": 0
+      },
+      {
+        "name": "chatter_presence",
+        "columns": [
+          "id",
+          "stream_session_id",
+          "username",
+          "display_name",
+          "first_seen_at",
+          "last_seen_at",
+          "first_message_at",
+          "last_message_at",
+          "first_direct_interaction_at",
+          "last_direct_interaction_at",
+          "message_count",
+          "direct_interaction_count",
+          "was_present",
+          "was_active_chatter",
+          "was_passive_viewer",
+          "was_raider",
+          "was_new_chatter",
+          "was_returning_after_absence",
+          "presence_source_json",
+          "created_at",
+          "updated_at"
+        ],
+        "row_count": 221
+      },
+      {
+        "name": "chatter_profiles",
+        "columns": [
+          "username",
+          "display_name",
+          "aliases_json",
+          "first_seen_at",
+          "last_seen_at",
+          "last_message_at",
+          "last_direct_interaction_at",
+          "last_lurk_seen_at",
+          "last_raid_at",
+          "last_follow_at",
+          "last_sub_at",
+          "streams_seen_count",
+          "streams_chatted_count",
+          "total_messages",
+          "total_direct_interactions",
+          "total_lurk_sessions",
+          "viewer_status",
+          "preferred_language",
+          "relationship_level",
+          "notes_summary",
+          "updated_at"
+        ],
+        "row_count": 36
+      },
+      {
+        "name": "cognitive_cutover_state",
+        "columns": [
+          "concern",
+          "canonical_owner",
+          "legacy_mode",
+          "compatibility_write_enabled",
+          "decided_at",
+          "reason",
+          "schema_version"
+        ],
+        "row_count": 0
+      },
+      {
+        "name": "cognitive_hygiene_runs",
+        "columns": [
+          "run_id",
+          "db_fingerprint_before",
+          "mode",
+          "started_at",
+          "completed_at",
+          "classification_counts_json",
+          "destructive_changes",
+          "schema_version"
+        ],
+        "row_count": 1
+      },
+      {
+        "name": "cognitive_migration_audit",
+        "columns": [
+          "id",
+          "run_id",
+          "operation",
+          "source_store",
+          "source_record_id",
+          "target_store",
+          "target_record_id",
+          "classification",
+          "reason",
+          "provenance_json",
+          "applied_at",
+          "schema_version"
+        ],
+        "row_count": 0
+      },
+      {
+        "name": "cognitive_replay_metadata",
+        "columns": [
+          "scenario_id",
+          "schema_version",
+          "seed",
+          "last_run_at"
+        ],
+        "row_count": 0
+      },
+      {
+        "name": "consolidation_deltas",
+        "columns": [
+          "id",
+          "consolidation_run_id",
+          "domain",
+          "delta_type",
+          "payload_json",
+          "evidence_ids_json",
+          "validator_result",
+          "committed_object_ref",
+          "idempotency_key",
+          "rejection_reason",
+          "created_at"
+        ],
+        "row_count": 0
+      },
+      {
+        "name": "consolidation_runs",
+        "columns": [
+          "id",
+          "session_id",
+          "input_start_event",
+          "input_end_event",
+          "pre_state_version",
+          "consolidator_version",
+          "status",
+          "started_at",
+          "completed_at",
+          "idempotency_key"
+        ],
+        "row_count": 0
+      },
+      {
+        "name": "conversations",
+        "columns": [
+          "id",
+          "context_kind",
+          "context_id",
+          "participants_json",
+          "attention_state",
+          "turn_owner",
+          "expected_reply_type",
+          "expected_reply_json",
+          "topic",
+          "origin_event_id",
+          "last_event_id",
+          "opened_at",
+          "last_turn_at",
+          "expires_at",
+          "status",
+          "closure_reason",
+          "version",
+          "domain_payload_json",
+          "consumed_event_ids_json"
+        ],
+        "row_count": 0
+      },
+      {
+        "name": "game_dossiers",
+        "columns": [
+          "game_id",
+          "canonical_title",
+          "dossier_json",
+          "dossier_version",
+          "created_at",
+          "updated_at",
+          "v2_projection_version"
+        ],
+        "row_count": 1
+      },
+      {
+        "name": "game_identities",
+        "columns": [
+          "game_id",
+          "canonical_name",
+          "aliases_json",
+          "platform_ids_json",
+          "series",
+          "schema_version"
+        ],
+        "row_count": 0
+      },
+      {
+        "name": "game_knowledge_facts",
+        "columns": [
+          "id",
+          "game_id",
+          "belief_id",
+          "source_type",
+          "source_quality",
+          "spoiler_class",
+          "dossier_link",
+          "version_tag",
+          "created_at",
+          "schema_version"
+        ],
+        "row_count": 0
+      },
+      {
+        "name": "game_knowledge_gaps",
+        "columns": [
+          "game_id",
+          "term",
+          "gap_json",
+          "updated_at"
+        ],
+        "row_count": 0
+      },
+      {
+        "name": "game_knowledge_v2_gaps",
+        "columns": [
+          "id",
+          "game_id",
+          "run_id",
+          "subject_ref",
+          "question_type",
+          "query_intent",
+          "spoiler_ceiling",
+          "required_confidence",
+          "created_from_event_id",
+          "normalized_gap_key",
+          "status",
+          "created_at",
+          "updated_at",
+          "resolved_fact_ids_json",
+          "schema_version"
+        ],
+        "row_count": 0
+      },
+      {
+        "name": "game_progress_states",
+        "columns": [
+          "game_id",
+          "stream_session_id",
+          "state_json",
+          "updated_at",
+          "game_run_id"
+        ],
+        "row_count": 12
+      },
+      {
+        "name": "game_research_cache",
+        "columns": [
+          "cache_key",
+          "game_id",
+          "query",
+          "sources_json",
+          "facts_json",
+          "spoiler_classification_json",
+          "created_at",
+          "expires_at"
+        ],
+        "row_count": 2
+      },
+      {
+        "name": "game_run_events",
+        "columns": [
+          "id",
+          "game_run_id",
+          "event_type",
+          "subject_ref",
+          "predicate",
+          "object_json",
+          "evidence_event_id",
+          "belief_id",
+          "observed_at",
+          "epistemic_status",
+          "schema_version"
+        ],
+        "row_count": 0
+      },
+      {
+        "name": "game_run_sessions",
+        "columns": [
+          "id",
+          "game_run_id",
+          "stream_session_id",
+          "started_at",
+          "ended_at",
+          "evidence_event_id",
+          "source",
+          "schema_version"
+        ],
+        "row_count": 0
+      },
+      {
+        "name": "game_runs",
+        "columns": [
+          "id",
+          "game_id",
+          "owner_id",
+          "run_kind",
+          "rules_json",
+          "status",
+          "started_at",
+          "last_active_at",
+          "ended_at",
+          "current_checkpoint_version",
+          "created_from_event_id",
+          "schema_version"
+        ],
+        "row_count": 0
+      },
+      {
+        "name": "game_sessions",
+        "columns": [
+          "id",
+          "game",
+          "game_key",
+          "stream_date",
+          "title",
+          "started_at",
+          "ended_at",
+          "start_summary",
+          "end_summary",
+          "current_location",
+          "current_objective",
+          "important_events_json",
+          "unresolved_threads_json",
+          "next_time_plan",
+          "spoiler_policy",
+          "source",
+          "created_at",
+          "updated_at",
+          "game_run_id"
+        ],
+        "row_count": 0
+      },
+      {
+        "name": "internal_events_log",
+        "columns": [
+          "id",
+          "event_type",
+          "payload_json",
+          "created_at"
+        ],
+        "row_count": 201
+      },
+      {
+        "name": "learned_apps",
+        "columns": [
+          "id",
+          "app_id",
+          "canonical_name",
+          "aliases",
+          "executable_path",
+          "launch_arguments",
+          "source",
+          "confidence",
+          "validated_at",
+          "learned_at",
+          "last_successful_launch",
+          "last_failed_launch",
+          "validation_version",
+          "process_name",
+          "window_title",
+          "updated_at"
+        ],
+        "row_count": 0
+      },
+      {
+        "name": "learning_observations",
+        "columns": [
+          "id",
+          "model",
+          "subject",
+          "value",
+          "event_id",
+          "observed_at",
+          "explicit"
+        ],
+        "row_count": 0
+      },
+      {
+        "name": "live_session_rolling_summaries",
+        "columns": [
+          "id",
+          "session_id",
+          "stream_session_id",
+          "summary_text",
+          "event_count",
+          "created_at",
+          "tags_json"
+        ],
+        "row_count": 4068
+      },
+      {
+        "name": "live_session_spontaneity_anchors",
+        "columns": [
+          "anchor_id",
+          "session_id",
+          "anchor_type",
+          "source_event_ids_json",
+          "topic",
+          "category",
+          "payload_json",
+          "created_at",
+          "consumed_at",
+          "invalidated_at",
+          "cooldown_key"
+        ],
+        "row_count": 34
+      },
+      {
+        "name": "live_session_state",
+        "columns": [
+          "session_id",
+          "stream_session_id",
+          "stream_status",
+          "current_game",
+          "current_category",
+          "current_title",
+          "language_mode",
+          "spoiler_policy",
+          "state_json",
+          "created_at",
+          "updated_at"
+        ],
+        "row_count": 3375
+      },
+      {
+        "name": "live_session_timeline",
+        "columns": [
+          "id",
+          "session_id",
+          "stream_session_id",
+          "event_uid",
+          "event_type",
+          "event_ts",
+          "source",
+          "raw_text",
+          "normalized_text",
+          "speaker",
+          "target",
+          "topic",
+          "category",
+          "confidence",
+          "provenance",
+          "related_event_id",
+          "output_target",
+          "index_for_rag",
+          "payload_json",
+          "created_at",
+          "context_kind",
+          "source_record_type",
+          "source_record_id",
+          "authority",
+          "literal_evidence_json",
+          "valid_from",
+          "valid_until",
+          "supersedes_event_uid",
+          "schema_version"
+        ],
+        "row_count": 41646
+      },
+      {
+        "name": "memories",
+        "columns": [
+          "id",
+          "key",
+          "text",
+          "category",
+          "importance",
+          "created_at",
+          "last_used_at",
+          "active"
+        ],
+        "row_count": 0
+      },
+      {
+        "name": "memory_chunks",
+        "columns": [
+          "id",
+          "text",
+          "kind",
+          "subject",
+          "source_session",
+          "embedding",
+          "embedding_model",
+          "embedding_dim",
+          "importance",
+          "access_count",
+          "last_accessed_at",
+          "created_at",
+          "tags",
+          "active",
+          "belief_id",
+          "episode_id"
+        ],
+        "row_count": 230
+      },
+      {
+        "name": "memory_facts",
+        "columns": [
+          "id",
+          "kind",
+          "subject",
+          "payload_json",
+          "source_text",
+          "confidence",
+          "created_at",
+          "updated_at",
+          "last_used_at",
+          "active",
+          "belief_id",
+          "epistemic_status"
+        ],
+        "row_count": 0
+      },
+      {
+        "name": "open_threads",
+        "columns": [
+          "id",
+          "thread_type",
+          "scope_kind",
+          "scope_id",
+          "participant_ids_json",
+          "subject_ref",
+          "summary",
+          "origin_event_id",
+          "latest_event_id",
+          "status",
+          "priority",
+          "created_at",
+          "relevance_until",
+          "valid_until",
+          "resolved_at",
+          "resolution_event_id",
+          "sensitivity",
+          "version"
+        ],
+        "row_count": 0
+      },
+      {
+        "name": "people",
+        "columns": [
+          "person_id",
+          "created_at",
+          "last_seen_at",
+          "scope",
+          "schema_version"
+        ],
+        "row_count": 0
+      },
+      {
+        "name": "person_identities",
+        "columns": [
+          "id",
+          "person_id",
+          "platform",
+          "platform_user_id",
+          "login",
+          "display_name",
+          "aliases_json",
+          "first_seen_at",
+          "last_seen_at",
+          "confidence",
+          "source",
+          "schema_version"
+        ],
+        "row_count": 0
+      },
+      {
+        "name": "person_sessions",
+        "columns": [
+          "person_id",
+          "stream_session_id",
+          "first_seen_at",
+          "last_seen_at"
+        ],
+        "row_count": 0
+      },
+      {
+        "name": "promotion_events",
+        "columns": [
+          "id",
+          "stream_session_id",
+          "source_event_id",
+          "requested_by",
+          "raw_target_text",
+          "resolved_twitch_user_id",
+          "resolved_login",
+          "resolution_confidence",
+          "trigger_type",
+          "execution_status",
+          "twitch_message_id",
+          "created_at",
+          "executed_at",
+          "failure_reason"
+        ],
+        "row_count": 8
+      },
+      {
+        "name": "reminders",
+        "columns": [
+          "id",
+          "kind",
+          "title",
+          "message",
+          "due_at",
+          "timezone",
+          "status",
+          "source_memory_id",
+          "payload_json",
+          "created_at",
+          "fired_at"
+        ],
+        "row_count": 0
+      },
+      {
+        "name": "scene_assertions",
+        "columns": [
+          "id",
+          "subject_ref",
+          "predicate",
+          "object_json",
+          "epistemic_status",
+          "confidence",
+          "evidence_ids_json",
+          "referent_data_json",
+          "observed_at",
+          "valid_from",
+          "valid_until",
+          "provenance",
+          "extractor",
+          "extractor_version",
+          "schema_version"
+        ],
+        "row_count": 0
+      },
+      {
+        "name": "scene_transitions",
+        "columns": [
+          "id",
+          "source_event_id",
+          "transition_type",
+          "destination_ref",
+          "payload_json",
+          "created_at"
+        ],
+        "row_count": 0
+      },
+      {
+        "name": "schedule_hypotheses",
+        "columns": [
+          "id",
+          "weekday",
+          "time_window",
+          "canonical_content",
+          "content_key",
+          "stream_format",
+          "source",
+          "confidence",
+          "evidence_count",
+          "consecutive_matches",
+          "consecutive_misses",
+          "first_observed_at",
+          "last_observed_at",
+          "status",
+          "superseded_by"
+        ],
+        "row_count": 7
+      },
+      {
+        "name": "schedule_observations",
+        "columns": [
+          "id",
+          "stream_session_id",
+          "weekday",
+          "time_window",
+          "canonical_content",
+          "content_key",
+          "stream_format",
+          "source",
+          "observed_at"
+        ],
+        "row_count": 2
+      },
+      {
+        "name": "schema_migrations",
+        "columns": [
+          "component",
+          "version",
+          "name",
+          "checksum",
+          "applied_at"
+        ],
+        "row_count": 7
+      },
+      {
+        "name": "shared_culture_evidence",
+        "columns": [
+          "id",
+          "culture_item_id",
+          "event_id",
+          "episode_id",
+          "reaction",
+          "polarity",
+          "weight",
+          "observed_at",
+          "authority"
+        ],
+        "row_count": 0
+      },
+      {
+        "name": "shared_culture_items",
+        "columns": [
+          "id",
+          "label",
+          "meaning",
+          "origin_episode_id",
+          "participant_ids_json",
+          "scope",
+          "tone",
+          "status",
+          "confidence",
+          "created_at",
+          "last_reinforced_at",
+          "last_used_at",
+          "reuse_count",
+          "cooldown_until",
+          "schema_version"
+        ],
+        "row_count": 0
+      },
+      {
+        "name": "social_episodes",
+        "columns": [
+          "id",
+          "episode_type",
+          "participant_ids_json",
+          "origin_event_id",
+          "related_event_ids_json",
+          "summary",
+          "tone_observations_json",
+          "created_at",
+          "relevance_until",
+          "retention_until",
+          "sensitivity",
+          "retention_class",
+          "retrieval_scope",
+          "salience_reason",
+          "schema_version"
+        ],
+        "row_count": 0
+      },
+      {
+        "name": "stream_chat_messages",
+        "columns": [
+          "id",
+          "stream_session_id",
+          "twitch_message_id",
+          "username",
+          "display_name",
+          "message_text",
+          "observed_at",
+          "is_mention_to_hebe",
+          "is_direct_reply_to_hebe",
+          "is_bot",
+          "is_mod",
+          "is_vip",
+          "is_subscriber",
+          "badges_json",
+          "source",
+          "replied_by_hebe",
+          "hebe_reply_message_id",
+          "topic_hint",
+          "language_hint",
+          "created_at"
+        ],
+        "row_count": 5512
+      },
+      {
+        "name": "stream_chatter_summaries",
+        "columns": [
+          "id",
+          "stream_session_id",
+          "username",
+          "display_name",
+          "message_count",
+          "direct_interaction_count",
+          "summary_text",
+          "topics_json",
+          "notable_quotes_json",
+          "mood_tone",
+          "inferred_facts_json",
+          "created_at"
+        ],
+        "row_count": 180
+      },
+      {
+        "name": "stream_events",
+        "columns": [
+          "id",
+          "stream_session_id",
+          "event_type",
+          "event_ts",
+          "payload_json",
+          "dedupe_key",
+          "created_at"
+        ],
+        "row_count": 63
+      },
+      {
+        "name": "stream_schedule",
+        "columns": [
+          "id",
+          "weekday",
+          "slot_name",
+          "game",
+          "category",
+          "playthrough_type",
+          "tags_json",
+          "title_style",
+          "enabled",
+          "updated_at"
+        ],
+        "row_count": 7
+      },
+      {
+        "name": "stream_sessions",
+        "columns": [
+          "id",
+          "twitch_stream_id",
+          "title",
+          "category",
+          "game",
+          "started_at",
+          "ended_at",
+          "duration_seconds",
+          "playthrough_type",
+          "challenge",
+          "language_mode",
+          "spoiler_policy",
+          "status",
+          "source",
+          "is_real_stream",
+          "created_at",
+          "updated_at"
+        ],
+        "row_count": 55
+      },
+      {
+        "name": "stream_summaries",
+        "columns": [
+          "id",
+          "stream_session_id",
+          "summary_text",
+          "key_events_json",
+          "game_progress_json",
+          "chat_topics_json",
+          "chatter_highlights_json",
+          "raids_json",
+          "shoutouts_json",
+          "next_stream_context",
+          "metadata_json",
+          "created_at"
+        ],
+        "row_count": 44
+      },
+      {
+        "name": "temporal_maintenance_audit",
+        "columns": [
+          "id",
+          "object_ref",
+          "object_type",
+          "old_status",
+          "new_status",
+          "reason",
+          "changed_at",
+          "policy_version"
+        ],
+        "row_count": 0
+      },
+      {
+        "name": "viewer_linguistic_profiles",
+        "columns": [
+          "twitch_user_id",
+          "login",
+          "display_name",
+          "preferred_grammatical_gender",
+          "pronouns_json",
+          "preferred_address_terms_json",
+          "confidence",
+          "source_type",
+          "source_event_id",
+          "evidence_summary",
+          "created_at",
+          "updated_at",
+          "confirmed_at",
+          "expires_at",
+          "owner_locked",
+          "user_locked",
+          "conflict"
+        ],
+        "row_count": 0
+      },
+      {
+        "name": "viewer_promotion_profiles",
+        "columns": [
+          "twitch_user_id",
+          "current_login",
+          "display_name",
+          "known_aliases_json",
+          "auto_promo_mode",
+          "created_by",
+          "created_at",
+          "updated_at",
+          "last_promoted_at",
+          "last_promoted_stream_id",
+          "cooldown_hours",
+          "owner_locked",
+          "active"
+        ],
+        "row_count": 3
+      }
+    ],
+    "indexes": [
+      {
+        "name": "idx_action_ledger_claim",
+        "table": "action_ledger",
+        "sql": "CREATE INDEX idx_action_ledger_claim ON action_ledger(action_type,target,requested_at,status)"
+      },
+      {
+        "name": "idx_belief_evidence_belief",
+        "table": "belief_evidence",
+        "sql": "CREATE INDEX idx_belief_evidence_belief ON belief_evidence(belief_id,observed_at)"
+      },
+      {
+        "name": "idx_belief_evidence_idempotency",
+        "table": "belief_evidence",
+        "sql": "CREATE UNIQUE INDEX idx_belief_evidence_idempotency ON belief_evidence(source_event_id,relation,subject_key)"
+      },
+      {
+        "name": "idx_belief_evidence_source",
+        "table": "belief_evidence",
+        "sql": "CREATE INDEX idx_belief_evidence_source ON belief_evidence(source_record_type,source_record_id)"
+      },
+      {
+        "name": "idx_beliefs_identity_active",
+        "table": "beliefs",
+        "sql": "CREATE INDEX idx_beliefs_identity_active ON beliefs(namespace,scope_kind,scope_id,subject_ref,predicate,epistemic_status)"
+      },
+      {
+        "name": "idx_beliefs_scope_sensitivity",
+        "table": "beliefs",
+        "sql": "CREATE INDEX idx_beliefs_scope_sensitivity ON beliefs(scope_kind,scope_id,sensitivity)"
+      },
+      {
+        "name": "idx_beliefs_validity",
+        "table": "beliefs",
+        "sql": "CREATE INDEX idx_beliefs_validity ON beliefs(epistemic_status,valid_until,relevance_until)"
+      },
+      {
+        "name": "idx_chatter_facts_confidence",
+        "table": "chatter_facts",
+        "sql": "CREATE INDEX idx_chatter_facts_confidence ON chatter_facts(confidence)"
+      },
+      {
+        "name": "idx_chatter_facts_last_confirmed",
+        "table": "chatter_facts",
+        "sql": "CREATE INDEX idx_chatter_facts_last_confirmed ON chatter_facts(last_confirmed_at)"
+      },
+      {
+        "name": "idx_chatter_facts_type",
+        "table": "chatter_facts",
+        "sql": "CREATE INDEX idx_chatter_facts_type ON chatter_facts(fact_type)"
+      },
+      {
+        "name": "idx_chatter_facts_username",
+        "table": "chatter_facts",
+        "sql": "CREATE INDEX idx_chatter_facts_username ON chatter_facts(username)"
+      },
+      {
+        "name": "idx_chatter_presence_last_message",
+        "table": "chatter_presence",
+        "sql": "CREATE INDEX idx_chatter_presence_last_message ON chatter_presence(last_message_at)"
+      },
+      {
+        "name": "idx_chatter_presence_last_seen",
+        "table": "chatter_presence",
+        "sql": "CREATE INDEX idx_chatter_presence_last_seen ON chatter_presence(last_seen_at)"
+      },
+      {
+        "name": "idx_chatter_presence_session",
+        "table": "chatter_presence",
+        "sql": "CREATE INDEX idx_chatter_presence_session ON chatter_presence(stream_session_id)"
+      },
+      {
+        "name": "idx_chatter_presence_session_username",
+        "table": "chatter_presence",
+        "sql": "CREATE UNIQUE INDEX idx_chatter_presence_session_username ON chatter_presence(stream_session_id, username)"
+      },
+      {
+        "name": "idx_chatter_presence_username",
+        "table": "chatter_presence",
+        "sql": "CREATE INDEX idx_chatter_presence_username ON chatter_presence(username)"
+      },
+      {
+        "name": "idx_chatter_profiles_last_message",
+        "table": "chatter_profiles",
+        "sql": "CREATE INDEX idx_chatter_profiles_last_message ON chatter_profiles(last_message_at)"
+      },
+      {
+        "name": "idx_chatter_profiles_last_seen",
+        "table": "chatter_profiles",
+        "sql": "CREATE INDEX idx_chatter_profiles_last_seen ON chatter_profiles(last_seen_at)"
+      },
+      {
+        "name": "idx_chatter_profiles_status",
+        "table": "chatter_profiles",
+        "sql": "CREATE INDEX idx_chatter_profiles_status ON chatter_profiles(viewer_status)"
+      },
+      {
+        "name": "idx_chunks_kind_active",
+        "table": "memory_chunks",
+        "sql": "CREATE INDEX idx_chunks_kind_active ON memory_chunks(kind, active)"
+      },
+      {
+        "name": "idx_chunks_session",
+        "table": "memory_chunks",
+        "sql": "CREATE INDEX idx_chunks_session ON memory_chunks(source_session)"
+      },
+      {
+        "name": "idx_chunks_subject",
+        "table": "memory_chunks",
+        "sql": "CREATE INDEX idx_chunks_subject ON memory_chunks(subject)"
+      },
+      {
+        "name": "idx_cognitive_migration_source",
+        "table": "cognitive_migration_audit",
+        "sql": "CREATE INDEX idx_cognitive_migration_source\n              ON cognitive_migration_audit(source_store,source_record_id,classification)"
+      },
+      {
+        "name": "idx_consolidation_delta_run",
+        "table": "consolidation_deltas",
+        "sql": "CREATE INDEX idx_consolidation_delta_run ON consolidation_deltas(consolidation_run_id,validator_result)"
+      },
+      {
+        "name": "idx_consolidation_session",
+        "table": "consolidation_runs",
+        "sql": "CREATE INDEX idx_consolidation_session ON consolidation_runs(session_id,input_end_event,status)"
+      },
+      {
+        "name": "idx_conversations_context_status",
+        "table": "conversations",
+        "sql": "CREATE INDEX idx_conversations_context_status\n                ON conversations(context_kind, context_id, status)"
+      },
+      {
+        "name": "idx_conversations_status_expiry",
+        "table": "conversations",
+        "sql": "CREATE INDEX idx_conversations_status_expiry\n                ON conversations(status, expires_at)"
+      },
+      {
+        "name": "idx_culture_evidence_item",
+        "table": "shared_culture_evidence",
+        "sql": "CREATE INDEX idx_culture_evidence_item ON shared_culture_evidence(culture_item_id,observed_at)"
+      },
+      {
+        "name": "idx_game_cache_game",
+        "table": "game_research_cache",
+        "sql": "CREATE INDEX idx_game_cache_game ON game_research_cache(game_id)"
+      },
+      {
+        "name": "idx_game_gap_status",
+        "table": "game_knowledge_gaps",
+        "sql": "CREATE INDEX idx_game_gap_status ON game_knowledge_gaps(game_id, updated_at)"
+      },
+      {
+        "name": "idx_game_knowledge_lookup",
+        "table": "game_knowledge_facts",
+        "sql": "CREATE INDEX idx_game_knowledge_lookup ON game_knowledge_facts(game_id,spoiler_class,created_at)"
+      },
+      {
+        "name": "idx_game_run_events_run",
+        "table": "game_run_events",
+        "sql": "CREATE INDEX idx_game_run_events_run ON game_run_events(game_run_id,observed_at,event_type)"
+      },
+      {
+        "name": "idx_game_run_sessions_stream",
+        "table": "game_run_sessions",
+        "sql": "CREATE INDEX idx_game_run_sessions_stream ON game_run_sessions(stream_session_id,game_run_id)"
+      },
+      {
+        "name": "idx_game_runs_resolution",
+        "table": "game_runs",
+        "sql": "CREATE INDEX idx_game_runs_resolution ON game_runs(game_id,owner_id,status,last_active_at)"
+      },
+      {
+        "name": "idx_game_sessions_game_key",
+        "table": "game_sessions",
+        "sql": "CREATE INDEX idx_game_sessions_game_key ON game_sessions(game_key, stream_date, updated_at)"
+      },
+      {
+        "name": "idx_game_v2_gaps_status",
+        "table": "game_knowledge_v2_gaps",
+        "sql": "CREATE INDEX idx_game_v2_gaps_status ON game_knowledge_v2_gaps(game_id,status,updated_at)"
+      },
+      {
+        "name": "idx_learning_observation_pattern",
+        "table": "learning_observations",
+        "sql": "CREATE INDEX idx_learning_observation_pattern ON learning_observations(model,subject,value,observed_at)"
+      },
+      {
+        "name": "idx_live_summaries_session",
+        "table": "live_session_rolling_summaries",
+        "sql": "CREATE INDEX idx_live_summaries_session ON live_session_rolling_summaries(session_id, created_at)"
+      },
+      {
+        "name": "idx_live_timeline_session_ts",
+        "table": "live_session_timeline",
+        "sql": "CREATE INDEX idx_live_timeline_session_ts ON live_session_timeline(session_id, event_ts)"
+      },
+      {
+        "name": "idx_live_timeline_topic",
+        "table": "live_session_timeline",
+        "sql": "CREATE INDEX idx_live_timeline_topic ON live_session_timeline(topic)"
+      },
+      {
+        "name": "idx_live_timeline_type",
+        "table": "live_session_timeline",
+        "sql": "CREATE INDEX idx_live_timeline_type ON live_session_timeline(event_type)"
+      },
+      {
+        "name": "idx_memory_facts_kind_active",
+        "table": "memory_facts",
+        "sql": "CREATE INDEX idx_memory_facts_kind_active ON memory_facts(kind, active)"
+      },
+      {
+        "name": "idx_memory_facts_subject",
+        "table": "memory_facts",
+        "sql": "CREATE INDEX idx_memory_facts_subject ON memory_facts(subject)"
+      },
+      {
+        "name": "idx_open_threads_scope_status",
+        "table": "open_threads",
+        "sql": "CREATE INDEX idx_open_threads_scope_status\n                ON open_threads(scope_kind, scope_id, status)"
+      },
+      {
+        "name": "idx_open_threads_status_validity",
+        "table": "open_threads",
+        "sql": "CREATE INDEX idx_open_threads_status_validity\n                ON open_threads(status, relevance_until, valid_until)"
+      },
+      {
+        "name": "idx_open_threads_subject",
+        "table": "open_threads",
+        "sql": "CREATE INDEX idx_open_threads_subject\n                ON open_threads(subject_ref, status)"
+      },
+      {
+        "name": "idx_person_identity_login",
+        "table": "person_identities",
+        "sql": "CREATE INDEX idx_person_identity_login ON person_identities(platform,lower(login))"
+      },
+      {
+        "name": "idx_person_identity_stable",
+        "table": "person_identities",
+        "sql": "CREATE UNIQUE INDEX idx_person_identity_stable ON person_identities(platform,platform_user_id) WHERE platform_user_id<>''"
+      },
+      {
+        "name": "idx_promotion_profile_login",
+        "table": "viewer_promotion_profiles",
+        "sql": "CREATE INDEX idx_promotion_profile_login\n            ON viewer_promotion_profiles(current_login)"
+      },
+      {
+        "name": "idx_promotion_session_login",
+        "table": "promotion_events",
+        "sql": "CREATE INDEX idx_promotion_session_login\n            ON promotion_events(stream_session_id, resolved_login, execution_status)"
+      },
+      {
+        "name": "idx_promotion_source_event",
+        "table": "promotion_events",
+        "sql": "CREATE UNIQUE INDEX idx_promotion_source_event\n            ON promotion_events(stream_session_id, source_event_id, trigger_type)"
+      },
+      {
+        "name": "idx_reminders_status_due_at",
+        "table": "reminders",
+        "sql": "CREATE INDEX idx_reminders_status_due_at ON reminders(status, due_at)"
+      },
+      {
+        "name": "idx_schedule_hypothesis_current",
+        "table": "schedule_hypotheses",
+        "sql": "CREATE INDEX idx_schedule_hypothesis_current\n            ON schedule_hypotheses(weekday, status, confidence)"
+      },
+      {
+        "name": "idx_schedule_observation_pattern",
+        "table": "schedule_observations",
+        "sql": "CREATE INDEX idx_schedule_observation_pattern\n            ON schedule_observations(weekday, time_window, content_key, stream_format, observed_at)"
+      },
+      {
+        "name": "idx_shared_culture_status",
+        "table": "shared_culture_items",
+        "sql": "CREATE INDEX idx_shared_culture_status ON shared_culture_items(status,cooldown_until,last_reinforced_at)"
+      },
+      {
+        "name": "idx_social_episode_relevance",
+        "table": "social_episodes",
+        "sql": "CREATE INDEX idx_social_episode_relevance ON social_episodes(relevance_until,retention_until,episode_type)"
+      },
+      {
+        "name": "idx_stream_chat_messages_observed_at",
+        "table": "stream_chat_messages",
+        "sql": "CREATE INDEX idx_stream_chat_messages_observed_at ON stream_chat_messages(observed_at)"
+      },
+      {
+        "name": "idx_stream_chat_messages_session",
+        "table": "stream_chat_messages",
+        "sql": "CREATE INDEX idx_stream_chat_messages_session ON stream_chat_messages(stream_session_id)"
+      },
+      {
+        "name": "idx_stream_chat_messages_session_username",
+        "table": "stream_chat_messages",
+        "sql": "CREATE INDEX idx_stream_chat_messages_session_username ON stream_chat_messages(stream_session_id, username)"
+      },
+      {
+        "name": "idx_stream_chat_messages_username",
+        "table": "stream_chat_messages",
+        "sql": "CREATE INDEX idx_stream_chat_messages_username ON stream_chat_messages(username)"
+      },
+      {
+        "name": "idx_stream_chat_messages_username_observed_at",
+        "table": "stream_chat_messages",
+        "sql": "CREATE INDEX idx_stream_chat_messages_username_observed_at ON stream_chat_messages(username, observed_at)"
+      },
+      {
+        "name": "idx_stream_events_dedupe",
+        "table": "stream_events",
+        "sql": "CREATE INDEX idx_stream_events_dedupe ON stream_events(stream_session_id, event_type, dedupe_key)"
+      },
+      {
+        "name": "idx_stream_events_session",
+        "table": "stream_events",
+        "sql": "CREATE INDEX idx_stream_events_session ON stream_events(stream_session_id)"
+      },
+      {
+        "name": "idx_stream_events_ts",
+        "table": "stream_events",
+        "sql": "CREATE INDEX idx_stream_events_ts ON stream_events(event_ts)"
+      },
+      {
+        "name": "idx_stream_events_type",
+        "table": "stream_events",
+        "sql": "CREATE INDEX idx_stream_events_type ON stream_events(event_type)"
+      },
+      {
+        "name": "idx_stream_schedule_weekday",
+        "table": "stream_schedule",
+        "sql": "CREATE INDEX idx_stream_schedule_weekday ON stream_schedule(weekday, enabled)"
+      },
+      {
+        "name": "idx_stream_sessions_game_category",
+        "table": "stream_sessions",
+        "sql": "CREATE INDEX idx_stream_sessions_game_category ON stream_sessions(game, category)"
+      },
+      {
+        "name": "idx_stream_sessions_real_status",
+        "table": "stream_sessions",
+        "sql": "CREATE INDEX idx_stream_sessions_real_status ON stream_sessions(is_real_stream, status)"
+      },
+      {
+        "name": "idx_stream_sessions_started_at",
+        "table": "stream_sessions",
+        "sql": "CREATE INDEX idx_stream_sessions_started_at ON stream_sessions(started_at)"
+      },
+      {
+        "name": "idx_stream_sessions_status",
+        "table": "stream_sessions",
+        "sql": "CREATE INDEX idx_stream_sessions_status ON stream_sessions(status)"
+      },
+      {
+        "name": "idx_stream_summaries_created_at",
+        "table": "stream_summaries",
+        "sql": "CREATE INDEX idx_stream_summaries_created_at ON stream_summaries(created_at)"
+      },
+      {
+        "name": "idx_stream_summaries_session",
+        "table": "stream_summaries",
+        "sql": "CREATE INDEX idx_stream_summaries_session ON stream_summaries(stream_session_id)"
+      },
+      {
+        "name": "idx_temporal_audit_object",
+        "table": "temporal_maintenance_audit",
+        "sql": "CREATE INDEX idx_temporal_audit_object ON temporal_maintenance_audit(object_ref,changed_at)"
+      },
+      {
+        "name": "idx_viewer_linguistic_login",
+        "table": "viewer_linguistic_profiles",
+        "sql": "CREATE INDEX idx_viewer_linguistic_login ON viewer_linguistic_profiles(login)"
+      }
+    ]
+  },
+  "migrations_first_pass": [
+    {
+      "component": "cognitive_replay",
+      "version": 1,
+      "name": "replay_metadata",
+      "checksum": "847e14d94cbcb5ad15dac895e06910750bdfd4fd44b001f5fff35688fffa5eba",
+      "applied_at": "2026-08-12T01:34:53.008022+00:00",
+      "already_applied": false
+    },
+    {
+      "component": "conversation_continuity",
+      "version": 1,
+      "name": "conversation_and_open_threads",
+      "checksum": "687d2c78577ff15489d0c45cd188f8ad9acf98bf95f40916e53bc8af0fc01e41",
+      "applied_at": "2026-08-11T08:24:19.206510+00:00",
+      "already_applied": true
+    },
+    {
+      "component": "belief_v2",
+      "version": 1,
+      "name": "beliefs_evidence_and_compatibility_columns",
+      "checksum": "f0df6f1288caccaf6bb47670b38f9cca747f14c84916d6c1ca75beb687200507",
+      "applied_at": "2026-08-11T09:21:33.848085+00:00",
+      "already_applied": true
+    },
+    {
+      "component": "game_context_v2",
+      "version": 1,
+      "name": "durable_runs_knowledge_and_gaps",
+      "checksum": "08e342acaae00d5d24c1a6dbccad5aee41f753ed90d9ec26282a5fdf042d0a75",
+      "applied_at": "2026-08-11T17:19:57.839346+00:00",
+      "already_applied": true
+    },
+    {
+      "component": "social_world_v2",
+      "version": 1,
+      "name": "people_episodes_and_shared_culture",
+      "checksum": "b02adc2cd7f298f1af228dc52c4ba44ae15999fb4c815ea004c40f68b78cbfa5",
+      "applied_at": "2026-08-12T01:34:53.074005+00:00",
+      "already_applied": false
+    },
+    {
+      "component": "learning_v2",
+      "version": 1,
+      "name": "consolidation_temporal_action_and_scene",
+      "checksum": "6a86e2d1c7c03167f3b20c328bc97b73fb92e03903f64e64d326fb08f9e3b942",
+      "applied_at": "2026-08-12T01:34:53.104320+00:00",
+      "already_applied": false
+    },
+    {
+      "component": "architecture_consolidation",
+      "version": 1,
+      "name": "audit_hygiene_and_cutover_state",
+      "checksum": "944b3ad6532151d4204ed59f663668c9b0ac62df54ece7602d26b91acddd5b7d",
+      "applied_at": "2026-08-12T01:34:53.118457+00:00",
+      "already_applied": false
+    }
+  ],
+  "migrations_second_pass": [
+    {
+      "component": "cognitive_replay",
+      "version": 1,
+      "name": "replay_metadata",
+      "checksum": "847e14d94cbcb5ad15dac895e06910750bdfd4fd44b001f5fff35688fffa5eba",
+      "applied_at": "2026-08-12T01:34:53.008022+00:00",
+      "already_applied": true
+    },
+    {
+      "component": "conversation_continuity",
+      "version": 1,
+      "name": "conversation_and_open_threads",
+      "checksum": "687d2c78577ff15489d0c45cd188f8ad9acf98bf95f40916e53bc8af0fc01e41",
+      "applied_at": "2026-08-11T08:24:19.206510+00:00",
+      "already_applied": true
+    },
+    {
+      "component": "belief_v2",
+      "version": 1,
+      "name": "beliefs_evidence_and_compatibility_columns",
+      "checksum": "f0df6f1288caccaf6bb47670b38f9cca747f14c84916d6c1ca75beb687200507",
+      "applied_at": "2026-08-11T09:21:33.848085+00:00",
+      "already_applied": true
+    },
+    {
+      "component": "game_context_v2",
+      "version": 1,
+      "name": "durable_runs_knowledge_and_gaps",
+      "checksum": "08e342acaae00d5d24c1a6dbccad5aee41f753ed90d9ec26282a5fdf042d0a75",
+      "applied_at": "2026-08-11T17:19:57.839346+00:00",
+      "already_applied": true
+    },
+    {
+      "component": "social_world_v2",
+      "version": 1,
+      "name": "people_episodes_and_shared_culture",
+      "checksum": "b02adc2cd7f298f1af228dc52c4ba44ae15999fb4c815ea004c40f68b78cbfa5",
+      "applied_at": "2026-08-12T01:34:53.074005+00:00",
+      "already_applied": true
+    },
+    {
+      "component": "learning_v2",
+      "version": 1,
+      "name": "consolidation_temporal_action_and_scene",
+      "checksum": "6a86e2d1c7c03167f3b20c328bc97b73fb92e03903f64e64d326fb08f9e3b942",
+      "applied_at": "2026-08-12T01:34:53.104320+00:00",
+      "already_applied": true
+    },
+    {
+      "component": "architecture_consolidation",
+      "version": 1,
+      "name": "audit_hygiene_and_cutover_state",
+      "checksum": "944b3ad6532151d4204ed59f663668c9b0ac62df54ece7602d26b91acddd5b7d",
+      "applied_at": "2026-08-12T01:34:53.118457+00:00",
+      "already_applied": true
+    }
+  ],
+  "all_second_pass_already_applied": true,
+  "hygiene_counts": {
+    "KEEP": 230,
+    "MIGRATE": 0,
+    "MERGE": 0,
+    "INVALIDATE": 0,
+    "ARCHIVE": 0,
+    "DELETE": 0,
+    "NEEDS_REVIEW": 7
+  },
+  "safe_apply": {
+    "schema_version": 1,
+    "planner": "phase6-hygiene-v1",
+    "mode": "safe-apply",
+    "db": "C:\\Users\\Leo Nifelheim\\Documents\\Hebe\\hebe-ui\\artifacts\\cognitive-continuity-phase6\\scratch\\copied-production.sqlite3",
+    "db_sha256": "bca06897ae3def7780ab95a21ce29e98d21e2b722fcb518d5a673541a6c5e7d7",
+    "generated_at_epoch": 1786498493.1295745,
+    "classification_counts": {
+      "KEEP": 230,
+      "MIGRATE": 0,
+      "MERGE": 0,
+      "INVALIDATE": 0,
+      "ARCHIVE": 0,
+      "DELETE": 0,
+      "NEEDS_REVIEW": 7
+    },
+    "destructive_changes": 0,
+    "records": [
+      {
+        "store": "memory_chunks",
+        "record_id": "1",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "2",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "3",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "4",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "5",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "6",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "7",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "8",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "9",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "10",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "11",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "12",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "13",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "14",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "15",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "16",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "17",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "18",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "19",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "20",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "21",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "22",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "23",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "24",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "25",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "26",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "27",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "28",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "29",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "30",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "31",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "32",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "33",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "34",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "35",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "36",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "37",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "38",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "39",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "40",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "41",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "42",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "43",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "44",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "45",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "46",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "47",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "48",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "49",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "50",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "51",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "52",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "53",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "54",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "55",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "56",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "57",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "58",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "59",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "60",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "61",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "62",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "63",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "64",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "65",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "66",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "67",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "68",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "69",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "70",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "71",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "72",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "73",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "74",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "75",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "76",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "77",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "78",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "79",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "80",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "81",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "82",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "83",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "84",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "85",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "86",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "87",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "88",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "89",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "90",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "91",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "92",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "93",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "94",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "95",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "96",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "97",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "98",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "99",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "100",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "101",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "102",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "103",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "104",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "105",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "106",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "107",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "108",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "109",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "110",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "111",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "112",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "113",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "114",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "115",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "116",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "117",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "118",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "119",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "120",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "121",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "122",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "123",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "124",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "125",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "126",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "127",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "128",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "129",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "130",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "131",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "132",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "133",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "134",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "135",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "136",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "137",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "138",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "139",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "140",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "141",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "142",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "143",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "144",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "145",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "146",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "147",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "148",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "149",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "150",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "151",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "152",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "153",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "154",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "155",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "156",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "157",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "158",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "159",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "160",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "161",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "162",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "163",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "164",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "165",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "166",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "167",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "168",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "169",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "170",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "171",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "172",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "173",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "174",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "175",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "176",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "177",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "178",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "179",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "180",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "181",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "182",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "183",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "184",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "185",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "186",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "187",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "188",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "189",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "190",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "191",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "192",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "193",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "194",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "195",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "196",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "197",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "198",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "199",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "200",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "201",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "202",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "203",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "204",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "205",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "206",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "207",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "208",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "209",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "210",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "211",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "212",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "213",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "214",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "215",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "216",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "217",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "218",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "219",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "220",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "221",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "222",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "223",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "224",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "225",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "226",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "227",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "228",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "229",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "230",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "schedule_hypotheses",
+        "record_id": "1",
+        "classification": "NEEDS_REVIEW",
+        "reason": "legacy schedule hypothesis cannot outrank current Twitch metadata automatically",
+        "provenance": {}
+      },
+      {
+        "store": "schedule_hypotheses",
+        "record_id": "2",
+        "classification": "NEEDS_REVIEW",
+        "reason": "legacy schedule hypothesis cannot outrank current Twitch metadata automatically",
+        "provenance": {}
+      },
+      {
+        "store": "schedule_hypotheses",
+        "record_id": "3",
+        "classification": "NEEDS_REVIEW",
+        "reason": "legacy schedule hypothesis cannot outrank current Twitch metadata automatically",
+        "provenance": {}
+      },
+      {
+        "store": "schedule_hypotheses",
+        "record_id": "4",
+        "classification": "NEEDS_REVIEW",
+        "reason": "legacy schedule hypothesis cannot outrank current Twitch metadata automatically",
+        "provenance": {}
+      },
+      {
+        "store": "schedule_hypotheses",
+        "record_id": "5",
+        "classification": "NEEDS_REVIEW",
+        "reason": "legacy schedule hypothesis cannot outrank current Twitch metadata automatically",
+        "provenance": {}
+      },
+      {
+        "store": "schedule_hypotheses",
+        "record_id": "6",
+        "classification": "NEEDS_REVIEW",
+        "reason": "legacy schedule hypothesis cannot outrank current Twitch metadata automatically",
+        "provenance": {}
+      },
+      {
+        "store": "schedule_hypotheses",
+        "record_id": "7",
+        "classification": "NEEDS_REVIEW",
+        "reason": "legacy schedule hypothesis cannot outrank current Twitch metadata automatically",
+        "provenance": {}
+      }
+    ],
+    "run_id": "hygiene_d47d5d26ba5b85c9d5ba",
+    "applied_count": 0,
+    "applied_counts": {},
+    "db_sha256_before": "bca06897ae3def7780ab95a21ce29e98d21e2b722fcb518d5a673541a6c5e7d7",
+    "db_sha256_after": "0b78cb495b118630a68e58c66f3389bf559628c67e58416df8e48a0cb40530cc"
+  },
+  "integrity_status": "PASS",
+  "integrity_blocking_errors": 0,
+  "restart_migrations_idempotent": true,
+  "application_startup_status": "PASS",
+  "hebe_engine_startup_status": "VERIFIED",
+  "hebe_engine_restart_count": 2,
+  "hebe_engine_scenario_report": "C:\\Users\\Leo Nifelheim\\Documents\\Hebe\\hebe-ui\\artifacts\\cognitive-continuity-phase6\\scratch\\copied-db-replay\\verification-report.json"
+}

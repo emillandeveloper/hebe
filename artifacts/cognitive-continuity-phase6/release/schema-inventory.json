@@ -1,0 +1,1446 @@
+{
+  "schema_version": 1,
+  "migrations": [
+    {
+      "component": "cognitive_replay",
+      "version": 1,
+      "name": "replay_metadata",
+      "checksum": "847e14d94cbcb5ad15dac895e06910750bdfd4fd44b001f5fff35688fffa5eba",
+      "active_code_owner": "MigrationRunner",
+      "legacy_dependency": "compatibility schemas may remain readable",
+      "rollback_compatibility": "additive schema; code rollback supported, semantic apply requires DB backup",
+      "destructive_status": "NON_DESTRUCTIVE"
+    },
+    {
+      "component": "conversation_continuity",
+      "version": 1,
+      "name": "conversation_and_open_threads",
+      "checksum": "687d2c78577ff15489d0c45cd188f8ad9acf98bf95f40916e53bc8af0fc01e41",
+      "active_code_owner": "MigrationRunner",
+      "legacy_dependency": "compatibility schemas may remain readable",
+      "rollback_compatibility": "additive schema; code rollback supported, semantic apply requires DB backup",
+      "destructive_status": "NON_DESTRUCTIVE"
+    },
+    {
+      "component": "belief_v2",
+      "version": 1,
+      "name": "beliefs_evidence_and_compatibility_columns",
+      "checksum": "f0df6f1288caccaf6bb47670b38f9cca747f14c84916d6c1ca75beb687200507",
+      "active_code_owner": "MigrationRunner",
+      "legacy_dependency": "compatibility schemas may remain readable",
+      "rollback_compatibility": "additive schema; code rollback supported, semantic apply requires DB backup",
+      "destructive_status": "NON_DESTRUCTIVE"
+    },
+    {
+      "component": "game_context_v2",
+      "version": 1,
+      "name": "durable_runs_knowledge_and_gaps",
+      "checksum": "08e342acaae00d5d24c1a6dbccad5aee41f753ed90d9ec26282a5fdf042d0a75",
+      "active_code_owner": "MigrationRunner",
+      "legacy_dependency": "compatibility schemas may remain readable",
+      "rollback_compatibility": "additive schema; code rollback supported, semantic apply requires DB backup",
+      "destructive_status": "NON_DESTRUCTIVE"
+    },
+    {
+      "component": "social_world_v2",
+      "version": 1,
+      "name": "people_episodes_and_shared_culture",
+      "checksum": "b02adc2cd7f298f1af228dc52c4ba44ae15999fb4c815ea004c40f68b78cbfa5",
+      "active_code_owner": "MigrationRunner",
+      "legacy_dependency": "compatibility schemas may remain readable",
+      "rollback_compatibility": "additive schema; code rollback supported, semantic apply requires DB backup",
+      "destructive_status": "NON_DESTRUCTIVE"
+    },
+    {
+      "component": "learning_v2",
+      "version": 1,
+      "name": "consolidation_temporal_action_and_scene",
+      "checksum": "6a86e2d1c7c03167f3b20c328bc97b73fb92e03903f64e64d326fb08f9e3b942",
+      "active_code_owner": "MigrationRunner",
+      "legacy_dependency": "compatibility schemas may remain readable",
+      "rollback_compatibility": "additive schema; code rollback supported, semantic apply requires DB backup",
+      "destructive_status": "NON_DESTRUCTIVE"
+    },
+    {
+      "component": "architecture_consolidation",
+      "version": 1,
+      "name": "audit_hygiene_and_cutover_state",
+      "checksum": "944b3ad6532151d4204ed59f663668c9b0ac62df54ece7602d26b91acddd5b7d",
+      "active_code_owner": "MigrationRunner",
+      "legacy_dependency": "compatibility schemas may remain readable",
+      "rollback_compatibility": "additive schema; code rollback supported, semantic apply requires DB backup",
+      "destructive_status": "NON_DESTRUCTIVE"
+    }
+  ],
+  "ad_hoc_ensure_column": [
+    {
+      "path": "backend/app/services/db_sqlite.py",
+      "scope": "unrelated core app_commands schema; intentionally retained"
+    },
+    {
+      "path": "backend/app/stream/memory.py",
+      "scope": "pre-continuity stream schema; inventory only"
+    }
+  ],
+  "tables_after_copy_migration": [
+    {
+      "name": "action_ledger",
+      "columns": [
+        "id",
+        "action_type",
+        "target",
+        "status",
+        "source_store",
+        "source_record_id",
+        "requested_at",
+        "completed_at",
+        "evidence_json",
+        "schema_version"
+      ]
+    },
+    {
+      "name": "app_commands",
+      "columns": [
+        "id",
+        "name",
+        "command",
+        "description",
+        "aliases",
+        "enabled",
+        "usage_count",
+        "last_used_at",
+        "process_name",
+        "window_title"
+      ]
+    },
+    {
+      "name": "app_settings",
+      "columns": [
+        "key",
+        "value",
+        "updated_at"
+      ]
+    },
+    {
+      "name": "belief_evidence",
+      "columns": [
+        "id",
+        "belief_id",
+        "source_event_id",
+        "source_record_type",
+        "source_record_id",
+        "relation",
+        "weight",
+        "observed_at",
+        "extractor",
+        "extractor_version",
+        "literal_span_json",
+        "subject_key"
+      ]
+    },
+    {
+      "name": "beliefs",
+      "columns": [
+        "id",
+        "namespace",
+        "scope_kind",
+        "scope_id",
+        "subject_ref",
+        "predicate",
+        "object_json",
+        "epistemic_status",
+        "confidence",
+        "authority_class",
+        "created_at",
+        "last_confirmed_at",
+        "valid_from",
+        "valid_until",
+        "relevance_until",
+        "superseded_by",
+        "owner_confirmed",
+        "sensitivity",
+        "schema_version",
+        "retention_policy",
+        "version"
+      ]
+    },
+    {
+      "name": "chat_log",
+      "columns": [
+        "id",
+        "timestamp",
+        "role",
+        "source",
+        "text"
+      ]
+    },
+    {
+      "name": "chatter_facts",
+      "columns": [
+        "id",
+        "username",
+        "fact_text",
+        "fact_type",
+        "confidence",
+        "source_message_id",
+        "source_stream_session_id",
+        "evidence_count",
+        "first_observed_at",
+        "last_confirmed_at",
+        "expires_at",
+        "public_reference_allowed",
+        "created_at",
+        "updated_at"
+      ]
+    },
+    {
+      "name": "chatter_presence",
+      "columns": [
+        "id",
+        "stream_session_id",
+        "username",
+        "display_name",
+        "first_seen_at",
+        "last_seen_at",
+        "first_message_at",
+        "last_message_at",
+        "first_direct_interaction_at",
+        "last_direct_interaction_at",
+        "message_count",
+        "direct_interaction_count",
+        "was_present",
+        "was_active_chatter",
+        "was_passive_viewer",
+        "was_raider",
+        "was_new_chatter",
+        "was_returning_after_absence",
+        "presence_source_json",
+        "created_at",
+        "updated_at"
+      ]
+    },
+    {
+      "name": "chatter_profiles",
+      "columns": [
+        "username",
+        "display_name",
+        "aliases_json",
+        "first_seen_at",
+        "last_seen_at",
+        "last_message_at",
+        "last_direct_interaction_at",
+        "last_lurk_seen_at",
+        "last_raid_at",
+        "last_follow_at",
+        "last_sub_at",
+        "streams_seen_count",
+        "streams_chatted_count",
+        "total_messages",
+        "total_direct_interactions",
+        "total_lurk_sessions",
+        "viewer_status",
+        "preferred_language",
+        "relationship_level",
+        "notes_summary",
+        "updated_at"
+      ]
+    },
+    {
+      "name": "cognitive_cutover_state",
+      "columns": [
+        "concern",
+        "canonical_owner",
+        "legacy_mode",
+        "compatibility_write_enabled",
+        "decided_at",
+        "reason",
+        "schema_version"
+      ]
+    },
+    {
+      "name": "cognitive_hygiene_runs",
+      "columns": [
+        "run_id",
+        "db_fingerprint_before",
+        "mode",
+        "started_at",
+        "completed_at",
+        "classification_counts_json",
+        "destructive_changes",
+        "schema_version"
+      ]
+    },
+    {
+      "name": "cognitive_migration_audit",
+      "columns": [
+        "id",
+        "run_id",
+        "operation",
+        "source_store",
+        "source_record_id",
+        "target_store",
+        "target_record_id",
+        "classification",
+        "reason",
+        "provenance_json",
+        "applied_at",
+        "schema_version"
+      ]
+    },
+    {
+      "name": "cognitive_replay_metadata",
+      "columns": [
+        "scenario_id",
+        "schema_version",
+        "seed",
+        "last_run_at"
+      ]
+    },
+    {
+      "name": "consolidation_deltas",
+      "columns": [
+        "id",
+        "consolidation_run_id",
+        "domain",
+        "delta_type",
+        "payload_json",
+        "evidence_ids_json",
+        "validator_result",
+        "committed_object_ref",
+        "idempotency_key",
+        "rejection_reason",
+        "created_at"
+      ]
+    },
+    {
+      "name": "consolidation_runs",
+      "columns": [
+        "id",
+        "session_id",
+        "input_start_event",
+        "input_end_event",
+        "pre_state_version",
+        "consolidator_version",
+        "status",
+        "started_at",
+        "completed_at",
+        "idempotency_key"
+      ]
+    },
+    {
+      "name": "conversations",
+      "columns": [
+        "id",
+        "context_kind",
+        "context_id",
+        "participants_json",
+        "attention_state",
+        "turn_owner",
+        "expected_reply_type",
+        "expected_reply_json",
+        "topic",
+        "origin_event_id",
+        "last_event_id",
+        "opened_at",
+        "last_turn_at",
+        "expires_at",
+        "status",
+        "closure_reason",
+        "version",
+        "domain_payload_json",
+        "consumed_event_ids_json"
+      ]
+    },
+    {
+      "name": "game_dossiers",
+      "columns": [
+        "game_id",
+        "canonical_title",
+        "dossier_json",
+        "dossier_version",
+        "created_at",
+        "updated_at",
+        "v2_projection_version"
+      ]
+    },
+    {
+      "name": "game_identities",
+      "columns": [
+        "game_id",
+        "canonical_name",
+        "aliases_json",
+        "platform_ids_json",
+        "series",
+        "schema_version"
+      ]
+    },
+    {
+      "name": "game_knowledge_facts",
+      "columns": [
+        "id",
+        "game_id",
+        "belief_id",
+        "source_type",
+        "source_quality",
+        "spoiler_class",
+        "dossier_link",
+        "version_tag",
+        "created_at",
+        "schema_version"
+      ]
+    },
+    {
+      "name": "game_knowledge_gaps",
+      "columns": [
+        "game_id",
+        "term",
+        "gap_json",
+        "updated_at"
+      ]
+    },
+    {
+      "name": "game_knowledge_v2_gaps",
+      "columns": [
+        "id",
+        "game_id",
+        "run_id",
+        "subject_ref",
+        "question_type",
+        "query_intent",
+        "spoiler_ceiling",
+        "required_confidence",
+        "created_from_event_id",
+        "normalized_gap_key",
+        "status",
+        "created_at",
+        "updated_at",
+        "resolved_fact_ids_json",
+        "schema_version"
+      ]
+    },
+    {
+      "name": "game_progress_states",
+      "columns": [
+        "game_id",
+        "stream_session_id",
+        "state_json",
+        "updated_at",
+        "game_run_id"
+      ]
+    },
+    {
+      "name": "game_research_cache",
+      "columns": [
+        "cache_key",
+        "game_id",
+        "query",
+        "sources_json",
+        "facts_json",
+        "spoiler_classification_json",
+        "created_at",
+        "expires_at"
+      ]
+    },
+    {
+      "name": "game_run_events",
+      "columns": [
+        "id",
+        "game_run_id",
+        "event_type",
+        "subject_ref",
+        "predicate",
+        "object_json",
+        "evidence_event_id",
+        "belief_id",
+        "observed_at",
+        "epistemic_status",
+        "schema_version"
+      ]
+    },
+    {
+      "name": "game_run_sessions",
+      "columns": [
+        "id",
+        "game_run_id",
+        "stream_session_id",
+        "started_at",
+        "ended_at",
+        "evidence_event_id",
+        "source",
+        "schema_version"
+      ]
+    },
+    {
+      "name": "game_runs",
+      "columns": [
+        "id",
+        "game_id",
+        "owner_id",
+        "run_kind",
+        "rules_json",
+        "status",
+        "started_at",
+        "last_active_at",
+        "ended_at",
+        "current_checkpoint_version",
+        "created_from_event_id",
+        "schema_version"
+      ]
+    },
+    {
+      "name": "game_sessions",
+      "columns": [
+        "id",
+        "game",
+        "game_key",
+        "stream_date",
+        "title",
+        "started_at",
+        "ended_at",
+        "start_summary",
+        "end_summary",
+        "current_location",
+        "current_objective",
+        "important_events_json",
+        "unresolved_threads_json",
+        "next_time_plan",
+        "spoiler_policy",
+        "source",
+        "created_at",
+        "updated_at",
+        "game_run_id"
+      ]
+    },
+    {
+      "name": "internal_events_log",
+      "columns": [
+        "id",
+        "event_type",
+        "payload_json",
+        "created_at"
+      ]
+    },
+    {
+      "name": "learned_apps",
+      "columns": [
+        "id",
+        "app_id",
+        "canonical_name",
+        "aliases",
+        "executable_path",
+        "launch_arguments",
+        "source",
+        "confidence",
+        "validated_at",
+        "learned_at",
+        "last_successful_launch",
+        "last_failed_launch",
+        "validation_version",
+        "process_name",
+        "window_title",
+        "updated_at"
+      ]
+    },
+    {
+      "name": "learning_observations",
+      "columns": [
+        "id",
+        "model",
+        "subject",
+        "value",
+        "event_id",
+        "observed_at",
+        "explicit"
+      ]
+    },
+    {
+      "name": "live_session_rolling_summaries",
+      "columns": [
+        "id",
+        "session_id",
+        "stream_session_id",
+        "summary_text",
+        "event_count",
+        "created_at",
+        "tags_json"
+      ]
+    },
+    {
+      "name": "live_session_spontaneity_anchors",
+      "columns": [
+        "anchor_id",
+        "session_id",
+        "anchor_type",
+        "source_event_ids_json",
+        "topic",
+        "category",
+        "payload_json",
+        "created_at",
+        "consumed_at",
+        "invalidated_at",
+        "cooldown_key"
+      ]
+    },
+    {
+      "name": "live_session_state",
+      "columns": [
+        "session_id",
+        "stream_session_id",
+        "stream_status",
+        "current_game",
+        "current_category",
+        "current_title",
+        "language_mode",
+        "spoiler_policy",
+        "state_json",
+        "created_at",
+        "updated_at"
+      ]
+    },
+    {
+      "name": "live_session_timeline",
+      "columns": [
+        "id",
+        "session_id",
+        "stream_session_id",
+        "event_uid",
+        "event_type",
+        "event_ts",
+        "source",
+        "raw_text",
+        "normalized_text",
+        "speaker",
+        "target",
+        "topic",
+        "category",
+        "confidence",
+        "provenance",
+        "related_event_id",
+        "output_target",
+        "index_for_rag",
+        "payload_json",
+        "created_at",
+        "context_kind",
+        "source_record_type",
+        "source_record_id",
+        "authority",
+        "literal_evidence_json",
+        "valid_from",
+        "valid_until",
+        "supersedes_event_uid",
+        "schema_version"
+      ]
+    },
+    {
+      "name": "memories",
+      "columns": [
+        "id",
+        "key",
+        "text",
+        "category",
+        "importance",
+        "created_at",
+        "last_used_at",
+        "active"
+      ]
+    },
+    {
+      "name": "memory_chunks",
+      "columns": [
+        "id",
+        "text",
+        "kind",
+        "subject",
+        "source_session",
+        "embedding",
+        "embedding_model",
+        "embedding_dim",
+        "importance",
+        "access_count",
+        "last_accessed_at",
+        "created_at",
+        "tags",
+        "active",
+        "belief_id",
+        "episode_id"
+      ]
+    },
+    {
+      "name": "memory_facts",
+      "columns": [
+        "id",
+        "kind",
+        "subject",
+        "payload_json",
+        "source_text",
+        "confidence",
+        "created_at",
+        "updated_at",
+        "last_used_at",
+        "active",
+        "belief_id",
+        "epistemic_status"
+      ]
+    },
+    {
+      "name": "open_threads",
+      "columns": [
+        "id",
+        "thread_type",
+        "scope_kind",
+        "scope_id",
+        "participant_ids_json",
+        "subject_ref",
+        "summary",
+        "origin_event_id",
+        "latest_event_id",
+        "status",
+        "priority",
+        "created_at",
+        "relevance_until",
+        "valid_until",
+        "resolved_at",
+        "resolution_event_id",
+        "sensitivity",
+        "version"
+      ]
+    },
+    {
+      "name": "people",
+      "columns": [
+        "person_id",
+        "created_at",
+        "last_seen_at",
+        "scope",
+        "schema_version"
+      ]
+    },
+    {
+      "name": "person_identities",
+      "columns": [
+        "id",
+        "person_id",
+        "platform",
+        "platform_user_id",
+        "login",
+        "display_name",
+        "aliases_json",
+        "first_seen_at",
+        "last_seen_at",
+        "confidence",
+        "source",
+        "schema_version"
+      ]
+    },
+    {
+      "name": "person_sessions",
+      "columns": [
+        "person_id",
+        "stream_session_id",
+        "first_seen_at",
+        "last_seen_at"
+      ]
+    },
+    {
+      "name": "promotion_events",
+      "columns": [
+        "id",
+        "stream_session_id",
+        "source_event_id",
+        "requested_by",
+        "raw_target_text",
+        "resolved_twitch_user_id",
+        "resolved_login",
+        "resolution_confidence",
+        "trigger_type",
+        "execution_status",
+        "twitch_message_id",
+        "created_at",
+        "executed_at",
+        "failure_reason"
+      ]
+    },
+    {
+      "name": "reminders",
+      "columns": [
+        "id",
+        "kind",
+        "title",
+        "message",
+        "due_at",
+        "timezone",
+        "status",
+        "source_memory_id",
+        "payload_json",
+        "created_at",
+        "fired_at"
+      ]
+    },
+    {
+      "name": "scene_assertions",
+      "columns": [
+        "id",
+        "subject_ref",
+        "predicate",
+        "object_json",
+        "epistemic_status",
+        "confidence",
+        "evidence_ids_json",
+        "referent_data_json",
+        "observed_at",
+        "valid_from",
+        "valid_until",
+        "provenance",
+        "extractor",
+        "extractor_version",
+        "schema_version"
+      ]
+    },
+    {
+      "name": "scene_transitions",
+      "columns": [
+        "id",
+        "source_event_id",
+        "transition_type",
+        "destination_ref",
+        "payload_json",
+        "created_at"
+      ]
+    },
+    {
+      "name": "schedule_hypotheses",
+      "columns": [
+        "id",
+        "weekday",
+        "time_window",
+        "canonical_content",
+        "content_key",
+        "stream_format",
+        "source",
+        "confidence",
+        "evidence_count",
+        "consecutive_matches",
+        "consecutive_misses",
+        "first_observed_at",
+        "last_observed_at",
+        "status",
+        "superseded_by"
+      ]
+    },
+    {
+      "name": "schedule_observations",
+      "columns": [
+        "id",
+        "stream_session_id",
+        "weekday",
+        "time_window",
+        "canonical_content",
+        "content_key",
+        "stream_format",
+        "source",
+        "observed_at"
+      ]
+    },
+    {
+      "name": "schema_migrations",
+      "columns": [
+        "component",
+        "version",
+        "name",
+        "checksum",
+        "applied_at"
+      ]
+    },
+    {
+      "name": "shared_culture_evidence",
+      "columns": [
+        "id",
+        "culture_item_id",
+        "event_id",
+        "episode_id",
+        "reaction",
+        "polarity",
+        "weight",
+        "observed_at",
+        "authority"
+      ]
+    },
+    {
+      "name": "shared_culture_items",
+      "columns": [
+        "id",
+        "label",
+        "meaning",
+        "origin_episode_id",
+        "participant_ids_json",
+        "scope",
+        "tone",
+        "status",
+        "confidence",
+        "created_at",
+        "last_reinforced_at",
+        "last_used_at",
+        "reuse_count",
+        "cooldown_until",
+        "schema_version"
+      ]
+    },
+    {
+      "name": "social_episodes",
+      "columns": [
+        "id",
+        "episode_type",
+        "participant_ids_json",
+        "origin_event_id",
+        "related_event_ids_json",
+        "summary",
+        "tone_observations_json",
+        "created_at",
+        "relevance_until",
+        "retention_until",
+        "sensitivity",
+        "retention_class",
+        "retrieval_scope",
+        "salience_reason",
+        "schema_version"
+      ]
+    },
+    {
+      "name": "stream_chat_messages",
+      "columns": [
+        "id",
+        "stream_session_id",
+        "twitch_message_id",
+        "username",
+        "display_name",
+        "message_text",
+        "observed_at",
+        "is_mention_to_hebe",
+        "is_direct_reply_to_hebe",
+        "is_bot",
+        "is_mod",
+        "is_vip",
+        "is_subscriber",
+        "badges_json",
+        "source",
+        "replied_by_hebe",
+        "hebe_reply_message_id",
+        "topic_hint",
+        "language_hint",
+        "created_at"
+      ]
+    },
+    {
+      "name": "stream_chatter_summaries",
+      "columns": [
+        "id",
+        "stream_session_id",
+        "username",
+        "display_name",
+        "message_count",
+        "direct_interaction_count",
+        "summary_text",
+        "topics_json",
+        "notable_quotes_json",
+        "mood_tone",
+        "inferred_facts_json",
+        "created_at"
+      ]
+    },
+    {
+      "name": "stream_events",
+      "columns": [
+        "id",
+        "stream_session_id",
+        "event_type",
+        "event_ts",
+        "payload_json",
+        "dedupe_key",
+        "created_at"
+      ]
+    },
+    {
+      "name": "stream_schedule",
+      "columns": [
+        "id",
+        "weekday",
+        "slot_name",
+        "game",
+        "category",
+        "playthrough_type",
+        "tags_json",
+        "title_style",
+        "enabled",
+        "updated_at"
+      ]
+    },
+    {
+      "name": "stream_sessions",
+      "columns": [
+        "id",
+        "twitch_stream_id",
+        "title",
+        "category",
+        "game",
+        "started_at",
+        "ended_at",
+        "duration_seconds",
+        "playthrough_type",
+        "challenge",
+        "language_mode",
+        "spoiler_policy",
+        "status",
+        "source",
+        "is_real_stream",
+        "created_at",
+        "updated_at"
+      ]
+    },
+    {
+      "name": "stream_summaries",
+      "columns": [
+        "id",
+        "stream_session_id",
+        "summary_text",
+        "key_events_json",
+        "game_progress_json",
+        "chat_topics_json",
+        "chatter_highlights_json",
+        "raids_json",
+        "shoutouts_json",
+        "next_stream_context",
+        "metadata_json",
+        "created_at"
+      ]
+    },
+    {
+      "name": "temporal_maintenance_audit",
+      "columns": [
+        "id",
+        "object_ref",
+        "object_type",
+        "old_status",
+        "new_status",
+        "reason",
+        "changed_at",
+        "policy_version"
+      ]
+    },
+    {
+      "name": "viewer_linguistic_profiles",
+      "columns": [
+        "twitch_user_id",
+        "login",
+        "display_name",
+        "preferred_grammatical_gender",
+        "pronouns_json",
+        "preferred_address_terms_json",
+        "confidence",
+        "source_type",
+        "source_event_id",
+        "evidence_summary",
+        "created_at",
+        "updated_at",
+        "confirmed_at",
+        "expires_at",
+        "owner_locked",
+        "user_locked",
+        "conflict"
+      ]
+    },
+    {
+      "name": "viewer_promotion_profiles",
+      "columns": [
+        "twitch_user_id",
+        "current_login",
+        "display_name",
+        "known_aliases_json",
+        "auto_promo_mode",
+        "created_by",
+        "created_at",
+        "updated_at",
+        "last_promoted_at",
+        "last_promoted_stream_id",
+        "cooldown_hours",
+        "owner_locked",
+        "active"
+      ]
+    }
+  ],
+  "indexes_after_copy_migration": [
+    {
+      "name": "idx_action_ledger_claim",
+      "table": "action_ledger",
+      "sql": "CREATE INDEX idx_action_ledger_claim ON action_ledger(action_type,target,requested_at,status)"
+    },
+    {
+      "name": "idx_belief_evidence_belief",
+      "table": "belief_evidence",
+      "sql": "CREATE INDEX idx_belief_evidence_belief ON belief_evidence(belief_id,observed_at)"
+    },
+    {
+      "name": "idx_belief_evidence_idempotency",
+      "table": "belief_evidence",
+      "sql": "CREATE UNIQUE INDEX idx_belief_evidence_idempotency ON belief_evidence(source_event_id,relation,subject_key)"
+    },
+    {
+      "name": "idx_belief_evidence_source",
+      "table": "belief_evidence",
+      "sql": "CREATE INDEX idx_belief_evidence_source ON belief_evidence(source_record_type,source_record_id)"
+    },
+    {
+      "name": "idx_beliefs_identity_active",
+      "table": "beliefs",
+      "sql": "CREATE INDEX idx_beliefs_identity_active ON beliefs(namespace,scope_kind,scope_id,subject_ref,predicate,epistemic_status)"
+    },
+    {
+      "name": "idx_beliefs_scope_sensitivity",
+      "table": "beliefs",
+      "sql": "CREATE INDEX idx_beliefs_scope_sensitivity ON beliefs(scope_kind,scope_id,sensitivity)"
+    },
+    {
+      "name": "idx_beliefs_validity",
+      "table": "beliefs",
+      "sql": "CREATE INDEX idx_beliefs_validity ON beliefs(epistemic_status,valid_until,relevance_until)"
+    },
+    {
+      "name": "idx_chatter_facts_confidence",
+      "table": "chatter_facts",
+      "sql": "CREATE INDEX idx_chatter_facts_confidence ON chatter_facts(confidence)"
+    },
+    {
+      "name": "idx_chatter_facts_last_confirmed",
+      "table": "chatter_facts",
+      "sql": "CREATE INDEX idx_chatter_facts_last_confirmed ON chatter_facts(last_confirmed_at)"
+    },
+    {
+      "name": "idx_chatter_facts_type",
+      "table": "chatter_facts",
+      "sql": "CREATE INDEX idx_chatter_facts_type ON chatter_facts(fact_type)"
+    },
+    {
+      "name": "idx_chatter_facts_username",
+      "table": "chatter_facts",
+      "sql": "CREATE INDEX idx_chatter_facts_username ON chatter_facts(username)"
+    },
+    {
+      "name": "idx_chatter_presence_last_message",
+      "table": "chatter_presence",
+      "sql": "CREATE INDEX idx_chatter_presence_last_message ON chatter_presence(last_message_at)"
+    },
+    {
+      "name": "idx_chatter_presence_last_seen",
+      "table": "chatter_presence",
+      "sql": "CREATE INDEX idx_chatter_presence_last_seen ON chatter_presence(last_seen_at)"
+    },
+    {
+      "name": "idx_chatter_presence_session",
+      "table": "chatter_presence",
+      "sql": "CREATE INDEX idx_chatter_presence_session ON chatter_presence(stream_session_id)"
+    },
+    {
+      "name": "idx_chatter_presence_session_username",
+      "table": "chatter_presence",
+      "sql": "CREATE UNIQUE INDEX idx_chatter_presence_session_username ON chatter_presence(stream_session_id, username)"
+    },
+    {
+      "name": "idx_chatter_presence_username",
+      "table": "chatter_presence",
+      "sql": "CREATE INDEX idx_chatter_presence_username ON chatter_presence(username)"
+    },
+    {
+      "name": "idx_chatter_profiles_last_message",
+      "table": "chatter_profiles",
+      "sql": "CREATE INDEX idx_chatter_profiles_last_message ON chatter_profiles(last_message_at)"
+    },
+    {
+      "name": "idx_chatter_profiles_last_seen",
+      "table": "chatter_profiles",
+      "sql": "CREATE INDEX idx_chatter_profiles_last_seen ON chatter_profiles(last_seen_at)"
+    },
+    {
+      "name": "idx_chatter_profiles_status",
+      "table": "chatter_profiles",
+      "sql": "CREATE INDEX idx_chatter_profiles_status ON chatter_profiles(viewer_status)"
+    },
+    {
+      "name": "idx_chunks_kind_active",
+      "table": "memory_chunks",
+      "sql": "CREATE INDEX idx_chunks_kind_active ON memory_chunks(kind, active)"
+    },
+    {
+      "name": "idx_chunks_session",
+      "table": "memory_chunks",
+      "sql": "CREATE INDEX idx_chunks_session ON memory_chunks(source_session)"
+    },
+    {
+      "name": "idx_chunks_subject",
+      "table": "memory_chunks",
+      "sql": "CREATE INDEX idx_chunks_subject ON memory_chunks(subject)"
+    },
+    {
+      "name": "idx_cognitive_migration_source",
+      "table": "cognitive_migration_audit",
+      "sql": "CREATE INDEX idx_cognitive_migration_source\n              ON cognitive_migration_audit(source_store,source_record_id,classification)"
+    },
+    {
+      "name": "idx_consolidation_delta_run",
+      "table": "consolidation_deltas",
+      "sql": "CREATE INDEX idx_consolidation_delta_run ON consolidation_deltas(consolidation_run_id,validator_result)"
+    },
+    {
+      "name": "idx_consolidation_session",
+      "table": "consolidation_runs",
+      "sql": "CREATE INDEX idx_consolidation_session ON consolidation_runs(session_id,input_end_event,status)"
+    },
+    {
+      "name": "idx_conversations_context_status",
+      "table": "conversations",
+      "sql": "CREATE INDEX idx_conversations_context_status\n                ON conversations(context_kind, context_id, status)"
+    },
+    {
+      "name": "idx_conversations_status_expiry",
+      "table": "conversations",
+      "sql": "CREATE INDEX idx_conversations_status_expiry\n                ON conversations(status, expires_at)"
+    },
+    {
+      "name": "idx_culture_evidence_item",
+      "table": "shared_culture_evidence",
+      "sql": "CREATE INDEX idx_culture_evidence_item ON shared_culture_evidence(culture_item_id,observed_at)"
+    },
+    {
+      "name": "idx_game_cache_game",
+      "table": "game_research_cache",
+      "sql": "CREATE INDEX idx_game_cache_game ON game_research_cache(game_id)"
+    },
+    {
+      "name": "idx_game_gap_status",
+      "table": "game_knowledge_gaps",
+      "sql": "CREATE INDEX idx_game_gap_status ON game_knowledge_gaps(game_id, updated_at)"
+    },
+    {
+      "name": "idx_game_knowledge_lookup",
+      "table": "game_knowledge_facts",
+      "sql": "CREATE INDEX idx_game_knowledge_lookup ON game_knowledge_facts(game_id,spoiler_class,created_at)"
+    },
+    {
+      "name": "idx_game_run_events_run",
+      "table": "game_run_events",
+      "sql": "CREATE INDEX idx_game_run_events_run ON game_run_events(game_run_id,observed_at,event_type)"
+    },
+    {
+      "name": "idx_game_run_sessions_stream",
+      "table": "game_run_sessions",
+      "sql": "CREATE INDEX idx_game_run_sessions_stream ON game_run_sessions(stream_session_id,game_run_id)"
+    },
+    {
+      "name": "idx_game_runs_resolution",
+      "table": "game_runs",
+      "sql": "CREATE INDEX idx_game_runs_resolution ON game_runs(game_id,owner_id,status,last_active_at)"
+    },
+    {
+      "name": "idx_game_sessions_game_key",
+      "table": "game_sessions",
+      "sql": "CREATE INDEX idx_game_sessions_game_key ON game_sessions(game_key, stream_date, updated_at)"
+    },
+    {
+      "name": "idx_game_v2_gaps_status",
+      "table": "game_knowledge_v2_gaps",
+      "sql": "CREATE INDEX idx_game_v2_gaps_status ON game_knowledge_v2_gaps(game_id,status,updated_at)"
+    },
+    {
+      "name": "idx_learning_observation_pattern",
+      "table": "learning_observations",
+      "sql": "CREATE INDEX idx_learning_observation_pattern ON learning_observations(model,subject,value,observed_at)"
+    },
+    {
+      "name": "idx_live_summaries_session",
+      "table": "live_session_rolling_summaries",
+      "sql": "CREATE INDEX idx_live_summaries_session ON live_session_rolling_summaries(session_id, created_at)"
+    },
+    {
+      "name": "idx_live_timeline_session_ts",
+      "table": "live_session_timeline",
+      "sql": "CREATE INDEX idx_live_timeline_session_ts ON live_session_timeline(session_id, event_ts)"
+    },
+    {
+      "name": "idx_live_timeline_topic",
+      "table": "live_session_timeline",
+      "sql": "CREATE INDEX idx_live_timeline_topic ON live_session_timeline(topic)"
+    },
+    {
+      "name": "idx_live_timeline_type",
+      "table": "live_session_timeline",
+      "sql": "CREATE INDEX idx_live_timeline_type ON live_session_timeline(event_type)"
+    },
+    {
+      "name": "idx_memory_facts_kind_active",
+      "table": "memory_facts",
+      "sql": "CREATE INDEX idx_memory_facts_kind_active ON memory_facts(kind, active)"
+    },
+    {
+      "name": "idx_memory_facts_subject",
+      "table": "memory_facts",
+      "sql": "CREATE INDEX idx_memory_facts_subject ON memory_facts(subject)"
+    },
+    {
+      "name": "idx_open_threads_scope_status",
+      "table": "open_threads",
+      "sql": "CREATE INDEX idx_open_threads_scope_status\n                ON open_threads(scope_kind, scope_id, status)"
+    },
+    {
+      "name": "idx_open_threads_status_validity",
+      "table": "open_threads",
+      "sql": "CREATE INDEX idx_open_threads_status_validity\n                ON open_threads(status, relevance_until, valid_until)"
+    },
+    {
+      "name": "idx_open_threads_subject",
+      "table": "open_threads",
+      "sql": "CREATE INDEX idx_open_threads_subject\n                ON open_threads(subject_ref, status)"
+    },
+    {
+      "name": "idx_person_identity_login",
+      "table": "person_identities",
+      "sql": "CREATE INDEX idx_person_identity_login ON person_identities(platform,lower(login))"
+    },
+    {
+      "name": "idx_person_identity_stable",
+      "table": "person_identities",
+      "sql": "CREATE UNIQUE INDEX idx_person_identity_stable ON person_identities(platform,platform_user_id) WHERE platform_user_id<>''"
+    },
+    {
+      "name": "idx_promotion_profile_login",
+      "table": "viewer_promotion_profiles",
+      "sql": "CREATE INDEX idx_promotion_profile_login\n            ON viewer_promotion_profiles(current_login)"
+    },
+    {
+      "name": "idx_promotion_session_login",
+      "table": "promotion_events",
+      "sql": "CREATE INDEX idx_promotion_session_login\n            ON promotion_events(stream_session_id, resolved_login, execution_status)"
+    },
+    {
+      "name": "idx_promotion_source_event",
+      "table": "promotion_events",
+      "sql": "CREATE UNIQUE INDEX idx_promotion_source_event\n            ON promotion_events(stream_session_id, source_event_id, trigger_type)"
+    },
+    {
+      "name": "idx_reminders_status_due_at",
+      "table": "reminders",
+      "sql": "CREATE INDEX idx_reminders_status_due_at ON reminders(status, due_at)"
+    },
+    {
+      "name": "idx_schedule_hypothesis_current",
+      "table": "schedule_hypotheses",
+      "sql": "CREATE INDEX idx_schedule_hypothesis_current\n            ON schedule_hypotheses(weekday, status, confidence)"
+    },
+    {
+      "name": "idx_schedule_observation_pattern",
+      "table": "schedule_observations",
+      "sql": "CREATE INDEX idx_schedule_observation_pattern\n            ON schedule_observations(weekday, time_window, content_key, stream_format, observed_at)"
+    },
+    {
+      "name": "idx_shared_culture_status",
+      "table": "shared_culture_items",
+      "sql": "CREATE INDEX idx_shared_culture_status ON shared_culture_items(status,cooldown_until,last_reinforced_at)"
+    },
+    {
+      "name": "idx_social_episode_relevance",
+      "table": "social_episodes",
+      "sql": "CREATE INDEX idx_social_episode_relevance ON social_episodes(relevance_until,retention_until,episode_type)"
+    },
+    {
+      "name": "idx_stream_chat_messages_observed_at",
+      "table": "stream_chat_messages",
+      "sql": "CREATE INDEX idx_stream_chat_messages_observed_at ON stream_chat_messages(observed_at)"
+    },
+    {
+      "name": "idx_stream_chat_messages_session",
+      "table": "stream_chat_messages",
+      "sql": "CREATE INDEX idx_stream_chat_messages_session ON stream_chat_messages(stream_session_id)"
+    },
+    {
+      "name": "idx_stream_chat_messages_session_username",
+      "table": "stream_chat_messages",
+      "sql": "CREATE INDEX idx_stream_chat_messages_session_username ON stream_chat_messages(stream_session_id, username)"
+    },
+    {
+      "name": "idx_stream_chat_messages_username",
+      "table": "stream_chat_messages",
+      "sql": "CREATE INDEX idx_stream_chat_messages_username ON stream_chat_messages(username)"
+    },
+    {
+      "name": "idx_stream_chat_messages_username_observed_at",
+      "table": "stream_chat_messages",
+      "sql": "CREATE INDEX idx_stream_chat_messages_username_observed_at ON stream_chat_messages(username, observed_at)"
+    },
+    {
+      "name": "idx_stream_events_dedupe",
+      "table": "stream_events",
+      "sql": "CREATE INDEX idx_stream_events_dedupe ON stream_events(stream_session_id, event_type, dedupe_key)"
+    },
+    {
+      "name": "idx_stream_events_session",
+      "table": "stream_events",
+      "sql": "CREATE INDEX idx_stream_events_session ON stream_events(stream_session_id)"
+    },
+    {
+      "name": "idx_stream_events_ts",
+      "table": "stream_events",
+      "sql": "CREATE INDEX idx_stream_events_ts ON stream_events(event_ts)"
+    },
+    {
+      "name": "idx_stream_events_type",
+      "table": "stream_events",
+      "sql": "CREATE INDEX idx_stream_events_type ON stream_events(event_type)"
+    },
+    {
+      "name": "idx_stream_schedule_weekday",
+      "table": "stream_schedule",
+      "sql": "CREATE INDEX idx_stream_schedule_weekday ON stream_schedule(weekday, enabled)"
+    },
+    {
+      "name": "idx_stream_sessions_game_category",
+      "table": "stream_sessions",
+      "sql": "CREATE INDEX idx_stream_sessions_game_category ON stream_sessions(game, category)"
+    },
+    {
+      "name": "idx_stream_sessions_real_status",
+      "table": "stream_sessions",
+      "sql": "CREATE INDEX idx_stream_sessions_real_status ON stream_sessions(is_real_stream, status)"
+    },
+    {
+      "name": "idx_stream_sessions_started_at",
+      "table": "stream_sessions",
+      "sql": "CREATE INDEX idx_stream_sessions_started_at ON stream_sessions(started_at)"
+    },
+    {
+      "name": "idx_stream_sessions_status",
+      "table": "stream_sessions",
+      "sql": "CREATE INDEX idx_stream_sessions_status ON stream_sessions(status)"
+    },
+    {
+      "name": "idx_stream_summaries_created_at",
+      "table": "stream_summaries",
+      "sql": "CREATE INDEX idx_stream_summaries_created_at ON stream_summaries(created_at)"
+    },
+    {
+      "name": "idx_stream_summaries_session",
+      "table": "stream_summaries",
+      "sql": "CREATE INDEX idx_stream_summaries_session ON stream_summaries(stream_session_id)"
+    },
+    {
+      "name": "idx_temporal_audit_object",
+      "table": "temporal_maintenance_audit",
+      "sql": "CREATE INDEX idx_temporal_audit_object ON temporal_maintenance_audit(object_ref,changed_at)"
+    },
+    {
+      "name": "idx_viewer_linguistic_login",
+      "table": "viewer_linguistic_profiles",
+      "sql": "CREATE INDEX idx_viewer_linguistic_login ON viewer_linguistic_profiles(login)"
+    }
+  ],
+  "query_index_audit": {
+    "status": "PASS",
+    "notes": "Canonical identity, lifecycle, evidence, run, social relevance, consolidation, action claim, and migration source queries have matching indexes; SQLite integrity and foreign-key checks pass."
+  }
+}

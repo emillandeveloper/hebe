@@ -179,7 +179,7 @@ from app.continuity import (
     LegacyPendingAdapter,
     OpenThreadRepository,
 )
-from app.replay.migrations import MigrationRunner, conversation_continuity_migrations, belief_v2_migrations, game_context_v2_migrations, social_world_v2_migrations, learning_v2_migrations
+from app.replay.migrations import MigrationRunner, architecture_consolidation_migrations, conversation_continuity_migrations, belief_v2_migrations, game_context_v2_migrations, social_world_v2_migrations, learning_v2_migrations
 from app.epistemics.repository import BeliefRepository
 from app.epistemics.service import BeliefLifecycleService
 from app.epistemics.retrieval import MemoryRetrievalCoordinator
@@ -196,6 +196,7 @@ from app.learning_v2 import (
     StableHebeCore, TemporalRelevanceService,
 )
 from app.learning_v2.repository import LearningRepository
+from app.integrity.production_defaults import enabled as cognitive_flag
 from app.services import db_sqlite
 
 WAKE_WORDS = ["hebe despierta", "eve despierta", "jebe despierta"]
@@ -539,47 +540,47 @@ class HebeEngine:
         self._last_policy_trace: dict = {}
         self._last_cognitive_trace: dict = {}
         self._current_input_event: InputEvent | None = None
-        self.conversation_continuity_v2 = os.getenv(
-            "HEBE_CONVERSATION_CONTINUITY_V2", "false"
-        ).strip().lower() in ("1", "true", "yes", "on")
+        self.cognitive_v2_enabled = cognitive_flag("HEBE_COGNITIVE_V2_ENABLED")
+        self.conversation_continuity_v2 = cognitive_flag("HEBE_CONVERSATION_CONTINUITY_V2")
         self.conversation_continuity_shadow = os.getenv(
-            "HEBE_CONVERSATION_CONTINUITY_SHADOW", "true"
+            "HEBE_CONVERSATION_CONTINUITY_SHADOW", "false"
         ).strip().lower() in ("1", "true", "yes", "on")
         self._last_continuity_resolution: dict = {}
         self._last_continuity_shadow_diff: dict = {}
         self._initialize_conversation_continuity()
-        self.belief_v2_reads = os.getenv("HEBE_BELIEF_V2_READS", "false").strip().lower() in ("1","true","yes","on")
-        self.belief_v2_writes = os.getenv("HEBE_BELIEF_V2_WRITES", "false").strip().lower() in ("1","true","yes","on")
+        self.belief_v2_reads = cognitive_flag("HEBE_BELIEF_V2_READS")
+        self.belief_v2_writes = cognitive_flag("HEBE_BELIEF_V2_WRITES")
         self._initialize_belief_v2()
-        self.game_context_v2 = os.getenv("HEBE_GAME_CONTEXT_V2", "false").strip().lower() in ("1","true","yes","on")
-        self.game_run_v2_reads = os.getenv("HEBE_GAME_RUN_V2_READS", "false").strip().lower() in ("1","true","yes","on")
-        self.game_run_v2_writes = os.getenv("HEBE_GAME_RUN_V2_WRITES", "false").strip().lower() in ("1","true","yes","on")
-        self.game_knowledge_v2_reads = os.getenv("HEBE_GAME_KNOWLEDGE_V2_READS", "false").strip().lower() in ("1","true","yes","on")
-        self.game_knowledge_v2_writes = os.getenv("HEBE_GAME_KNOWLEDGE_V2_WRITES", "false").strip().lower() in ("1","true","yes","on")
-        self.game_research_memory_first = os.getenv("HEBE_GAME_RESEARCH_MEMORY_FIRST", "false").strip().lower() in ("1","true","yes","on")
+        self.game_context_v2 = cognitive_flag("HEBE_GAME_CONTEXT_V2")
+        self.game_run_v2_reads = cognitive_flag("HEBE_GAME_RUN_V2_READS")
+        self.game_run_v2_writes = cognitive_flag("HEBE_GAME_RUN_V2_WRITES")
+        self.game_knowledge_v2_reads = cognitive_flag("HEBE_GAME_KNOWLEDGE_V2_READS")
+        self.game_knowledge_v2_writes = cognitive_flag("HEBE_GAME_KNOWLEDGE_V2_WRITES")
+        self.game_research_memory_first = cognitive_flag("HEBE_GAME_RESEARCH_MEMORY_FIRST")
         self._initialize_game_context_v2()
-        self.social_world_v2 = os.getenv("HEBE_SOCIAL_WORLD_V2", "false").strip().lower() in ("1","true","yes","on")
-        self.social_identity_v2 = os.getenv("HEBE_SOCIAL_IDENTITY_V2", "false").strip().lower() in ("1","true","yes","on")
-        self.social_episode_writes_v2 = os.getenv("HEBE_SOCIAL_EPISODE_WRITES_V2", "false").strip().lower() in ("1","true","yes","on")
-        self.social_retrieval_v2 = os.getenv("HEBE_SOCIAL_RETRIEVAL_V2", "false").strip().lower() in ("1","true","yes","on")
-        self.shared_culture_v2 = os.getenv("HEBE_SHARED_CULTURE_V2", "false").strip().lower() in ("1","true","yes","on")
-        self.social_thread_opportunities_v2 = os.getenv("HEBE_SOCIAL_THREAD_OPPORTUNITIES_V2", "false").strip().lower() in ("1","true","yes","on")
+        self.social_world_v2 = cognitive_flag("HEBE_SOCIAL_WORLD_V2")
+        self.social_identity_v2 = cognitive_flag("HEBE_SOCIAL_IDENTITY_V2")
+        self.social_episode_writes_v2 = cognitive_flag("HEBE_SOCIAL_EPISODE_WRITES_V2")
+        self.social_retrieval_v2 = cognitive_flag("HEBE_SOCIAL_RETRIEVAL_V2")
+        self.shared_culture_v2 = cognitive_flag("HEBE_SHARED_CULTURE_V2")
+        self.social_thread_opportunities_v2 = cognitive_flag("HEBE_SOCIAL_THREAD_OPPORTUNITIES_V2")
         self._initialize_social_world_v2()
-        self.consolidation_v2 = os.getenv("HEBE_CONSOLIDATION_V2", "false").strip().lower() in ("1","true","yes","on")
-        self.consolidation_commits_v2 = os.getenv("HEBE_CONSOLIDATION_COMMITS_V2", "false").strip().lower() in ("1","true","yes","on")
-        self.hebe_self_v2 = os.getenv("HEBE_HEBE_SELF_V2", "false").strip().lower() in ("1","true","yes","on")
-        self.owner_preferences_v2 = os.getenv("HEBE_OWNER_PREFERENCES_V2", "false").strip().lower() in ("1","true","yes","on")
-        self.leo_language_v2 = os.getenv("HEBE_LEO_LANGUAGE_V2", "false").strip().lower() in ("1","true","yes","on")
-        self.temporal_relevance_v2 = os.getenv("HEBE_TEMPORAL_RELEVANCE_V2", "false").strip().lower() in ("1","true","yes","on")
-        self.schedule_learning_v2 = os.getenv("HEBE_SCHEDULE_LEARNING_V2", "false").strip().lower() in ("1","true","yes","on")
-        self.scene_consequence_v2 = os.getenv("HEBE_SCENE_CONSEQUENCE_V2", "false").strip().lower() in ("1","true","yes","on")
-        self.historical_action_ledger_v2 = os.getenv("HEBE_HISTORICAL_ACTION_LEDGER_V2", "false").strip().lower() in ("1","true","yes","on")
+        self.consolidation_v2 = cognitive_flag("HEBE_CONSOLIDATION_V2")
+        self.consolidation_commits_v2 = cognitive_flag("HEBE_CONSOLIDATION_COMMITS_V2")
+        self.hebe_self_v2 = cognitive_flag("HEBE_HEBE_SELF_V2")
+        self.owner_preferences_v2 = cognitive_flag("HEBE_OWNER_PREFERENCES_V2")
+        self.leo_language_v2 = cognitive_flag("HEBE_LEO_LANGUAGE_V2")
+        self.temporal_relevance_v2 = cognitive_flag("HEBE_TEMPORAL_RELEVANCE_V2")
+        self.schedule_learning_v2 = cognitive_flag("HEBE_SCHEDULE_LEARNING_V2")
+        self.scene_consequence_v2 = cognitive_flag("HEBE_SCENE_CONSEQUENCE_V2")
+        self.historical_action_ledger_v2 = cognitive_flag("HEBE_HISTORICAL_ACTION_LEDGER_V2")
         self._initialize_learning_v2()
 
     def _initialize_learning_v2(self) -> None:
         try:
             if self.belief_repository is None or self.conversation_continuity is None:raise RuntimeError("continuity_foundation_unavailable")
             self.learning_v2_migrations=MigrationRunner(db_sqlite.get_db_connection).migrate(learning_v2_migrations())
+            self.phase6_migrations=MigrationRunner(db_sqlite.get_db_connection).migrate(architecture_consolidation_migrations())
             repo=LearningRepository(db_sqlite.get_db_connection);core=StableHebeCore()
             self.learning_repository=repo;self.stable_hebe_core=core
             self.hebe_self_model=HebeSelfModel(self.belief_repository,repo,now_fn=lambda:time.time())

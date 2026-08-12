@@ -1,0 +1,274 @@
+{
+  "schema_version": 1,
+  "stage": "after",
+  "concerns": [
+    {
+      "concern": "pending/clarifications",
+      "canonical_owner": "ConversationContinuityService",
+      "canonical_read_path": "ConversationContinuityService",
+      "canonical_write_path": "ConversationContinuityService",
+      "retained_compatibility": [
+        "LegacyPendingCompatibilityAdapter"
+      ],
+      "reason": "One semantic owner; retained component cannot independently establish v2 truth."
+    },
+    {
+      "concern": "conversation state",
+      "canonical_owner": "ConversationContinuityService",
+      "canonical_read_path": "ConversationContinuityService",
+      "canonical_write_path": "ConversationContinuityService",
+      "retained_compatibility": [
+        "HebeState compatibility projection"
+      ],
+      "reason": "One semantic owner; retained component cannot independently establish v2 truth."
+    },
+    {
+      "concern": "OpenThreads",
+      "canonical_owner": "OpenThreadRepository",
+      "canonical_read_path": "OpenThreadRepository",
+      "canonical_write_path": "OpenThreadRepository",
+      "retained_compatibility": [],
+      "reason": "One semantic owner; retained component cannot independently establish v2 truth."
+    },
+    {
+      "concern": "raw evidence/timeline",
+      "canonical_owner": "live_session_timeline",
+      "canonical_read_path": "live_session_timeline",
+      "canonical_write_path": "live_session_timeline",
+      "retained_compatibility": [],
+      "reason": "One semantic owner; retained component cannot independently establish v2 truth."
+    },
+    {
+      "concern": "scene projections",
+      "canonical_owner": "SceneConsequenceReducer",
+      "canonical_read_path": "SceneConsequenceReducer",
+      "canonical_write_path": "SceneConsequenceReducer",
+      "retained_compatibility": [
+        "wide runtime scene snapshots"
+      ],
+      "reason": "One semantic owner; retained component cannot independently establish v2 truth."
+    },
+    {
+      "concern": "memory_facts",
+      "canonical_owner": "BeliefRepository",
+      "canonical_read_path": "BeliefRepository",
+      "canonical_write_path": "BeliefRepository",
+      "retained_compatibility": [
+        "LegacyMemoryFactAdapter"
+      ],
+      "reason": "One semantic owner; retained component cannot independently establish v2 truth."
+    },
+    {
+      "concern": "memory_chunks",
+      "canonical_owner": "BeliefMemoryRetrieval",
+      "canonical_read_path": "BeliefMemoryRetrieval",
+      "canonical_write_path": "BeliefMemoryRetrieval",
+      "retained_compatibility": [
+        "retrieval cache only"
+      ],
+      "reason": "One semantic owner; retained component cannot independently establish v2 truth."
+    },
+    {
+      "concern": "legacy MemoryExtractor",
+      "canonical_owner": "BeliefLifecycleService",
+      "canonical_read_path": "BeliefLifecycleService",
+      "canonical_write_path": "BeliefLifecycleService",
+      "retained_compatibility": [
+        "MemoryExtractor deprecated writer"
+      ],
+      "reason": "One semantic owner; retained component cannot independently establish v2 truth."
+    },
+    {
+      "concern": "rolling summaries",
+      "canonical_owner": "live_session_rolling_summaries",
+      "canonical_read_path": "live_session_rolling_summaries",
+      "canonical_write_path": "live_session_rolling_summaries",
+      "retained_compatibility": [
+        "archive/projection"
+      ],
+      "reason": "One semantic owner; retained component cannot independently establish v2 truth."
+    },
+    {
+      "concern": "stream summaries",
+      "canonical_owner": "stream_summaries",
+      "canonical_read_path": "stream_summaries",
+      "canonical_write_path": "stream_summaries",
+      "retained_compatibility": [
+        "archive/projection"
+      ],
+      "reason": "One semantic owner; retained component cannot independently establish v2 truth."
+    },
+    {
+      "concern": "schedule systems",
+      "canonical_owner": "ScheduleLearningService",
+      "canonical_read_path": "ScheduleLearningService",
+      "canonical_write_path": "ScheduleLearningService",
+      "retained_compatibility": [
+        "legacy stream_schedule compatibility"
+      ],
+      "reason": "One semantic owner; retained component cannot independently establish v2 truth."
+    },
+    {
+      "concern": "game knowledge/research/guidance",
+      "canonical_owner": "GameContextResolver",
+      "canonical_read_path": "GameContextResolver",
+      "canonical_write_path": "GameContextResolver",
+      "retained_compatibility": [
+        "GameDossier compatibility cache"
+      ],
+      "reason": "One semantic owner; retained component cannot independently establish v2 truth."
+    },
+    {
+      "concern": "GameProgressState",
+      "canonical_owner": "GameRunService",
+      "canonical_read_path": "GameRunService",
+      "canonical_write_path": "GameRunService",
+      "retained_compatibility": [
+        "compatibility projection"
+      ],
+      "reason": "One semantic owner; retained component cannot independently establish v2 truth."
+    },
+    {
+      "concern": "GameRunState",
+      "canonical_owner": "GameRunService",
+      "canonical_read_path": "GameRunService",
+      "canonical_write_path": "GameRunService",
+      "retained_compatibility": [
+        "runtime projection"
+      ],
+      "reason": "One semantic owner; retained component cannot independently establish v2 truth."
+    },
+    {
+      "concern": "GameDossier",
+      "canonical_owner": "GameKnowledgeV2Service",
+      "canonical_read_path": "GameKnowledgeV2Service",
+      "canonical_write_path": "GameKnowledgeV2Service",
+      "retained_compatibility": [
+        "compatibility cache"
+      ],
+      "reason": "One semantic owner; retained component cannot independently establish v2 truth."
+    },
+    {
+      "concern": "chatter profiles/facts/summaries",
+      "canonical_owner": "SocialWorldService",
+      "canonical_read_path": "SocialWorldService",
+      "canonical_write_path": "SocialWorldService",
+      "retained_compatibility": [
+        "legacy social compatibility archive"
+      ],
+      "reason": "One semantic owner; retained component cannot independently establish v2 truth."
+    },
+    {
+      "concern": "SocialWorld",
+      "canonical_owner": "SocialWorldService",
+      "canonical_read_path": "SocialWorldService",
+      "canonical_write_path": "SocialWorldService",
+      "retained_compatibility": [],
+      "reason": "One semantic owner; retained component cannot independently establish v2 truth."
+    },
+    {
+      "concern": "SharedCulture",
+      "canonical_owner": "SocialWorldService",
+      "canonical_read_path": "SocialWorldService",
+      "canonical_write_path": "SocialWorldService",
+      "retained_compatibility": [],
+      "reason": "One semantic owner; retained component cannot independently establish v2 truth."
+    },
+    {
+      "concern": "persona identity/voice",
+      "canonical_owner": "StableHebeCore",
+      "canonical_read_path": "StableHebeCore",
+      "canonical_write_path": "StableHebeCore",
+      "retained_compatibility": [],
+      "reason": "One semantic owner; retained component cannot independently establish v2 truth."
+    },
+    {
+      "concern": "owner preferences",
+      "canonical_owner": "OwnerProceduralPreferences",
+      "canonical_read_path": "OwnerProceduralPreferences",
+      "canonical_write_path": "OwnerProceduralPreferences",
+      "retained_compatibility": [],
+      "reason": "One semantic owner; retained component cannot independently establish v2 truth."
+    },
+    {
+      "concern": "action receipts",
+      "canonical_owner": "domain executors",
+      "canonical_read_path": "domain executors",
+      "canonical_write_path": "domain executors",
+      "retained_compatibility": [],
+      "reason": "One semantic owner; retained component cannot independently establish v2 truth."
+    },
+    {
+      "concern": "action ledger",
+      "canonical_owner": "HistoricalActionLedger",
+      "canonical_read_path": "HistoricalActionLedger",
+      "canonical_write_path": "HistoricalActionLedger",
+      "retained_compatibility": [
+        "generic memory action claims"
+      ],
+      "reason": "One semantic owner; retained component cannot independently establish v2 truth."
+    },
+    {
+      "concern": "Presence inputs",
+      "canonical_owner": "PresenceModel",
+      "canonical_read_path": "PresenceModel",
+      "canonical_write_path": "PresenceModel",
+      "retained_compatibility": [],
+      "reason": "One semantic owner; retained component cannot independently establish v2 truth."
+    },
+    {
+      "concern": "ContextBuilder",
+      "canonical_owner": "ContinuityContextBuilder",
+      "canonical_read_path": "ContinuityContextBuilder",
+      "canonical_write_path": "ContinuityContextBuilder",
+      "retained_compatibility": [
+        "legacy CognitiveContextBuilder retained for non-v2 payload"
+      ],
+      "reason": "One semantic owner; retained component cannot independently establish v2 truth."
+    },
+    {
+      "concern": "FinalEmissionGate",
+      "canonical_owner": "FinalEmissionGate",
+      "canonical_read_path": "FinalEmissionGate",
+      "canonical_write_path": "FinalEmissionGate",
+      "retained_compatibility": [],
+      "reason": "One semantic owner; retained component cannot independently establish v2 truth."
+    },
+    {
+      "concern": "Hebe evolving opinions",
+      "canonical_owner": "HebeSelfModel",
+      "canonical_read_path": "HebeSelfModel",
+      "canonical_write_path": "HebeSelfModel",
+      "retained_compatibility": [],
+      "reason": "One semantic owner; retained component cannot independently establish v2 truth."
+    },
+    {
+      "concern": "Leo language",
+      "canonical_owner": "LeoLanguageModel",
+      "canonical_read_path": "LeoLanguageModel",
+      "canonical_write_path": "LeoLanguageModel",
+      "retained_compatibility": [],
+      "reason": "One semantic owner; retained component cannot independently establish v2 truth."
+    },
+    {
+      "concern": "consolidation",
+      "canonical_owner": "SessionConsolidator",
+      "canonical_read_path": "SessionConsolidator",
+      "canonical_write_path": "SessionConsolidator",
+      "retained_compatibility": [
+        "broad summary-to-truth deprecated"
+      ],
+      "reason": "One semantic owner; retained component cannot independently establish v2 truth."
+    },
+    {
+      "concern": "temporal lifecycle",
+      "canonical_owner": "TemporalRelevanceService",
+      "canonical_read_path": "TemporalRelevanceService",
+      "canonical_write_path": "TemporalRelevanceService",
+      "retained_compatibility": [
+        "domain TTL helpers retained as compatibility"
+      ],
+      "reason": "One semantic owner; retained component cannot independently establish v2 truth."
+    }
+  ]
+}

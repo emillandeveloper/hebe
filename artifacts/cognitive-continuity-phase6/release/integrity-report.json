@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "scanner": "phase6-integrity-v1",
+  "db": "C:\\Users\\Leo Nifelheim\\Documents\\Hebe\\hebe-ui\\artifacts\\cognitive-continuity-phase6\\scratch\\copied-db-replay\\workspaces\\phase6_copied_production_startup_restart\\hebe-replay.sqlite3",
+  "db_sha256": "2bf28e20d257c00695fc8df8a158db23c9f3c5c53e3c4dc8f49fc1d821dbca96",
+  "scanned_at_epoch": 1786498547.1350157,
+  "status": "PASS",
+  "blocking_error_count": 0,
+  "counts": {
+    "ERROR": 0,
+    "WARNING": 0,
+    "NEEDS_REVIEW": 0,
+    "INFO": 0
+  },
+  "categories_with_findings": [],
+  "findings": []
+}

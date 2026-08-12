@@ -1,0 +1,620 @@
+{
+  "schema_version": 1,
+  "stage": "before",
+  "concerns": [
+    {
+      "concern": "pending/clarifications",
+      "canonical_owner": "ConversationContinuityService",
+      "current_writers": [
+        "ConversationContinuityService",
+        "LegacyPendingCompatibilityAdapter"
+      ],
+      "current_readers": [
+        "ConversationContinuityService"
+      ],
+      "legacy_writers": [
+        "LegacyPendingCompatibilityAdapter"
+      ],
+      "legacy_readers": [
+        "LegacyPendingCompatibilityAdapter"
+      ],
+      "compatibility_adapters": [
+        "LegacyPendingCompatibilityAdapter"
+      ],
+      "shadow_paths": [],
+      "duplicate_state": true,
+      "removal_candidate": true,
+      "blocking_dependency": "runtime compatibility consumers"
+    },
+    {
+      "concern": "conversation state",
+      "canonical_owner": "ConversationContinuityService",
+      "current_writers": [
+        "ConversationContinuityService",
+        "HebeState compatibility projection"
+      ],
+      "current_readers": [
+        "ConversationContinuityService"
+      ],
+      "legacy_writers": [
+        "HebeState compatibility projection"
+      ],
+      "legacy_readers": [
+        "HebeState compatibility projection"
+      ],
+      "compatibility_adapters": [
+        "HebeState compatibility projection"
+      ],
+      "shadow_paths": [],
+      "duplicate_state": true,
+      "removal_candidate": true,
+      "blocking_dependency": "runtime compatibility consumers"
+    },
+    {
+      "concern": "OpenThreads",
+      "canonical_owner": "OpenThreadRepository",
+      "current_writers": [
+        "OpenThreadRepository"
+      ],
+      "current_readers": [
+        "OpenThreadRepository"
+      ],
+      "legacy_writers": [],
+      "legacy_readers": [],
+      "compatibility_adapters": [],
+      "shadow_paths": [],
+      "duplicate_state": false,
+      "removal_candidate": false,
+      "blocking_dependency": ""
+    },
+    {
+      "concern": "raw evidence/timeline",
+      "canonical_owner": "live_session_timeline",
+      "current_writers": [
+        "live_session_timeline"
+      ],
+      "current_readers": [
+        "live_session_timeline"
+      ],
+      "legacy_writers": [],
+      "legacy_readers": [],
+      "compatibility_adapters": [],
+      "shadow_paths": [],
+      "duplicate_state": false,
+      "removal_candidate": false,
+      "blocking_dependency": ""
+    },
+    {
+      "concern": "scene projections",
+      "canonical_owner": "SceneConsequenceReducer",
+      "current_writers": [
+        "SceneConsequenceReducer",
+        "wide runtime scene snapshots"
+      ],
+      "current_readers": [
+        "SceneConsequenceReducer"
+      ],
+      "legacy_writers": [
+        "wide runtime scene snapshots"
+      ],
+      "legacy_readers": [
+        "wide runtime scene snapshots"
+      ],
+      "compatibility_adapters": [
+        "wide runtime scene snapshots"
+      ],
+      "shadow_paths": [],
+      "duplicate_state": true,
+      "removal_candidate": true,
+      "blocking_dependency": "runtime compatibility consumers"
+    },
+    {
+      "concern": "memory_facts",
+      "canonical_owner": "BeliefRepository",
+      "current_writers": [
+        "BeliefRepository",
+        "LegacyMemoryFactAdapter"
+      ],
+      "current_readers": [
+        "BeliefRepository"
+      ],
+      "legacy_writers": [
+        "LegacyMemoryFactAdapter"
+      ],
+      "legacy_readers": [
+        "LegacyMemoryFactAdapter"
+      ],
+      "compatibility_adapters": [
+        "LegacyMemoryFactAdapter"
+      ],
+      "shadow_paths": [],
+      "duplicate_state": true,
+      "removal_candidate": true,
+      "blocking_dependency": "runtime compatibility consumers"
+    },
+    {
+      "concern": "memory_chunks",
+      "canonical_owner": "BeliefMemoryRetrieval",
+      "current_writers": [
+        "BeliefMemoryRetrieval"
+      ],
+      "current_readers": [
+        "BeliefMemoryRetrieval"
+      ],
+      "legacy_writers": [
+        "retrieval cache only"
+      ],
+      "legacy_readers": [
+        "retrieval cache only"
+      ],
+      "compatibility_adapters": [
+        "retrieval cache only"
+      ],
+      "shadow_paths": [],
+      "duplicate_state": true,
+      "removal_candidate": true,
+      "blocking_dependency": "runtime compatibility consumers"
+    },
+    {
+      "concern": "legacy MemoryExtractor",
+      "canonical_owner": "BeliefLifecycleService",
+      "current_writers": [
+        "BeliefLifecycleService",
+        "MemoryExtractor deprecated writer"
+      ],
+      "current_readers": [
+        "BeliefLifecycleService"
+      ],
+      "legacy_writers": [
+        "MemoryExtractor deprecated writer"
+      ],
+      "legacy_readers": [
+        "MemoryExtractor deprecated writer"
+      ],
+      "compatibility_adapters": [
+        "MemoryExtractor deprecated writer"
+      ],
+      "shadow_paths": [],
+      "duplicate_state": true,
+      "removal_candidate": true,
+      "blocking_dependency": "runtime compatibility consumers"
+    },
+    {
+      "concern": "rolling summaries",
+      "canonical_owner": "live_session_rolling_summaries",
+      "current_writers": [
+        "live_session_rolling_summaries"
+      ],
+      "current_readers": [
+        "live_session_rolling_summaries"
+      ],
+      "legacy_writers": [
+        "archive/projection"
+      ],
+      "legacy_readers": [
+        "archive/projection"
+      ],
+      "compatibility_adapters": [
+        "archive/projection"
+      ],
+      "shadow_paths": [],
+      "duplicate_state": true,
+      "removal_candidate": true,
+      "blocking_dependency": "runtime compatibility consumers"
+    },
+    {
+      "concern": "stream summaries",
+      "canonical_owner": "stream_summaries",
+      "current_writers": [
+        "stream_summaries"
+      ],
+      "current_readers": [
+        "stream_summaries"
+      ],
+      "legacy_writers": [
+        "archive/projection"
+      ],
+      "legacy_readers": [
+        "archive/projection"
+      ],
+      "compatibility_adapters": [
+        "archive/projection"
+      ],
+      "shadow_paths": [],
+      "duplicate_state": true,
+      "removal_candidate": true,
+      "blocking_dependency": "runtime compatibility consumers"
+    },
+    {
+      "concern": "schedule systems",
+      "canonical_owner": "ScheduleLearningService",
+      "current_writers": [
+        "ScheduleLearningService",
+        "legacy stream_schedule compatibility"
+      ],
+      "current_readers": [
+        "ScheduleLearningService"
+      ],
+      "legacy_writers": [
+        "legacy stream_schedule compatibility"
+      ],
+      "legacy_readers": [
+        "legacy stream_schedule compatibility"
+      ],
+      "compatibility_adapters": [
+        "legacy stream_schedule compatibility"
+      ],
+      "shadow_paths": [],
+      "duplicate_state": true,
+      "removal_candidate": true,
+      "blocking_dependency": "runtime compatibility consumers"
+    },
+    {
+      "concern": "game knowledge/research/guidance",
+      "canonical_owner": "GameContextResolver",
+      "current_writers": [
+        "GameContextResolver",
+        "GameDossier compatibility cache"
+      ],
+      "current_readers": [
+        "GameContextResolver"
+      ],
+      "legacy_writers": [
+        "GameDossier compatibility cache"
+      ],
+      "legacy_readers": [
+        "GameDossier compatibility cache"
+      ],
+      "compatibility_adapters": [
+        "GameDossier compatibility cache"
+      ],
+      "shadow_paths": [],
+      "duplicate_state": true,
+      "removal_candidate": true,
+      "blocking_dependency": "runtime compatibility consumers"
+    },
+    {
+      "concern": "GameProgressState",
+      "canonical_owner": "GameRunService",
+      "current_writers": [
+        "GameRunService"
+      ],
+      "current_readers": [
+        "GameRunService"
+      ],
+      "legacy_writers": [
+        "compatibility projection"
+      ],
+      "legacy_readers": [
+        "compatibility projection"
+      ],
+      "compatibility_adapters": [
+        "compatibility projection"
+      ],
+      "shadow_paths": [],
+      "duplicate_state": true,
+      "removal_candidate": true,
+      "blocking_dependency": "runtime compatibility consumers"
+    },
+    {
+      "concern": "GameRunState",
+      "canonical_owner": "GameRunService",
+      "current_writers": [
+        "GameRunService",
+        "runtime projection"
+      ],
+      "current_readers": [
+        "GameRunService"
+      ],
+      "legacy_writers": [
+        "runtime projection"
+      ],
+      "legacy_readers": [
+        "runtime projection"
+      ],
+      "compatibility_adapters": [
+        "runtime projection"
+      ],
+      "shadow_paths": [],
+      "duplicate_state": true,
+      "removal_candidate": true,
+      "blocking_dependency": "runtime compatibility consumers"
+    },
+    {
+      "concern": "GameDossier",
+      "canonical_owner": "GameKnowledgeV2Service",
+      "current_writers": [
+        "GameKnowledgeV2Service"
+      ],
+      "current_readers": [
+        "GameKnowledgeV2Service"
+      ],
+      "legacy_writers": [
+        "compatibility cache"
+      ],
+      "legacy_readers": [
+        "compatibility cache"
+      ],
+      "compatibility_adapters": [
+        "compatibility cache"
+      ],
+      "shadow_paths": [],
+      "duplicate_state": true,
+      "removal_candidate": true,
+      "blocking_dependency": "runtime compatibility consumers"
+    },
+    {
+      "concern": "chatter profiles/facts/summaries",
+      "canonical_owner": "SocialWorldService",
+      "current_writers": [
+        "SocialWorldService",
+        "legacy social compatibility archive"
+      ],
+      "current_readers": [
+        "SocialWorldService"
+      ],
+      "legacy_writers": [
+        "legacy social compatibility archive"
+      ],
+      "legacy_readers": [
+        "legacy social compatibility archive"
+      ],
+      "compatibility_adapters": [
+        "legacy social compatibility archive"
+      ],
+      "shadow_paths": [],
+      "duplicate_state": true,
+      "removal_candidate": true,
+      "blocking_dependency": "runtime compatibility consumers"
+    },
+    {
+      "concern": "SocialWorld",
+      "canonical_owner": "SocialWorldService",
+      "current_writers": [
+        "SocialWorldService"
+      ],
+      "current_readers": [
+        "SocialWorldService"
+      ],
+      "legacy_writers": [],
+      "legacy_readers": [],
+      "compatibility_adapters": [],
+      "shadow_paths": [],
+      "duplicate_state": false,
+      "removal_candidate": false,
+      "blocking_dependency": ""
+    },
+    {
+      "concern": "SharedCulture",
+      "canonical_owner": "SocialWorldService",
+      "current_writers": [
+        "SocialWorldService"
+      ],
+      "current_readers": [
+        "SocialWorldService"
+      ],
+      "legacy_writers": [],
+      "legacy_readers": [],
+      "compatibility_adapters": [],
+      "shadow_paths": [],
+      "duplicate_state": false,
+      "removal_candidate": false,
+      "blocking_dependency": ""
+    },
+    {
+      "concern": "persona identity/voice",
+      "canonical_owner": "StableHebeCore",
+      "current_writers": [
+        "StableHebeCore"
+      ],
+      "current_readers": [
+        "StableHebeCore"
+      ],
+      "legacy_writers": [],
+      "legacy_readers": [],
+      "compatibility_adapters": [],
+      "shadow_paths": [],
+      "duplicate_state": false,
+      "removal_candidate": false,
+      "blocking_dependency": ""
+    },
+    {
+      "concern": "owner preferences",
+      "canonical_owner": "OwnerProceduralPreferences",
+      "current_writers": [
+        "OwnerProceduralPreferences"
+      ],
+      "current_readers": [
+        "OwnerProceduralPreferences"
+      ],
+      "legacy_writers": [],
+      "legacy_readers": [],
+      "compatibility_adapters": [],
+      "shadow_paths": [],
+      "duplicate_state": false,
+      "removal_candidate": false,
+      "blocking_dependency": ""
+    },
+    {
+      "concern": "action receipts",
+      "canonical_owner": "domain executors",
+      "current_writers": [
+        "domain executors"
+      ],
+      "current_readers": [
+        "domain executors"
+      ],
+      "legacy_writers": [],
+      "legacy_readers": [],
+      "compatibility_adapters": [],
+      "shadow_paths": [],
+      "duplicate_state": false,
+      "removal_candidate": false,
+      "blocking_dependency": ""
+    },
+    {
+      "concern": "action ledger",
+      "canonical_owner": "HistoricalActionLedger",
+      "current_writers": [
+        "HistoricalActionLedger",
+        "generic memory action claims"
+      ],
+      "current_readers": [
+        "HistoricalActionLedger"
+      ],
+      "legacy_writers": [
+        "generic memory action claims"
+      ],
+      "legacy_readers": [
+        "generic memory action claims"
+      ],
+      "compatibility_adapters": [
+        "generic memory action claims"
+      ],
+      "shadow_paths": [],
+      "duplicate_state": true,
+      "removal_candidate": true,
+      "blocking_dependency": "runtime compatibility consumers"
+    },
+    {
+      "concern": "Presence inputs",
+      "canonical_owner": "PresenceModel",
+      "current_writers": [
+        "PresenceModel"
+      ],
+      "current_readers": [
+        "PresenceModel"
+      ],
+      "legacy_writers": [],
+      "legacy_readers": [],
+      "compatibility_adapters": [],
+      "shadow_paths": [],
+      "duplicate_state": false,
+      "removal_candidate": false,
+      "blocking_dependency": ""
+    },
+    {
+      "concern": "ContextBuilder",
+      "canonical_owner": "ContinuityContextBuilder",
+      "current_writers": [
+        "ContinuityContextBuilder",
+        "legacy CognitiveContextBuilder retained for non-v2 payload"
+      ],
+      "current_readers": [
+        "ContinuityContextBuilder"
+      ],
+      "legacy_writers": [
+        "legacy CognitiveContextBuilder retained for non-v2 payload"
+      ],
+      "legacy_readers": [
+        "legacy CognitiveContextBuilder retained for non-v2 payload"
+      ],
+      "compatibility_adapters": [
+        "legacy CognitiveContextBuilder retained for non-v2 payload"
+      ],
+      "shadow_paths": [],
+      "duplicate_state": true,
+      "removal_candidate": true,
+      "blocking_dependency": "runtime compatibility consumers"
+    },
+    {
+      "concern": "FinalEmissionGate",
+      "canonical_owner": "FinalEmissionGate",
+      "current_writers": [
+        "FinalEmissionGate"
+      ],
+      "current_readers": [
+        "FinalEmissionGate"
+      ],
+      "legacy_writers": [],
+      "legacy_readers": [],
+      "compatibility_adapters": [],
+      "shadow_paths": [],
+      "duplicate_state": false,
+      "removal_candidate": false,
+      "blocking_dependency": ""
+    },
+    {
+      "concern": "Hebe evolving opinions",
+      "canonical_owner": "HebeSelfModel",
+      "current_writers": [
+        "HebeSelfModel"
+      ],
+      "current_readers": [
+        "HebeSelfModel"
+      ],
+      "legacy_writers": [],
+      "legacy_readers": [],
+      "compatibility_adapters": [],
+      "shadow_paths": [],
+      "duplicate_state": false,
+      "removal_candidate": false,
+      "blocking_dependency": ""
+    },
+    {
+      "concern": "Leo language",
+      "canonical_owner": "LeoLanguageModel",
+      "current_writers": [
+        "LeoLanguageModel"
+      ],
+      "current_readers": [
+        "LeoLanguageModel"
+      ],
+      "legacy_writers": [],
+      "legacy_readers": [],
+      "compatibility_adapters": [],
+      "shadow_paths": [],
+      "duplicate_state": false,
+      "removal_candidate": false,
+      "blocking_dependency": ""
+    },
+    {
+      "concern": "consolidation",
+      "canonical_owner": "SessionConsolidator",
+      "current_writers": [
+        "SessionConsolidator",
+        "broad summary-to-truth deprecated"
+      ],
+      "current_readers": [
+        "SessionConsolidator"
+      ],
+      "legacy_writers": [
+        "broad summary-to-truth deprecated"
+      ],
+      "legacy_readers": [
+        "broad summary-to-truth deprecated"
+      ],
+      "compatibility_adapters": [
+        "broad summary-to-truth deprecated"
+      ],
+      "shadow_paths": [],
+      "duplicate_state": true,
+      "removal_candidate": true,
+      "blocking_dependency": "runtime compatibility consumers"
+    },
+    {
+      "concern": "temporal lifecycle",
+      "canonical_owner": "TemporalRelevanceService",
+      "current_writers": [
+        "TemporalRelevanceService",
+        "domain TTL helpers retained as compatibility"
+      ],
+      "current_readers": [
+        "TemporalRelevanceService"
+      ],
+      "legacy_writers": [
+        "domain TTL helpers retained as compatibility"
+      ],
+      "legacy_readers": [
+        "domain TTL helpers retained as compatibility"
+      ],
+      "compatibility_adapters": [
+        "domain TTL helpers retained as compatibility"
+      ],
+      "shadow_paths": [],
+      "duplicate_state": true,
+      "removal_candidate": true,
+      "blocking_dependency": "runtime compatibility consumers"
+    }
+  ]
+}

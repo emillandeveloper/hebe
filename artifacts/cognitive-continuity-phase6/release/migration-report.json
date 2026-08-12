@@ -1,0 +1,2268 @@
+{
+  "schema_version": 1,
+  "source_untouched": true,
+  "first_pass": [
+    {
+      "component": "cognitive_replay",
+      "version": 1,
+      "name": "replay_metadata",
+      "checksum": "847e14d94cbcb5ad15dac895e06910750bdfd4fd44b001f5fff35688fffa5eba",
+      "applied_at": "2026-08-12T01:34:53.008022+00:00",
+      "already_applied": false
+    },
+    {
+      "component": "conversation_continuity",
+      "version": 1,
+      "name": "conversation_and_open_threads",
+      "checksum": "687d2c78577ff15489d0c45cd188f8ad9acf98bf95f40916e53bc8af0fc01e41",
+      "applied_at": "2026-08-11T08:24:19.206510+00:00",
+      "already_applied": true
+    },
+    {
+      "component": "belief_v2",
+      "version": 1,
+      "name": "beliefs_evidence_and_compatibility_columns",
+      "checksum": "f0df6f1288caccaf6bb47670b38f9cca747f14c84916d6c1ca75beb687200507",
+      "applied_at": "2026-08-11T09:21:33.848085+00:00",
+      "already_applied": true
+    },
+    {
+      "component": "game_context_v2",
+      "version": 1,
+      "name": "durable_runs_knowledge_and_gaps",
+      "checksum": "08e342acaae00d5d24c1a6dbccad5aee41f753ed90d9ec26282a5fdf042d0a75",
+      "applied_at": "2026-08-11T17:19:57.839346+00:00",
+      "already_applied": true
+    },
+    {
+      "component": "social_world_v2",
+      "version": 1,
+      "name": "people_episodes_and_shared_culture",
+      "checksum": "b02adc2cd7f298f1af228dc52c4ba44ae15999fb4c815ea004c40f68b78cbfa5",
+      "applied_at": "2026-08-12T01:34:53.074005+00:00",
+      "already_applied": false
+    },
+    {
+      "component": "learning_v2",
+      "version": 1,
+      "name": "consolidation_temporal_action_and_scene",
+      "checksum": "6a86e2d1c7c03167f3b20c328bc97b73fb92e03903f64e64d326fb08f9e3b942",
+      "applied_at": "2026-08-12T01:34:53.104320+00:00",
+      "already_applied": false
+    },
+    {
+      "component": "architecture_consolidation",
+      "version": 1,
+      "name": "audit_hygiene_and_cutover_state",
+      "checksum": "944b3ad6532151d4204ed59f663668c9b0ac62df54ece7602d26b91acddd5b7d",
+      "applied_at": "2026-08-12T01:34:53.118457+00:00",
+      "already_applied": false
+    }
+  ],
+  "second_pass": [
+    {
+      "component": "cognitive_replay",
+      "version": 1,
+      "name": "replay_metadata",
+      "checksum": "847e14d94cbcb5ad15dac895e06910750bdfd4fd44b001f5fff35688fffa5eba",
+      "applied_at": "2026-08-12T01:34:53.008022+00:00",
+      "already_applied": true
+    },
+    {
+      "component": "conversation_continuity",
+      "version": 1,
+      "name": "conversation_and_open_threads",
+      "checksum": "687d2c78577ff15489d0c45cd188f8ad9acf98bf95f40916e53bc8af0fc01e41",
+      "applied_at": "2026-08-11T08:24:19.206510+00:00",
+      "already_applied": true
+    },
+    {
+      "component": "belief_v2",
+      "version": 1,
+      "name": "beliefs_evidence_and_compatibility_columns",
+      "checksum": "f0df6f1288caccaf6bb47670b38f9cca747f14c84916d6c1ca75beb687200507",
+      "applied_at": "2026-08-11T09:21:33.848085+00:00",
+      "already_applied": true
+    },
+    {
+      "component": "game_context_v2",
+      "version": 1,
+      "name": "durable_runs_knowledge_and_gaps",
+      "checksum": "08e342acaae00d5d24c1a6dbccad5aee41f753ed90d9ec26282a5fdf042d0a75",
+      "applied_at": "2026-08-11T17:19:57.839346+00:00",
+      "already_applied": true
+    },
+    {
+      "component": "social_world_v2",
+      "version": 1,
+      "name": "people_episodes_and_shared_culture",
+      "checksum": "b02adc2cd7f298f1af228dc52c4ba44ae15999fb4c815ea004c40f68b78cbfa5",
+      "applied_at": "2026-08-12T01:34:53.074005+00:00",
+      "already_applied": true
+    },
+    {
+      "component": "learning_v2",
+      "version": 1,
+      "name": "consolidation_temporal_action_and_scene",
+      "checksum": "6a86e2d1c7c03167f3b20c328bc97b73fb92e03903f64e64d326fb08f9e3b942",
+      "applied_at": "2026-08-12T01:34:53.104320+00:00",
+      "already_applied": true
+    },
+    {
+      "component": "architecture_consolidation",
+      "version": 1,
+      "name": "audit_hygiene_and_cutover_state",
+      "checksum": "944b3ad6532151d4204ed59f663668c9b0ac62df54ece7602d26b91acddd5b7d",
+      "applied_at": "2026-08-12T01:34:53.118457+00:00",
+      "already_applied": true
+    }
+  ],
+  "restart_idempotent": true,
+  "safe_apply": {
+    "schema_version": 1,
+    "planner": "phase6-hygiene-v1",
+    "mode": "safe-apply",
+    "db": "C:\\Users\\Leo Nifelheim\\Documents\\Hebe\\hebe-ui\\artifacts\\cognitive-continuity-phase6\\scratch\\copied-production.sqlite3",
+    "db_sha256": "bca06897ae3def7780ab95a21ce29e98d21e2b722fcb518d5a673541a6c5e7d7",
+    "generated_at_epoch": 1786498493.1295745,
+    "classification_counts": {
+      "KEEP": 230,
+      "MIGRATE": 0,
+      "MERGE": 0,
+      "INVALIDATE": 0,
+      "ARCHIVE": 0,
+      "DELETE": 0,
+      "NEEDS_REVIEW": 7
+    },
+    "destructive_changes": 0,
+    "records": [
+      {
+        "store": "memory_chunks",
+        "record_id": "1",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "2",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "3",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "4",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "5",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "6",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "7",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "8",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "9",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "10",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "11",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "12",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "13",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "14",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "15",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "16",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "17",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "18",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "19",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "20",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "21",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "22",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "23",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "24",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "25",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "26",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "27",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "28",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "29",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "30",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "31",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "32",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "33",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "34",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "35",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "36",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "37",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "38",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "39",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "40",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "41",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "42",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "43",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "44",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "45",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "46",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "47",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "48",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "49",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "50",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "51",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "52",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "53",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "54",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "55",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "56",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "57",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "58",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "59",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "60",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "61",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "62",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "63",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "64",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "65",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "66",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "67",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "68",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "69",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "70",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "71",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "72",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "73",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "74",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "75",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "76",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "77",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "78",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "79",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "80",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "81",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "82",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "83",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "84",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "85",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "86",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "87",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "88",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "89",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "90",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "91",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "92",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "93",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "94",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "95",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "96",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "97",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "98",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "99",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "100",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "101",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "102",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "103",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "104",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "105",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "106",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "107",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "108",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "109",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "110",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "111",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "112",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "113",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "114",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "115",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "116",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "117",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "118",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "119",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "120",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "121",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "122",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "123",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "124",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "125",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "126",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "127",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "128",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "129",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "130",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "131",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "132",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "133",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "134",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "135",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "136",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "137",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "138",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "139",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "140",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "141",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "142",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "143",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "144",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "145",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "146",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "147",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "148",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "149",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "150",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "151",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "152",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "153",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "154",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "155",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "156",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "157",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "158",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "159",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "160",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "161",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "162",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "163",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "164",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "165",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "166",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "167",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "168",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "169",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "170",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "171",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "172",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "173",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "174",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "175",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "176",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "177",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "178",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "179",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "180",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "181",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "182",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "183",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "184",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "185",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "186",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "187",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "188",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "189",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "190",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "191",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "192",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "193",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "194",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "195",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "196",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "197",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "198",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "199",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "200",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "201",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "202",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "203",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "204",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "205",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "206",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "207",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "208",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "209",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "210",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "211",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "212",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "213",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "214",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "215",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "216",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "217",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "218",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "219",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "220",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "221",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "222",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "223",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "224",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "225",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "226",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "227",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "228",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "229",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "memory_chunks",
+        "record_id": "230",
+        "classification": "KEEP",
+        "reason": "retrieval-only cache; never canonical truth",
+        "provenance": {
+          "belief_linked": false
+        }
+      },
+      {
+        "store": "schedule_hypotheses",
+        "record_id": "1",
+        "classification": "NEEDS_REVIEW",
+        "reason": "legacy schedule hypothesis cannot outrank current Twitch metadata automatically",
+        "provenance": {}
+      },
+      {
+        "store": "schedule_hypotheses",
+        "record_id": "2",
+        "classification": "NEEDS_REVIEW",
+        "reason": "legacy schedule hypothesis cannot outrank current Twitch metadata automatically",
+        "provenance": {}
+      },
+      {
+        "store": "schedule_hypotheses",
+        "record_id": "3",
+        "classification": "NEEDS_REVIEW",
+        "reason": "legacy schedule hypothesis cannot outrank current Twitch metadata automatically",
+        "provenance": {}
+      },
+      {
+        "store": "schedule_hypotheses",
+        "record_id": "4",
+        "classification": "NEEDS_REVIEW",
+        "reason": "legacy schedule hypothesis cannot outrank current Twitch metadata automatically",
+        "provenance": {}
+      },
+      {
+        "store": "schedule_hypotheses",
+        "record_id": "5",
+        "classification": "NEEDS_REVIEW",
+        "reason": "legacy schedule hypothesis cannot outrank current Twitch metadata automatically",
+        "provenance": {}
+      },
+      {
+        "store": "schedule_hypotheses",
+        "record_id": "6",
+        "classification": "NEEDS_REVIEW",
+        "reason": "legacy schedule hypothesis cannot outrank current Twitch metadata automatically",
+        "provenance": {}
+      },
+      {
+        "store": "schedule_hypotheses",
+        "record_id": "7",
+        "classification": "NEEDS_REVIEW",
+        "reason": "legacy schedule hypothesis cannot outrank current Twitch metadata automatically",
+        "provenance": {}
+      }
+    ],
+    "run_id": "hygiene_d47d5d26ba5b85c9d5ba",
+    "applied_count": 0,
+    "applied_counts": {},
+    "db_sha256_before": "bca06897ae3def7780ab95a21ce29e98d21e2b722fcb518d5a673541a6c5e7d7",
+    "db_sha256_after": "0b78cb495b118630a68e58c66f3389bf559628c67e58416df8e48a0cb40530cc"
+  },
+  "physical_deletes": 0,
+  "table_drops": 0,
+  "column_drops": 0
+}

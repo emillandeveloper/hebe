@@ -379,3 +379,46 @@ def learning_v2_migrations() -> tuple[Migration, ...]:
             """
         )
     return (Migration("learning_v2",1,"consolidation_temporal_action_and_scene",phase5),)
+
+
+def architecture_consolidation_migrations() -> tuple[Migration, ...]:
+    """Phase 6 audit tables. These preserve history and never delete domain data."""
+
+    def phase6(conn: sqlite3.Connection) -> None:
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS cognitive_migration_audit (
+              id TEXT PRIMARY KEY, run_id TEXT NOT NULL, operation TEXT NOT NULL,
+              source_store TEXT NOT NULL, source_record_id TEXT NOT NULL,
+              target_store TEXT NOT NULL DEFAULT '', target_record_id TEXT NOT NULL DEFAULT '',
+              classification TEXT NOT NULL, reason TEXT NOT NULL,
+              provenance_json TEXT NOT NULL DEFAULT '{}', applied_at TEXT NOT NULL,
+              schema_version INTEGER NOT NULL DEFAULT 1,
+              UNIQUE(run_id,source_store,source_record_id,operation)
+            );
+            CREATE INDEX IF NOT EXISTS idx_cognitive_migration_source
+              ON cognitive_migration_audit(source_store,source_record_id,classification);
+            CREATE TABLE IF NOT EXISTS cognitive_cutover_state (
+              concern TEXT PRIMARY KEY, canonical_owner TEXT NOT NULL,
+              legacy_mode TEXT NOT NULL, compatibility_write_enabled INTEGER NOT NULL DEFAULT 0,
+              decided_at TEXT NOT NULL, reason TEXT NOT NULL,
+              schema_version INTEGER NOT NULL DEFAULT 1
+            );
+            CREATE TABLE IF NOT EXISTS cognitive_hygiene_runs (
+              run_id TEXT PRIMARY KEY, db_fingerprint_before TEXT NOT NULL,
+              mode TEXT NOT NULL, started_at TEXT NOT NULL, completed_at TEXT NOT NULL DEFAULT '',
+              classification_counts_json TEXT NOT NULL DEFAULT '{}',
+              destructive_changes INTEGER NOT NULL DEFAULT 0,
+              schema_version INTEGER NOT NULL DEFAULT 1
+            );
+            """
+        )
+
+    return (
+        Migration(
+            "architecture_consolidation",
+            1,
+            "audit_hygiene_and_cutover_state",
+            phase6,
+        ),
+    )
