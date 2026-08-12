@@ -18,6 +18,11 @@ class CognitiveFeatureFlags:
     game_knowledge_v2_writes: bool = False
     game_research_memory_first: bool = False
     social_world_v2: bool = False
+    social_identity_v2: bool = False
+    social_episode_writes_v2: bool = False
+    social_retrieval_v2: bool = False
+    shared_culture_v2: bool = False
+    social_thread_opportunities_v2: bool = False
     consolidation_v2: bool = False
 
     @classmethod

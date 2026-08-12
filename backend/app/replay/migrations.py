@@ -277,3 +277,56 @@ def game_context_v2_migrations() -> tuple[Migration, ...]:
         add("game_progress_states","game_run_id","TEXT")
         add("game_sessions","game_run_id","TEXT")
     return (Migration("game_context_v2",1,"durable_runs_knowledge_and_gaps",phase3),)
+
+
+def social_world_v2_migrations() -> tuple[Migration, ...]:
+    def phase4(conn: sqlite3.Connection) -> None:
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS people (
+              person_id TEXT PRIMARY KEY, created_at REAL NOT NULL, last_seen_at REAL NOT NULL,
+              scope TEXT NOT NULL DEFAULT 'stream_public', schema_version INTEGER NOT NULL DEFAULT 1
+            );
+            CREATE TABLE IF NOT EXISTS person_identities (
+              id TEXT PRIMARY KEY, person_id TEXT NOT NULL, platform TEXT NOT NULL,
+              platform_user_id TEXT NOT NULL DEFAULT '', login TEXT NOT NULL DEFAULT '',
+              display_name TEXT NOT NULL DEFAULT '', aliases_json TEXT NOT NULL DEFAULT '[]',
+              first_seen_at REAL NOT NULL, last_seen_at REAL NOT NULL, confidence REAL NOT NULL,
+              source TEXT NOT NULL, schema_version INTEGER NOT NULL DEFAULT 1,
+              FOREIGN KEY(person_id) REFERENCES people(person_id)
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_person_identity_stable ON person_identities(platform,platform_user_id) WHERE platform_user_id<>'';
+            CREATE INDEX IF NOT EXISTS idx_person_identity_login ON person_identities(platform,lower(login));
+            CREATE TABLE IF NOT EXISTS person_sessions (
+              person_id TEXT NOT NULL, stream_session_id TEXT NOT NULL, first_seen_at REAL NOT NULL,
+              last_seen_at REAL NOT NULL, PRIMARY KEY(person_id,stream_session_id),
+              FOREIGN KEY(person_id) REFERENCES people(person_id)
+            );
+            CREATE TABLE IF NOT EXISTS social_episodes (
+              id TEXT PRIMARY KEY, episode_type TEXT NOT NULL, participant_ids_json TEXT NOT NULL,
+              origin_event_id TEXT NOT NULL UNIQUE, related_event_ids_json TEXT NOT NULL DEFAULT '[]',
+              summary TEXT NOT NULL, tone_observations_json TEXT NOT NULL DEFAULT '[]',
+              created_at REAL NOT NULL, relevance_until REAL NOT NULL, retention_until REAL NOT NULL,
+              sensitivity TEXT NOT NULL, retention_class TEXT NOT NULL, retrieval_scope TEXT NOT NULL,
+              salience_reason TEXT NOT NULL, schema_version INTEGER NOT NULL DEFAULT 1
+            );
+            CREATE INDEX IF NOT EXISTS idx_social_episode_relevance ON social_episodes(relevance_until,retention_until,episode_type);
+            CREATE TABLE IF NOT EXISTS shared_culture_items (
+              id TEXT PRIMARY KEY, label TEXT NOT NULL, meaning TEXT NOT NULL, origin_episode_id TEXT NOT NULL,
+              participant_ids_json TEXT NOT NULL, scope TEXT NOT NULL, tone TEXT NOT NULL,
+              status TEXT NOT NULL, confidence REAL NOT NULL, created_at REAL NOT NULL,
+              last_reinforced_at REAL NOT NULL, last_used_at REAL NOT NULL DEFAULT 0,
+              reuse_count INTEGER NOT NULL DEFAULT 0, cooldown_until REAL NOT NULL DEFAULT 0,
+              schema_version INTEGER NOT NULL DEFAULT 1
+            );
+            CREATE INDEX IF NOT EXISTS idx_shared_culture_status ON shared_culture_items(status,cooldown_until,last_reinforced_at);
+            CREATE TABLE IF NOT EXISTS shared_culture_evidence (
+              id TEXT PRIMARY KEY, culture_item_id TEXT NOT NULL, event_id TEXT NOT NULL,
+              episode_id TEXT NOT NULL DEFAULT '', reaction TEXT NOT NULL, polarity TEXT NOT NULL,
+              weight REAL NOT NULL, observed_at REAL NOT NULL, authority TEXT NOT NULL,
+              FOREIGN KEY(culture_item_id) REFERENCES shared_culture_items(id), UNIQUE(culture_item_id,event_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_culture_evidence_item ON shared_culture_evidence(culture_item_id,observed_at);
+            """
+        )
+    return (Migration("social_world_v2",1,"people_episodes_and_shared_culture",phase4),)

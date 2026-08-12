@@ -58,6 +58,8 @@ class CognitiveStateProbe:
         "conversations", "open_threads", "beliefs", "belief_evidence", "scene_assertions",
         "game_identities", "game_runs", "game_run_sessions", "game_run_events",
         "game_knowledge_facts", "game_knowledge_v2_gaps",
+        "people", "person_identities", "person_sessions", "social_episodes",
+        "shared_culture_items", "shared_culture_evidence",
     )
 
     def __init__(
@@ -152,6 +154,20 @@ class CognitiveStateProbe:
             "recent_chat_count": len(list(getattr(stream, "recent_chat_messages", []) or [])),
             "last_raid": _plain(getattr(stream, "last_raid_event", None) or {}),
             "last_cheer": _plain(getattr(stream, "last_cheer_event", None) or {}),
+            "people":rows["people"],"identities":rows["person_identities"],"recent_episodes":rows["social_episodes"],
+            "active_hypotheses":[item for item in rows["beliefs"] if item["namespace"]=="social" and item["epistemic_status"] in {"KNOWN","INFERRED","SUSPECTED"} and not item["superseded_by"]],
+            "historical_hypotheses":[item for item in rows["beliefs"] if item["namespace"]=="social" and item["epistemic_status"] in {"HISTORICAL","SUPERSEDED"}],
+            "open_threads":[item for item in rows["open_threads"] if item["scope_kind"]=="person"],
+            "relationships":[{"person_id":item["person_id"],**_plain(getattr(getattr(engine,"social_world_repository",None),"familiarity",lambda _:{ })(item["person_id"]))} for item in rows["people"]],
+            "shared_culture":{
+                "all":rows["shared_culture_items"],"candidates":[x for x in rows["shared_culture_items"] if x["status"]=="CANDIDATE"],"active":[x for x in rows["shared_culture_items"] if x["status"]=="ACTIVE"],"weakening":[x for x in rows["shared_culture_items"] if x["status"]=="WEAKENING"],"retired":[x for x in rows["shared_culture_items"] if x["status"]=="RETIRED"],"reactions":rows["shared_culture_evidence"],"selection":_plain(getattr(getattr(engine,"social_world",None),"last_culture_selection",{}))},
+            "retrieval":_plain(getattr(getattr(engine,"social_world",None),"last_context",{})),
+            "opportunities":_plain(getattr(getattr(engine,"social_world",None),"last_opportunities",[])),
+            "resolution":_plain(getattr(getattr(engine,"social_world",None),"last_resolution",{})),
+            "rejected_writes":_plain(getattr(getattr(engine,"social_world",None),"rejections",[])),
+            "compatibility":_plain(getattr(getattr(engine,"legacy_social_adapter",None),"telemetry",{})),
+            "performance":_plain(getattr(getattr(engine,"social_world_repository",None),"performance",lambda:{})()),
+            "belief_lookup_performance":_plain(getattr(getattr(engine,"belief_repository",None),"performance",lambda:{})()),
         }
         final_response = ""
         final_response = str(cognitive.get("final_response") or trace.get("final_response") or trace.get("hebe_response") or "")
@@ -288,6 +304,15 @@ class CognitiveStateProbe:
             if "game_knowledge_v2_gaps" in existing:
                 game_knowledge_gaps=[dict(row) for row in conn.execute("SELECT * FROM game_knowledge_v2_gaps ORDER BY created_at,id")]
                 for item in game_knowledge_gaps:item["resolved_fact_ids"]=json.loads(item.pop("resolved_fact_ids_json") or "[]")
+            people=[dict(row) for row in conn.execute("SELECT * FROM people ORDER BY created_at,person_id")] if "people" in existing else []
+            person_identities=[dict(row) for row in conn.execute("SELECT * FROM person_identities ORDER BY first_seen_at,id")] if "person_identities" in existing else []
+            for item in person_identities:item["aliases"]=json.loads(item.pop("aliases_json") or "[]")
+            social_episodes=[dict(row) for row in conn.execute("SELECT * FROM social_episodes ORDER BY created_at,id")] if "social_episodes" in existing else []
+            for item in social_episodes:
+                item["participant_ids"]=json.loads(item.pop("participant_ids_json") or "[]");item["related_event_ids"]=json.loads(item.pop("related_event_ids_json") or "[]");item["tone_observations"]=json.loads(item.pop("tone_observations_json") or "[]")
+            shared_culture_items=[dict(row) for row in conn.execute("SELECT * FROM shared_culture_items ORDER BY created_at,id")] if "shared_culture_items" in existing else []
+            for item in shared_culture_items:item["participant_ids"]=json.loads(item.pop("participant_ids_json") or "[]")
+            shared_culture_evidence=[dict(row) for row in conn.execute("SELECT * FROM shared_culture_evidence ORDER BY observed_at,id")] if "shared_culture_evidence" in existing else []
             return {
                 "counts": counts, "promotion_profiles": profiles, "promotion_events": promotions,
                 "schema_migrations": migrations, "conversations": conversations,
@@ -295,6 +320,7 @@ class CognitiveStateProbe:
                 "beliefs":beliefs,"belief_evidence":belief_evidence,"game_runs":game_runs,
                 "game_run_sessions":game_run_sessions,"game_run_events":game_run_events,
                 "game_knowledge_facts":game_knowledge_facts,"game_knowledge_gaps":game_knowledge_gaps,
+                "people":people,"person_identities":person_identities,"social_episodes":social_episodes,"shared_culture_items":shared_culture_items,"shared_culture_evidence":shared_culture_evidence,
             }
         finally:
             conn.close()

@@ -179,7 +179,7 @@ from app.continuity import (
     LegacyPendingAdapter,
     OpenThreadRepository,
 )
-from app.replay.migrations import MigrationRunner, conversation_continuity_migrations, belief_v2_migrations, game_context_v2_migrations
+from app.replay.migrations import MigrationRunner, conversation_continuity_migrations, belief_v2_migrations, game_context_v2_migrations, social_world_v2_migrations
 from app.epistemics.repository import BeliefRepository
 from app.epistemics.service import BeliefLifecycleService
 from app.epistemics.retrieval import MemoryRetrievalCoordinator
@@ -189,6 +189,7 @@ from app.game_context_v2.adapters import LegacyGameCompatibilityAdapter
 from app.game_context_v2.context import GameContextResolver
 from app.game_context_v2.repository import GameV2Repository
 from app.game_context_v2.service import GameKnowledgeService as GameKnowledgeV2Service, GameRunService
+from app.social_world_v2 import LegacySocialCompatibilityAdapter, SocialWorldRepository, SocialWorldService
 from app.services import db_sqlite
 
 WAKE_WORDS = ["hebe despierta", "eve despierta", "jebe despierta"]
@@ -551,6 +552,24 @@ class HebeEngine:
         self.game_knowledge_v2_writes = os.getenv("HEBE_GAME_KNOWLEDGE_V2_WRITES", "false").strip().lower() in ("1","true","yes","on")
         self.game_research_memory_first = os.getenv("HEBE_GAME_RESEARCH_MEMORY_FIRST", "false").strip().lower() in ("1","true","yes","on")
         self._initialize_game_context_v2()
+        self.social_world_v2 = os.getenv("HEBE_SOCIAL_WORLD_V2", "false").strip().lower() in ("1","true","yes","on")
+        self.social_identity_v2 = os.getenv("HEBE_SOCIAL_IDENTITY_V2", "false").strip().lower() in ("1","true","yes","on")
+        self.social_episode_writes_v2 = os.getenv("HEBE_SOCIAL_EPISODE_WRITES_V2", "false").strip().lower() in ("1","true","yes","on")
+        self.social_retrieval_v2 = os.getenv("HEBE_SOCIAL_RETRIEVAL_V2", "false").strip().lower() in ("1","true","yes","on")
+        self.shared_culture_v2 = os.getenv("HEBE_SHARED_CULTURE_V2", "false").strip().lower() in ("1","true","yes","on")
+        self.social_thread_opportunities_v2 = os.getenv("HEBE_SOCIAL_THREAD_OPPORTUNITIES_V2", "false").strip().lower() in ("1","true","yes","on")
+        self._initialize_social_world_v2()
+
+    def _initialize_social_world_v2(self) -> None:
+        try:
+            if self.belief_lifecycle is None or self.conversation_continuity is None:raise RuntimeError("phase1_or_phase2_unavailable")
+            runner=MigrationRunner(db_sqlite.get_db_connection);self.social_world_v2_migrations=runner.migrate(social_world_v2_migrations())
+            repository=SocialWorldRepository(db_sqlite.get_db_connection);self.social_world_repository=repository
+            self.social_world=SocialWorldService(repository,self.belief_lifecycle,self.conversation_continuity.threads,getattr(self,"memory_retrieval",None),now_fn=lambda:time.time())
+            self.legacy_social_adapter=LegacySocialCompatibilityAdapter()
+        except Exception as exc:
+            self.social_world_repository=None;self.social_world=None;self.legacy_social_adapter=None;self.social_world_v2_migrations=[]
+            print(f"[HEBE][SOCIAL_WORLD_V2_INIT] status=failed_closed reason={type(exc).__name__}",flush=True)
 
     def _initialize_game_context_v2(self) -> None:
         try:
@@ -2654,6 +2673,11 @@ class HebeEngine:
             f"[HEBE][TWITCH_PIPELINE_START] event_id={event_id} username={username} raw={message!r}",
             flush=True,
         )
+        if getattr(self,"social_world_v2",False) and getattr(self,"social_identity_v2",False) and getattr(self,"social_world",None) is not None:
+            stream=self._get_stream_state();stable_id=str(tags.get("user-id") or tags.get("user_id") or "")
+            try:
+                person,_identity=self.social_world.resolve_person(platform="twitch",platform_user_id=stable_id,login=username,display_name=display_name or username,source="twitch_chat",stream_session_id=str(getattr(stream,"active_stream_session_id","") or ""));fields["person_id"]=person.person_id
+            except Exception as exc:print(f"[HEBE][SOCIAL_PERSON_RESOLVE] decision=failed reason={type(exc).__name__}",flush=True)
         self._observe_automatic_promotion(
             username=username,
             display_name=display_name,
@@ -4017,6 +4041,19 @@ class HebeEngine:
             return
         self._process_internal_event_now(event)
 
+    def _observe_social_world_event(self,event_type:str,payload:dict) -> None:
+        if not (getattr(self,"social_world_v2",False) and getattr(self,"social_identity_v2",False) and getattr(self,"social_world",None) is not None):return
+        if event_type not in {"twitch_follow","twitch_sub","twitch_raid"}:return
+        login=str(payload.get("user_login") or payload.get("username") or payload.get("login") or "");user_id=str(payload.get("user_id") or payload.get("twitch_user_id") or "")
+        if not login and not user_id:return
+        stream=self._get_stream_state();session_id=str(getattr(stream,"active_stream_session_id","") or "");event_id=str(payload.get("event_id") or payload.get("message_id") or f"social:{event_type}:{user_id or login}")
+        try:
+            person,_=self.social_world.resolve_person(platform="twitch",platform_user_id=user_id,login=login,display_name=str(payload.get("display_name") or login),source=event_type,stream_session_id=session_id)
+            if getattr(self,"social_episode_writes_v2",False):
+                episode_type="resub" if event_type=="twitch_sub" and bool(payload.get("is_resub")) else "sub" if event_type=="twitch_sub" else "follow" if event_type=="twitch_follow" else "raid_arrival"
+                self.social_world.record_episode(episode_type=episode_type,participant_ids=(person.person_id,),origin_event_id=event_id,summary=episode_type,salience_reason="platform_social_event",relevance_seconds=604800,retention_seconds=7776000,sensitivity="normal",retention_class="bounded",retrieval_scope="stream_public")
+        except Exception as exc:print(f"[HEBE][SOCIAL_EPISODE] origin={event_id} admitted=false reason={type(exc).__name__}",flush=True)
+
     def _process_internal_event_now(self, event) -> None:
         if getattr(event, "event_type", None) in {"stream_online", "stream_offline"}:
             self._handle_stream_lifecycle_event(event)
@@ -4026,6 +4063,7 @@ class HebeEngine:
         if event_type.startswith("twitch_") and isinstance(payload, dict):
             payload = self._enrich_stream_payload(payload)
             event.payload = payload
+        self._observe_social_world_event(event_type,payload if isinstance(payload,dict) else {})
         if event_type == "twitch_cheer":
             self._handle_twitch_cheer_event(event)
             return

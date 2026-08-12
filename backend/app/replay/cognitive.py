@@ -108,6 +108,9 @@ class CognitiveReplayRunner:
         self._id_counter = 0
         self._belief_aliases: dict[str, str] = {}
         self._game_aliases: dict[str, str] = {}
+        self._person_aliases: dict[str, str] = {}
+        self._episode_aliases: dict[str, str] = {}
+        self._culture_aliases: dict[str, str] = {}
 
     def run(self, scenario: CognitiveReplayScenario | str | Path) -> ScenarioRunResult:
         if not isinstance(scenario, CognitiveReplayScenario):
@@ -115,6 +118,9 @@ class CognitiveReplayRunner:
         self._active_scenario = scenario
         self._belief_aliases = {}
         self._game_aliases = {}
+        self._person_aliases = {}
+        self._episode_aliases = {}
+        self._culture_aliases = {}
         started = _REAL_PERF_COUNTER()
         random.seed(scenario.seed)
         self.clock = ScenarioClock(scenario.initial_time)
@@ -294,6 +300,12 @@ class CognitiveReplayRunner:
             "HEBE_GAME_KNOWLEDGE_V2_READS": str(bool(self._active_scenario and self._active_scenario.feature_flags.game_knowledge_v2_reads)).lower(),
             "HEBE_GAME_KNOWLEDGE_V2_WRITES": str(bool(self._active_scenario and self._active_scenario.feature_flags.game_knowledge_v2_writes)).lower(),
             "HEBE_GAME_RESEARCH_MEMORY_FIRST": str(bool(self._active_scenario and self._active_scenario.feature_flags.game_research_memory_first)).lower(),
+            "HEBE_SOCIAL_WORLD_V2": str(bool(self._active_scenario and self._active_scenario.feature_flags.social_world_v2)).lower(),
+            "HEBE_SOCIAL_IDENTITY_V2": str(bool(self._active_scenario and self._active_scenario.feature_flags.social_identity_v2)).lower(),
+            "HEBE_SOCIAL_EPISODE_WRITES_V2": str(bool(self._active_scenario and self._active_scenario.feature_flags.social_episode_writes_v2)).lower(),
+            "HEBE_SOCIAL_RETRIEVAL_V2": str(bool(self._active_scenario and self._active_scenario.feature_flags.social_retrieval_v2)).lower(),
+            "HEBE_SHARED_CULTURE_V2": str(bool(self._active_scenario and self._active_scenario.feature_flags.shared_culture_v2)).lower(),
+            "HEBE_SOCIAL_THREAD_OPPORTUNITIES_V2": str(bool(self._active_scenario and self._active_scenario.feature_flags.social_thread_opportunities_v2)).lower(),
         }
         with patch.dict(os.environ, env, clear=False), self._deterministic_context():
             engine = HebeEngine(runtime=runtime, use_wakeword=True, say_hello=False)
@@ -432,6 +444,37 @@ class CognitiveReplayRunner:
                 domain_payload=domain_payload,
             )
             return
+        if event_type == "resolve_person":
+            person,identity=self.engine.social_world.resolve_person(platform=str(payload.get("platform") or "twitch"),platform_user_id=str(payload.get("platform_user_id") or payload.get("user_id") or ""),login=str(payload.get("login") or ""),display_name=str(payload.get("display_name") or ""),source="cognitive_replay",stream_session_id=str(payload.get("stream_session_id") or ""));self._person_aliases[event.event_id]=person.person_id;return
+        if event_type == "record_social_episode":
+            refs=payload.get("participant_refs") or ();people=tuple(self._person_aliases.get(str(x),str(x)) for x in refs)
+            result=self.engine.social_world.record_episode(episode_type=str(payload.get("episode_type") or "meaningful_interaction"),participant_ids=people,origin_event_id=event.event_id,summary=str(payload.get("summary") or payload.get("text") or ""),salience_reason=str(payload.get("salience_reason") or ""),relevance_seconds=float(payload.get("relevance_seconds") or 86400),retention_seconds=float(payload.get("retention_seconds") or 2592000),sensitivity=str(payload.get("sensitivity") or "normal"),retention_class=str(payload.get("retention_class") or "bounded"),retrieval_scope=str(payload.get("retrieval_scope") or "stream_public"),tone_observations=tuple(payload.get("tone_observations") or ()))
+            if result:self._episode_aliases[event.event_id]=result.id
+            return
+        if event_type == "propose_social_hypothesis":
+            ref=str(payload.get("person_ref") or "");person_id=self._person_aliases.get(ref,ref);payload.setdefault("authority_class","extractor");payload.setdefault("literal_span",{"excerpt":str(payload.get("text") or "")[:120]})
+            source_event_id,source_record_type,source_record_id=self._record_canonical_belief_evidence(event,payload);evidence=EvidenceRef(source_event_id=source_event_id,source_record_type=source_record_type,source_record_id=source_record_id,relation=EvidenceRelation.SUPPORTS,observed_at=self.clock.now(),extractor="social_hypothesis_validator",extractor_version="v1",literal_span=dict(payload["literal_span"]))
+            result=self.engine.social_world.propose_hypothesis(person_id,predicate=str(payload.get("predicate") or "interest.topic"),object_value=payload.get("object"),confidence=float(payload.get("confidence") or .6),evidence=evidence,sensitivity=str(payload.get("sensitivity") or "normal"),relevance_seconds=float(payload.get("relevance_seconds") or 2592000))
+            if result:self._belief_aliases[event.event_id]=result.id
+            return
+        if event_type == "open_social_thread":
+            ref=str(payload.get("person_ref") or "");person_id=self._person_aliases.get(ref,ref);self.engine.social_world.open_social_thread(person_id,thread_type=str(payload.get("thread_type") or "question_followup"),subject_ref=str(payload.get("subject_ref") or event.event_id),summary=str(payload.get("summary") or ""),origin_event_id=event.event_id,relevance_seconds=float(payload.get("relevance_seconds") or 86400),valid_seconds=float(payload.get("valid_seconds") or payload.get("relevance_seconds") or 86400),sensitivity=str(payload.get("sensitivity") or "normal"),priority=int(payload.get("priority") or 40));return
+        if event_type == "resolve_social_thread":
+            from app.continuity.models import OpenThreadStatus
+            self.engine.social_world.resolve_social_thread(str(payload.get("subject_ref") or ""),event_id=event.event_id,status=OpenThreadStatus(str(payload.get("status") or "RESOLVED")));return
+        if event_type == "expire_social":self.engine.social_world.expire_social_threads(event.event_id);return
+        if event_type == "retrieve_social_context":
+            ref=str(payload.get("person_ref") or "");person_id=self._person_aliases.get(ref,ref);self.engine.social_world.retrieve_social_context(person_id,purpose=str(payload.get("purpose") or "social_greeting"),retrieval_scope=str(payload.get("retrieval_scope") or "stream_public"),topic=str(payload.get("topic") or ""),scene_tone=str(payload.get("scene_tone") or "casual"));return
+        if event_type == "create_culture_candidate":
+            refs=payload.get("participant_refs") or ();people=[self._person_aliases.get(str(x),str(x)) for x in refs];episode_ref=str(payload.get("episode_ref") or "");item=self.engine.social_world.create_culture_candidate(label=str(payload.get("label") or "callback"),meaning=str(payload.get("meaning") or ""),participant_ids=people,origin_episode_id=self._episode_aliases.get(episode_ref,episode_ref),event_id=event.event_id,tone=str(payload.get("tone") or "playful"),owner_confirmed=bool(payload.get("owner_confirmed")));self._culture_aliases[event.event_id]=item["id"];return
+        if event_type == "reinforce_culture":
+            ref=str(payload.get("culture_ref") or "");item_id=self._culture_aliases.get(ref,ref);episode_ref=str(payload.get("episode_ref") or "");self.engine.social_world.reinforce_culture(item_id,event_id=event.event_id,episode_id=self._episode_aliases.get(episode_ref,episode_ref),reaction=str(payload.get("reaction") or "positive"),weight=float(payload.get("weight") or 1),authority=str(payload.get("authority") or "interaction"));return
+        if event_type == "use_culture":
+            ref=str(payload.get("culture_ref") or "");self.engine.social_world.use_culture(self._culture_aliases.get(ref,ref),event_id=event.event_id,cooldown_seconds=float(payload.get("cooldown_seconds") or 3600));return
+        if event_type == "select_culture":
+            ref=str(payload.get("person_ref") or "");self.engine.social_world.select_culture(self._person_aliases.get(ref,ref),topic=str(payload.get("topic") or ""),scene_tone=str(payload.get("scene_tone") or "casual"));return
+        if event_type == "social_opportunity":
+            ref=str(payload.get("person_ref") or "");self.engine.social_world.opportunities(self._person_aliases.get(ref,ref),scene_suitable=bool(payload.get("scene_suitable",True)));return
         if event_type == "resolve_game_run":
             result=self.engine.game_run_service.resolve(game=str(payload.get("game") or "Unknown Game"),stream_session_id=str(payload.get("stream_session_id") or event.event_id),source_event_id=str(payload.get("source_event_id") or event.event_id),owner_id=str(payload.get("owner_id") or "leo"),run_kind=str(payload.get("run_kind") or "unknown"),rules=dict(payload.get("rules") or {}),explicit_new=bool(payload.get("explicit_new")),explicit_continue=bool(payload.get("explicit_continue")))
             if result.active_run:self._game_aliases[event.event_id]=result.active_run.id
@@ -622,6 +665,8 @@ class CognitiveReplayRunner:
         continuity = getattr(self.engine, "conversation_continuity", None)
         if continuity is not None:
             continuity.expire_due()
+        social=getattr(self.engine,"social_world",None)
+        if social is not None:social.expire_social_threads()
         self.engine.poll_internal_events()
         self.engine.poll_stream_presence()
 

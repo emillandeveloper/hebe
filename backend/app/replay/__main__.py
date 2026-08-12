@@ -39,6 +39,7 @@ PHASE_05_TEST_MODULES = (
 PHASE_1_TEST_MODULES = (*PHASE_05_TEST_MODULES, "backend.tests.test_conversation_continuity_phase1")
 PHASE_2_TEST_MODULES = (*PHASE_1_TEST_MODULES, "backend.tests.test_epistemic_beliefs_phase2")
 PHASE_3_TEST_MODULES = (*PHASE_2_TEST_MODULES, "backend.tests.test_game_guidance_routing", "backend.tests.test_game_context_phase3")
+PHASE_4_TEST_MODULES = (*PHASE_3_TEST_MODULES, "backend.tests.test_social_world_phase4")
 
 
 def _default_scenario_dir() -> Path:
@@ -64,6 +65,8 @@ def _resolve_scenarios(values: list[str], suite: str) -> list[Path]:
             phase2 = directory.parent / "cognitive_replay_phase2"
             phase3 = directory.parent / "cognitive_replay_phase3"
             return sorted(directory.glob("*.json"))+sorted(phase1.glob("*.json"))+sorted(phase2.glob("*.json"))+sorted(phase3.glob("*.json"))
+        if suite == "cognitive-v2-phase4":
+            return sorted(directory.glob("*.json"))+sorted((directory.parent/"cognitive_replay_phase1").glob("*.json"))+sorted((directory.parent/"cognitive_replay_phase2").glob("*.json"))+sorted((directory.parent/"cognitive_replay_phase3").glob("*.json"))+sorted((directory.parent/"cognitive_replay_phase4").glob("*.json"))
         if suite != "cognitive-v2":
             raise ValueError(f"unknown suite: {suite}")
         return sorted(directory.glob("*.json"))
@@ -85,7 +88,7 @@ def _resolve_scenarios(values: list[str], suite: str) -> list[Path]:
 
 
 def _run_phase_tests(workdir: Path, *, phase: int = 0) -> tuple[CommandVerification, dict[str, object]]:
-    modules = PHASE_3_TEST_MODULES if phase >= 3 else PHASE_2_TEST_MODULES if phase >= 2 else PHASE_1_TEST_MODULES if phase >= 1 else PHASE_05_TEST_MODULES
+    modules = PHASE_4_TEST_MODULES if phase >= 4 else PHASE_3_TEST_MODULES if phase >= 3 else PHASE_2_TEST_MODULES if phase >= 2 else PHASE_1_TEST_MODULES if phase >= 1 else PHASE_05_TEST_MODULES
     command = [sys.executable, "-m", "unittest", *modules]
     started = time.perf_counter()
     env = dict(__import__("os").environ)
@@ -156,7 +159,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     commands: list[CommandVerification] = []
     if args.run_phase_tests:
-        phase = 3 if args.suite == "cognitive-v2-phase3" else 2 if args.suite == "cognitive-v2-phase2" else 1 if args.suite == "cognitive-v2-phase1" else 0
+        phase = 4 if args.suite == "cognitive-v2-phase4" else 3 if args.suite == "cognitive-v2-phase3" else 2 if args.suite == "cognitive-v2-phase2" else 1 if args.suite == "cognitive-v2-phase1" else 0
         test_command, test_summary = _run_phase_tests(repo_root, phase=phase)
         commands.append(test_command)
     else:
@@ -165,9 +168,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.baseline_differential:
         differential = json.loads(Path(args.baseline_differential).resolve().read_text(encoding="utf-8"))
         differential_current_failures = differential.get(
+            "phase_4_tests_failed",
+            differential.get(
             "phase_3_tests_failed",
             differential.get("phase_2_tests_failed", differential.get("phase_1_tests_failed", differential.get("phase_0_5_tests_failed", -1))),
-        )
+        ))
         if int(differential_current_failures) != int(test_summary["failed"]):
             raise ValueError("baseline differential does not match the current regression failure count")
     regression_failed = int(differential.get("new_regressions") or 0) > 0 if differential else bool(test_summary["failed"])
