@@ -1,0 +1,195 @@
+{
+  "baseline_commit": "9cc2f1b",
+  "baseline_python": "3.11.0",
+  "baseline_platform": "Windows-10-10.0.26200-SP0",
+  "baseline_command": "python -m app.replay.regression_probe (committed Phase 4 checkpoint 9cc2f1b)",
+  "baseline_command_duration_seconds": 0.0,
+  "baseline_loader_errors": 1,
+  "baseline_tests_passed": -2,
+  "baseline_tests_failed": 17,
+  "baseline_new_module_unavailable": "backend.tests.test_cognitive_replay",
+  "phase_5_tests_passed": -2,
+  "phase_5_tests_failed": 17,
+  "new_regressions": 0,
+  "pre_existing_failures": 17,
+  "fixed_existing_failures": 0,
+  "classification_counts": {
+    "PASS_BOTH": 0,
+    "PRE_EXISTING_FAILURE": 17,
+    "NEW_PHASE_5_REGRESSION": 0,
+    "FIXED_BY_PHASE_5": 0,
+    "FAILURE_CHANGED": 0
+  },
+  "tests": [
+    {
+      "test": "backend.tests.test_game_guidance_routing.GameGuidanceRoutingTests.test_fallback_chat_blocks_ungrounded_walkthrough_claim",
+      "subsystem": "local application/capability resolution",
+      "baseline_status": "FAIL",
+      "phase_5_status": "FAIL",
+      "baseline_exception_or_assertion": "AssertionError: 'castillo' unexpectedly found in 've al castillo, habla con la autoridad local y busca el objeto clave.'",
+      "phase_5_exception_or_assertion": "AssertionError: 'castillo' unexpectedly found in 've al castillo, habla con la autoridad local y busca el objeto clave.'",
+      "phase_5_code_on_failing_path": "NO: the Phase 5 production seam changes are not on this failing path",
+      "classification": "PRE_EXISTING_FAILURE"
+    },
+    {
+      "test": "backend.tests.test_game_guidance_routing.GameGuidanceRoutingTests.test_fallback_chat_is_blocked_while_game_pending_is_active",
+      "subsystem": "local application/capability resolution",
+      "baseline_status": "FAIL",
+      "phase_5_status": "FAIL",
+      "baseline_exception_or_assertion": "AssertionError: 'aclaración' not found in <captured value>",
+      "phase_5_exception_or_assertion": "AssertionError: 'aclaración' not found in <captured value>",
+      "phase_5_code_on_failing_path": "NO: the Phase 5 production seam changes are not on this failing path",
+      "classification": "PRE_EXISTING_FAILURE"
+    },
+    {
+      "test": "backend.tests.test_game_guidance_routing.GameGuidanceRoutingTests.test_stt_answer_without_wake_is_owner_followup",
+      "subsystem": "local application/capability resolution",
+      "baseline_status": "FAIL",
+      "phase_5_status": "FAIL",
+      "baseline_exception_or_assertion": "AssertionError: 'ambient_stt' != 'owner_stt_followup'\n- ambient_stt\n+ owner_stt_followup",
+      "phase_5_exception_or_assertion": "AssertionError: 'ambient_stt' != 'owner_stt_followup'\n- ambient_stt\n+ owner_stt_followup",
+      "phase_5_code_on_failing_path": "ENTRY ONLY: the Phase 5 STT seam is on the path; the unchanged local capability resolver produces the identical failure",
+      "classification": "PRE_EXISTING_FAILURE"
+    },
+    {
+      "test": "backend.tests.test_game_guidance_routing.GameGuidanceRoutingTests.test_successful_state_update_mutates_runtime_game_run_state",
+      "subsystem": "local application/capability resolution",
+      "baseline_status": "FAIL",
+      "phase_5_status": "FAIL",
+      "baseline_exception_or_assertion": "AssertionError: '' != 'Cloud'\n+ Cloud",
+      "phase_5_exception_or_assertion": "AssertionError: '' != 'Cloud'\n+ Cloud",
+      "phase_5_code_on_failing_path": "NO: the Phase 5 production seam changes are not on this failing path",
+      "classification": "PRE_EXISTING_FAILURE"
+    },
+    {
+      "test": "backend.tests.test_game_knowledge.GameKnowledgeTests.test_response_synthesizer_handles_game_knowledge_command_result",
+      "subsystem": "Game Knowledge response guard",
+      "baseline_status": "FAIL",
+      "phase_5_status": "FAIL",
+      "baseline_exception_or_assertion": "AssertionError: 'Persona 5 Royal' not found in <captured value>",
+      "phase_5_exception_or_assertion": "AssertionError: 'Persona 5 Royal' not found in <captured value>",
+      "phase_5_code_on_failing_path": "NO: the Phase 5 production seam changes are not on this failing path",
+      "classification": "PRE_EXISTING_FAILURE"
+    },
+    {
+      "test": "backend.tests.test_voice_command_pipeline.VoiceCommandPipelineTests.test_high_value_game_tip_can_reply_without_hebe_mention",
+      "subsystem": "Twitch no-mention/presence",
+      "baseline_status": "FAIL",
+      "phase_5_status": "FAIL",
+      "baseline_exception_or_assertion": "AssertionError: 0 != 1",
+      "phase_5_exception_or_assertion": "AssertionError: 0 != 1",
+      "phase_5_code_on_failing_path": "YES: Phase 5 shares this path, but the baseline and current terminal assertion are identical",
+      "classification": "PRE_EXISTING_FAILURE"
+    },
+    {
+      "test": "backend.tests.test_voice_command_pipeline.VoiceCommandPipelineTests.test_no_wake_whitelisted_app_command_routes_while_stream_offline",
+      "subsystem": "local application/capability resolution",
+      "baseline_status": "ERROR",
+      "phase_5_status": "ERROR",
+      "baseline_exception_or_assertion": "IndexError: list index out of range",
+      "phase_5_exception_or_assertion": "IndexError: list index out of range",
+      "phase_5_code_on_failing_path": "ENTRY ONLY: the Phase 5 STT seam is on the path; the unchanged local capability resolver produces the identical failure",
+      "classification": "PRE_EXISTING_FAILURE"
+    },
+    {
+      "test": "backend.tests.test_voice_command_pipeline.VoiceCommandPipelineTests.test_obs_path_missing_returns_structured_action_result_not_generic_advice",
+      "subsystem": "local application/capability resolution",
+      "baseline_status": "FAIL",
+      "phase_5_status": "FAIL",
+      "baseline_exception_or_assertion": "AssertionError: 'HEBE_APP_OBS_PATH' not found in <captured value>",
+      "phase_5_exception_or_assertion": "AssertionError: 'HEBE_APP_OBS_PATH' not found in <captured value>",
+      "phase_5_code_on_failing_path": "NO: the Phase 5 production seam changes are not on this failing path",
+      "classification": "PRE_EXISTING_FAILURE"
+    },
+    {
+      "test": "backend.tests.test_voice_command_pipeline.VoiceCommandPipelineTests.test_stt_canonical_melonds_command_executes_once (transcript='Ebe, abre Melón DS')",
+      "subsystem": "local application/capability resolution",
+      "baseline_status": "FAIL",
+      "phase_5_status": "FAIL",
+      "baseline_exception_or_assertion": "AssertionError: 0 != 1",
+      "phase_5_exception_or_assertion": "AssertionError: 0 != 1",
+      "phase_5_code_on_failing_path": "ENTRY ONLY: the Phase 5 STT seam is on the path; the unchanged local capability resolver produces the identical failure",
+      "classification": "PRE_EXISTING_FAILURE"
+    },
+    {
+      "test": "backend.tests.test_voice_command_pipeline.VoiceCommandPipelineTests.test_stt_canonical_melonds_command_executes_once (transcript='Eve, abre Melón de Ese')",
+      "subsystem": "local application/capability resolution",
+      "baseline_status": "FAIL",
+      "phase_5_status": "FAIL",
+      "baseline_exception_or_assertion": "AssertionError: 0 != 1",
+      "phase_5_exception_or_assertion": "AssertionError: 0 != 1",
+      "phase_5_code_on_failing_path": "ENTRY ONLY: the Phase 5 STT seam is on the path; the unchanged local capability resolver produces the identical failure",
+      "classification": "PRE_EXISTING_FAILURE"
+    },
+    {
+      "test": "backend.tests.test_voice_command_pipeline.VoiceCommandPipelineTests.test_stt_canonical_melonds_command_executes_once (transcript='Hebe, abre melonDS')",
+      "subsystem": "local application/capability resolution",
+      "baseline_status": "FAIL",
+      "phase_5_status": "FAIL",
+      "baseline_exception_or_assertion": "AssertionError: 0 != 1",
+      "phase_5_exception_or_assertion": "AssertionError: 0 != 1",
+      "phase_5_code_on_failing_path": "ENTRY ONLY: the Phase 5 STT seam is on the path; the unchanged local capability resolver produces the identical failure",
+      "classification": "PRE_EXISTING_FAILURE"
+    },
+    {
+      "test": "backend.tests.test_voice_command_pipeline.VoiceCommandPipelineTests.test_stt_hebe_abre_obs_uses_same_open_application_pipeline",
+      "subsystem": "local application/capability resolution",
+      "baseline_status": "ERROR",
+      "phase_5_status": "ERROR",
+      "baseline_exception_or_assertion": "IndexError: list index out of range",
+      "phase_5_exception_or_assertion": "IndexError: list index out of range",
+      "phase_5_code_on_failing_path": "ENTRY ONLY: the Phase 5 STT seam is on the path; the unchanged local capability resolver produces the identical failure",
+      "classification": "PRE_EXISTING_FAILURE"
+    },
+    {
+      "test": "backend.tests.test_voice_command_pipeline.VoiceCommandPipelineTests.test_twitch_normal_no_mention_chat_reaches_presence_observe",
+      "subsystem": "Twitch no-mention/presence",
+      "baseline_status": "FAIL",
+      "phase_5_status": "FAIL",
+      "baseline_exception_or_assertion": "AssertionError: '[HEBE][TWITCH_PIPELINE_CLASSIFY] category=normal_no_mention_chat' not found in <captured value>",
+      "phase_5_exception_or_assertion": "AssertionError: '[HEBE][TWITCH_PIPELINE_CLASSIFY] category=normal_no_mention_chat' not found in <captured value>",
+      "phase_5_code_on_failing_path": "YES: Phase 5 shares this path, but the baseline and current terminal assertion are identical",
+      "classification": "PRE_EXISTING_FAILURE"
+    },
+    {
+      "test": "backend.tests.test_voice_command_pipeline.VoiceCommandPipelineTests.test_twitch_pipeline_health_counts_messages",
+      "subsystem": "Twitch no-mention/presence",
+      "baseline_status": "FAIL",
+      "phase_5_status": "FAIL",
+      "baseline_exception_or_assertion": "AssertionError: 0 != 1",
+      "phase_5_exception_or_assertion": "AssertionError: 0 != 1",
+      "phase_5_code_on_failing_path": "YES: Phase 5 shares this path, but the baseline and current terminal assertion are identical",
+      "classification": "PRE_EXISTING_FAILURE"
+    },
+    {
+      "test": "backend.tests.test_voice_command_pipeline.VoiceCommandPipelineTests.test_ui_abre_obs_creates_open_application_when_awake_and_whitelisted",
+      "subsystem": "local application/capability resolution",
+      "baseline_status": "ERROR",
+      "phase_5_status": "ERROR",
+      "baseline_exception_or_assertion": "IndexError: list index out of range",
+      "phase_5_exception_or_assertion": "IndexError: list index out of range",
+      "phase_5_code_on_failing_path": "NO: the Phase 5 production seam changes are not on this failing path",
+      "classification": "PRE_EXISTING_FAILURE"
+    },
+    {
+      "test": "backend.tests.test_voice_command_pipeline.VoiceCommandPipelineTests.test_ui_hebe_abre_obs_creates_open_application_action_plan",
+      "subsystem": "local application/capability resolution",
+      "baseline_status": "ERROR",
+      "phase_5_status": "ERROR",
+      "baseline_exception_or_assertion": "IndexError: list index out of range",
+      "phase_5_exception_or_assertion": "IndexError: list index out of range",
+      "phase_5_code_on_failing_path": "NO: the Phase 5 production seam changes are not on this failing path",
+      "classification": "PRE_EXISTING_FAILURE"
+    },
+    {
+      "test": "backend.tests.test_voice_command_pipeline.VoiceCommandPipelineTests.test_unrelated_action_during_pending_conversation_still_uses_action_flow",
+      "subsystem": "local application/capability resolution",
+      "baseline_status": "ERROR",
+      "phase_5_status": "ERROR",
+      "baseline_exception_or_assertion": "IndexError: list index out of range",
+      "phase_5_exception_or_assertion": "IndexError: list index out of range",
+      "phase_5_code_on_failing_path": "ENTRY ONLY: the Phase 5 STT seam is on the path; the unchanged local capability resolver produces the identical failure",
+      "classification": "PRE_EXISTING_FAILURE"
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "schema_version":1,"scenario_id":"phase5_model_candidate_fixture","initial_time":5000,"seed":506,
+  "feature_flags":{"cognitive_replay_enabled":true,"conversation_continuity_v2":true,"belief_v2_reads":true,"belief_v2_writes":true,"consolidation_v2":true,"consolidation_commits_v2":true,"hebe_self_v2":true},
+  "model_fixtures":{
+    "session_consolidation:GAME:v1:cognitive-replay":{"candidates":[]},
+    "session_consolidation:HEBE_SELF:v1:cognitive-replay":{"candidates":[{"domain":"HEBE_SELF","delta_type":"added","payload":{"subject":"ffv.white_mage","predicate":"opinion.character","value":"likes","source_domain":"hebe_expression"},"evidence_ids":["model-consolidate"]}]},
+    "session_consolidation:LEO_LANGUAGE:v1:cognitive-replay":{"candidates":[]},
+    "session_consolidation:OWNER_PREFERENCE:v1:cognitive-replay":{"candidates":[]},
+    "session_consolidation:SCHEDULE:v1:cognitive-replay":{"candidates":[]},
+    "session_consolidation:SHARED_CULTURE:v1:cognitive-replay":{"candidates":[]},
+    "session_consolidation:SOCIAL:v1:cognitive-replay":{"candidates":[]},
+    "session_consolidation:THREAD:v1:cognitive-replay":{"candidates":[]}
+  },
+  "events":[
+    {"event_id":"model-consolidate","type":"consolidate_session","session_id":"cognitive-replay","start_event":"start","end_event":"model-consolidate","use_model_fixture":true,"assertions":[{"assertion":"equals","path":"learning.last_result.accepted_deltas","expected":1},{"assertion":"contains_matching","path":"self_model.opinions","matching":{"subject_ref":"ffv.white_mage","predicate":"opinion.character","object":"likes"}},{"assertion":"count","path":"actions.model_calls","count":8}]}
+  ]
+}

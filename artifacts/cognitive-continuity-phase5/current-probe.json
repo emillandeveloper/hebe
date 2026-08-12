@@ -1,0 +1,131 @@
+{
+  "source_root": "C:\\Users\\Leo Nifelheim\\Documents\\Hebe\\hebe-ui",
+  "python": "3.11.0",
+  "platform": "Windows-10-10.0.26200-SP0",
+  "duration_seconds": 29.118031,
+  "tests_run": 15,
+  "failures": 12,
+  "errors": 5,
+  "skipped": 0,
+  "records": [
+    {
+      "test": "backend.tests.test_voice_command_pipeline.VoiceCommandPipelineTests.test_no_wake_whitelisted_app_command_routes_while_stream_offline",
+      "status": "ERROR",
+      "exception_type": "IndexError",
+      "exception_message": "list index out of range",
+      "traceback_tail": "IndexError: list index out of range"
+    },
+    {
+      "test": "backend.tests.test_voice_command_pipeline.VoiceCommandPipelineTests.test_stt_hebe_abre_obs_uses_same_open_application_pipeline",
+      "status": "ERROR",
+      "exception_type": "IndexError",
+      "exception_message": "list index out of range",
+      "traceback_tail": "IndexError: list index out of range"
+    },
+    {
+      "test": "backend.tests.test_voice_command_pipeline.VoiceCommandPipelineTests.test_ui_abre_obs_creates_open_application_when_awake_and_whitelisted",
+      "status": "ERROR",
+      "exception_type": "IndexError",
+      "exception_message": "list index out of range",
+      "traceback_tail": "IndexError: list index out of range"
+    },
+    {
+      "test": "backend.tests.test_voice_command_pipeline.VoiceCommandPipelineTests.test_ui_hebe_abre_obs_creates_open_application_action_plan",
+      "status": "ERROR",
+      "exception_type": "IndexError",
+      "exception_message": "list index out of range",
+      "traceback_tail": "IndexError: list index out of range"
+    },
+    {
+      "test": "backend.tests.test_voice_command_pipeline.VoiceCommandPipelineTests.test_unrelated_action_during_pending_conversation_still_uses_action_flow",
+      "status": "ERROR",
+      "exception_type": "IndexError",
+      "exception_message": "list index out of range",
+      "traceback_tail": "IndexError: list index out of range"
+    },
+    {
+      "test": "backend.tests.test_voice_command_pipeline.VoiceCommandPipelineTests.test_high_value_game_tip_can_reply_without_hebe_mention",
+      "status": "FAIL",
+      "exception_type": "AssertionError",
+      "exception_message": "0 != 1",
+      "traceback_tail": "AssertionError: 0 != 1"
+    },
+    {
+      "test": "backend.tests.test_voice_command_pipeline.VoiceCommandPipelineTests.test_obs_path_missing_returns_structured_action_result_not_generic_advice",
+      "status": "FAIL",
+      "exception_type": "AssertionError",
+      "exception_message": "'HEBE_APP_OBS_PATH' not found in 'Reconozco OBS Studio, pero no tengo configurada su ruta ejecutable. Todavía estoy intentando encontrarla.'",
+      "traceback_tail": "AssertionError: 'HEBE_APP_OBS_PATH' not found in 'Reconozco OBS Studio, pero no tengo configurada su ruta ejecutable. Todavía estoy intentando encontrarla.'"
+    },
+    {
+      "test": "backend.tests.test_voice_command_pipeline.VoiceCommandPipelineTests.test_stt_canonical_melonds_command_executes_once (transcript='Hebe, abre melonDS')",
+      "status": "FAIL",
+      "exception_type": "AssertionError",
+      "exception_message": "0 != 1",
+      "traceback_tail": "AssertionError: 0 != 1"
+    },
+    {
+      "test": "backend.tests.test_voice_command_pipeline.VoiceCommandPipelineTests.test_stt_canonical_melonds_command_executes_once (transcript='Ebe, abre Melón DS')",
+      "status": "FAIL",
+      "exception_type": "AssertionError",
+      "exception_message": "0 != 1",
+      "traceback_tail": "AssertionError: 0 != 1"
+    },
+    {
+      "test": "backend.tests.test_voice_command_pipeline.VoiceCommandPipelineTests.test_stt_canonical_melonds_command_executes_once (transcript='Eve, abre Melón de Ese')",
+      "status": "FAIL",
+      "exception_type": "AssertionError",
+      "exception_message": "0 != 1",
+      "traceback_tail": "AssertionError: 0 != 1"
+    },
+    {
+      "test": "backend.tests.test_voice_command_pipeline.VoiceCommandPipelineTests.test_twitch_normal_no_mention_chat_reaches_presence_observe",
+      "status": "FAIL",
+      "exception_type": "AssertionError",
+      "exception_message": "'[HEBE][TWITCH_PIPELINE_CLASSIFY] category=normal_no_mention_chat' not found in \"[HEBE][TWITCH_PIPELINE_START] event_id=twchat_2ff404bdfed04ca987f3acf6268002b5 username=viewer raw='estoy mirando la partida tranquilamente'\\n[HEBE][NORMALIZE] raw='estoy mirando la partida tranquilamente' normalized='estoy mirando la partida tranquilamente'\\n[HEBE][NORMALIZE] raw='estoy mirando la partida tranquilamente' normalized='estoy mirando la partida tranquilamente'\\n[HEBE][INPUT_FIREWALL] source=twitch_viewer authority=viewer trust=trusted_direct decision=allow reason=live_viewer_message\\n[HEBE][ACTION_PERMISSIONS] action=twitch_action allowed=false reason=live_viewer_message\\n[HEBE][ACTION_PERMISSIONS] action=promotion_shoutout allowed=false reason=live_viewer_message\\n[HEBE][TWITCH][CHAT] observed username=viewer message='estoy mirando la partida tranquilamente'\\n[HEBE][STREAM_SESSION] reused_active id=1 reason=same_twitch_stream_id\\n[HEBE][NORMALIZE] raw='estoy mirando la partida tranquilamente' normalized='estoy mirando la partida tranquilamente'\\n[HEBE][NORMALIZE] raw='estoy mirando la partida tranquilamente' normalized='estoy mirando la partida tranquilamente'\\n[HEBE][CHATTER] recent_chatter updated username=viewer display=Viewer\\n[HEBE][NORMALIZE] raw='estoy mirando la partida tranquilamente' normalized='estoy mirando la partida tranquilamente'\\n[HEBE][NORMALIZE] raw='estoy mirando la partida tranquilamente' normalized='estoy mirando la partida tranquilamente'\\n[HEBE][TWITCH_INTERACTION_QUEUE] event_id=twchat_2ff404bdfed04ca987f3acf6268002b5 priority=8 action=enqueue\\n[HEBE][TWITCH_INTERACTION_ACTIVE] event_id=twchat_2ff404bdfed04ca987f3acf6268002b5 stage=generating\\n[HEBE][NORMALIZE] raw='estoy mirando la partida tranquilamente' normalized='estoy mirando la partida tranquilamente'\\n[HEBE][NORMALIZE] raw='estoy mirando la partida tranquilamente' normalized='estoy mirando la partida tranquilamente'\\n[HEBE][NORMALIZE] raw='estoy mirando la partida tranquilamente' normalized='estoy mirando la partida tranquilamente'\\n[HEBE][INPUT_FIREWALL] source=twitch_viewer authority=viewer trust=trusted_direct decision=allow reason=live_viewer_message\\n[HEBE][ACTION_PERMISSIONS] action=twitch_action allowed=false reason=live_viewer_message\\n[HEBE][ACTION_PERMISSIONS] action=promotion_shoutout allowed=false reason=live_viewer_message\\n[HEBE][CONVERSATION_OWNERSHIP] addressee=general allowed=true reason=general_chat confidence=0.720\\n[HEBE][NORMALIZE] raw='estoy mirando la partida tranquilamente' normalized='estoy mirando la partida tranquilamente'\\n[HEBE][COGNITIVE_ROUTER] intent=stream_context_update confidence=0.95 new_request=false uses_pending=false should_reply=false stop=true state=none reason=viewer_context_only\\n[HEBE][PENDING_ROUTER] active=false kind=none compatible=false reason=no_active_pending\\n[HEBE][COGNITIVE_TRACE] message_id=msg_37ba04fef4b144c6b11725c71b9f0518 route=stream_context_update\\n[HEBE][COGNITIVE_ROUTER] source=twitch_chat event_id=twchat_2ff404bdfed04ca987f3acf6268002b5 should_reply=false reason=viewer_context_only response_mode=silent\\n[HEBE][TWITCH_INTERACTION_OUTCOME] event_id=twchat_2ff404bdfed04ca987f3acf6268002b5 outcome=suppressed reason=viewer_context_only\\n[HEBE][TWITCH_PIPELINE_FINAL] route=context_only emitted=false reason=viewer_context_only\\n[HEBE][TWITCH_PIPELINE_HEALTH] received=1 presence_evaluated=0 emitted=0 early_skipped=0 top_suppress_reasons=none\"",
+      "traceback_tail": "AssertionError: '[HEBE][TWITCH_PIPELINE_CLASSIFY] category=normal_no_mention_chat' not found in \"[HEBE][TWITCH_PIPELINE_START] event_id=twchat_2ff404bdfed04ca987f3acf6268002b5 username=viewer raw='estoy mirando la partida tranquilamente'\\n[HEBE][NORMALIZE] raw='estoy mirando la partida tranquilamente' normalized='estoy mirando la partida tranquilamente'\\n[HEBE][NORMALIZE] raw='estoy mirando la partida tranquilamente' normalized='estoy mirando la partida tranquilamente'\\n[HEBE][INPUT_FIREWALL] source=twitch_viewer authority=viewer trust=trusted_direct decision=allow reason=live_viewer_message\\n[HEBE][ACTION_PERMISSIONS] action=twitch_action allowed=false reason=live_viewer_message\\n[HEBE][ACTION_PERMISSIONS] action=promotion_shoutout allowed=false reason=live_viewer_message\\n[HEBE][TWITCH][CHAT] observed username=viewer message='estoy mirando la partida tranquilamente'\\n[HEBE][STREAM_SESSION] reused_active id=1 reason=same_twitch_stream_id\\n[HEBE][NORMALIZE] raw='estoy mirando la partida tranquilamente' normalized='estoy mirando la partida tranquilamente'\\n[HEBE][NORMALIZE] raw='estoy mirando la partida tranquilamente' normalized='estoy mirando la partida tranquilamente'\\n[HEBE][CHATTER] recent_chatter updated username=viewer display=Viewer\\n[HEBE][NORMALIZE] raw='estoy mirando la partida tranquilamente' normalized='estoy mirando la partida tranquilamente'\\n[HEBE][NORMALIZE] raw='estoy mirando la partida tranquilamente' normalized='estoy mirando la partida tranquilamente'\\n[HEBE][TWITCH_INTERACTION_QUEUE] event_id=twchat_2ff404bdfed04ca987f3acf6268002b5 priority=8 action=enqueue\\n[HEBE][TWITCH_INTERACTION_ACTIVE] event_id=twchat_2ff404bdfed04ca987f3acf6268002b5 stage=generating\\n[HEBE][NORMALIZE] raw='estoy mirando la partida tranquilamente' normalized='estoy mirando la partida tranquilamente'\\n[HEBE][NORMALIZE] raw='estoy mirando la partida tranquilamente' normalized='estoy mirando la partida tranquilamente'\\n[HEBE][NORMALIZE] raw='estoy mirando la partida tranquilamente' normalized='estoy mirando la partida tranquilamente'\\n[HEBE][INPUT_FIREWALL] source=twitch_viewer authority=viewer trust=trusted_direct decision=allow reason=live_viewer_message\\n[HEBE][ACTION_PERMISSIONS] action=twitch_action allowed=false reason=live_viewer_message\\n[HEBE][ACTION_PERMISSIONS] action=promotion_shoutout allowed=false reason=live_viewer_message\\n[HEBE][CONVERSATION_OWNERSHIP] addressee=general allowed=true reason=general_chat confidence=0.720\\n[HEBE][NORMALIZE] raw='estoy mirando la partida tranquilamente' normalized='estoy mirando la partida tranquilamente'\\n[HEBE][COGNITIVE_ROUTER] intent=stream_context_update confidence=0.95 new_request=false uses_pending=false should_reply=false stop=true state=none reason=viewer_context_only\\n[HEBE][PENDING_ROUTER] active=false kind=none compatible=false reason=no_active_pending\\n[HEBE][COGNITIVE_TRACE] message_id=msg_37ba04fef4b144c6b11725c71b9f0518 route=stream_context_update\\n[HEBE][COGNITIVE_ROUTER] source=twitch_chat event_id=twchat_2ff404bdfed04ca987f3acf6268002b5 should_reply=false reason=viewer_context_only response_mode=silent\\n[HEBE][TWITCH_INTERACTION_OUTCOME] event_id=twchat_2ff404bdfed04ca987f3acf6268002b5 outcome=suppressed reason=viewer_context_only\\n[HEBE][TWITCH_PIPELINE_FINAL] route=context_only emitted=false reason=viewer_context_only\\n[HEBE][TWITCH_PIPELINE_HEALTH] received=1 presence_evaluated=0 emitted=0 early_skipped=0 top_suppress_reasons=none\""
+    },
+    {
+      "test": "backend.tests.test_voice_command_pipeline.VoiceCommandPipelineTests.test_twitch_pipeline_health_counts_messages",
+      "status": "FAIL",
+      "exception_type": "AssertionError",
+      "exception_message": "0 != 1",
+      "traceback_tail": "AssertionError: 0 != 1"
+    },
+    {
+      "test": "backend.tests.test_game_knowledge.GameKnowledgeTests.test_response_synthesizer_handles_game_knowledge_command_result",
+      "status": "FAIL",
+      "exception_type": "AssertionError",
+      "exception_message": "'Persona 5 Royal' not found in 'Te leo, Leo. Recalibro.'",
+      "traceback_tail": "AssertionError: 'Persona 5 Royal' not found in 'Te leo, Leo. Recalibro.'"
+    },
+    {
+      "test": "backend.tests.test_game_guidance_routing.GameGuidanceRoutingTests.test_fallback_chat_blocks_ungrounded_walkthrough_claim",
+      "status": "FAIL",
+      "exception_type": "AssertionError",
+      "exception_message": "'castillo' unexpectedly found in 've al castillo, habla con la autoridad local y busca el objeto clave.'",
+      "traceback_tail": "AssertionError: 'castillo' unexpectedly found in 've al castillo, habla con la autoridad local y busca el objeto clave.'"
+    },
+    {
+      "test": "backend.tests.test_game_guidance_routing.GameGuidanceRoutingTests.test_fallback_chat_is_blocked_while_game_pending_is_active",
+      "status": "FAIL",
+      "exception_type": "AssertionError",
+      "exception_message": "'aclaración' not found in 'Ve al castillo, habla con la autoridad local y busca el objeto clave.'",
+      "traceback_tail": "AssertionError: 'aclaración' not found in 'Ve al castillo, habla con la autoridad local y busca el objeto clave.'"
+    },
+    {
+      "test": "backend.tests.test_game_guidance_routing.GameGuidanceRoutingTests.test_stt_answer_without_wake_is_owner_followup",
+      "status": "FAIL",
+      "exception_type": "AssertionError",
+      "exception_message": "'ambient_stt' != 'owner_stt_followup'\n- ambient_stt\n+ owner_stt_followup\n",
+      "traceback_tail": "AssertionError: 'ambient_stt' != 'owner_stt_followup'\n- ambient_stt\n+ owner_stt_followup"
+    },
+    {
+      "test": "backend.tests.test_game_guidance_routing.GameGuidanceRoutingTests.test_successful_state_update_mutates_runtime_game_run_state",
+      "status": "FAIL",
+      "exception_type": "AssertionError",
+      "exception_message": "'' != 'Cloud'\n+ Cloud",
+      "traceback_tail": "AssertionError: '' != 'Cloud'\n+ Cloud"
+    }
+  ]
+}

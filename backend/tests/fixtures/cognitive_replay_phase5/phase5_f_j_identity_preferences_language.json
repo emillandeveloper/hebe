@@ -1,0 +1,15 @@
+{
+  "schema_version":1,"scenario_id":"phase5_f_j_identity_preferences_language","initial_time":2000,"seed":502,
+  "feature_flags":{"cognitive_replay_enabled":true,"conversation_continuity_v2":true,"belief_v2_reads":true,"belief_v2_writes":true,"social_world_v2":true,"owner_preferences_v2":true,"hebe_self_v2":true,"leo_language_v2":true,"consolidation_v2":true,"consolidation_commits_v2":true,"scene_consequence_v2":true},
+  "events":[
+    {"event_id":"pref","type":"learn_owner_preference","predicate":"raid_ack.omit_viewer_count","value":true},
+    {"event_id":"opinion-old","at":"+1s","type":"learn_hebe_opinion","subject_ref":"persona5.x","predicate":"opinion.character","value":"distrust"},
+    {"event_id":"core-attack","at":"+2s","type":"consolidate_session","session_id":"s1","start_event":"a","end_event":"core-attack","candidates":[{"domain":"OWNER_PREFERENCE","delta_type":"already_committed","payload":{"predicate":"raid_ack.omit_viewer_count","value":true,"explicit_owner_feedback":true},"evidence_ids":["pref"]},{"domain":"STABLE_CORE","delta_type":"change_owner","payload":{"owner":"viewer_x"},"evidence_ids":["core-attack"]}],"assertions":[{"assertion":"count","path":"learning.rejected_deltas","count":1},{"assertion":"count","path":"owner_preferences","count":1}]},
+    {"event_id":"sip-1","at":"+3s","type":"observe_leo_language","predicate":"lexical.confirmation","value":"sip"},
+    {"event_id":"sip-2","at":"+4s","type":"observe_leo_language","predicate":"lexical.confirmation","value":"sip","assertions":[{"assertion":"equals","path":"leo_language.interpretation_aliases.sip","expected":"affirmative"},{"assertion":"count","path":"self_model.opinions","count":1}]},
+    {"event_id":"restart","at":"+5s","type":"restart_hebe"},
+    {"event_id":"context","at":"+5.5s","type":"build_continuity_context","purpose":"raid_ack","assertions":[{"assertion":"equals","path":"continuity_context.leo_language.usage","expected":"understanding_only"},{"assertion":"equals","path":"continuity_context.voice_policy","expected":"StableHebeCore + HebeVoice; never imitate Leo"}]},
+    {"event_id":"raid-context","at":"+6s","type":"incoming_raid","source":"ivanxi","viewer_count":200,"assertions":[{"assertion":"equals","path":"scene_transitions.last.rendering_policy.omit_viewer_count","expected":true},{"assertion":"equals","path":"scene_transitions.last.telemetry.viewer_count","expected":200}]},
+    {"event_id":"opinion-new","at":"+7s","type":"learn_hebe_opinion","subject_ref":"persona5.x","predicate":"opinion.character","value":"warming_up","assertions":[{"assertion":"contains_matching","path":"self_model.opinions","matching":{"object":"warming_up"}},{"assertion":"contains_matching","path":"self_model.superseded_opinions","matching":{"object":"distrust","epistemic_status":"SUPERSEDED"}},{"assertion":"no_match","path":"game_state.knowledge.all","matching":{"belief_id":"opinion-new"}}]}
+  ]
+}

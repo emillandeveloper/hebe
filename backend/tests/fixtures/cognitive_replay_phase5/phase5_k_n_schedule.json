@@ -1,0 +1,13 @@
+{
+  "schema_version":1,"scenario_id":"phase5_k_n_schedule","initial_time":"2026-08-03T19:00:00Z","seed":503,
+  "feature_flags":{"cognitive_replay_enabled":true,"conversation_continuity_v2":true,"belief_v2_reads":true,"belief_v2_writes":true,"schedule_learning_v2":true},
+  "events":[
+    {"event_id":"m1","type":"observe_schedule","session_id":"m1","content":"Final Fantasy V"},
+    {"event_id":"m2","at":"+7d","type":"observe_schedule","session_id":"m2","content":"Final Fantasy V"},
+    {"event_id":"m3","at":"+14d","type":"observe_schedule","session_id":"m3","content":"Final Fantasy V","assertions":[{"assertion":"contains_matching","path":"schedule.hypotheses","matching":{"canonical_content":"Final Fantasy V","status":"active","evidence_count":3}}]},
+    {"event_id":"exception","at":"+21d","type":"observe_schedule","session_id":"m4","content":"Special Event","assertions":[{"assertion":"contains_matching","path":"schedule.hypotheses","matching":{"canonical_content":"Final Fantasy V","status":"weakening","consecutive_misses":1}}]},
+    {"event_id":"miss2","at":"+28d","type":"observe_schedule","session_id":"m5","content":"Endless Frontier","assertions":[{"assertion":"contains_matching","path":"schedule.hypotheses","matching":{"canonical_content":"Final Fantasy V","status":"superseded","consecutive_misses":2}}]},
+    {"event_id":"start","at":"+29d","type":"stream_started","session_id":"current","game_name":"Endless Frontier","title":"Current observed stream"},
+    {"event_id":"metadata","at":"+2505601s","type":"stream_metadata_changed","is_live":true,"game_name":"Endless Frontier","title":"Current observed stream","assertions":[{"assertion":"equals","path":"schedule.observed_current_state.game","expected":"Endless Frontier"},{"assertion":"equals","path":"schedule.precedence","expected":"observed_twitch_metadata"}]}
+  ]
+}

@@ -37,6 +37,15 @@ class CognitiveStateSnapshot:
     memory_compatibility: dict[str, Any] = field(default_factory=dict)
     game_state: dict[str, Any] = field(default_factory=dict)
     social_state: dict[str, Any] = field(default_factory=dict)
+    learning: dict[str, Any] = field(default_factory=dict)
+    self_model: dict[str, Any] = field(default_factory=dict)
+    owner_preferences: list[dict[str, Any]] = field(default_factory=list)
+    leo_language: dict[str, Any] = field(default_factory=dict)
+    temporal: dict[str, Any] = field(default_factory=dict)
+    schedule: dict[str, Any] = field(default_factory=dict)
+    action_ledger: dict[str, Any] = field(default_factory=dict)
+    scene_transitions: dict[str, Any] = field(default_factory=dict)
+    continuity_context: dict[str, Any] = field(default_factory=dict)
     promotion_profiles: list[dict[str, Any]] = field(default_factory=list)
     actions: dict[str, Any] = field(default_factory=dict)
     receipts: list[dict[str, Any]] = field(default_factory=list)
@@ -60,6 +69,9 @@ class CognitiveStateProbe:
         "game_knowledge_facts", "game_knowledge_v2_gaps",
         "people", "person_identities", "person_sessions", "social_episodes",
         "shared_culture_items", "shared_culture_evidence",
+        "consolidation_runs", "consolidation_deltas", "action_ledger",
+        "temporal_maintenance_audit", "learning_observations", "scene_transitions",
+        "schedule_observations", "schedule_hypotheses",
     )
 
     def __init__(
@@ -172,6 +184,16 @@ class CognitiveStateProbe:
         final_response = ""
         final_response = str(cognitive.get("final_response") or trace.get("final_response") or trace.get("hebe_response") or "")
         emitted = [self._minimal_emission(item) for item in self.final_emissions]
+        learning_repo=getattr(engine,"learning_repository",None)
+        consolidation_runs=learning_repo.rows("consolidation_runs",order="started_at,id") if learning_repo else []
+        consolidation_deltas=learning_repo.rows("consolidation_deltas",order="created_at,id") if learning_repo else []
+        action_rows=learning_repo.rows("action_ledger",order="requested_at,id") if learning_repo else []
+        maintenance_rows=learning_repo.rows("temporal_maintenance_audit",order="changed_at,id") if learning_repo else []
+        scene_rows=learning_repo.rows("scene_transitions",order="created_at,id") if learning_repo else []
+        self_active=[item for item in rows["beliefs"] if item["namespace"]=="hebe_self" and item["epistemic_status"] in {"KNOWN","INFERRED","SUSPECTED"} and not item["superseded_by"]]
+        self_old=[item for item in rows["beliefs"] if item["namespace"]=="hebe_self" and item["epistemic_status"] in {"HISTORICAL","SUPERSEDED"}]
+        owner_prefs=[item for item in rows["beliefs"] if item["namespace"]=="owner_preference" and item["epistemic_status"] in {"KNOWN","INFERRED"} and not item["superseded_by"]]
+        language_items=[item for item in rows["beliefs"] if item["namespace"]=="leo_language" and item["epistemic_status"] in {"KNOWN","INFERRED"} and not item["superseded_by"]]
         return CognitiveStateSnapshot(
             runtime=runtime,
             stream_session=stream_session,
@@ -214,6 +236,15 @@ class CognitiveStateProbe:
             memory_compatibility=_plain(getattr(getattr(engine,"legacy_memory_fact_adapter",None),"telemetry",{}) or {}),
             game_state=game_state,
             social_state=social_state,
+            learning={"consolidation_runs":consolidation_runs,"deltas":consolidation_deltas,"rejected_deltas":[x for x in consolidation_deltas if x["validator_result"]=="REJECTED"],"watermarks":[{"session_id":x["session_id"],"start":x["input_start_event"],"end":x["input_end_event"],"status":x["status"]} for x in consolidation_runs],"last_result":_plain(getattr(getattr(engine,"session_consolidator",None),"last_result",{})),"stable_core_version":getattr(getattr(engine,"stable_hebe_core",None),"version",""),"performance":{"repository":_plain(getattr(learning_repo,"performance",lambda:{})()),"consolidation":_plain(getattr(getattr(engine,"session_consolidator",None),"performance",lambda:{})()),"temporal":_plain(getattr(getattr(engine,"temporal_relevance_service",None),"performance",lambda:{})()),"action_history":_plain(getattr(getattr(engine,"historical_action_ledger",None),"performance",lambda:{})()),"owner_preferences":_plain(getattr(getattr(engine,"owner_procedural_preferences",None),"performance",lambda:{})()),"hebe_self":_plain(getattr(getattr(engine,"hebe_self_model",None),"performance",lambda:{})()),"context":_plain(getattr(getattr(engine,"continuity_context_builder",None),"performance",lambda:{})())}},
+            self_model={"stable_core_version":getattr(getattr(engine,"stable_hebe_core",None),"version",""),"evolving_preferences":[x for x in self_active if x["predicate"].startswith("preference.")],"opinions":self_active,"superseded_opinions":self_old},
+            owner_preferences=owner_prefs,
+            leo_language={"beliefs":language_items,"interpretation_aliases":_plain(getattr(getattr(engine,"leo_language_model",None),"interpretation_aliases",lambda:{})())},
+            temporal={"expired":[x for x in maintenance_rows if x["new_status"]=="EXPIRED"],"archived":[x for x in maintenance_rows if x["new_status"]=="ARCHIVED"],"weakened":[x for x in maintenance_rows if x["new_status"]=="WEAKENING"],"maintenance_actions":maintenance_rows,"last_actions":_plain(getattr(getattr(engine,"temporal_relevance_service",None),"last_actions",[]))},
+            schedule={"observations":rows.get("schedule_observations",[]),"hypotheses":rows.get("schedule_hypotheses",[]),"observed_current_state":{"game":getattr(stream,"current_game",None),"title":getattr(stream,"current_stream_title",None)},"precedence":"observed_twitch_metadata" if getattr(stream,"current_game",None) else "schedule_prediction"},
+            action_ledger={"entries":action_rows,"last_claim_validation":_plain(getattr(getattr(engine,"historical_action_ledger",None),"last_decision",{}))},
+            scene_transitions={"all":scene_rows,"last":_plain(getattr(getattr(engine,"scene_consequence_reducer",None),"last_transition",{}))},
+            continuity_context=_plain(getattr(getattr(engine,"continuity_context_builder",None),"last_context",{})),
             promotion_profiles=rows["promotion_profiles"],
             actions={
                 "attempts": _plain(self.actions),
@@ -313,6 +344,8 @@ class CognitiveStateProbe:
             shared_culture_items=[dict(row) for row in conn.execute("SELECT * FROM shared_culture_items ORDER BY created_at,id")] if "shared_culture_items" in existing else []
             for item in shared_culture_items:item["participant_ids"]=json.loads(item.pop("participant_ids_json") or "[]")
             shared_culture_evidence=[dict(row) for row in conn.execute("SELECT * FROM shared_culture_evidence ORDER BY observed_at,id")] if "shared_culture_evidence" in existing else []
+            schedule_observations=[dict(row) for row in conn.execute("SELECT * FROM schedule_observations ORDER BY observed_at,id")] if "schedule_observations" in existing else []
+            schedule_hypotheses=[dict(row) for row in conn.execute("SELECT * FROM schedule_hypotheses ORDER BY last_observed_at,id")] if "schedule_hypotheses" in existing else []
             return {
                 "counts": counts, "promotion_profiles": profiles, "promotion_events": promotions,
                 "schema_migrations": migrations, "conversations": conversations,
@@ -321,6 +354,7 @@ class CognitiveStateProbe:
                 "game_run_sessions":game_run_sessions,"game_run_events":game_run_events,
                 "game_knowledge_facts":game_knowledge_facts,"game_knowledge_gaps":game_knowledge_gaps,
                 "people":people,"person_identities":person_identities,"social_episodes":social_episodes,"shared_culture_items":shared_culture_items,"shared_culture_evidence":shared_culture_evidence,
+                "schedule_observations":schedule_observations,"schedule_hypotheses":schedule_hypotheses,
             }
         finally:
             conn.close()

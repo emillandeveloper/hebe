@@ -471,6 +471,10 @@ def record_schedule_observation(
         f"content={content!r} format={format_key} matches={len(matching)}",
         flush=True,
     )
+    print(f"[HEBE][SCHEDULE_OBSERVE] session={session_key} weekday={weekday} content_key={content_key}",flush=True)
+    if current:print(f"[HEBE][SCHEDULE_HYPOTHESIS] id={current['id']} status={current['status']} confidence={float(current['confidence']):.3f} evidence_count={int(current['evidence_count'])}",flush=True)
+    for row in competing:
+        if int(row["consecutive_misses"] or 0)+1>=2:print(f"[HEBE][SCHEDULE_SUPERSEDE] id={row['id']} reason=repeated_misses",flush=True)
     return {
         "recorded": True,
         "observation": asdict(ScheduleObservation(

@@ -330,3 +330,52 @@ def social_world_v2_migrations() -> tuple[Migration, ...]:
             """
         )
     return (Migration("social_world_v2",1,"people_episodes_and_shared_culture",phase4),)
+
+
+def learning_v2_migrations() -> tuple[Migration, ...]:
+    def phase5(conn: sqlite3.Connection) -> None:
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS consolidation_runs (
+              id TEXT PRIMARY KEY, session_id TEXT NOT NULL, input_start_event TEXT NOT NULL,
+              input_end_event TEXT NOT NULL, pre_state_version TEXT NOT NULL,
+              consolidator_version TEXT NOT NULL, status TEXT NOT NULL,
+              started_at REAL NOT NULL, completed_at REAL NOT NULL DEFAULT 0,
+              idempotency_key TEXT NOT NULL UNIQUE
+            );
+            CREATE INDEX IF NOT EXISTS idx_consolidation_session ON consolidation_runs(session_id,input_end_event,status);
+            CREATE TABLE IF NOT EXISTS consolidation_deltas (
+              id TEXT PRIMARY KEY, consolidation_run_id TEXT NOT NULL, domain TEXT NOT NULL,
+              delta_type TEXT NOT NULL, payload_json TEXT NOT NULL, evidence_ids_json TEXT NOT NULL,
+              validator_result TEXT NOT NULL, committed_object_ref TEXT NOT NULL DEFAULT '',
+              idempotency_key TEXT NOT NULL UNIQUE, rejection_reason TEXT NOT NULL DEFAULT '',
+              created_at REAL NOT NULL, FOREIGN KEY(consolidation_run_id) REFERENCES consolidation_runs(id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_consolidation_delta_run ON consolidation_deltas(consolidation_run_id,validator_result);
+            CREATE TABLE IF NOT EXISTS action_ledger (
+              id TEXT PRIMARY KEY, action_type TEXT NOT NULL, target TEXT NOT NULL DEFAULT '',
+              status TEXT NOT NULL, source_store TEXT NOT NULL, source_record_id TEXT NOT NULL,
+              requested_at REAL NOT NULL, completed_at REAL NOT NULL DEFAULT 0,
+              evidence_json TEXT NOT NULL DEFAULT '{}', schema_version INTEGER NOT NULL DEFAULT 1,
+              UNIQUE(source_store,source_record_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_action_ledger_claim ON action_ledger(action_type,target,requested_at,status);
+            CREATE TABLE IF NOT EXISTS temporal_maintenance_audit (
+              id TEXT PRIMARY KEY, object_ref TEXT NOT NULL, object_type TEXT NOT NULL,
+              old_status TEXT NOT NULL, new_status TEXT NOT NULL, reason TEXT NOT NULL,
+              changed_at REAL NOT NULL, policy_version TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_temporal_audit_object ON temporal_maintenance_audit(object_ref,changed_at);
+            CREATE TABLE IF NOT EXISTS learning_observations (
+              id TEXT PRIMARY KEY, model TEXT NOT NULL, subject TEXT NOT NULL, value TEXT NOT NULL,
+              event_id TEXT NOT NULL UNIQUE, observed_at REAL NOT NULL, explicit INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS idx_learning_observation_pattern ON learning_observations(model,subject,value,observed_at);
+            CREATE TABLE IF NOT EXISTS scene_transitions (
+              id TEXT PRIMARY KEY, source_event_id TEXT NOT NULL, transition_type TEXT NOT NULL,
+              destination_ref TEXT NOT NULL DEFAULT '', payload_json TEXT NOT NULL,
+              created_at REAL NOT NULL, UNIQUE(source_event_id,transition_type)
+            );
+            """
+        )
+    return (Migration("learning_v2",1,"consolidation_temporal_action_and_scene",phase5),)

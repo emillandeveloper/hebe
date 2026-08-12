@@ -23,6 +23,9 @@ EVENT_TYPES = {
     "resolve_person", "record_social_episode", "propose_social_hypothesis",
     "open_social_thread", "resolve_social_thread", "expire_social", "retrieve_social_context",
     "create_culture_candidate", "reinforce_culture", "use_culture", "select_culture", "social_opportunity",
+    "consolidate_session", "learn_owner_preference", "learn_hebe_opinion", "observe_leo_language",
+    "project_action_receipt", "validate_action_claim", "outgoing_raid", "incoming_raid",
+    "build_continuity_context", "observe_schedule",
 }
 
 

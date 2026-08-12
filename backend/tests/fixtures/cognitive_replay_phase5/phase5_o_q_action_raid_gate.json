@@ -1,0 +1,16 @@
+{
+  "schema_version":1,"scenario_id":"phase5_o_q_action_raid_gate","initial_time":3000,"seed":504,
+  "feature_flags":{"cognitive_replay_enabled":true,"conversation_continuity_v2":true,"belief_v2_reads":true,"belief_v2_writes":true,"social_world_v2":true,"social_identity_v2":true,"social_thread_opportunities_v2":true,"historical_action_ledger_v2":true,"scene_consequence_v2":true,"owner_preferences_v2":true},
+  "events":[
+    {"event_id":"success","type":"project_action_receipt","action_type":"promotion","target":"ivanxi","status":"SUCCEEDED"},
+    {"event_id":"failure","at":"+1s","type":"project_action_receipt","action_type":"desktop","target":"obs","status":"FAILED"},
+    {"event_id":"unknown","at":"+2s","type":"project_action_receipt","action_type":"title_change","target":"x","status":"UNKNOWN"},
+    {"event_id":"claim-success","at":"+3s","type":"validate_action_claim","action_type":"promotion","target":"ivanxi","assertions":[{"assertion":"equals","path":"action_ledger.last_claim_validation.allowed","expected":true}]},
+    {"event_id":"claim-failure","at":"+4s","type":"validate_action_claim","action_type":"desktop","target":"obs","assertions":[{"assertion":"equals","path":"action_ledger.last_claim_validation.allowed","expected":false},{"assertion":"equals","path":"action_ledger.last_claim_validation.claim_strength","expected":"none"}]},
+    {"event_id":"claim-unknown","at":"+5s","type":"validate_action_claim","action_type":"title_change","target":"x","assertions":[{"assertion":"equals","path":"action_ledger.last_claim_validation.claim_strength","expected":"uncertain"}]},
+    {"event_id":"raid","at":"+6s","type":"outgoing_raid","destination":"ivanxi","receipt_status":"SUCCEEDED","viewer_count":100,"assertions":[{"assertion":"equals","path":"scene_transitions.last.stream_ending","expected":true},{"assertion":"equals","path":"scene_transitions.last.social_transition","expected":true},{"assertion":"equals","path":"scene_transitions.last.farewell_opportunity.presence_gated","expected":true},{"assertion":"equals","path":"scene_transitions.last.farewell_opportunity.final_emission_gated","expected":true}]},
+    {"event_id":"person","at":"+7s","type":"resolve_person","user_id":"42","login":"ivanxi"},
+    {"event_id":"thread","at":"+8s","type":"open_social_thread","person_ref":"person","subject_ref":"followup","summary":"follow up","relevance_seconds":100},
+    {"event_id":"opportunity","at":"+9s","type":"social_opportunity","person_ref":"person","scene_suitable":false,"assertions":[{"assertion":"contains_matching","path":"social_state.opportunities","matching":{"scene_suitable":false,"emission_allowed":false}}]}
+  ]
+}

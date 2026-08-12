@@ -24,4 +24,14 @@ backend/models/ModelFile
 backend/.env
 backend/ollama/models/Llama-3.2-3B-Instruct-uncensored-Q4_K_M.gguf
 backend/data/dataset/hebe_stream_replies.jsonl
+/hebe.db
+/data/dataset/hebe_stream_replies.jsonl
+
+# Cognitive verification scratch runs (keep the final verified report tracked)
+/artifacts/cognitive-continuity-phase5/targeted*/
+/artifacts/cognitive-continuity-phase5/a-e/
+/artifacts/cognitive-continuity-phase5/model-fixture-check/
+/artifacts/cognitive-continuity-phase5/final/
+/artifacts/cognitive-continuity-phase5/verified/
+/artifacts/cognitive-continuity-phase5/release/workspaces/
 .claude/worktrees/wonderful-moser-3c9a97

@@ -79,6 +79,11 @@ def build_report(
         key:(next(iter(values)) if len(values)==1 else sorted(values))
         for key,values in sorted(flag_values.items())
     }
+    is_phase5 = any(
+        bool((item.get("feature_flags") or {}).get("consolidation_v2"))
+        or str(item.get("scenario_id") or "").startswith("phase5_")
+        for item in scenario_results
+    )
     is_phase4 = any(
         bool((item.get("feature_flags") or {}).get("social_world_v2"))
         or str(item.get("scenario_id") or "").startswith("phase4_")
@@ -101,7 +106,9 @@ def build_report(
         for item in scenario_results
     )
     phase_result = (
-        f"PHASE 4 {status.replace('_', ' ')}"
+        f"PHASE 5 {status.replace('_', ' ')}"
+        if is_phase5
+        else f"PHASE 4 {status.replace('_', ' ')}"
         if is_phase4
         else f"PHASE 3 {status.replace('_', ' ')}"
         if is_phase3

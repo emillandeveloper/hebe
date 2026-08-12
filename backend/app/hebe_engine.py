@@ -179,7 +179,7 @@ from app.continuity import (
     LegacyPendingAdapter,
     OpenThreadRepository,
 )
-from app.replay.migrations import MigrationRunner, conversation_continuity_migrations, belief_v2_migrations, game_context_v2_migrations, social_world_v2_migrations
+from app.replay.migrations import MigrationRunner, conversation_continuity_migrations, belief_v2_migrations, game_context_v2_migrations, social_world_v2_migrations, learning_v2_migrations
 from app.epistemics.repository import BeliefRepository
 from app.epistemics.service import BeliefLifecycleService
 from app.epistemics.retrieval import MemoryRetrievalCoordinator
@@ -190,6 +190,12 @@ from app.game_context_v2.context import GameContextResolver
 from app.game_context_v2.repository import GameV2Repository
 from app.game_context_v2.service import GameKnowledgeService as GameKnowledgeV2Service, GameRunService
 from app.social_world_v2 import LegacySocialCompatibilityAdapter, SocialWorldRepository, SocialWorldService
+from app.learning_v2 import (
+    ContinuityContextBuilder, HebeSelfModel, HistoricalActionLedger, LeoLanguageModel,
+    OwnerProceduralPreferences, SceneConsequenceReducer, SessionConsolidator,
+    StableHebeCore, TemporalRelevanceService,
+)
+from app.learning_v2.repository import LearningRepository
 from app.services import db_sqlite
 
 WAKE_WORDS = ["hebe despierta", "eve despierta", "jebe despierta"]
@@ -559,6 +565,49 @@ class HebeEngine:
         self.shared_culture_v2 = os.getenv("HEBE_SHARED_CULTURE_V2", "false").strip().lower() in ("1","true","yes","on")
         self.social_thread_opportunities_v2 = os.getenv("HEBE_SOCIAL_THREAD_OPPORTUNITIES_V2", "false").strip().lower() in ("1","true","yes","on")
         self._initialize_social_world_v2()
+        self.consolidation_v2 = os.getenv("HEBE_CONSOLIDATION_V2", "false").strip().lower() in ("1","true","yes","on")
+        self.consolidation_commits_v2 = os.getenv("HEBE_CONSOLIDATION_COMMITS_V2", "false").strip().lower() in ("1","true","yes","on")
+        self.hebe_self_v2 = os.getenv("HEBE_HEBE_SELF_V2", "false").strip().lower() in ("1","true","yes","on")
+        self.owner_preferences_v2 = os.getenv("HEBE_OWNER_PREFERENCES_V2", "false").strip().lower() in ("1","true","yes","on")
+        self.leo_language_v2 = os.getenv("HEBE_LEO_LANGUAGE_V2", "false").strip().lower() in ("1","true","yes","on")
+        self.temporal_relevance_v2 = os.getenv("HEBE_TEMPORAL_RELEVANCE_V2", "false").strip().lower() in ("1","true","yes","on")
+        self.schedule_learning_v2 = os.getenv("HEBE_SCHEDULE_LEARNING_V2", "false").strip().lower() in ("1","true","yes","on")
+        self.scene_consequence_v2 = os.getenv("HEBE_SCENE_CONSEQUENCE_V2", "false").strip().lower() in ("1","true","yes","on")
+        self.historical_action_ledger_v2 = os.getenv("HEBE_HISTORICAL_ACTION_LEDGER_V2", "false").strip().lower() in ("1","true","yes","on")
+        self._initialize_learning_v2()
+
+    def _initialize_learning_v2(self) -> None:
+        try:
+            if self.belief_repository is None or self.conversation_continuity is None:raise RuntimeError("continuity_foundation_unavailable")
+            self.learning_v2_migrations=MigrationRunner(db_sqlite.get_db_connection).migrate(learning_v2_migrations())
+            repo=LearningRepository(db_sqlite.get_db_connection);core=StableHebeCore()
+            self.learning_repository=repo;self.stable_hebe_core=core
+            self.hebe_self_model=HebeSelfModel(self.belief_repository,repo,now_fn=lambda:time.time())
+            self.owner_procedural_preferences=OwnerProceduralPreferences(self.belief_repository,repo,now_fn=lambda:time.time())
+            self.leo_language_model=LeoLanguageModel(self.belief_repository,repo,now_fn=lambda:time.time())
+            self.historical_action_ledger=HistoricalActionLedger(repo,now_fn=lambda:time.time())
+            if self.historical_action_ledger_v2:self.historical_action_ledger.project_existing_receipts()
+            self.scene_consequence_reducer=SceneConsequenceReducer(repo,self.owner_procedural_preferences,now_fn=lambda:time.time())
+            self.temporal_relevance_service=TemporalRelevanceService(db_sqlite.get_db_connection,self.belief_repository,self.conversation_continuity.threads,getattr(self,"social_world_repository",None),repo,now_fn=lambda:time.time())
+            self.session_consolidator=SessionConsolidator(repo,core,self.hebe_self_model,self.owner_procedural_preferences,self.leo_language_model,now_fn=lambda:time.time(),candidate_provider=self._propose_consolidation_candidates)
+            self.continuity_context_builder=ContinuityContextBuilder(self.hebe_self_model,self.owner_procedural_preferences,self.leo_language_model,self.historical_action_ledger,self.scene_consequence_reducer,now_fn=lambda:time.time())
+        except Exception as exc:
+            self.learning_repository=None;self.stable_hebe_core=None;self.hebe_self_model=None;self.owner_procedural_preferences=None;self.leo_language_model=None;self.historical_action_ledger=None;self.scene_consequence_reducer=None;self.temporal_relevance_service=None;self.session_consolidator=None;self.continuity_context_builder=None;self.learning_v2_migrations=[]
+            print(f"[HEBE][LEARNING_V2_INIT] status=failed_closed reason={type(exc).__name__}",flush=True)
+
+    def _propose_consolidation_candidates(self, *, session_id: str, domain: str, schema_version: int, evidence: list[dict]) -> list[dict]:
+        """Model proposal only. SessionConsolidator remains the sole validator/committer."""
+        model=getattr(self.runtime,"intent_llm",None) or getattr(self.runtime,"llm",None)
+        structured=getattr(model,"chat_structured",None)
+        if not callable(structured):return []
+        safe_evidence=[{k:item.get(k) for k in ("event_uid","event_type","source","speaker","normalized_text","context_kind","authority","valid_from","valid_until") if k in item} for item in evidence[-250:]]
+        response=structured(
+            system_prompt="Propose only meaningful typed state deltas supported by supplied evidence. Never summarize the transcript, mutate Hebe's stable identity, conflate domains, or claim actions without receipts. Empty candidates is desirable when nothing changed.",
+            user_prompt=__import__('json').dumps({"purpose":"session_consolidation","domain":domain,"schema_version":schema_version,"session_id":session_id,"evidence":safe_evidence},ensure_ascii=False),
+            schema={"type":"object","properties":{"candidates":{"type":"array","items":{"type":"object","properties":{"domain":{"type":"string"},"delta_type":{"type":"string"},"payload":{"type":"object"},"evidence_ids":{"type":"array","items":{"type":"string"}},"idempotency_key":{"type":"string"}},"required":["domain","delta_type","payload","evidence_ids"]}}},"required":["candidates"]},
+            purpose=f"session_consolidation:{domain}:v{schema_version}:{session_id}",
+        )
+        return [dict(x) for x in dict(response or {}).get("candidates") or []]
 
     def _initialize_social_world_v2(self) -> None:
         try:
@@ -2628,11 +2677,19 @@ class HebeEngine:
         mapped = {"stream_started": "stream_online", "stream_ended": "stream_offline"}.get(event_type, event_type)
         if mapped not in {"stream_online", "stream_offline"}:
             raise ValueError(f"unsupported lifecycle event: {event_type}")
+        stream_before=self._get_stream_state()
+        closing_session_id=str(getattr(stream_before,"active_stream_session_id","") or "") if mapped=="stream_offline" else ""
         self.process_internal_event(InternalEvent(
             event_type=mapped,
             payload=dict(payload or {}),
             created_at=created_at or datetime.now(timezone.utc).isoformat(),
         ))
+        if mapped == "stream_offline" and bool(getattr(self,"consolidation_v2",False)):
+            data=dict(payload or {});session_id=str(closing_session_id or data.get("session_id") or data.get("stream_id") or "closed_stream")
+            def _consolidate_closed_session() -> None:
+                try:self.session_consolidator.consolidate(session_id=session_id,start_event=str(data.get("start_event") or "session_start"),end_event=str(data.get("end_event") or created_at or "stream_offline"))
+                except Exception as exc:print(f"[HEBE][CONSOLIDATION_COMPLETE] status=failed reason={type(exc).__name__}",flush=True)
+            threading.Thread(target=_consolidate_closed_session,name="hebe-session-consolidation",daemon=True).start()
 
     def ingest_stream_metadata(self, payload: dict) -> bool:
         """Apply replay/live-normalized metadata through production context sync."""
@@ -3081,7 +3138,9 @@ class HebeEngine:
     def _raid_ack_fallback(self, payload: dict) -> str:
         raider = str(payload.get("display_name") or payload.get("user_login") or "raider").strip()
         viewers = int(payload.get("viewer_count") or 0)
-        count = f" con {viewers}" if viewers > 0 else ""
+        preferences=getattr(self,"owner_procedural_preferences",None)
+        omit=bool(preferences and preferences.rendering_policy("raid_ack").get("omit_viewer_count"))
+        count = f" con {viewers}" if viewers > 0 and not omit else ""
         return f"Gracias por la raid{count}, {raider}."
 
     def _render_raid_ack_safe(self, event, cognitive_decision=None) -> tuple[str, bool, str]:
@@ -3090,9 +3149,17 @@ class HebeEngine:
         viewers = int(payload.get("viewer_count") or 0)
         print(f"[HEBE][RAID_ACK_RENDER] raider={raider} viewers={viewers} route=renderer", flush=True)
         try:
+            preferences=getattr(self,"owner_procedural_preferences",None)
+            render_policy=preferences.rendering_policy("raid_ack") if preferences else {"omit_viewer_count":False}
+            render_payload=dict(payload);render_payload["owner_procedural_preferences"]=render_policy
+            if render_policy.get("omit_viewer_count"):
+                render_payload["viewer_count_telemetry"]=viewers;render_payload["viewer_count"]=0
+            event.payload=render_payload
             text = self._synthesize_internal_event_reply(event, cognitive_decision=cognitive_decision)
+            event.payload=payload
             return str(text or "").strip(), False, ""
         except Exception as exc:
+            event.payload=payload
             fallback = self._raid_ack_fallback(payload)
             print(f"[HEBE][RAID_ACK_ERROR] error={type(exc).__name__}: {exc} fallback_used=true", flush=True)
             return fallback, True, f"{type(exc).__name__}: {exc}"
@@ -4858,6 +4925,9 @@ class HebeEngine:
                 route_hints=[],
             ))
         print(f"[HEBE][TWITCH][RAID] received from={username} viewers={viewers}", flush=True)
+        reducer=getattr(self,"scene_consequence_reducer",None)
+        if reducer is not None and bool(getattr(self,"scene_consequence_v2",False)):
+            reducer.incoming_raid(event_id=str(payload.get("event_id") or payload.get("message_id") or f"incoming_raid_{uuid.uuid4().hex}"),source=str(payload.get("user_login") or username),viewer_count=viewers)
         is_simulated = bool(payload.get("_simulated"))
         if stream is not None:
             stream.last_raid_event = {
@@ -5401,7 +5471,7 @@ class HebeEngine:
                     decision = scheduled_reminder_decision(
                         trigger=f"routine:{base_time}",
                         schedule_slot=schedule_slot,
-                        current_game=str(schedule_slot.get("game") or getattr(stream, "current_game", "") or ""),
+                        current_game=str(getattr(stream, "current_game", "") or schedule_slot.get("game") or ""),
                     )
                     stream.last_proactive_decision = decision.to_dict()
                     if decision.should_speak:
@@ -5423,7 +5493,8 @@ class HebeEngine:
         twitch = getattr(self.runtime, "twitch", None)
         chat_bot = getattr(self.runtime, "twitch_chat_bot", None)
         game_run = GameRunState.from_value(getattr(self.runtime.state, "game_run_state", None))
-        expected_game = str(schedule_slot.get("game") or getattr(stream, "current_game", "") or "")
+        # Current observed Twitch state is stronger evidence than a schedule prediction.
+        expected_game = str(getattr(stream, "current_game", "") or schedule_slot.get("game") or "")
         game_run_ready = bool(game_run.game and (not expected_game or self._normalize_text(game_run.game) == self._normalize_text(expected_game)))
         return self.stream_preparation.evaluate(
             stream=stream,
@@ -6883,6 +6954,11 @@ class HebeEngine:
             flush=True,
         )
         emit("voice.command", {**payload, "status": "outcome", "final_decision": outcome})
+        ledger=getattr(self,"historical_action_ledger",None)
+        if ledger is not None and bool(getattr(self,"historical_action_ledger_v2",False)) and result.detected_intent_family:
+            status="SUCCEEDED" if outcome=="action_executed" else "FAILED" if outcome=="action_failed" else "REQUESTED" if outcome=="clarification" else "UNKNOWN"
+            try:ledger.project(source_store="direct_stt_terminal",source_record_id=result.event_id,action_type=str(receipt.get("action_type") or result.detected_intent_family),target=str(receipt.get("target") or ""),status=status,evidence={"outcome":outcome,"reason":reason,"external_confirmation":receipt.get("external_confirmation")})
+            except Exception as exc:print(f"[HEBE][ACTION_LEDGER_PROJECT] status=failed reason={type(exc).__name__}",flush=True)
         return True
 
     def _commit_current_direct_stt_terminal(self, *, outcome: str, reason: str, action_receipt: dict | None = None) -> bool:

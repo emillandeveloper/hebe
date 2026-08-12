@@ -24,6 +24,14 @@ class CognitiveFeatureFlags:
     shared_culture_v2: bool = False
     social_thread_opportunities_v2: bool = False
     consolidation_v2: bool = False
+    consolidation_commits_v2: bool = False
+    hebe_self_v2: bool = False
+    owner_preferences_v2: bool = False
+    leo_language_v2: bool = False
+    temporal_relevance_v2: bool = False
+    schedule_learning_v2: bool = False
+    scene_consequence_v2: bool = False
+    historical_action_ledger_v2: bool = False
 
     @classmethod
     def from_value(cls, value: dict[str, Any] | None) -> "CognitiveFeatureFlags":

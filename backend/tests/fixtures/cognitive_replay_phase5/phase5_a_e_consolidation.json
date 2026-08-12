@@ -1,0 +1,18 @@
+{
+  "schema_version":1,"scenario_id":"phase5_a_e_consolidation","initial_time":1000,"seed":501,
+  "feature_flags":{"cognitive_replay_enabled":true,"conversation_continuity_v2":true,"belief_v2_reads":true,"belief_v2_writes":true,"game_context_v2":true,"game_run_v2_reads":true,"game_run_v2_writes":true,"social_world_v2":true,"social_identity_v2":true,"social_episode_writes_v2":true,"consolidation_v2":true,"consolidation_commits_v2":true,"temporal_relevance_v2":true},
+  "events":[
+    {"event_id":"empty","type":"consolidate_session","session_id":"empty","start_event":"empty-start","end_event":"empty-end","candidates":[],"assertions":[{"assertion":"equals","path":"learning.last_result.accepted_deltas","expected":0}]},
+    {"event_id":"empty-rerun","at":"+1s","type":"consolidate_session","session_id":"empty","start_event":"empty-start","end_event":"empty-end","candidates":[],"assertions":[{"assertion":"count","path":"learning.consolidation_runs","count":1}]},
+    {"event_id":"run","at":"+2s","type":"resolve_game_run","game":"Final Fantasy V","stream_session_id":"ffv-s1","run_kind":"crystal_roulette"},
+    {"event_id":"white","at":"+3s","type":"record_run_fact","run_ref":"run","subject_ref":"run","predicate":"job.rolled","object":"white_mage","literal_span":{"excerpt":"Me ha tocado Mago Blanco"}},
+    {"event_id":"crystal-three","at":"+3.2s","type":"infer_run_fact","run_ref":"run","subject_ref":"run","predicate":"crystal.count","object":3,"literal_span":{"excerpt":"Looks like three crystals"}},
+    {"event_id":"crystal-two","at":"+3.4s","type":"correct_run_fact","belief_ref":"crystal-three","object":2,"literal_span":{"excerpt":"No, son dos"}},
+    {"event_id":"game-delta","at":"+4s","type":"consolidate_session","session_id":"ffv-s1","start_event":"run","end_event":"crystal-two","candidates":[{"domain":"GAME","delta_type":"already_committed","payload":{"committed_object_ref":"run_truth"},"evidence_ids":["white","crystal-two"]}],"assertions":[{"assertion":"contains_matching","path":"game_state.run_beliefs.current","matching":{"predicate":"job.rolled","object":"white_mage"}},{"assertion":"contains_matching","path":"game_state.run_beliefs.current","matching":{"predicate":"crystal.count","object":2}},{"assertion":"contains_matching","path":"game_state.run_beliefs.superseded","matching":{"predicate":"crystal.count","object":3}}]},
+    {"event_id":"person","at":"+5s","type":"resolve_person","user_id":"42","login":"ivanxi"},
+    {"event_id":"thread","at":"+6s","type":"open_social_thread","person_ref":"person","subject_ref":"exam","summary":"Tomorrow exam","relevance_seconds":10},
+    {"event_id":"later","at":"+7s","type":"advance_time","seconds":20,"assertions":[{"assertion":"contains_matching","path":"open_threads","matching":{"subject_ref":"exam","status":"EXPIRED"}},{"assertion":"count","path":"social_state.active_hypotheses","count":0}]},
+    {"event_id":"restart","at":"+28s","type":"restart_hebe"},
+    {"event_id":"rerun","at":"+29s","type":"consolidate_session","session_id":"ffv-s1","start_event":"run","end_event":"crystal-two","candidates":[{"domain":"GAME","delta_type":"already_committed","payload":{"committed_object_ref":"run_truth"},"evidence_ids":["white","crystal-two"]}],"assertions":[{"assertion":"contains_matching","path":"game_state.run_beliefs.current","matching":{"predicate":"crystal.count","object":2}},{"assertion":"contains_matching","path":"game_state.run_beliefs.superseded","matching":{"predicate":"crystal.count","object":3}},{"assertion":"count","path":"learning.consolidation_runs","count":2}]}
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "schema_version":1,"scenario_id":"phase5_r_t_temporal_restart_contamination","initial_time":4000,"seed":505,
+  "feature_flags":{"cognitive_replay_enabled":true,"conversation_continuity_v2":true,"belief_v2_reads":true,"belief_v2_writes":true,"social_world_v2":true,"shared_culture_v2":true,"temporal_relevance_v2":true,"consolidation_v2":true,"consolidation_commits_v2":true},
+  "events":[
+    {"event_id":"person","type":"resolve_person","user_id":"42","login":"ivanxi"},
+    {"event_id":"episode","at":"+1s","type":"record_social_episode","participant_refs":["person"],"summary":"Funny crystal joke","salience_reason":"positive_reaction"},
+    {"event_id":"culture","at":"+2s","type":"create_culture_candidate","participant_refs":["person"],"episode_ref":"episode","label":"crystal joke","meaning":"shared callback","owner_confirmed":true},
+    {"event_id":"stale","at":"+3s","type":"advance_time","seconds":2678400,"assertions":[{"assertion":"contains_matching","path":"social_state.shared_culture.weakening","matching":{"label":"crystal joke"}}]},
+    {"event_id":"reinforce","at":"+2678404s","type":"reinforce_culture","culture_ref":"culture","reaction":"positive","weight":2,"assertions":[{"assertion":"contains_matching","path":"social_state.shared_culture.active","matching":{"label":"crystal joke"}}]},
+    {"event_id":"cross","at":"+2678405s","type":"consolidate_session","session_id":"cross","start_event":"person","end_event":"cross","candidates":[{"domain":"HEBE_SELF","delta_type":"learn","payload":{"predicate":"opinion.character","value":"likes","source_domain":"leo_opinion"},"evidence_ids":["cross"]},{"domain":"GAME","delta_type":"learn","payload":{"source_domain":"hebe_opinion"},"evidence_ids":["cross"]},{"domain":"SOCIAL","delta_type":"learn","payload":{"objective_truth":true},"evidence_ids":["cross"]}],"assertions":[{"assertion":"count","path":"learning.rejected_deltas","count":3}]},
+    {"event_id":"restart","at":"+2678406s","type":"restart_hebe"},
+    {"event_id":"retry","at":"+2678407s","type":"consolidate_session","session_id":"cross","start_event":"person","end_event":"cross","candidates":[],"assertions":[{"assertion":"count","path":"learning.consolidation_runs","count":1},{"assertion":"count","path":"learning.rejected_deltas","count":3},{"assertion":"contains_matching","path":"social_state.shared_culture.active","matching":{"label":"crystal joke"}}]}
+  ]
+}

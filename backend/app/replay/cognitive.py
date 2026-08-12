@@ -306,6 +306,15 @@ class CognitiveReplayRunner:
             "HEBE_SOCIAL_RETRIEVAL_V2": str(bool(self._active_scenario and self._active_scenario.feature_flags.social_retrieval_v2)).lower(),
             "HEBE_SHARED_CULTURE_V2": str(bool(self._active_scenario and self._active_scenario.feature_flags.shared_culture_v2)).lower(),
             "HEBE_SOCIAL_THREAD_OPPORTUNITIES_V2": str(bool(self._active_scenario and self._active_scenario.feature_flags.social_thread_opportunities_v2)).lower(),
+            "HEBE_CONSOLIDATION_V2": str(bool(self._active_scenario and self._active_scenario.feature_flags.consolidation_v2)).lower(),
+            "HEBE_CONSOLIDATION_COMMITS_V2": str(bool(self._active_scenario and self._active_scenario.feature_flags.consolidation_commits_v2)).lower(),
+            "HEBE_HEBE_SELF_V2": str(bool(self._active_scenario and self._active_scenario.feature_flags.hebe_self_v2)).lower(),
+            "HEBE_OWNER_PREFERENCES_V2": str(bool(self._active_scenario and self._active_scenario.feature_flags.owner_preferences_v2)).lower(),
+            "HEBE_LEO_LANGUAGE_V2": str(bool(self._active_scenario and self._active_scenario.feature_flags.leo_language_v2)).lower(),
+            "HEBE_TEMPORAL_RELEVANCE_V2": str(bool(self._active_scenario and self._active_scenario.feature_flags.temporal_relevance_v2)).lower(),
+            "HEBE_SCHEDULE_LEARNING_V2": str(bool(self._active_scenario and self._active_scenario.feature_flags.schedule_learning_v2)).lower(),
+            "HEBE_SCENE_CONSEQUENCE_V2": str(bool(self._active_scenario and self._active_scenario.feature_flags.scene_consequence_v2)).lower(),
+            "HEBE_HISTORICAL_ACTION_LEDGER_V2": str(bool(self._active_scenario and self._active_scenario.feature_flags.historical_action_ledger_v2)).lower(),
         }
         with patch.dict(os.environ, env, clear=False), self._deterministic_context():
             engine = HebeEngine(runtime=runtime, use_wakeword=True, say_hello=False)
@@ -446,6 +455,31 @@ class CognitiveReplayRunner:
             return
         if event_type == "resolve_person":
             person,identity=self.engine.social_world.resolve_person(platform=str(payload.get("platform") or "twitch"),platform_user_id=str(payload.get("platform_user_id") or payload.get("user_id") or ""),login=str(payload.get("login") or ""),display_name=str(payload.get("display_name") or ""),source="cognitive_replay",stream_session_id=str(payload.get("stream_session_id") or ""));self._person_aliases[event.event_id]=person.person_id;return
+        if event_type in {"learn_owner_preference","learn_hebe_opinion","observe_leo_language"}:
+            payload.setdefault("authority_class","owner" if event_type=="learn_owner_preference" else "hebe_experience");source_event_id,source_record_type,source_record_id=self._record_canonical_belief_evidence(event,payload);evidence=EvidenceRef(source_event_id,source_record_type,source_record_id,EvidenceRelation.SUPPORTS,observed_at=self.clock.now(),extractor="phase5_replay",extractor_version="v1",literal_span=dict(payload.get("literal_span") or {}))
+            if event_type=="learn_owner_preference":result,_=self.engine.owner_procedural_preferences.learn(subject="leo",predicate=str(payload.get("predicate")),value=payload.get("value"),evidence=evidence)
+            elif event_type=="learn_hebe_opinion":result,_=self.engine.hebe_self_model.learn(subject=str(payload.get("subject_ref") or "hebe"),predicate=str(payload.get("predicate")),value=payload.get("value"),evidence=evidence)
+            else:result,_=self.engine.leo_language_model.observe(predicate=str(payload.get("predicate") or "lexical.confirmation"),value=payload.get("value"),event_id=event.event_id,evidence=evidence,explicit=bool(payload.get("explicit")))
+            if result:self._belief_aliases[event.event_id]=result.id
+            return
+        if event_type=="consolidate_session":
+            candidates=None if bool(payload.get("use_model_fixture")) else []
+            for item in payload.get("candidates") or []:
+                row=dict(item);row["evidence_ids"]=[str(x) for x in row.get("evidence_ids") or [event.event_id]];candidates.append(row)
+            self._record_canonical_belief_evidence(event,{"authority_class":"system","text":"session consolidation watermark"})
+            self.engine.session_consolidator.consolidate(session_id=str(payload.get("session_id") or "cognitive-replay"),start_event=str(payload.get("start_event") or "session_start"),end_event=str(payload.get("end_event") or event.event_id),candidates=candidates,pre_state_version=str(payload.get("pre_state_version") or "replay"));return
+        if event_type=="project_action_receipt":
+            self.engine.historical_action_ledger.project(source_store=str(payload.get("source_store") or "replay_receipt"),source_record_id=str(payload.get("source_record_id") or event.event_id),action_type=str(payload.get("action_type") or "action"),target=str(payload.get("target") or ""),status=str(payload.get("status") or "UNKNOWN"),evidence=dict(payload.get("evidence") or {}));return
+        if event_type=="validate_action_claim":self.engine.historical_action_ledger.validate_claim(action_type=str(payload.get("action_type") or "action"),target=str(payload.get("target") or ""));return
+        if event_type in {"outgoing_raid","incoming_raid"}:
+            if event_type=="outgoing_raid":self.engine.scene_consequence_reducer.outgoing_raid(event_id=event.event_id,destination=str(payload.get("destination") or ""),receipt_status=str(payload.get("receipt_status") or "SUCCEEDED"),viewer_count=int(payload.get("viewer_count") or 0))
+            else:self.engine.scene_consequence_reducer.incoming_raid(event_id=event.event_id,source=str(payload.get("source") or ""),viewer_count=int(payload.get("viewer_count") or 0))
+            return
+        if event_type=="build_continuity_context":self.engine.continuity_context_builder.build(purpose=str(payload.get("purpose") or "response"),conversation=dict(payload.get("conversation") or {}),scene=dict(payload.get("scene") or {}),open_threads=tuple(payload.get("open_threads") or ()),game=dict(payload.get("game") or {}),social=dict(payload.get("social") or {}));return
+        if event_type=="observe_schedule":
+            from app.stream import session_primer
+            from datetime import datetime
+            session_primer.record_schedule_observation(stream_session_id=str(payload.get("session_id") or event.event_id),canonical_content=str(payload.get("content") or ""),dt=datetime.fromtimestamp(self.clock.now(),tz=timezone.utc),stream_format=str(payload.get("stream_format") or ""),source=str(payload.get("source") or "observed"));return
         if event_type == "record_social_episode":
             refs=payload.get("participant_refs") or ();people=tuple(self._person_aliases.get(str(x),str(x)) for x in refs)
             result=self.engine.social_world.record_episode(episode_type=str(payload.get("episode_type") or "meaningful_interaction"),participant_ids=people,origin_event_id=event.event_id,summary=str(payload.get("summary") or payload.get("text") or ""),salience_reason=str(payload.get("salience_reason") or ""),relevance_seconds=float(payload.get("relevance_seconds") or 86400),retention_seconds=float(payload.get("retention_seconds") or 2592000),sensitivity=str(payload.get("sensitivity") or "normal"),retention_class=str(payload.get("retention_class") or "bounded"),retrieval_scope=str(payload.get("retrieval_scope") or "stream_public"),tone_observations=tuple(payload.get("tone_observations") or ()))
@@ -662,11 +696,14 @@ class CognitiveReplayRunner:
         assert self.engine is not None
         self.engine._active_pending_clarification()
         self.engine._get_pending_conversation_turn()
+        temporal=getattr(self.engine,"temporal_relevance_service",None)
+        if temporal is not None and bool(getattr(self.engine,"temporal_relevance_v2",False)):
+            temporal.maintain()
         continuity = getattr(self.engine, "conversation_continuity", None)
         if continuity is not None:
             continuity.expire_due()
         social=getattr(self.engine,"social_world",None)
-        if social is not None:social.expire_social_threads()
+        if social is not None and temporal is None:social.expire_social_threads()
         self.engine.poll_internal_events()
         self.engine.poll_stream_presence()
 
