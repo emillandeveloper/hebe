@@ -155,9 +155,17 @@ def open_app(app: Dict[str, Any], speak: SpeakFn) -> bool:
             if not os.path.exists(exe_path):
                 return False
             exe_dir = os.path.dirname(exe_path) or None
-            spawn_detached(exe_path, cwd=exe_dir)
+            # User-facing applications cross the backend lifecycle boundary.
+            # spawn_detached uses the Windows CIM process broker; do not use
+            # this lifecycle boundary for Hebe's own workers/services.
+            external_pid = spawn_detached(exe_path, cwd=exe_dir)
         else:
-            run_cmd_windows(cmd_str)
+            external_pid = run_cmd_windows(cmd_str)
+        print(
+            f"[HEBE][EXTERNAL_APP_LAUNCH] app={name} pid={external_pid or 0} "
+            "lifecycle=independent",
+            flush=True,
+        )
     except Exception:
         return False
 
@@ -182,6 +190,6 @@ def open_app(app: Dict[str, Any], speak: SpeakFn) -> bool:
         expected = guess_exe_from_command(cmd_str)
         learned = learn_process_name_after_launch(app_id, expected_exe=expected)
         if learned:
-            print(f"🧠 Aprendido process_name para {name}: {learned}")
+            print(f"[HEBE][APP_LEARNED] app={name} process_name={learned}", flush=True)
 
     return launched
