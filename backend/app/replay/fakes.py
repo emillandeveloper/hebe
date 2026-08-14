@@ -56,6 +56,8 @@ class FakeSTT:
     def __init__(self) -> None:
         self.tts_playback = False
         self.last_tts_text = ""
+        self.last_input_rms = 0.0
+        self.cfg = SimpleNamespace(silence_rms_threshold=0.003)
 
     def set_tts_playback(self, active: bool, text: str = "") -> None:
         self.tts_playback = bool(active)

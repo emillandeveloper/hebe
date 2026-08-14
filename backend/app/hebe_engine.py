@@ -379,6 +379,8 @@ class HebeEngine:
             presence_engine=self._get_presence_engine(),
             scene_timeline=self.scene_timeline,
             opportunities=self.spontaneous_opportunities,
+            owner_voice_active_fn=self._owner_audio_active,
+            tts_active_fn=lambda: bool(getattr(self, "_tts_active", False)),
         )
         self.stream_context_sync = StreamContextSyncService(
             twitch_api=getattr(self.runtime, "twitch", None),
@@ -469,7 +471,9 @@ class HebeEngine:
         self.use_cognitive_flow = True
         self.scheduler_poll_interval_sec = 1.0
         self._last_scheduler_poll_ts = 0.0
-        self.presence_poll_interval_sec = 30.0
+        # Turn arbitration is cheap and must observe normal 1-3 second gaps.
+        # Candidate rendering/model work still happens only after an intent wins.
+        self.presence_poll_interval_sec = float(os.getenv("HEBE_PRESENCE_POLL_INTERVAL_SECONDS", "0.5"))
         self._last_presence_poll_ts = 0.0
         self.stream_context_poll_interval_sec = float(os.getenv("HEBE_STREAM_CONTEXT_SYNC_SEC", "90"))
         self._last_stream_context_poll_ts = 0.0
@@ -4616,6 +4620,10 @@ class HebeEngine:
             stream.stream_started_at = payload.get("started_at") or payload.get("started_at_ts") or stream.stream_started_at
             stream.idle_prompts_sent_stream = 0
             stream.recent_idle_messages = []
+            loop = getattr(self, "stream_companion_loop", None)
+            if loop is not None:
+                loop.reset_session()
+                stream.speech_intent_state = loop.intent_manager.snapshot()
             self._auto_enable_stream_if_live(stream, source="stream_online_event")
             session_id = self._ensure_stream_memory_session_if_live(stream)
             self._record_stream_event_safe("stream_online", payload, stream=stream)
@@ -4628,6 +4636,10 @@ class HebeEngine:
             print("[HEBE][STREAM_CONTEXT] stream_online event handled", flush=True)
             return
         if event.event_type == "stream_offline":
+            loop = getattr(self, "stream_companion_loop", None)
+            if loop is not None:
+                loop.reset_session()
+                stream.speech_intent_state = loop.intent_manager.snapshot()
             active_game_run_id=str(getattr(stream,"active_game_run_id","") or "")
             active_stream_session_id=str(getattr(stream,"active_stream_session_id","") or "")
             stream.is_live = False
@@ -5264,11 +5276,14 @@ class HebeEngine:
                 presence_engine=self._get_presence_engine(),
                 scene_timeline=getattr(self, "scene_timeline", None),
                 opportunities=getattr(self, "spontaneous_opportunities", None),
+                owner_voice_active_fn=self._owner_audio_active,
+                tts_active_fn=lambda: bool(getattr(self, "_tts_active", False)),
             )
             self.stream_companion_loop = loop
 
         output_mode = self._stream_output_mode()
         stream_tts_allowed = bool(output_mode == "tts_enabled")
+        self._queue_cognitive_speech_intent_candidates(stream, loop=loop, now=now)
         tick = loop.evaluate(
             stream,
             stream_tts_enabled=stream_tts_allowed,
@@ -5284,6 +5299,79 @@ class HebeEngine:
             flush=True,
         )
         self.process_internal_event(tick.event)
+
+    def _queue_cognitive_speech_intent_candidates(self, stream, *, loop, now: float) -> None:
+        """Project already-grounded Cognitive v2 material into transient speech candidates.
+
+        This scan is bounded and model-free. It never grants action authority and
+        does not render text; Presence and turn arbitration still decide whether
+        a candidate can proceed.
+        """
+        if stream is None or loop is None:
+            return
+        if now - float(getattr(stream, "last_cognitive_intent_scan_ts", 0.0) or 0.0) < 5.0:
+            return
+        stream.last_cognitive_intent_scan_ts = now
+        candidates = list(getattr(stream, "speech_intent_candidates", []) or [])
+        manager = getattr(loop, "intent_manager", None)
+
+        def add(candidate: dict) -> None:
+            source_ids = [str(item) for item in candidate.get("source_event_ids") or [] if str(item)]
+            if any(manager and manager.has_seen_source(item) for item in source_ids):
+                return
+            if any(set(source_ids) & set(existing.get("source_event_ids") or []) for existing in candidates):
+                return
+            candidates.append(candidate)
+
+        plan = dict(getattr(stream, "proposed_discourse_contribution", None) or {})
+        if bool(plan.get("should_contribute")) and float(plan.get("contribution_value") or 0.0) >= 0.62:
+            topic_id = str(plan.get("topic_id") or "")
+            add({
+                "type": "OPINION", "topic": topic_id or "current_discourse",
+                "value": float(plan.get("contribution_value") or 0.62), "urgency": 0.35,
+                "source_event_ids": [f"discourse:{topic_id}"],
+                "material": {
+                    "grounded_fragments": list(plan.get("grounded_fragments") or []),
+                    "proposed_claims": list(plan.get("proposed_claims") or []),
+                },
+            })
+
+        for opportunity in list(getattr(getattr(self, "social_world", None), "last_opportunities", []) or [])[:3]:
+            if not opportunity.get("scene_suitable") or opportunity.get("consumed"):
+                continue
+            opportunity_id = str(opportunity.get("id") or "")
+            add({
+                "type": "SOCIAL_FOLLOWUP", "topic": str(opportunity.get("opportunity_type") or "social_followup"),
+                "subject_ref": str(opportunity.get("person_id") or ""),
+                "value": float(opportunity.get("value") or 0.7), "urgency": 0.35,
+                "source_event_ids": [opportunity_id], "material": dict(opportunity),
+            })
+
+        calm_scene = str(getattr(stream, "current_activity", "") or "").casefold() not in {
+            "combat", "boss", "cinematic", "dialogue",
+        }
+        current_game = str(getattr(stream, "current_game", "") or "").strip()
+        if calm_scene and current_game and not (manager and manager.pending()):
+            try:
+                opinions = list(getattr(self, "hebe_self_model", None).current())
+            except Exception:
+                opinions = []
+            game_key = current_game.casefold()
+            for opinion in opinions:
+                material_text = json.dumps(opinion.to_dict(), ensure_ascii=False, sort_keys=True).casefold()
+                if game_key not in material_text or float(getattr(opinion, "confidence", 0.0) or 0.0) < 0.75:
+                    continue
+                add({
+                    "type": "SELF_INITIATED_TOPIC", "topic": str(opinion.predicate),
+                    "subject_ref": str(opinion.subject_ref), "value": float(opinion.confidence),
+                    "urgency": 0.2, "source_event_ids": [str(opinion.id)],
+                    "material": {
+                        "belief_id": str(opinion.id), "predicate": str(opinion.predicate),
+                        "value": opinion.object_value, "game": current_game,
+                    },
+                })
+                break
+        stream.speech_intent_candidates = candidates[-20:]
 
     def _poll_owner_discourse_opportunity(self, stream, *, now: float | None = None) -> bool:
         if stream is None:
@@ -8322,6 +8410,10 @@ class HebeEngine:
             return relevance
         stream.last_voice_event = event_type
         stream.last_voice_event_ts = time.time()
+        # STT inbox entries are normalized completed utterances. Live RMS/VAD
+        # remains authoritative for whether the microphone is active now.
+        stream.last_owner_utterance_end_ts = stream.last_voice_event_ts
+        stream.owner_voice_active = False
         stream.last_voice_summary = self._summarize_voice_event(text, event_type)
         now_ts = time.time()
         current_event = getattr(self, "_current_input_event", None)
@@ -12788,6 +12880,21 @@ class HebeEngine:
             reason=spontaneous_chat_reason or "stream_event_reply",
         )
         if stream is not None:
+            intent_id = str((payload or {}).get("speech_intent_id") or "")
+            loop = getattr(self, "stream_companion_loop", None)
+            if is_spontaneous and intent_id and loop is not None and loop.owner_voice_active():
+                loop.yield_intent(intent_id, reason="owner_resumed_before_tts")
+                stream.speech_intent_state = loop.intent_manager.snapshot()
+                self._emit_final_response(
+                    event_id=final_event_id_for_gate,
+                    source="spontaneity",
+                    final_response=text,
+                    output_route=OutputRoute.SUPPRESS,
+                    output_targets=[],
+                    guard_result={"passed": False, "reason": "owner_resumed_before_tts"},
+                    debug_payload=self._latest_response_debug_payload(),
+                )
+                return
             stream.last_hebe_stream_speak_ts = time.time()
             if event_type == "twitch_idle_prompt":
                 topic = (payload or {}).get("idle_topic")
@@ -12829,6 +12936,10 @@ class HebeEngine:
             return
 
         def speak_stream_once(final_text: str) -> None:
+            intent_id = str((payload or {}).get("speech_intent_id") or "")
+            loop = getattr(self, "stream_companion_loop", None)
+            if intent_id and loop is not None:
+                loop.mark_tts_committed(intent_id)
             safe_text = str(final_text or "").replace('"', '\\"')
             print(f"[HEBE][TTS] speaking output_target={OUTPUT_TARGET_STREAM_TTS} text=\"{safe_text}\"", flush=True)
             self._remember_tts_text(final_text)
@@ -12932,7 +13043,12 @@ class HebeEngine:
                 if (payload or {}).get("source") == "stream_companion_tick":
                     loop = getattr(self, "stream_companion_loop", None)
                     if loop is not None:
-                        loop.record_emitted(stream, text, route=str(gate_route.value if hasattr(gate_route, "value") else gate_route))
+                        loop.record_emitted(
+                            stream,
+                            text,
+                            route=str(gate_route.value if hasattr(gate_route, "value") else gate_route),
+                            intent_id=str((payload or {}).get("speech_intent_id") or ""),
+                        )
                     if stream is not None and isinstance(getattr(stream, "last_proactive_decision", None), dict):
                         log_jsonl_event("proactive_decisions", dict(stream.last_proactive_decision))
                 try:

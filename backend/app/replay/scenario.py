@@ -26,6 +26,7 @@ EVENT_TYPES = {
     "consolidate_session", "learn_owner_preference", "learn_hebe_opinion", "observe_leo_language",
     "project_action_receipt", "validate_action_claim", "outgoing_raid", "incoming_raid",
     "build_continuity_context", "observe_schedule",
+    "owner_voice_state", "speech_intent_candidate", "stream_scene", "companion_tick",
 }
 
 

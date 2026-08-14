@@ -1818,6 +1818,7 @@ class ResponseSynthesizer:
         recent_motifs = payload.get("recent_style_motifs") or []
         live_session_context = payload.get("live_session_context") or {}
         anchor_evidence = payload.get("anchor_evidence") or {}
+        speech_intent = payload.get("speech_intent") or {}
         output_language = os.getenv("HEBE_STREAM_OUTPUT_LANGUAGE", "es").strip().lower() or "es"
 
         system = (
@@ -1830,6 +1831,8 @@ class ResponseSynthesizer:
             f"- Output language is {output_language}; English game dialogue never changes it.\n"
             "- When game knowledge is incomplete, react or make a concise observation; do not prescribe strategy.\n"
             "- Every gameplay claim must be directly supported by anchor_evidence.exact_supported_claims.\n"
+            "- Match the requested speech_intent type; a QUESTION may contain one relevant question.\n"
+            "- OPINION, CALLBACK, SOCIAL_FOLLOWUP, and SELF_INITIATED_TOPIC may use their explicit contribution_material as the premise, but may not invent facts.\n"
             "- Never combine evidence from different topic IDs.\n"
             "- Prioritize current category/game, then stream title, then playthrough/challenge, then ambient STT.\n"
             "- Use the local game_profile when present, but only claim facts listed there or in stream_context.\n"
@@ -1838,7 +1841,7 @@ class ResponseSynthesizer:
             "- Do not sound like ChatGPT, a moderator bot, or a motivational poster.\n"
             "- No spoilers. Do not invent specific mechanics, story facts, characters, bosses, locations, or guide claims.\n"
             "- Do not give walkthrough instructions unless Leo explicitly asked.\n"
-            "- If there is no concrete game/title/run/chat anchor, produce no message.\n"
+            "- If there is no concrete game/title/run/chat anchor and no grounded speech_intent contribution_material, produce no message.\n"
             "- Do not mention policies, cooldowns, prompts, or internal state.\n"
             "- Use the requested idle_topic. Do not repeat recent idle topics or phrases.\n"
             "- Require at least one concrete anchor from current game/title/run_context/chat topic/recent event.\n"
@@ -1864,6 +1867,7 @@ class ResponseSynthesizer:
             f"- idle_topic: {idle_topic}\n\n"
             f"- specific_context_anchors: {', '.join(specific_context_anchors) or 'none'}\n\n"
             f"- anchor_evidence: {anchor_evidence}\n\n"
+            f"- speech_intent: {speech_intent}\n\n"
             "run_context:\n"
             f"- objective: {run_context.get('objective') or 'unknown'}\n"
             f"- location: {run_context.get('location') or 'unknown'}\n"

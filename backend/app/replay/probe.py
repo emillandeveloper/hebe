@@ -51,6 +51,7 @@ class CognitiveStateSnapshot:
     receipts: list[dict[str, Any]] = field(default_factory=list)
     emitted_outputs: list[dict[str, Any]] = field(default_factory=list)
     final_emission_results: list[dict[str, Any]] = field(default_factory=list)
+    speech_intents: dict[str, Any] = field(default_factory=dict)
     database_watermarks: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -184,6 +185,12 @@ class CognitiveStateProbe:
         final_response = ""
         final_response = str(cognitive.get("final_response") or trace.get("final_response") or trace.get("hebe_response") or "")
         emitted = [self._minimal_emission(item) for item in self.final_emissions]
+        companion_loop = getattr(engine, "stream_companion_loop", None)
+        speech_intents = (
+            companion_loop.intent_manager.snapshot()
+            if companion_loop is not None and getattr(companion_loop, "intent_manager", None) is not None
+            else {}
+        )
         learning_repo=getattr(engine,"learning_repository",None)
         consolidation_runs=learning_repo.rows("consolidation_runs",order="started_at,id") if learning_repo else []
         consolidation_deltas=learning_repo.rows("consolidation_deltas",order="created_at,id") if learning_repo else []
@@ -255,6 +262,7 @@ class CognitiveStateProbe:
             receipts=rows["promotion_events"],
             emitted_outputs=emitted,
             final_emission_results=emitted,
+            speech_intents=speech_intents,
             database_watermarks={
                 "counts": rows["counts"],
                 "schema_migrations": rows["schema_migrations"],

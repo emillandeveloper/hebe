@@ -90,7 +90,7 @@ class StreamCompanionLoopTests(unittest.TestCase):
         self.assertEqual(tick.decision.anchor_type, "failure_or_death")
         self.assertEqual(tick.route, "stream_tts_reply")
 
-    def test_recent_owner_speech_increases_interruption_cost(self):
+    def test_recent_owner_speech_is_not_a_blanket_veto_after_turn_gap(self):
         now = 1_000_000.0
         stream = self.make_stream(now=now)
         stream.last_voice_event_ts = now - 10
@@ -100,8 +100,8 @@ class StreamCompanionLoopTests(unittest.TestCase):
             tick = loop.evaluate(stream, stream_tts_enabled=True, output_mode="tts_enabled")
 
         self.assertIsNotNone(tick)
-        self.assertFalse(tick.should_speak)
-        self.assertEqual(tick.blocked_reason, "recent_owner_speech")
+        self.assertTrue(tick.should_speak)
+        self.assertNotEqual(tick.blocked_reason, "recent_owner_speech")
 
     def test_recent_owner_speech_expires_after_window(self):
         now = 1_000_000.0

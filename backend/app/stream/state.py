@@ -30,6 +30,9 @@ class StreamSessionState:
     last_voice_target_user: Optional[str] = None
     last_voice_event: Optional[str] = None
     last_voice_event_ts: float = 0.0
+    owner_voice_active: bool = False
+    owner_voice_started_ts: float = 0.0
+    last_owner_utterance_end_ts: float = 0.0
     last_voice_summary: Optional[str] = None
     last_voice_raw_transcript: Optional[str] = None
     last_voice_normalized_command: Optional[str] = None
@@ -115,6 +118,9 @@ class StreamSessionState:
     last_stream_spontaneity_preview_ts: float = 0.0
     last_stream_spontaneity_blocked_reason: Optional[str] = None
     last_proactive_decision: Optional[dict] = None
+    speech_intent_candidates: list[dict] = field(default_factory=list)
+    speech_intent_state: dict = field(default_factory=dict)
+    last_cognitive_intent_scan_ts: float = 0.0
     idle_spontaneity_enabled: bool = True
     recent_idle_messages: list[dict] = field(default_factory=list)
     recent_style_motifs: list[dict] = field(default_factory=list)

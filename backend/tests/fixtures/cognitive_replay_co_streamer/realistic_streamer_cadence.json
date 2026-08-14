@@ -1,0 +1,70 @@
+{
+  "schema_version": 1,
+  "scenario_id": "co_streamer_realistic_cadence",
+  "initial_time": "2026-08-14T19:00:00+02:00",
+  "seed": 814,
+  "feature_flags": {"cognitive_replay_enabled": true},
+  "model_fixtures": {"*": "Eso ha sido pura loteria."},
+  "external_outcomes": {"twitch.send_message": [{"success": true, "status": "sent"}]},
+  "events": [
+    {
+      "event_id": "stream-start",
+      "at": "+0s",
+      "type": "stream_started",
+      "session_id": "co-streamer-1",
+      "game": "Test RPG",
+      "title": "Boss attempts"
+    },
+    {"event_id": "past-grace", "at": "+0s", "type": "advance_time", "seconds": 300},
+    {"event_id": "leo-speaking", "at": "+301s", "type": "owner_voice_state", "active": true},
+    {
+      "event_id": "reaction-material",
+      "at": "+302s",
+      "type": "ambient_stt",
+      "text": "Que ha sido demasiada suerte, Dios"
+    },
+    {
+      "event_id": "blocked-active-voice",
+      "at": "+302.2s",
+      "type": "companion_tick",
+      "assertions": [
+        {"assertion": "contains", "path": "speech_intents.active", "matching": {"type": "REACTION", "status": "PENDING"}},
+        {"assertion": "collection_count", "path": "final_emission_results", "count": 0}
+      ]
+    },
+    {"event_id": "leo-ends", "at": "+303s", "type": "owner_voice_state", "active": false},
+    {
+      "event_id": "gap-too-short",
+      "at": "+303.5s",
+      "type": "companion_tick",
+      "assertions": [
+        {"assertion": "contains", "path": "speech_intents.active", "matching": {"type": "REACTION", "status": "PENDING"}},
+        {"assertion": "collection_count", "path": "final_emission_results", "count": 0}
+      ]
+    },
+    {
+      "event_id": "natural-turn",
+      "at": "+304.3s",
+      "type": "companion_tick",
+      "assertions": [
+        {"assertion": "contains", "path": "speech_intents.all", "matching": {"type": "REACTION", "status": "EMITTED"}},
+        {"assertion": "collection_count", "path": "final_emission_results", "count": 1}
+      ]
+    },
+    {"event_id": "leo-resumes", "at": "+305s", "type": "owner_voice_state", "active": true},
+    {"event_id": "second-comment", "at": "+305.5s", "type": "speech_intent_candidate", "intent_type": "OPINION", "topic": "boss-design", "value": 0.73},
+    {
+      "event_id": "yield-second",
+      "at": "+305.7s",
+      "type": "companion_tick",
+      "assertions": [
+        {"assertion": "collection_count", "path": "final_emission_results", "count": 1},
+        {"assertion": "contains", "path": "speech_intents.active", "matching": {"type": "OPINION", "status": "PENDING"}}
+      ]
+    }
+  ],
+  "final_assertions": [
+    {"assertion": "exactly_once", "path": "speech_intents.all", "matching": {"type": "REACTION", "status": "EMITTED"}},
+    {"assertion": "exactly_once", "path": "actions.attempts", "matching": {"operation": "twitch.send_message", "outcome.status": "sent"}}
+  ]
+}

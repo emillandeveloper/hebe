@@ -1,0 +1,140 @@
+{
+  "overall_result": "CO-STREAMER TURN-TAKING VERIFIED",
+  "source_verification_report": "C:\\Users\\Leo Nifelheim\\Documents\\Hebe\\hebe-ui\\artifacts\\co-streamer-turn-taking\\release\\verification-report.json",
+  "source_sha256": "d245e0bcaac1a67aa4e99a75d5943cc37d6a9775d59737e8a1f1d2777983a8df",
+  "root_cause": {
+    "presence_poll_seconds": 30.0,
+    "blanket_recent_owner_speech_seconds": 30.0,
+    "additional_spontaneity_recent_voice_seconds": 20.0,
+    "effect": "valuable owner-anchored opportunities were discarded before conversational turn arbitration"
+  },
+  "before": {
+    "representative_real_stream_ticks": 486,
+    "should_speak_false": 486,
+    "proactive_emissions": 0,
+    "stream_tts_emissions": 0,
+    "recent_owner_speech_suppressions": 407
+  },
+  "after_representative_replay": {
+    "scenario": "co_streamer_realistic_cadence",
+    "status": "VERIFIED",
+    "assertions_passed": 10,
+    "assertions_failed": 0,
+    "companion_ticks": 4,
+    "intents_created": 3,
+    "intents_emitted": 1,
+    "intents_expired": 0,
+    "intents_superseded": 0,
+    "yield_due_owner_resume": 0,
+    "pending_at_end": 2,
+    "final_emissions": 1
+  },
+  "pipeline": [
+    "candidate",
+    "SpeechIntent",
+    "pending",
+    "turn_arbitration",
+    "PresenceEngine",
+    "rendering",
+    "FinalEmissionGate",
+    "output"
+  ],
+  "timing_semantics": {
+    "REACTION": {
+      "minimum_turn_gap_seconds": 1.2,
+      "maximum_turn_delay_seconds": 8.0
+    },
+    "OPINION": {
+      "minimum_turn_gap_seconds": 2.5,
+      "maximum_turn_delay_seconds": 25.0
+    },
+    "BANTER": {
+      "minimum_turn_gap_seconds": 1.2,
+      "maximum_turn_delay_seconds": 10.0
+    },
+    "CALLBACK": {
+      "minimum_turn_gap_seconds": 3.0,
+      "maximum_turn_delay_seconds": 45.0
+    },
+    "QUESTION": {
+      "minimum_turn_gap_seconds": 2.5,
+      "maximum_turn_delay_seconds": 40.0
+    },
+    "GAME_COMMENT": {
+      "minimum_turn_gap_seconds": 1.8,
+      "maximum_turn_delay_seconds": 14.0
+    },
+    "SOCIAL_FOLLOWUP": {
+      "minimum_turn_gap_seconds": 1.5,
+      "maximum_turn_delay_seconds": 30.0
+    },
+    "OWNER_MEMORY_REFERENCE": {
+      "minimum_turn_gap_seconds": 3.0,
+      "maximum_turn_delay_seconds": 45.0
+    },
+    "SELF_INITIATED_TOPIC": {
+      "minimum_turn_gap_seconds": 5.0,
+      "maximum_turn_delay_seconds": 90.0
+    },
+    "RAID_FAREWELL": {
+      "minimum_turn_gap_seconds": 0.8,
+      "maximum_turn_delay_seconds": 12.0
+    },
+    "IDLE_CHATTER": {
+      "minimum_turn_gap_seconds": 30.0,
+      "maximum_turn_delay_seconds": 120.0
+    }
+  },
+  "performance": {
+    "intent_creation": {
+      "count": 3,
+      "p50_ms": 0.057,
+      "p95_ms": 0.057
+    },
+    "pending_queue_operation": {
+      "count": 3,
+      "p50_ms": 0.057,
+      "p95_ms": 0.057
+    },
+    "turn_arbitration": {
+      "count": 4,
+      "p50_ms": 0.02,
+      "p95_ms": 0.024
+    },
+    "presence_turn_decision": {
+      "count": 4,
+      "p50_ms": 1.799,
+      "p95_ms": 2.037
+    },
+    "time_created_to_emit": {
+      "count": 1,
+      "p50_ms": 2100.0,
+      "p95_ms": 2100.0
+    },
+    "turn_gap_before_emit": {
+      "count": 1,
+      "p50_ms": 1300.0,
+      "p95_ms": 1300.0
+    }
+  },
+  "verification": {
+    "tests_total": 594,
+    "tests_passed": 577,
+    "tests_failed": 17,
+    "tests_skipped": 0,
+    "inherited_failures": 17,
+    "new_regressions": 0,
+    "scenarios_A_through_L": {
+      "status": "PASSED",
+      "count": 12,
+      "test_module": "backend.tests.test_co_streamer_turn_taking.CoStreamerTurnTakingScenarios"
+    }
+  },
+  "known_limitations": [
+    "Naturalness, comedic timing, and social appropriateness still require human stream review.",
+    "Replay replaces Twitch, TTS audio, and model/network boundaries with deterministic fakes.",
+    "Owner voice-active uses the production RMS/VAD sample plus normalized STT utterance completion; it is not sample-accurate diarization.",
+    "Hebe yields before TTS commit; already-playing audio is not forcibly cancelled by this change.",
+    "The full historical suite retains 17 baseline failures; the differential confirms none were introduced by this fix."
+  ]
+}

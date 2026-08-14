@@ -427,6 +427,46 @@ class CognitiveReplayRunner:
                 "source_context": str(payload.get("source_context") or "owner_live_control"),
             })
             return
+        if event_type == "owner_voice_state":
+            active = bool(payload.get("active"))
+            self.engine.runtime.stt.last_input_rms = 0.01 if active else 0.0
+            stream = self.engine._get_stream_state()
+            if stream is not None:
+                stream.owner_voice_active = active
+                if active:
+                    stream.owner_voice_started_ts = self.clock.now()
+                else:
+                    stream.last_owner_utterance_end_ts = self.clock.now()
+            return
+        if event_type == "speech_intent_candidate":
+            stream = self.engine._get_stream_state()
+            if stream is not None:
+                candidates = list(getattr(stream, "speech_intent_candidates", []) or [])
+                candidates.append({
+                    **payload,
+                    "type": str(payload.get("intent_type") or payload.get("speech_intent_type") or "SELF_INITIATED_TOPIC"),
+                    "source_event_ids": payload.get("source_event_ids") or [event.event_id],
+                })
+                stream.speech_intent_candidates = candidates
+            return
+        if event_type == "stream_scene":
+            stream = self.engine._get_stream_state()
+            if stream is not None:
+                stream.current_scene_timeline = dict(payload)
+                stream.current_activity = str(payload.get("activity") or stream.current_activity)
+            return
+        if event_type == "companion_tick":
+            stream = self.engine._get_stream_state()
+            loop = self.engine.stream_companion_loop
+            tick = loop.evaluate(
+                stream,
+                stream_tts_enabled=bool(payload.get("stream_tts_enabled", False)),
+                output_mode=str(payload.get("output_mode") or "ui_only"),
+                backend_running=True,
+            )
+            if tick is not None and tick.event is not None:
+                self.engine.process_internal_event(tick.event)
+            return
         if event_type == "open_conversation":
             context_kind = ConversationContext(str(payload.get("context_kind") or "owner_live_control"))
             if payload.get("context_id"):

@@ -36,4 +36,6 @@ backend/data/dataset/hebe_stream_replies.jsonl
 /artifacts/cognitive-continuity-phase5/release/workspaces/
 /artifacts/cognitive-continuity-phase6/scratch/
 /artifacts/cognitive-continuity-phase6/release/workspaces/
+/artifacts/co-streamer-turn-taking/targeted/
+/artifacts/co-streamer-turn-taking/release/workspaces/
 .claude/worktrees/wonderful-moser-3c9a97

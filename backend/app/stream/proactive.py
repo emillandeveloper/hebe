@@ -36,6 +36,9 @@ class ProactiveDecision:
     social_value_score: float = 0.0
     interruption_cost: float = 0.0
     channel_cost: float = 0.0
+    speech_intent_id: str = ""
+    speech_intent_type: str = ""
+    speech_intent_status: str = ""
     game_advice_validation: dict[str, Any] | None = None
     score: dict[str, float] = field(default_factory=dict)
 

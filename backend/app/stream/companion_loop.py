@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import time
 import uuid
-import os
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any, Callable
@@ -10,6 +9,12 @@ from typing import Any, Callable
 from app.cognitive.core_loop import PerceivedEvent, PolicyContract, PresenceEngine, UnderstandingResult
 from app.cognitive.scheduler import InternalEvent
 from app.stream.proactive import ProactiveDecision, log_proactive_decision, semantic_cooldown_key
+from app.stream.speech_intents import (
+    SpeechIntent,
+    SpeechIntentManager,
+    SpeechIntentStatus,
+    SpeechIntentType,
+)
 from app.stream.spontaneity import StreamSpontaneityService
 from app.stream.scene_timeline import SceneTimelineManager, SpontaneousOpportunityManager
 from app.stream.state import StreamSessionState
@@ -25,6 +30,7 @@ class StreamCompanionTick:
     route: str = "observe_only"
     presence: dict[str, Any] = field(default_factory=dict)
     readiness: dict[str, Any] = field(default_factory=dict)
+    speech_intent: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -90,15 +96,18 @@ class StreamCompanionLoop:
         scene_timeline: SceneTimelineManager | None = None,
         opportunities: SpontaneousOpportunityManager | None = None,
         now_fn: Callable[[], float] | None = None,
+        owner_voice_active_fn: Callable[[], bool] | None = None,
+        tts_active_fn: Callable[[], bool] | None = None,
+        intent_manager: SpeechIntentManager | None = None,
     ):
         self.spontaneity = spontaneity or StreamSpontaneityService()
         self.presence_engine = presence_engine or PresenceEngine()
         self.scene_timeline = scene_timeline or SceneTimelineManager(now_fn=now_fn or time.time)
         self.opportunities = opportunities or SpontaneousOpportunityManager(now_fn=now_fn or time.time)
         self._now_fn = now_fn
-        self.min_seconds_after_owner_speech = float(
-            os.getenv("HEBE_COMPANION_MIN_SECONDS_AFTER_OWNER_SPEECH", "30")
-        )
+        self.owner_voice_active_fn = owner_voice_active_fn or (lambda: False)
+        self.tts_active_fn = tts_active_fn or (lambda: False)
+        self.intent_manager = intent_manager or SpeechIntentManager(now_fn=now_fn or time.time)
         self.last_tick_ts = 0.0
         self.last_summary_ts = 0.0
         self._used_anchor_ids: set[str] = set()
@@ -116,6 +125,7 @@ class StreamCompanionLoop:
         self.should_speak_count = 0
         self.emitted_count = 0
         self.blocked_reasons.clear()
+        self.intent_manager.reset_session()
 
     def due(self, *, last_poll_ts: float, interval_sec: float) -> bool:
         return self._now() - float(last_poll_ts or 0.0) >= float(interval_sec or 45.0)
@@ -140,6 +150,7 @@ class StreamCompanionLoop:
             return None
 
         assert stream is not None
+        decision_started = time.perf_counter()
         self.last_tick_ts = now
         self.ticks += 1
         mode = str(getattr(stream, "presence_mode", "reactive") or "reactive")
@@ -168,10 +179,48 @@ class StreamCompanionLoop:
             flush=True,
         )
 
-        presence = self._presence_decision(stream, readiness, anchor, now=now)
+        self._create_speech_intent(stream, readiness, anchor, now=now)
+        owner_voice_active = bool(self.owner_voice_active_fn())
+        stream.owner_voice_active = owner_voice_active
+        if owner_voice_active:
+            stream.owner_voice_started_ts = now
+        owner_ended_at = float(
+            getattr(stream, "last_owner_utterance_end_ts", 0.0)
+            or getattr(stream, "last_voice_event_ts", 0.0)
+            or 0.0
+        )
+        arbitration = self.intent_manager.arbitrate(
+            owner_voice_active=owner_voice_active,
+            owner_utterance_ended_at=owner_ended_at,
+            tts_active=bool(self.tts_active_fn()),
+            current_scene=dict(getattr(stream, "current_scene_timeline", None) or {}),
+            now=now,
+        )
+        stream.speech_intent_state = self.intent_manager.snapshot()
+        selected_intent = arbitration.intent
+        if selected_intent is None:
+            no_candidate_reason = str(readiness.get("blocked_reason") or "")
+            wait_reason = (
+                no_candidate_reason
+                if arbitration.reason == "no_pending_intent" and no_candidate_reason not in {"", "ready"}
+                else arbitration.reason
+            )
+            presence = {
+                "should_intervene": False,
+                "intervention_level": "observe_only",
+                "reason": wait_reason,
+                "social_value_score": 0.0,
+                "interruption_cost": 1.0 if owner_voice_active else 0.0,
+                "channel_cost": 0.0,
+            }
+        else:
+            presence = self._presence_decision(stream, readiness, anchor, selected_intent, now=now)
+            if not presence.get("should_intervene"):
+                self.intent_manager.release(selected_intent.id, str(presence.get("reason") or "presence_rejected"))
+                stream.speech_intent_state = self.intent_manager.snapshot()
         route = self._route_for_presence(stream, presence, stream_tts_enabled=stream_tts_enabled, output_mode=output_mode)
-        should_speak = bool(readiness.get("would_send") and presence.get("should_intervene") and route != "observe_only")
-        blocked_reason = "" if should_speak else str(presence.get("reason") or readiness.get("blocked_reason") or "observe_only")
+        should_speak = bool(selected_intent and presence.get("should_intervene") and route != "observe_only")
+        blocked_reason = "" if should_speak else str(presence.get("reason") or arbitration.reason or "observe_only")
         reason = "presence_value" if should_speak else blocked_reason
         if should_speak:
             print(
@@ -189,6 +238,9 @@ class StreamCompanionLoop:
                 event.payload["anchor_type"] = anchor.get("type")
                 event.payload["anchor_quality"] = anchor.get("quality")
                 event.payload["anchor_evidence"] = anchor.get("evidence") or {}
+                event.payload["speech_intent_id"] = selected_intent.id
+                event.payload["speech_intent_type"] = selected_intent.type.value
+                event.payload["speech_intent"] = selected_intent.to_dict()
                 scene_guard = dict(anchor.get("scene_guard") or self.scene_timeline.snapshot())
                 event.payload["scene_guard"] = scene_guard
                 opportunity = self.opportunities.open(
@@ -214,6 +266,7 @@ class StreamCompanionLoop:
             blocked_reason=blocked_reason,
             reason=reason,
             selected_route=route,
+            speech_intent=selected_intent,
             now=now,
         )
         stream.last_proactive_decision = decision.to_dict()
@@ -225,6 +278,10 @@ class StreamCompanionLoop:
             flush=True,
         )
         self.maybe_log_health(stream, now=now)
+        self.intent_manager.observe_presence_turn_decision(
+            (time.perf_counter() - decision_started) * 1000.0
+        )
+        stream.speech_intent_state = self.intent_manager.snapshot()
         return StreamCompanionTick(
             should_speak=should_speak,
             reason=reason,
@@ -234,12 +291,27 @@ class StreamCompanionLoop:
             route=route,
             presence=presence,
             readiness=readiness,
+            speech_intent=selected_intent.to_dict() if selected_intent else {},
         )
 
-    def record_emitted(self, stream: StreamSessionState | None, final_response: str, *, route: str = "stream_tts_reply") -> None:
+    def record_emitted(
+        self,
+        stream: StreamSessionState | None,
+        final_response: str,
+        *,
+        route: str = "stream_tts_reply",
+        intent_id: str = "",
+    ) -> None:
         self.emitted_count += 1
         if stream is None:
             return
+        intent_id = intent_id or str((getattr(stream, "last_proactive_decision", {}) or {}).get("speech_intent_id") or "")
+        if intent_id:
+            self.intent_manager.mark_emitted(
+                intent_id,
+                owner_utterance_ended_at=float(getattr(stream, "last_owner_utterance_end_ts", 0.0) or 0.0),
+            )
+            stream.speech_intent_state = self.intent_manager.snapshot()
         anchor_id = str((getattr(stream, "last_proactive_decision", {}) or {}).get("anchor_id") or "")
         if anchor_id:
             self._used_anchor_ids.add(anchor_id)
@@ -272,7 +344,7 @@ class StreamCompanionLoop:
         print(
             "[HEBE][STREAM_COMPANION_HEALTH] "
             f"ticks={self.ticks} should_speak={self.should_speak_count} emitted={self.emitted_count} "
-            f"top_blocked_reasons={top or 'none'}",
+            f"top_blocked_reasons={top or 'none'} intent_metrics={self.intent_manager.metrics_snapshot()}",
             flush=True,
         )
 
@@ -311,26 +383,32 @@ class StreamCompanionLoop:
         stream: StreamSessionState,
         readiness: dict[str, Any],
         anchor: dict[str, Any],
+        intent: SpeechIntent,
         *,
         now: float,
     ) -> dict[str, Any]:
-        recent_owner = float(getattr(stream, "last_voice_event_ts", 0.0) or 0.0)
-        owner_speech_age = (now - recent_owner) if recent_owner else float("inf")
-        recent_owner_block = bool(recent_owner and owner_speech_age < self.min_seconds_after_owner_speech)
-        print(
-            "[HEBE][RECENT_OWNER_SPEECH_GATE] "
-            f"blocked={str(recent_owner_block).lower()} "
-            f"age_seconds={owner_speech_age if recent_owner else 'never'} "
-            f"threshold={self.min_seconds_after_owner_speech:g}",
-            flush=True,
-        )
         quality = float(anchor.get("quality") or 0.0)
-        pressure = max(0.0, min(1.0, 0.42 + quality * 0.45))
-        budget = {"allowed": bool(readiness.get("would_send")) and not recent_owner_block, "reason": readiness.get("blocked_reason") or "ready"}
-        if recent_owner_block:
-            budget["reason"] = "recent_owner_speech"
+        pressure = max(0.0, min(1.0, max(intent.value, 0.42 + quality * 0.45)))
+        readiness_reason = str(readiness.get("blocked_reason") or "ready")
+        turn_only_reasons = {
+            "Leo spoke recently", "recent_owner_speech", "recent_chat_activity",
+            "chat_active", "chat activity baseline not ready",
+        }
+        anchored = intent.type not in {SpeechIntentType.SELF_INITIATED_TOPIC, SpeechIntentType.IDLE_CHATTER}
+        cognitive_material = bool(intent.contribution_material.get("cognitive_candidate"))
+        material_replaces_anchor = readiness_reason in {"no_high_quality_anchor", "weak_anchor", "no_specific_context"}
+        budget_allowed = (
+            bool(readiness.get("would_send"))
+            or bool(anchored and readiness_reason in turn_only_reasons)
+            or bool(cognitive_material and material_replaces_anchor)
+        )
+        budget = {
+            "allowed": budget_allowed,
+            "reason": "anchored_intent_turn_arbitrated" if budget_allowed and not readiness.get("would_send") else readiness_reason,
+            "presence_rejection_reason": "" if budget_allowed else readiness_reason,
+        }
         perception = PerceivedEvent(
-            event_id=f"stream_companion_tick:{int(now)}",
+            event_id=intent.id,
             timestamp=now,
             source="stream_companion_tick",
             source_type="system",
@@ -340,14 +418,14 @@ class StreamCompanionLoop:
             stream_live=bool(getattr(stream, "is_live", False)),
             current_game=str(getattr(stream, "current_game", None) or getattr(stream, "current_category", None) or ""),
             current_activity=str(getattr(stream, "current_activity", "") or "unknown"),
-            confidence=quality,
+            confidence=max(quality, intent.value),
         )
         understanding = UnderstandingResult(
-            intent="stream_companion_anchor",
-            confidence=quality,
+            intent=f"stream_companion_{intent.type.value.lower()}",
+            confidence=max(quality, intent.value),
             authority="system",
             reply_pressure=pressure,
-            social_context=str(anchor.get("type") or "stream_silence"),
+            social_context=str(intent.topic or anchor.get("type") or "stream_silence"),
         )
         decision = self.presence_engine.decide(
             perception=perception,
@@ -355,10 +433,8 @@ class StreamCompanionLoop:
             policy=PolicyContract(risk_level="low"),
             budget_result=budget,
         ).to_dict()
-        positive = [anchor.get("type") or "stream_context"] if quality >= 0.55 else []
+        positive = [intent.type.value, anchor.get("type") or "stream_context"]
         negative = []
-        if recent_owner_block:
-            negative.append("recent_owner_speech")
         if not readiness.get("would_send"):
             negative.append(str(readiness.get("blocked_reason") or "not_due"))
         print(
@@ -370,6 +446,94 @@ class StreamCompanionLoop:
         )
         print(f"[HEBE][PRESENCE_FACTORS] positive={positive} negative={negative}", flush=True)
         return decision
+
+    def owner_voice_active(self) -> bool:
+        return bool(self.owner_voice_active_fn())
+
+    def yield_intent(self, intent_id: str, *, reason: str = "owner_resumed") -> bool:
+        return self.intent_manager.yield_reserved(intent_id, reason=reason)
+
+    def mark_tts_committed(self, intent_id: str) -> None:
+        self.intent_manager.mark_tts_committed(intent_id)
+
+    def _create_speech_intent(
+        self,
+        stream: StreamSessionState,
+        readiness: dict[str, Any],
+        anchor: dict[str, Any],
+        *,
+        now: float,
+    ) -> SpeechIntent | None:
+        candidates = list(getattr(stream, "speech_intent_candidates", []) or [])
+        created: SpeechIntent | None = None
+        anchor_id = str(anchor.get("id") or "")
+        anchor_type = str(anchor.get("type") or "stream_silence")
+        quality = float(anchor.get("quality") or 0.0)
+        if (
+            quality >= 0.55
+            and anchor_type != "stream_silence"
+            and (not anchor_id or not self.intent_manager.has_seen_anchor(anchor_id))
+        ):
+            intent_type = self._intent_type_for_anchor(anchor_type, anchor)
+            created = self.intent_manager.create(
+                intent_type=intent_type,
+                source_event_ids=list((anchor.get("evidence") or {}).get("source_event_ids") or []),
+                anchor_ids=[anchor_id] if anchor_id else [],
+                topic=anchor_type,
+                subject_ref=str((anchor.get("evidence") or {}).get("extracted_subject") or ""),
+                value=quality,
+                urgency=0.85 if intent_type in {SpeechIntentType.REACTION, SpeechIntentType.BANTER} else 0.55,
+                freshness=float((anchor.get("evidence") or {}).get("currentness", 1.0) or 1.0),
+                scene_relevance=dict(anchor.get("scene_guard") or {}),
+                contribution_material={"anchor": anchor, "readiness_topic": readiness.get("candidate_topic")},
+                now=now,
+            )
+        elif readiness.get("would_send"):
+            created = self.intent_manager.create(
+                intent_type=SpeechIntentType.IDLE_CHATTER,
+                topic=str(readiness.get("candidate_topic") or "stream_context"),
+                value=float((readiness.get("spontaneity_score") or {}).get("total") or 0.62),
+                urgency=0.1,
+                scene_relevance=dict(getattr(stream, "current_scene_timeline", None) or {}),
+                contribution_material={"readiness_topic": readiness.get("candidate_topic")},
+                now=now,
+            )
+        for candidate in candidates:
+            if not isinstance(candidate, dict) or candidate.get("consumed"):
+                continue
+            try:
+                created = self.intent_manager.create(
+                    intent_type=str(candidate.get("type") or SpeechIntentType.SELF_INITIATED_TOPIC.value),
+                    source_event_ids=list(candidate.get("source_event_ids") or []),
+                    anchor_ids=list(candidate.get("anchor_ids") or []),
+                    topic=str(candidate.get("topic") or "cognitive_candidate"),
+                    subject_ref=str(candidate.get("subject_ref") or ""),
+                    value=float(candidate.get("value") or 0.0),
+                    urgency=float(candidate.get("urgency") or 0.3),
+                    freshness=float(candidate.get("freshness") or 1.0),
+                    scene_relevance=dict(candidate.get("scene_relevance") or getattr(stream, "current_scene_timeline", None) or {}),
+                    contribution_material={"cognitive_candidate": True, **dict(candidate.get("material") or {})},
+                    now=now,
+                )
+                candidate["consumed"] = True
+            except (TypeError, ValueError):
+                candidate["consumed"] = True
+                candidate["rejected_reason"] = "invalid_speech_intent_candidate"
+        stream.speech_intent_candidates = candidates[-20:]
+        return created
+
+    @staticmethod
+    def _intent_type_for_anchor(anchor_type: str, anchor: dict[str, Any]) -> SpeechIntentType:
+        normalized = anchor_type.casefold()
+        if any(token in normalized for token in ("rng", "luck", "failure", "death", "victory", "frustration")):
+            return SpeechIntentType.REACTION
+        if any(token in normalized for token in ("joke", "laughter", "banter")):
+            return SpeechIntentType.BANTER
+        if any(token in normalized for token in ("opinion", "discourse")):
+            return SpeechIntentType.OPINION
+        if any(token in normalized for token in ("social", "viewer", "chat", "callback")):
+            return SpeechIntentType.SOCIAL_FOLLOWUP
+        return SpeechIntentType.GAME_COMMENT
 
     def _route_for_presence(
         self,
@@ -478,6 +642,7 @@ class StreamCompanionLoop:
         blocked_reason: str,
         reason: str,
         selected_route: str,
+        speech_intent: SpeechIntent | None,
         now: float,
     ) -> ProactiveDecision:
         topic = str(readiness.get("candidate_topic") or anchor.get("type") or "stream_silence")
@@ -513,6 +678,9 @@ class StreamCompanionLoop:
             social_value_score=float(presence.get("social_value_score") or 0.0),
             interruption_cost=float(presence.get("interruption_cost") or 0.0),
             channel_cost=float(presence.get("channel_cost") or 0.0),
+            speech_intent_id=speech_intent.id if speech_intent else "",
+            speech_intent_type=speech_intent.type.value if speech_intent else "",
+            speech_intent_status=speech_intent.status.value if speech_intent else "",
             score={
                 **{k: float(v) for k, v in (readiness.get("spontaneity_score") or {}).items() if isinstance(v, (int, float))},
                 "social_value_score": float(presence.get("social_value_score") or 0.0),
