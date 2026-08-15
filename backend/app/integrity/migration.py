@@ -11,6 +11,10 @@ from app.replay.migrations import (
     conversation_continuity_migrations, game_context_v2_migrations,
     learning_v2_migrations, replay_foundation_migrations, social_world_v2_migrations,
 )
+from app.game_context_v2.migration import (
+    game_knowledge_canonicalization_migrations,
+    game_run_state_canonicalization_migrations,
+)
 
 from .hygiene import HygienePlanner
 from .scanner import IntegrityScanner
@@ -21,6 +25,8 @@ ALL_MIGRATIONS = (
     conversation_continuity_migrations,
     belief_v2_migrations,
     game_context_v2_migrations,
+    game_run_state_canonicalization_migrations,
+    game_knowledge_canonicalization_migrations,
     social_world_v2_migrations,
     learning_v2_migrations,
     architecture_consolidation_migrations,

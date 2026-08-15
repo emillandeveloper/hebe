@@ -494,41 +494,6 @@ class GameIntelligenceTests(unittest.TestCase):
         dossier, _ = service.get_or_build_dossier(game_title="Test Game")
         self.assertNotIn("villain", " ".join(dossier.confirmed_general_mechanics).lower())
 
-    def test_first_playthrough_title_sets_strict_spoiler_mode(self):
-        service, _ = self.service()
-        state = service.progress.start("Test Game", "s1", title="First playthrough - no spoilers")
-        self.assertEqual(state.playthrough_type, "first_playthrough")
-        self.assertEqual(state.spoiler_policy, "strict")
-
-    def test_explicit_owner_progress_updates_state(self):
-        service, _ = self.service()
-        state = service.progress.start("Test Game", "s1")
-        service.progress.apply_owner_progress(
-            state,
-            "He llegado a Alexandria",
-            explicit_owner_statement=True,
-            area="Alexandria",
-        )
-        self.assertEqual(state.current_area, "Alexandria")
-
-    def test_quoted_dialogue_does_not_advance_progress(self):
-        service, _ = self.service()
-        state = service.progress.start("Test Game", "s1")
-        service.progress.apply_owner_progress(
-            state,
-            "He llegado al final",
-            explicit_owner_statement=True,
-            quoted_dialogue=True,
-            area="Final Castle",
-        )
-        self.assertEqual(state.current_area, "")
-
-    def test_uncertain_progress_remains_unknown(self):
-        service, _ = self.service()
-        state = service.progress.start("Test Game", "s1")
-        service.progress.apply_owner_progress(state, "maybe castle", explicit_owner_statement=False, area="Castle")
-        self.assertEqual(state.current_area, "")
-
     def test_future_boss_fact_blocked(self):
         fact = _fact(spoiler_classification="future_mechanic", claim="Future boss weakness is fire")
         self.assertFalse(SpoilerFirewall().evaluate(fact, _progress()).allowed)

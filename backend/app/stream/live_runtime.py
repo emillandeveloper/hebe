@@ -62,7 +62,6 @@ PERSISTENT_LIVE_FIELDS = (
     "viewer_identities",
     "viewer_linguistic_profiles",
     "promotion_preferences",
-    "game_dossiers",
     "owner_behavior_preferences",
     "confirmed_memories",
 )

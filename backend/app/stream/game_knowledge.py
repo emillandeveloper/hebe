@@ -5,7 +5,6 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from app.stream import session_primer
 from app.stream.game_profiles import GameProfile, GameProfileStore
 from app.stream.game_research import GameKnowledgeResearchConfig, GameKnowledgeResearchService
 
@@ -66,10 +65,12 @@ class GameKnowledgeResolver:
         profile_store: GameProfileStore | None = None,
         research_service: GameKnowledgeResearchService | None = None,
         config: GameKnowledgeConfig | None = None,
+        run_service: Any | None = None,
     ) -> None:
         self.profile_store = profile_store or GameProfileStore()
         self.research_service = research_service
         self.config = config or GameKnowledgeConfig.from_env()
+        self.run_service = run_service
 
     def resolve(self, *, game: str | None = None, stream: Any | None = None, force_web: bool = False) -> GameKnowledgeResult:
         title = self._resolve_game_title(game=game, stream=stream)
@@ -167,8 +168,7 @@ class GameKnowledgeResolver:
                 cleaned = _clean_game_title(value)
                 if cleaned:
                     return cleaned
-        schedule = session_primer.get_schedule_for_date()
-        return _clean_game_title((schedule or {}).get("game")) or "este juego"
+        return "este juego"
 
     def _personal_memory_for(self, title: str, *, stream: Any | None) -> dict[str, Any]:
         data: dict[str, Any] = {}
@@ -182,15 +182,27 @@ class GameKnowledgeResolver:
                 data["current_location"] = location
             if facts:
                 data["run_context_facts"] = facts[:5]
-        session = session_primer.latest_game_session(title)
-        if session:
-            data["latest_session"] = {
-                "end_summary": session.get("end_summary") or "",
-                "current_location": session.get("current_location") or "",
-                "current_objective": session.get("current_objective") or "",
-                "next_time_plan": session.get("next_time_plan") or "",
-                "source": session.get("source") or "",
-            }
+        runs = self.run_service
+        if runs is not None and title and title != "este juego":
+            identity = runs.repository.resolve_identity(title)
+            run_id = str(getattr(stream, "active_game_run_id", "") or "") if stream is not None else ""
+            run = runs.repository.get_run(run_id) if run_id else None
+            if run is None or run.game_id != identity.game_id:
+                run = next(iter(runs.repository.list_runs(
+                    game_id=identity.game_id,owner_id="leo",statuses=("ACTIVE",),
+                )),None)
+            if run is not None:
+                state = runs.state(run.id)
+                durable = {
+                    "current_location": state.get("current_location") or "",
+                    "current_objective": state.get("current_objective") or "",
+                    "last_confirmed_progress": state.get("last_confirmed_progress") or "",
+                    "party_members": state.get("party_members") or [],
+                    "challenge": state.get("challenge") or "",
+                    "run_id": run.id,
+                }
+                if any(value for key,value in durable.items() if key != "run_id"):
+                    data["canonical_run"] = durable
         return {key: value for key, value in data.items() if value}
 
     def _has_specific_profile(self, profile: GameProfile) -> bool:

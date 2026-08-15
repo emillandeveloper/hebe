@@ -178,6 +178,10 @@ from app.continuity import (
 from app.replay.migrations import MigrationRunner, architecture_consolidation_migrations, conversation_continuity_migrations, game_context_v2_migrations, social_world_v2_migrations, learning_v2_migrations
 from app.epistemics.models import EvidenceRef, EvidenceRelation
 from app.game_context_v2.context import GameContextResolver
+from app.game_context_v2.migration import (
+    game_knowledge_canonicalization_migrations,
+    game_run_state_canonicalization_migrations,
+)
 from app.game_context_v2.repository import GameV2Repository
 from app.game_context_v2.service import GameKnowledgeService as GameKnowledgeV2Service, GameRunService
 from app.social_world_v2 import SocialWorldRepository, SocialWorldService
@@ -522,12 +526,6 @@ class HebeEngine:
         self._last_continuity_resolution: dict = {}
         self._initialize_conversation_continuity()
         self._initialize_belief_v2()
-        self.game_context_v2 = cognitive_flag("HEBE_GAME_CONTEXT_V2")
-        self.game_run_v2_reads = cognitive_flag("HEBE_GAME_RUN_V2_READS")
-        self.game_run_v2_writes = cognitive_flag("HEBE_GAME_RUN_V2_WRITES")
-        self.game_knowledge_v2_reads = cognitive_flag("HEBE_GAME_KNOWLEDGE_V2_READS")
-        self.game_knowledge_v2_writes = cognitive_flag("HEBE_GAME_KNOWLEDGE_V2_WRITES")
-        self.game_research_memory_first = cognitive_flag("HEBE_GAME_RESEARCH_MEMORY_FIRST")
         self._initialize_game_context_v2()
         self.social_world_v2 = cognitive_flag("HEBE_SOCIAL_WORLD_V2")
         self.social_identity_v2 = cognitive_flag("HEBE_SOCIAL_IDENTITY_V2")
@@ -595,11 +593,14 @@ class HebeEngine:
         try:
             if self.belief_repository is None or self.belief_lifecycle is None: raise RuntimeError("belief_v2_unavailable")
             runner=MigrationRunner(db_sqlite.get_db_connection);self.game_context_v2_migrations=runner.migrate(game_context_v2_migrations())
+            self.game_run_state_canonicalization=runner.migrate(game_run_state_canonicalization_migrations())
+            self.game_knowledge_canonicalization=runner.migrate(game_knowledge_canonicalization_migrations())
             repository=GameV2Repository(db_sqlite.get_db_connection);runs=GameRunService(repository,self.belief_lifecycle,now_fn=lambda:time.time());knowledge=GameKnowledgeV2Service(repository,self.belief_lifecycle,now_fn=lambda:time.time())
             self.game_v2_repository=repository;self.game_run_service=runs;self.game_knowledge_v2_service=knowledge
             self.game_context_resolver=GameContextResolver(repository,runs,knowledge,research_service=getattr(self,"game_intelligence",None),memory_retrieval=getattr(self,"memory_retrieval",None),now_fn=lambda:time.time())
+            self.game_knowledge.run_service=runs
         except Exception as exc:
-            self.game_v2_repository=None;self.game_run_service=None;self.game_knowledge_v2_service=None;self.game_context_resolver=None;self.game_context_v2_migrations=[]
+            self.game_v2_repository=None;self.game_run_service=None;self.game_knowledge_v2_service=None;self.game_context_resolver=None;self.game_context_v2_migrations=[];self.game_run_state_canonicalization=[];self.game_knowledge_canonicalization=[]
             print(f"[HEBE][GAME_CONTEXT_V2_INIT] status=failed_closed reason={type(exc).__name__}",flush=True)
 
     def _initialize_belief_v2(self) -> None:
@@ -676,7 +677,7 @@ class HebeEngine:
             return None
 
     def _apply_game_run_correction_continuation(self, continuation, *, event_id: str, text: str) -> None:
-        if not (getattr(self,"game_context_v2",False) and getattr(self,"game_run_v2_writes",False) and continuation is not None and continuation.consumed and str(getattr(continuation.reply_act,"value",continuation.reply_act))=="CORRECT"):
+        if not (continuation is not None and continuation.consumed and str(getattr(continuation.reply_act,"value",continuation.reply_act))=="CORRECT"):
             return
         domain=dict((continuation.payload or {}).get("domain") or {})
         if domain.get("kind")!="game_run_belief_correction":return
@@ -1019,49 +1020,6 @@ class HebeEngine:
             return reject("sentence_fragment", resolution)
         return reject(reason or "low_confidence_target", resolution)
 
-    def _game_run_state_write_guard(self, field_name: str, value, *, updates: dict) -> tuple[bool, str, object]:
-        if field_name not in {"current_location", "current_character", "party_members", "current_objective", "last_confirmed_progress"}:
-            return True, "unrestricted_field", value
-        confidence = float(updates.get("confidence") or 0.0)
-        provenance = str(updates.get("provenance") or "")
-        if provenance != "leo_clarification" or confidence < 0.75:
-            return False, "low_confidence_or_missing_provenance", value
-
-        values = value if isinstance(value, list) else [value]
-        cleaned: list[str] = []
-        for item in values:
-            raw = str(item or "").strip()
-            text = self._normalize_guard_text(raw)
-            if not text:
-                return False, "empty_value", value
-            if len(text) > 70 or len(text.split()) > 6:
-                return False, "sentence_fragment", value
-            if re.search(
-                r"\b(?:familia|madre|padre|herman[oa]s?|anime|artes?\s+marciales?|tranquilamente|"
-                r"rango\s+eh|en\s+plan|o\s+sea|viewer|espectador)\b",
-                text,
-            ):
-                return False, "real_life_or_stt_junk", value
-            if field_name == "current_location" and not re.search(
-                r"\b(?:palacio|castillo|mazmorra|dungeon|templo|ciudad|zona|nivel|mementos|shibuya|"
-                r"kamoshida|midgar|gaia|alexandria|lindblum|burmecia)\b",
-                text,
-            ):
-                return False, "location_not_game_like", value
-            if field_name in {"current_character", "party_members"} and re.search(r"\b(?:eh|vale|pues|nada)\b", text):
-                return False, "character_not_entity_like", value
-            cleaned.append(raw)
-        if isinstance(value, list):
-            return True, "accepted", cleaned
-        return True, "accepted", cleaned[0]
-
-    def _log_game_run_state_write_guard(self, *, accepted: bool, field_name: str, value, reason: str) -> None:
-        safe_value = str(value or "").replace("\n", " ")[:120]
-        print(
-            "[HEBE][GAME_RUN_STATE_WRITE_GUARD] "
-            f"accepted={str(bool(accepted)).lower()} field={field_name} value={safe_value!r} reason={reason}",
-            flush=True,
-        )
 
     def _owner_mute_command_mode(self, normalized: str) -> str | None:
         text = self._normalize_guard_text(normalized)
@@ -3960,35 +3918,48 @@ class HebeEngine:
         if not state_update or not state_update.success or state_update.data.get("kind") != "game_run_state":
             return
         updates = dict(state_update.data.get("updates") or {})
-        run = GameRunState.from_value(getattr(self.runtime.state, "game_run_state", None))
-        accepted_updates: dict[str, object] = {}
-        semantic_fields = {
-            "current_location",
-            "current_character",
-            "party_members",
-            "current_objective",
-            "last_confirmed_progress",
-            "game",
-            "spoiler_policy",
-        }
-        for field_name, value in updates.items():
-            if field_name in GameRunState.__dataclass_fields__:
-                accepted, reason, cleaned = self._game_run_state_write_guard(field_name, value, updates=updates)
-                self._log_game_run_state_write_guard(
-                    accepted=accepted,
-                    field_name=field_name,
-                    value=value,
-                    reason=reason,
-                )
-                if accepted:
-                    setattr(run, field_name, cleaned)
-                    accepted_updates[field_name] = cleaned
-        if not any(field in semantic_fields for field in accepted_updates):
+        stream = self._get_stream_state()
+        service = getattr(self,"game_run_service",None)
+        if service is None:
+            print("[HEBE][GAME_PENDING] state_update_rejected reason=canonical_service_unavailable",flush=True)
+            return
+        pending_id = str(state_update.data.get("pending_id") or "game_run_state")
+        explicit_game = str(updates.pop("game","") or "").strip()
+        game = str(explicit_game or getattr(stream,"current_game",None) or getattr(stream,"current_category",None) or "").strip()
+        resolved_game = ""
+        run_id = str(getattr(stream,"active_game_run_id","") or "") if stream is not None else ""
+        if game and stream is not None and getattr(stream,"active_stream_session_id",None):
+            resolution=service.resolve(
+                game=game,stream_session_id=str(stream.active_stream_session_id),
+                source_event_id=f"owner_game_state:{pending_id}",
+                run_kind=str(updates.get("playthrough_type") or getattr(stream,"current_playthrough_type",None) or "unknown"),
+            )
+            if resolution.active_run:
+                run_id=resolution.active_run.id;stream.active_game_run_id=run_id
+                stream.current_game=resolution.game_identity.canonical_name
+                if explicit_game:resolved_game=resolution.game_identity.canonical_name
+        if not run_id:
+            print(f"[HEBE][GAME_PENDING] state_update_rejected id={pending_id} reason=no_active_game_run",flush=True)
+            return
+        provenance=str(updates.pop("provenance","") or "")
+        confidence=float(updates.pop("confidence",0.0) or 0.0)
+        evidence=EvidenceRef(
+            source_event_id=f"owner_game_state:{pending_id}",source_record_type="owner_stt",
+            source_record_id=pending_id,observed_at=time.time(),extractor="game_guidance_clarification",
+            extractor_version="v1",literal_span={"updates":sorted(updates)},
+        )
+        result=service.update_state(
+            run_id,updates=updates,provenance=provenance,confidence=confidence,evidence=evidence,
+        )
+        accepted_updates=dict(result["accepted"])
+        if resolved_game:accepted_updates["game"]=resolved_game
+        if not accepted_updates:
             pending_id = state_update.data.get("pending_id")
             print(f"[HEBE][GAME_PENDING] state_update_rejected id={pending_id}", flush=True)
             return
-        self.runtime.state.game_run_state = run
-        pending_id = state_update.data.get("pending_id")
+        run=GameRunState.from_value(result["state"])
+        self.runtime.state.game_run_state=run
+        if stream is not None:self._project_canonical_game_run(stream,run_id)
         print(f"[HEBE][GAME_PENDING] consumed id={pending_id} fields_updated={sorted(accepted_updates)!r}", flush=True)
         print(
             f"[HEBE][GAME_RUN_STATE] updated game={run.game or 'unknown'} "
@@ -4574,25 +4545,27 @@ class HebeEngine:
                 brain.retrieve_context("stream ended", limit_events=20, limit_summaries=5)
             except Exception as exc:
                 print(f"[HEBE][LIVE_SESSION] stream_offline failed: {exc!r}", flush=True)
-            if active_game_run_id and getattr(self,"game_context_v2",False) and getattr(self,"game_run_v2_writes",False) and getattr(self,"game_run_service",None) is not None:
+            if active_game_run_id and getattr(self,"game_run_service",None) is not None:
                 try:self.game_run_service.pause(active_game_run_id,stream_session_id=active_stream_session_id,event_id=str(getattr(event,"event_id","") or f"stream_offline:{active_stream_session_id}"))
                 except Exception as exc:print(f"[HEBE][GAME_RUN_RESOLVE] decision=pause_failed reason={type(exc).__name__}",flush=True)
             self._close_stream_memory_session_safe(stream, reason="stream_offline_event")
             print("[HEBE][STREAM_CONTEXT] stream_offline event handled", flush=True)
 
     def _prepare_live_game_intelligence(self, stream) -> None:
-        service = getattr(self, "game_intelligence", None)
         game = str(getattr(stream, "current_game", None) or getattr(stream, "current_category", None) or "").strip()
         session_id = getattr(stream, "active_stream_session_id", None)
-        if service is None or not game or not session_id:
+        if not game or not session_id or getattr(self,"game_run_service",None) is None:
             return
         try:
-            resolution = None
-            if getattr(self,"game_context_v2",False) and getattr(self,"game_run_v2_writes",False) and getattr(self,"game_run_service",None) is not None:
-                title=str(getattr(stream,"current_stream_title",None) or "")
-                run_kind=str(getattr(stream,"current_playthrough_type",None) or "unknown").strip().lower().replace(" ","_") or "unknown"
-                resolution=self.game_run_service.resolve(game=game,stream_session_id=str(session_id),source_event_id=f"stream_session:{session_id}",run_kind=run_kind,rules={"title":title[:200]})
-                if resolution.active_run:setattr(stream,"active_game_run_id",resolution.active_run.id)
+            title=str(getattr(stream,"current_stream_title",None) or "")
+            run_kind=str(getattr(stream,"current_playthrough_type",None) or "unknown").strip().lower().replace(" ","_") or "unknown"
+            rules={"title":title[:200]}
+            challenge=str(getattr(stream,"current_challenge",None) or "").strip()
+            if challenge:rules["challenge"]=challenge
+            resolution=self.game_run_service.resolve(game=game,stream_session_id=str(session_id),source_event_id=f"stream_session:{session_id}",run_kind=run_kind,rules=rules)
+            if resolution.active_run:
+                setattr(stream,"active_game_run_id",resolution.active_run.id)
+                self._project_canonical_game_run(stream,resolution.active_run.id)
             session_primer.record_schedule_observation(
                 stream_session_id=session_id,
                 canonical_content=game,
@@ -4600,22 +4573,7 @@ class HebeEngine:
                     game, str(getattr(stream, "current_playthrough_type", None) or ""),
                 ),
             )
-            progress = service.progress.start(
-                game,
-                session_id,
-                title=str(getattr(stream, "current_stream_title", None) or ""),
-            )
-            service.diagnostics.progress_state = asdict(progress)
-            service.diagnostics.spoiler_mode = progress.spoiler_policy
-            existing = service.store.get_dossier(game)
-            if existing is not None and service._dossier_sufficient(existing):
-                service.diagnostics.current_game = existing.canonical_title
-                service.diagnostics.dossier_status = "loaded"
-                service._log_dossier(existing, "loaded")
-            elif not (getattr(self,"game_context_v2",False) and getattr(self,"game_research_memory_first",False)):
-                service.prepare_game_async(game_title=game, session_id=session_id)
-            else:
-                print(f"[HEBE][GAME_RESEARCH_SKIP] reason=memory_first_no_typed_gap game={game}",flush=True)
+            print(f"[HEBE][GAME_RESEARCH_SKIP] reason=memory_first_no_typed_gap game={game}",flush=True)
         except Exception as exc:
             print(f"[HEBE][GAME_DOSSIER] game={game} status=failed facts=0 sources=0 error={type(exc).__name__}", flush=True)
 
@@ -5084,6 +5042,7 @@ class HebeEngine:
             f"game={stream.user_today_game_override!r}",
             flush=True,
         )
+        self._sync_game_run_state(stream,provenance="manual_update")
     def _restore_user_today_game_override(self, stream) -> None:
         game = str(getattr(stream, "user_today_game_override", "") or "").strip()
         if not game:
@@ -5100,26 +5059,71 @@ class HebeEngine:
         self._sync_game_run_state(stream, provenance="manual_update")
 
     def _sync_game_run_state(self, stream, *, provenance: str) -> None:
-        current = GameRunState.from_value(getattr(self.runtime.state, "game_run_state", None))
         game = str(getattr(stream, "current_game", None) or getattr(stream, "current_category", None) or "").strip()
-        if not game:
+        service=getattr(self,"game_run_service",None)
+        if not game or service is None:
             return
-        if current.game and CognitiveRouter.normalize(current.game) != CognitiveRouter.normalize(game):
-            current.current_location = ""
-            current.current_character = ""
-            current.last_confirmed_progress = ""
-            current.current_objective = ""
-        current.game = game
-        current.current_location = str(getattr(stream, "current_location", None) or current.current_location or "")
-        current.current_objective = str(getattr(stream, "current_objective", None) or current.current_objective or "")
-        markers = getattr(stream, "recent_progress_markers", None) or []
-        if markers:
-            current.last_confirmed_progress = str(markers[-1] or current.last_confirmed_progress)
-        current.spoiler_policy = str(getattr(stream, "spoiler_policy", None) or current.spoiler_policy)
-        current.provenance = provenance
-        current.confidence = max(current.confidence, 0.75)
-        current.last_updated = time.time()
-        self.runtime.state.game_run_state = current
+        run_id=str(getattr(stream,"active_game_run_id","") or "")
+        run=service.repository.get_run(run_id) if run_id else None
+        identity=service.repository.resolve_identity(game)
+        if run is None or run.game_id!=identity.game_id:
+            session_id=str(getattr(stream,"active_stream_session_id","") or "")
+            if not session_id:
+                self.runtime.state.game_run_state=GameRunState(game=identity.canonical_name,provenance=provenance)
+                return
+            resolution=service.resolve(
+                game=game,stream_session_id=session_id,source_event_id=f"stream_context:{session_id}",
+                run_kind=str(getattr(stream,"current_playthrough_type",None) or "unknown"),
+            )
+            run=resolution.active_run
+            if run is None:return
+            stream.active_game_run_id=run.id
+        self._project_canonical_game_run(stream,run.id)
+
+    def _project_canonical_game_run(self, stream, run_id: str) -> None:
+        service=getattr(self,"game_run_service",None)
+        if service is None:return
+        state=service.state(run_id)
+        self.runtime.state.game_run_state=GameRunState.from_value(state)
+        stream.current_game=state["game"]
+        stream.current_category=state["game"]
+        stream.current_run_location=state["current_location"] or None
+        stream.current_run_objective=state["current_objective"] or None
+        stream.current_run_phase=state["last_confirmed_progress"] or None
+        stream.current_challenge=state["challenge"] or None
+        stream.current_playthrough_type=state["playthrough_type"] or None
+
+    def _persist_canonical_run_state(self, stream, updates: dict[str, object], *, source: str) -> bool:
+        service=getattr(self,"game_run_service",None)
+        run_id=str(getattr(stream,"active_game_run_id","") or "")
+        if service is None or not run_id:return False
+        event_id=f"manual_game_state:{uuid.uuid4().hex}"
+        evidence=EvidenceRef(
+            source_event_id=event_id,source_record_type="owner_command",source_record_id=event_id,
+            observed_at=time.time(),extractor="manual_game_context",extractor_version="v1",
+            literal_span={"fields":sorted(updates)},
+        )
+        result=service.update_state(
+            run_id,updates=updates,provenance="manual_command",confidence=1.0,evidence=evidence,
+        )
+        if result["accepted"]:
+            self._project_canonical_game_run(stream,run_id)
+            stream.run_context_updated_ts=time.time();stream.run_context_source=source
+            return True
+        return False
+
+    def _clear_canonical_run_state(self, stream, fields: tuple[str, ...]) -> None:
+        service=getattr(self,"game_run_service",None);run_id=str(getattr(stream,"active_game_run_id","") or "")
+        if service is None or not run_id:return
+        event_id=f"manual_game_state_clear:{uuid.uuid4().hex}"
+        service.clear_state(
+            run_id,fields=fields,evidence=EvidenceRef(
+                source_event_id=event_id,source_record_type="owner_command",source_record_id=event_id,
+                relation=EvidenceRelation.CORRECTS,observed_at=time.time(),
+                extractor="manual_game_context",extractor_version="v1",literal_span={"fields":list(fields)},
+            ),
+        )
+        self._project_canonical_game_run(stream,run_id)
 
     def _maybe_research_game_after_context_sync(self, stream) -> None:
         category = getattr(stream, "current_category", None) or getattr(stream, "current_game", None)
@@ -5648,6 +5652,9 @@ class HebeEngine:
         executor = getattr(self, "plan_executor", None)
         if executor is not None and hasattr(executor, "begin_shutdown"):
             executor.begin_shutdown(drain_seconds=float(os.getenv("HEBE_COMMAND_SHUTDOWN_DRAIN_SECONDS", "2") or 2))
+        game_research = getattr(self,"game_intelligence",None)
+        if game_research is not None and hasattr(game_research,"close"):
+            game_research.close(wait=False)
         self._stop_event.set()
 
         if hasattr(self.runtime, "twitch_events") and self.runtime.twitch_events:
@@ -7716,87 +7723,38 @@ class HebeEngine:
         return frame
 
     def _game_intelligence_context_for_event(self, event: InputEvent | None, classification) -> dict:
-        service = getattr(self, "game_intelligence", None)
+        resolver = getattr(self, "game_context_resolver", None)
         stream = self._get_stream_state()
         game = str(getattr(stream, "current_game", None) or getattr(stream, "current_category", None) or "").strip() if stream else ""
-        if service is None or not game:
+        if resolver is None or not game:
             return {}
-        session_id = getattr(stream, "active_stream_session_id", None) or "current"
         try:
-            progress = service.progress.start(
-                game,
-                session_id,
-                title=str(getattr(stream, "current_stream_title", None) or ""),
+            run_id=str(getattr(stream,"active_game_run_id","") or "")
+            raw=str(getattr(event,"raw_text","") or "") if event is not None else ""
+            normalized=self._normalize_text(raw)
+            game_question=bool(re.search(r"\b(?:juego|game|mecanica|combate|boss|jefe|vida|hp|damage|como funciona)\b",normalized))
+            context=resolver.build(
+                game=game,purpose="game_fact" if game_question else "stream_reaction",
+                stream_session_id=str(getattr(stream,"active_stream_session_id","") or ""),
+                run_id=run_id,event_id=str(getattr(event,"timestamp","") or "stream_context"),
+                spoiler_ceiling="strict",allow_research=False,
             )
-            service.diagnostics.progress_state = asdict(progress)
-            service.diagnostics.spoiler_mode = progress.spoiler_policy
-            dossier = service.store.get_dossier(game)
-            raw = str(getattr(event, "raw_text", "") or "") if event is not None else ""
-            normalized = self._normalize_text(raw)
-            game_question = bool(
-                re.search(r"\b(?:juego|game|mecanica|mecánica|combate|boss|jefe|vida|hp|daño|damage|como funciona|cómo funciona)\b", normalized)
-            )
-            uncertainty = bool(
-                re.search(r"\b(?:no entiendo|por que|por qué|no baja|no funciona|como funciona|cómo funciona|que pasa|qué pasa)\b", normalized)
-            )
-            quoted = bool((getattr(event, "stt_metadata", {}) or {}).get("quoted_game_dialogue")) if event is not None else False
-            decision = service.trigger_engine.decide(
-                game_id=progress.game_id,
-                text=raw,
-                entity=raw[:120],
-                explicit_direct_question=bool(classification.input_type == "explicit_question" and game_question),
-                owner_uncertainty=uncertainty,
-                unknown_mechanic=bool(uncertainty and game_question),
-                quoted_dialogue=quoted,
-                filler=len(normalized.split()) <= 2 and not game_question,
-                confidence=float(getattr(classification, "confidence", 0.0) or 0.0),
-            )
-            service.diagnostics.last_research_trigger = asdict(decision)
-            if decision.should_research and service.provider is not None:
-                plan = service.plan_search(
-                    game_title=game,
-                    game_id=progress.game_id,
-                    entity=decision.query_scope,
-                    question_type="owner_question" if classification.input_type == "explicit_question" else "unknown_mechanic",
-                    expected_fact_type="general_or_current_mechanic",
-                    owner_uncertainty=raw,
-                    spoiler_limit=progress.spoiler_policy,
-                )
-                job = service.queue_research(
-                    plan,
-                    progress=progress,
-                    scene_id=str((getattr(event, "stt_metadata", {}) or {}).get("event_id") or getattr(event, "timestamp", "") or "scene"),
-                    ttl_seconds=45 if classification.input_type == "explicit_question" else 15,
-                )
-                if event is not None:
-                    event.stt_metadata["game_research_job_id"] = job.job_id
-            if dossier is None:
-                return {
-                    "game_id": progress.game_id,
-                    "dossier_status": service.diagnostics.dossier_status,
-                    "progress": asdict(progress),
-                    "contribution_mode": "contextual_reaction",
-                    "allowed_claims": [],
-                    "forbidden_claims": ["unverified mechanics", "future story information", "walkthrough solutions"],
-                    "lookup_used": False,
-                }
-            safe_claims = list(dossier.confirmed_general_mechanics)[:12]
-            fact_ids = [str(source.get("fact_id") or "") for source in dossier.sources if source.get("fact_id")]
-            service.diagnostics.lookup_used = bool(safe_claims and dossier.sources)
+            claims=list(context.knowledge_claims)[:12]
+            safe_claims=[item.get("object") for item in claims if item.get("object") is not None]
             return {
-                "game_id": dossier.game_id,
-                "dossier_status": "loaded",
-                "progress": asdict(progress),
-                "contribution_mode": "informed_observation" if safe_claims else "contextual_reaction",
-                "allowed_claims": safe_claims,
-                "source_provenance": list(dossier.sources)[:12],
-                "candidate_fact_ids": fact_ids[:12],
-                "forbidden_claims": list(dossier.unsafe_story_topics),
-                "lookup_used": bool(safe_claims and dossier.sources),
-                "instruction": "Use only allowed claims; otherwise make a scene reaction. Never turn this into unsolicited walkthrough advice.",
+                "game_id":context.game_identity.get("game_id"),
+                "dossier_status":"canonical_knowledge" if claims else "missing",
+                "progress":self.game_run_service.state(run_id) if run_id else {},
+                "contribution_mode":"informed_observation" if safe_claims else "contextual_reaction",
+                "allowed_claims":safe_claims,
+                "source_provenance":list(context.provenance_manifest)[:12],
+                "candidate_fact_ids":[str(item.get("id") or "") for item in claims],
+                "forbidden_claims":["unverified mechanics","future story information","walkthrough solutions"],
+                "lookup_used":bool(claims),
+                "instruction":"Use only allowed claims; otherwise make a scene reaction. Never turn this into unsolicited walkthrough advice.",
             }
         except Exception as exc:
-            print(f"[HEBE][GAME_INTELLIGENCE] context_failed={type(exc).__name__}", flush=True)
+            print(f"[HEBE][GAME_INTELLIGENCE] context_failed={type(exc).__name__}",flush=True)
             return {}
 
     def _log_input_classification(self, classification) -> None:
@@ -7824,8 +7782,8 @@ class HebeEngine:
         lookup_used = bool(getattr(diagnostics, "lookup_used", False))
         if not lookup_used and knowledge.game:
             try:
-                dossier = self.game_intelligence.store.get_dossier(knowledge.game)
-                lookup_used = bool(dossier and dossier.sources and dossier.confirmed_general_mechanics)
+                identity=self.game_v2_repository.resolve_identity(knowledge.game)
+                lookup_used=bool(self.game_v2_repository.knowledge(identity.game_id))
             except Exception:
                 pass
         print(
@@ -9894,7 +9852,9 @@ class HebeEngine:
         if schedule_game_match:
             game = self._title_case_game(self._strip_stream_primer_filler(schedule_game_match.group(1)))
             schedule = session_primer.update_schedule_for_weekday(today_weekday, game)
-            primer = session_primer.build_stream_session_primer(game=game, dt=now_dt)
+            primer = session_primer.build_stream_session_primer(
+                game=game,dt=now_dt,canonical_run_state=self._canonical_run_state_for_game(game),
+            )
             session_primer.apply_primer_to_stream(stream, primer)
             self._mark_today_game_override(stream, game)
             return command_result(
@@ -9931,7 +9891,10 @@ class HebeEngine:
 
         note_result = self._handle_game_session_note_command(raw_command, normalized, now_dt)
         if note_result is not None:
-            primer = session_primer.build_stream_session_primer(game=note_result.get("game"), dt=now_dt)
+            primer = session_primer.build_stream_session_primer(
+                game=note_result.get("game"),dt=now_dt,
+                canonical_run_state=self._canonical_run_state_for_game(note_result.get("game")),
+            )
             session_primer.apply_primer_to_stream(stream, primer)
             return command_result(
                 "game_session_note_saved",
@@ -9941,7 +9904,9 @@ class HebeEngine:
             )
 
         if schedule_query:
-            primer = session_primer.build_stream_session_primer(dt=now_dt)
+            primer = session_primer.build_stream_session_primer(
+                dt=now_dt,canonical_run_state=self._canonical_run_state_for_game(None),
+            )
             return command_result(
                 "stream_schedule_lookup",
                 self._format_stream_schedule_reply(primer),
@@ -9953,6 +9918,9 @@ class HebeEngine:
             primer = session_primer.build_stream_session_primer(
                 game=self._title_case_game(explicit_prepare_game) if explicit_prepare_game else None,
                 dt=now_dt,
+                canonical_run_state=self._canonical_run_state_for_game(
+                    self._title_case_game(explicit_prepare_game) if explicit_prepare_game else None
+                ),
             )
             session_primer.apply_primer_to_stream(stream, primer)
             return command_result(
@@ -9966,6 +9934,9 @@ class HebeEngine:
             primer = session_primer.build_stream_session_primer(
                 game=self._title_case_game(explicit_title_game) if explicit_title_game else None,
                 dt=now_dt,
+                canonical_run_state=self._canonical_run_state_for_game(
+                    self._title_case_game(explicit_title_game) if explicit_title_game else None
+                ),
             )
             return command_result(
                 "stream_title_suggestions",
@@ -9984,6 +9955,20 @@ class HebeEngine:
             )
 
         return None
+
+    def _canonical_run_state_for_game(self, game: str | None) -> dict:
+        service=getattr(self,"game_run_service",None)
+        if service is None:return {}
+        stream=self._get_stream_state();target=str(game or getattr(stream,"current_game",None) or getattr(stream,"current_category",None) or "").strip()
+        if not target:return {}
+        identity=service.repository.resolve_identity(target)
+        run_id=str(getattr(stream,"active_game_run_id","") or "") if stream is not None else ""
+        run=service.repository.get_run(run_id) if run_id else None
+        if run is None or run.game_id!=identity.game_id:
+            run=next(iter(service.repository.list_runs(
+                game_id=identity.game_id,owner_id="leo",statuses=("ACTIVE","PAUSED"),
+            )),None)
+        return service.state(run.id) if run is not None else {}
 
     def _strip_stream_primer_filler(self, value: str) -> str:
         text = str(value or "").strip()
@@ -10044,17 +10029,29 @@ class HebeEngine:
                     current_location = text
         if not game or not text:
             return None
-        return session_primer.save_game_session_note(
-            game,
-            stream_date=now_dt.date().isoformat(),
-            start_summary=start_summary,
-            end_summary=end_summary,
-            current_location=current_location,
-            current_objective=current_objective,
-            next_time_plan=next_time_plan,
-            spoiler_policy="no_spoilers",
-            source="manual_command",
+        service=getattr(self,"game_run_service",None)
+        if service is None:return None
+        stream=self._get_stream_state();session_id=str(getattr(stream,"active_stream_session_id","") or f"manual:{now_dt.date().isoformat()}")
+        resolution=service.resolve(
+            game=game,stream_session_id=session_id,source_event_id=f"manual_game_note:{uuid.uuid4().hex}",
+            run_kind=str(getattr(stream,"current_playthrough_type",None) or "unknown") if stream is not None else "unknown",
         )
+        if resolution.active_run is None:return None
+        updates={}
+        if end_summary or start_summary:updates["last_confirmed_progress"]=end_summary or start_summary
+        if next_time_plan or current_objective:updates["current_objective"]=next_time_plan or current_objective
+        event_id=f"manual_game_note:{uuid.uuid4().hex}"
+        result=service.update_state(
+            resolution.active_run.id,updates=updates,provenance="manual_command",confidence=1.0,
+            evidence=EvidenceRef(
+                source_event_id=event_id,source_record_type="owner_command",source_record_id=event_id,
+                observed_at=now_dt.timestamp(),extractor="manual_game_note",extractor_version="v1",
+                literal_span={"text":text},
+            ),
+        )
+        if stream is not None:
+            stream.active_game_run_id=resolution.active_run.id;self._project_canonical_game_run(stream,resolution.active_run.id)
+        return {"game":resolution.game_identity.canonical_name,"game_run_id":resolution.active_run.id,**result["state"]}
 
     def _format_stream_schedule_reply(self, primer: session_primer.StreamSessionPrimer) -> str:
         return (
@@ -10096,6 +10093,7 @@ class HebeEngine:
                 value = raw_command[len(prefix):].strip()
                 if value:
                     stream.current_run_objective = value
+                    self._persist_canonical_run_state(stream,{"current_objective":value},source="manual")
                     set_updated("manual")
                     return f"Objetivo actual guardado: {value}."
 
@@ -10105,6 +10103,7 @@ class HebeEngine:
                 value = raw_command[len(prefix):].strip()
                 if value:
                     stream.current_run_phase = value
+                    self._persist_canonical_run_state(stream,{"last_confirmed_progress":value},source="manual")
                     set_updated("manual")
                     return f"Progreso actual guardado: {value}."
 
@@ -10114,6 +10113,7 @@ class HebeEngine:
                 value = raw_command[len(prefix):].strip()
                 if value:
                     stream.current_run_location = value
+                    self._persist_canonical_run_state(stream,{"current_location":value},source="manual")
                     set_updated("manual")
                     return f"Ubicacion actual guardada: {value}."
 
@@ -10123,6 +10123,8 @@ class HebeEngine:
                 marker = raw_command[len(prefix):].strip()
                 if marker:
                     self._add_completed_marker(stream, marker)
+                    markers=list(getattr(stream,"completed_run_markers",[]) or [])
+                    self._persist_canonical_run_state(stream,{"progress_markers":markers[-20:]},source="manual")
                     set_updated("manual")
                     return f"Marcador completado guardado: {marker}."
 
@@ -10133,10 +10135,12 @@ class HebeEngine:
                 self._add_completed_marker(stream, marker)
                 if self._same_marker(getattr(stream, "current_run_objective", ""), marker):
                     stream.current_run_objective = None
+                    self._clear_canonical_run_state(stream,("current_objective",))
                 set_updated("manual")
                 return f"Dejo de tratar {marker} como objetivo actual."
 
         if normalized in {"limpia contexto de partida"}:
+            self._clear_canonical_run_state(stream,("current_objective","current_location","last_confirmed_progress","progress_markers"))
             stream.current_run_objective = None
             stream.current_run_location = None
             stream.current_run_phase = None
@@ -12945,11 +12949,7 @@ class HebeEngine:
         game = str(getattr(stream, "current_game", None) or getattr(stream, "current_category", None) or "").strip() if stream else ""
         if service is None or not game:
             return True, "no_game_context"
-        progress = service.progress.start(
-            game,
-            getattr(stream, "active_stream_session_id", None) or "current",
-            title=str(getattr(stream, "current_stream_title", None) or ""),
-        )
+        progress = self._canonical_progress_projection(stream)
         return service.advice_guard.allow(text, mode=default_assistance_mode(progress), explicit_owner_request=False)
 
     def _record_final_gameplay_comment(self, comment_id: str, text: str, *, event_type: str | None, payload: dict | None) -> None:
@@ -12961,11 +12961,7 @@ class HebeEngine:
         if service is None or not game:
             return
         try:
-            progress = service.progress.start(
-                game,
-                getattr(stream, "active_stream_session_id", None) or "current",
-                title=str(getattr(stream, "current_stream_title", None) or ""),
-            )
+            progress = self._canonical_progress_projection(stream)
             evidence = [
                 str((payload or {}).get("message_text") or ""),
                 *[str(item) for item in (payload or {}).get("specific_context_anchors") or []],
@@ -12982,16 +12978,27 @@ class HebeEngine:
                 scene_decision = scene_timeline.revalidate((payload or {}).get("scene_guard")) if scene_timeline is not None else SimpleNamespace(valid=True)
                 if scene_decision.valid:
                     scene_fact_ids.append(scene_fact_id)
-            service.record_final_comment(
-                comment_id=comment_id,
-                text=text,
-                game=game,
-                scene_evidence=[item for item in evidence if item],
-                scene_fact_ids=scene_fact_ids,
-                advice_mode=default_assistance_mode(progress),
+            identity=self.game_v2_repository.resolve_identity(game)
+            facts=self.game_v2_repository.knowledge(identity.game_id)
+            service.diagnostics.lookup_used=bool(facts)
+            service.diagnostics.current_comment_fact_ids=[str(item.get("id") or "") for item in facts]
+            service.diagnostics.current_comment_mode="informed_observation" if facts else "contextual_reaction"
+            print(
+                f"[HEBE][COMMENT_PROVENANCE] comment_id={comment_id} mode={service.diagnostics.current_comment_mode} "
+                f"scene_fact_ids={scene_fact_ids} game_fact_ids={service.diagnostics.current_comment_fact_ids} "
+                f"lookup_used={str(bool(facts)).lower()} spoiler_guard=passed advice_mode={default_assistance_mode(progress).value}",
+                flush=True,
             )
         except Exception as exc:
             print(f"[HEBE][COMMENT_PROVENANCE] comment_id={comment_id} mode=unknown lookup_used=false error={type(exc).__name__}", flush=True)
+
+    def _canonical_progress_projection(self, stream) -> SimpleNamespace:
+        run_id=str(getattr(stream,"active_game_run_id","") or "") if stream is not None else ""
+        state=self.game_run_service.state(run_id) if run_id and getattr(self,"game_run_service",None) is not None else {}
+        return SimpleNamespace(
+            playthrough_type=str(state.get("playthrough_type") or getattr(stream,"current_playthrough_type",None) or "unknown"),
+            spoiler_policy=str(state.get("spoiler_policy") or getattr(stream,"spoiler_policy",None) or "strict"),
+        )
 
 
     def _deliver_voice_reply(

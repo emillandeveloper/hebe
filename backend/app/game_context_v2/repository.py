@@ -41,6 +41,19 @@ class GameV2Repository:
                 (item.game_id,item.canonical_name,json.dumps(item.aliases,ensure_ascii=False),json.dumps(item.platform_ids,ensure_ascii=False),item.series,item.schema_version));conn.commit()
         finally:conn.close();self.write_latencies.append((time.perf_counter()-started)*1000)
 
+    def get_identity(self, game_id: str) -> GameIdentity | None:
+        conn=self.connection_factory();conn.row_factory=__import__('sqlite3').Row
+        try:
+            row=conn.execute("SELECT * FROM game_identities WHERE game_id=?",(game_id,)).fetchone()
+            if row is None:return None
+            return GameIdentity(
+                game_id=row["game_id"],canonical_name=row["canonical_name"],
+                aliases=tuple(json.loads(row["aliases_json"] or "[]")),
+                platform_ids=dict(json.loads(row["platform_ids_json"] or "{}")),
+                series=str(row["series"] or ""),schema_version=int(row["schema_version"]),
+            )
+        finally:conn.close()
+
     def create_run(self,run:GameRun)->GameRun:
         started=time.perf_counter();conn=self.connection_factory()
         try:

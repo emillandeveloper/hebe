@@ -241,6 +241,8 @@ class GameIntelligenceStore:
         if connection is not None:
             connection.row_factory = sqlite3.Row
         self._lock = threading.RLock()
+        self._dossiers: dict[str, GameDossier] = {}
+        self._knowledge_gaps: dict[tuple[str, str], KnowledgeGap] = {}
         self.init_schema()
 
     def _connect(self) -> tuple[sqlite3.Connection, bool]:
@@ -252,14 +254,6 @@ class GameIntelligenceStore:
         conn, close = self._connect()
         conn.executescript(
             """
-            CREATE TABLE IF NOT EXISTS game_dossiers (
-                game_id TEXT PRIMARY KEY,
-                canonical_title TEXT NOT NULL,
-                dossier_json TEXT NOT NULL,
-                dossier_version INTEGER NOT NULL,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            );
             CREATE TABLE IF NOT EXISTS game_research_cache (
                 cache_key TEXT PRIMARY KEY,
                 game_id TEXT NOT NULL,
@@ -270,22 +264,7 @@ class GameIntelligenceStore:
                 created_at TEXT NOT NULL,
                 expires_at REAL NOT NULL
             );
-            CREATE TABLE IF NOT EXISTS game_progress_states (
-                game_id TEXT NOT NULL,
-                stream_session_id TEXT NOT NULL,
-                state_json TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                PRIMARY KEY(game_id, stream_session_id)
-            );
-            CREATE TABLE IF NOT EXISTS game_knowledge_gaps (
-                game_id TEXT NOT NULL,
-                term TEXT NOT NULL,
-                gap_json TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                PRIMARY KEY(game_id, term)
-            );
             CREATE INDEX IF NOT EXISTS idx_game_cache_game ON game_research_cache(game_id);
-            CREATE INDEX IF NOT EXISTS idx_game_gap_status ON game_knowledge_gaps(game_id, updated_at);
             """
         )
         conn.commit()
@@ -296,74 +275,18 @@ class GameIntelligenceStore:
         now = dossier.updated_at or _now_iso()
         dossier.created_at = dossier.created_at or now
         dossier.updated_at = now
-        conn, close = self._connect()
-        conn.execute(
-            """
-            INSERT INTO game_dossiers(game_id, canonical_title, dossier_json, dossier_version, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT(game_id) DO UPDATE SET canonical_title=excluded.canonical_title,
-                dossier_json=excluded.dossier_json, dossier_version=excluded.dossier_version,
-                updated_at=excluded.updated_at
-            """,
-            (
-                dossier.game_id,
-                dossier.canonical_title,
-                json.dumps(asdict(dossier), ensure_ascii=False),
-                dossier.dossier_version,
-                dossier.created_at,
-                dossier.updated_at,
-            ),
-        )
-        conn.commit()
-        if close:
-            conn.close()
+        with self._lock:
+            self._dossiers[dossier.game_id] = dossier
         return dossier
 
     def get_dossier(self, game_id_or_title: str) -> GameDossier | None:
         key = _slug(game_id_or_title)
-        conn, close = self._connect()
-        row = conn.execute(
-            """
-            SELECT dossier_json FROM game_dossiers
-            WHERE game_id = ? OR lower(canonical_title) = lower(?)
-               OR EXISTS (
-                   SELECT 1 FROM json_each(json_extract(dossier_json, '$.aliases'))
-                   WHERE lower(json_each.value) = lower(?)
-               )
-            LIMIT 1
-            """,
-            (key, str(game_id_or_title or ""), str(game_id_or_title or "")),
-        ).fetchone()
-        if close:
-            conn.close()
-        return GameDossier(**json.loads(row["dossier_json"])) if row is not None else None
-
-    def save_progress(self, progress: GameProgressState) -> GameProgressState:
-        progress.last_updated_at = progress.last_updated_at or _now_iso()
-        conn, close = self._connect()
-        conn.execute(
-            """
-            INSERT INTO game_progress_states(game_id, stream_session_id, state_json, updated_at)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(game_id, stream_session_id) DO UPDATE SET
-                state_json=excluded.state_json, updated_at=excluded.updated_at
-            """,
-            (progress.game_id, progress.stream_session_id, json.dumps(asdict(progress), ensure_ascii=False), progress.last_updated_at),
-        )
-        conn.commit()
-        if close:
-            conn.close()
-        return progress
-
-    def get_progress(self, game_id: str, session_id: str | int) -> GameProgressState | None:
-        conn, close = self._connect()
-        row = conn.execute(
-            "SELECT state_json FROM game_progress_states WHERE game_id = ? AND stream_session_id = ?",
-            (_slug(game_id), str(session_id or "")),
-        ).fetchone()
-        if close:
-            conn.close()
-        return GameProgressState(**json.loads(row["state_json"])) if row is not None else None
+        target = str(game_id_or_title or "").casefold()
+        with self._lock:
+            return next((item for item in self._dossiers.values() if (
+                item.game_id == key or item.canonical_title.casefold() == target
+                or target in {alias.casefold() for alias in item.aliases}
+            )), None)
 
     def save_cache(
         self,
@@ -412,95 +335,19 @@ class GameIntelligenceStore:
         return [RetrievedGameFact(**item) for item in json.loads(row["facts_json"] or "[]")]
 
     def save_gap(self, gap: KnowledgeGap) -> KnowledgeGap:
-        conn, close = self._connect()
-        conn.execute(
-            """
-            INSERT OR REPLACE INTO game_knowledge_gaps(game_id, term, gap_json, updated_at)
-            VALUES (?, ?, ?, ?)
-            """,
-            (gap.game_id, _norm(gap.term), json.dumps(asdict(gap), ensure_ascii=False), _now_iso()),
-        )
-        conn.commit()
-        if close:
-            conn.close()
+        with self._lock:
+            self._knowledge_gaps[(gap.game_id, _norm(gap.term))] = gap
         return gap
 
     def get_gap(self, game_id: str, term: str) -> KnowledgeGap | None:
-        conn, close = self._connect()
-        row = conn.execute(
-            "SELECT gap_json FROM game_knowledge_gaps WHERE game_id = ? AND term = ?",
-            (_slug(game_id), _norm(term)),
-        ).fetchone()
-        if close:
-            conn.close()
-        return KnowledgeGap(**json.loads(row["gap_json"])) if row is not None else None
+        with self._lock:
+            return self._knowledge_gaps.get((_slug(game_id), _norm(term)))
 
     def unresolved_gaps(self, game_id: str) -> list[KnowledgeGap]:
-        conn, close = self._connect()
-        rows = conn.execute("SELECT gap_json FROM game_knowledge_gaps WHERE game_id = ?", (_slug(game_id),)).fetchall()
-        if close:
-            conn.close()
-        gaps = [KnowledgeGap(**json.loads(row["gap_json"])) for row in rows]
+        key = _slug(game_id)
+        with self._lock:
+            gaps = [gap for (stored_game, _term), gap in self._knowledge_gaps.items() if stored_game == key]
         return [gap for gap in gaps if gap.status in {"open", "researching", "uncertain", "failed"}]
-
-
-class GameProgressTracker:
-    def __init__(self, store: GameIntelligenceStore) -> None:
-        self.store = store
-
-    def start(self, game: str, session_id: str | int, *, title: str = "") -> GameProgressState:
-        game_id = _slug(game)
-        existing = self.store.get_progress(game_id, session_id)
-        if existing:
-            return existing
-        normalized_title = _norm(title)
-        first = bool(re.search(r"\b(?:first playthrough|blind|primera partida|primera vez|sin spoilers|no spoilers)\b", normalized_title))
-        state = GameProgressState(
-            game_id=game_id,
-            stream_session_id=str(session_id or ""),
-            playthrough_type="first_playthrough" if first else "unknown",
-            spoiler_policy="strict" if first else "strict",
-            confidence=0.9 if first else 0.2,
-            last_updated_at=_now_iso(),
-        )
-        return self.store.save_progress(state)
-
-    def apply_owner_progress(
-        self,
-        state: GameProgressState,
-        statement: str,
-        *,
-        explicit_owner_statement: bool,
-        quoted_dialogue: bool = False,
-        chapter: str = "",
-        area: str = "",
-        party_member: str = "",
-        encountered_character: str = "",
-        encountered_boss: str = "",
-        unlocked_mechanic: str = "",
-        confidence: float = 0.9,
-    ) -> GameProgressState:
-        if not explicit_owner_statement or quoted_dialogue:
-            return state
-        raw = str(statement or "").strip()
-        if chapter:
-            state.current_chapter = chapter
-        if area:
-            state.current_area = area
-        for value, collection in (
-            (party_member, state.known_party_members),
-            (encountered_character, state.encountered_characters),
-            (encountered_boss, state.encountered_bosses),
-            (unlocked_mechanic, state.unlocked_mechanics),
-        ):
-            if value and value not in collection:
-                collection.append(value)
-        if raw and raw not in state.recent_progress_markers:
-            state.recent_progress_markers.append(raw[:240])
-            state.recent_progress_markers = state.recent_progress_markers[-12:]
-        state.confidence = max(state.confidence, min(1.0, confidence))
-        state.last_updated_at = _now_iso()
-        return self.store.save_progress(state)
 
 
 class SpoilerFirewall:
@@ -781,7 +628,6 @@ class GameResearchService:
         self.dossier_timeout_seconds = max(self.contextual_timeout_seconds, float(dossier_timeout_seconds))
         self.max_attempts = max(1, int(max_attempts))
         self.retry_base_seconds = max(0.1, float(retry_base_seconds))
-        self.progress = GameProgressTracker(self.store)
         self.spoiler_firewall = SpoilerFirewall()
         self.trigger_engine = ResearchTriggerEngine(self.store)
         self.gaps = KnowledgeGapTracker(self.store)
@@ -799,6 +645,7 @@ class GameResearchService:
         self._executor = ThreadPoolExecutor(max_workers=max(1, max_workers), thread_name_prefix="hebe-game-research")
         self._jobs: dict[str, tuple[GameResearchJob, Future[list[RetrievedGameFact]]]] = {}
         self._job_lock = threading.RLock()
+        self._closed = False
 
     def canonical_game(self, title: str, *, aliases: list[str] | None = None) -> tuple[str, str, list[str]]:
         clean = str(title or "").strip()
@@ -992,6 +839,8 @@ class GameResearchService:
         timeout_seconds: float | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> GameResearchJob:
+        if self._closed:
+            raise RuntimeError("game_research_service_closed")
         with self._job_lock:
             for existing_job, existing_future in self._jobs.values():
                 if (
@@ -1158,6 +1007,19 @@ class GameResearchService:
         job.status = "cancelled"
         print(f"[HEBE][GAME_RESEARCH_JOB] status=cancelled job_id={job.job_id}", flush=True)
         return cancelled
+
+    def close(self, *, wait: bool = False) -> None:
+        """Release the service-owned worker pool; safe to call more than once."""
+        with self._job_lock:
+            if self._closed:
+                return
+            self._closed = True
+            for job, future in self._jobs.values():
+                if not future.done():
+                    future.cancel()
+                    job.status = "cancelled"
+        self._executor.shutdown(wait=wait, cancel_futures=True)
+        print(f"[HEBE][GAME_RESEARCH_WORKERS] status=closed wait={str(wait).lower()}", flush=True)
 
     def record_comment_provenance(
         self,
@@ -1549,7 +1411,6 @@ __all__ = [
     "GameIntelligenceDiagnostics",
     "GameIntelligenceStore",
     "GameProgressState",
-    "GameProgressTracker",
     "GameResearchJob",
     "GameResearchProvider",
     "GameResearchService",

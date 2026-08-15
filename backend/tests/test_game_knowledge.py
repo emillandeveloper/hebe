@@ -215,19 +215,10 @@ class GameKnowledgeTests(unittest.TestCase):
 
         self.assertFalse(engine._should_extract_memory(source="stt_voice", execution=SimpleNamespace(first_result_of_type=lambda kind: object())))
 
-    def test_user_correction_invalidates_wrong_stored_fact(self):
-        session_primer.save_game_session_note(
-            "FINAL FANTASY IX",
-            end_summary="Will parece ser el objetivo de hoy",
-            next_time_plan="buscar a Will",
-        )
-
-        changed = session_primer.invalidate_game_session_term("FINAL FANTASY IX", "Will", source="user_correction")
-        latest = session_primer.latest_game_session("FINAL FANTASY IX")
-
-        self.assertEqual(changed, 1)
-        self.assertNotIn("Will", latest["end_summary"])
-        self.assertNotIn("Will", latest["next_time_plan"])
+    def test_legacy_game_session_mutation_api_is_retired(self):
+        self.assertFalse(hasattr(session_primer, "save_game_session_note"))
+        self.assertFalse(hasattr(session_primer, "invalidate_game_session_term"))
+        self.assertFalse(hasattr(session_primer, "latest_game_session"))
 
     def test_response_synthesizer_handles_game_knowledge_command_result(self):
         model = EchoModel()

@@ -190,29 +190,7 @@ def init_session_primer_schema() -> None:
             UNIQUE(weekday, slot_name)
         );
 
-        CREATE TABLE IF NOT EXISTS game_sessions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            game TEXT NOT NULL,
-            game_key TEXT NOT NULL,
-            stream_date TEXT,
-            title TEXT,
-            started_at TEXT,
-            ended_at TEXT,
-            start_summary TEXT,
-            end_summary TEXT,
-            current_location TEXT,
-            current_objective TEXT,
-            important_events_json TEXT,
-            unresolved_threads_json TEXT,
-            next_time_plan TEXT,
-            spoiler_policy TEXT,
-            source TEXT,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-        );
-
         CREATE INDEX IF NOT EXISTS idx_stream_schedule_weekday ON stream_schedule(weekday, enabled);
-        CREATE INDEX IF NOT EXISTS idx_game_sessions_game_key ON game_sessions(game_key, stream_date, updated_at);
 
         CREATE TABLE IF NOT EXISTS schedule_observations (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -612,136 +590,6 @@ def infer_playthrough_type(game: str) -> str:
     return "Playthrough"
 
 
-def latest_game_session(game: str) -> dict | None:
-    init_session_primer_schema()
-    key = normalize_game_key(game)
-    conn = db_sqlite.get_db_connection()
-    row = conn.execute(
-        """
-        SELECT * FROM game_sessions
-        WHERE game_key = ?
-        ORDER BY COALESCE(stream_date, ended_at, updated_at) DESC, id DESC
-        LIMIT 1
-        """,
-        (key,),
-    ).fetchone()
-    conn.close()
-    item = _row(row)
-    if item:
-        item["important_events"] = _loads(item.pop("important_events_json", ""), [])
-        item["unresolved_threads"] = _loads(item.pop("unresolved_threads_json", ""), [])
-    return item
-
-
-def save_game_session_note(
-    game: str,
-    *,
-    stream_date: str | None = None,
-    start_summary: str = "",
-    end_summary: str = "",
-    current_location: str = "",
-    current_objective: str = "",
-    next_time_plan: str = "",
-    spoiler_policy: str = "no_spoilers",
-    source: str = "manual",
-) -> dict:
-    init_session_primer_schema()
-    now = _now_iso()
-    game = str(game or "").strip()
-    key = normalize_game_key(game)
-    conn = db_sqlite.get_db_connection()
-    cur = conn.execute(
-        """
-        INSERT INTO game_sessions (
-            game, game_key, stream_date, title, started_at, ended_at,
-            start_summary, end_summary, current_location, current_objective,
-            important_events_json, unresolved_threads_json, next_time_plan,
-            spoiler_policy, source, created_at, updated_at
-        )
-        VALUES (?, ?, ?, '', '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            game,
-            key,
-            stream_date or now[:10],
-            now,
-            start_summary,
-            end_summary,
-            current_location,
-            current_objective,
-            _json([]),
-            _json([]),
-            next_time_plan,
-            spoiler_policy,
-            source,
-            now,
-            now,
-        ),
-    )
-    conn.commit()
-    session_id = int(cur.lastrowid)
-    row = conn.execute("SELECT * FROM game_sessions WHERE id = ?", (session_id,)).fetchone()
-    conn.close()
-    item = _row(row) or {}
-    item["important_events"] = _loads(item.pop("important_events_json", ""), [])
-    item["unresolved_threads"] = _loads(item.pop("unresolved_threads_json", ""), [])
-    return item
-
-
-def invalidate_game_session_term(game: str, term: str, *, source: str = "manual_correction") -> int:
-    init_session_primer_schema()
-    key = normalize_game_key(game)
-    needle = normalize_game_key(term)
-    if not key or not needle:
-        return 0
-    conn = db_sqlite.get_db_connection()
-    rows = conn.execute(
-        """
-        SELECT * FROM game_sessions
-        WHERE game_key = ?
-        """,
-        (key,),
-    ).fetchall()
-    changed = 0
-    now = _now_iso()
-    text_fields = ("start_summary", "end_summary", "current_location", "current_objective", "next_time_plan")
-    for row in rows:
-        updates: dict[str, str] = {}
-        for field in text_fields:
-            value = str(row[field] or "")
-            if needle in normalize_game_key(value):
-                updates[field] = _remove_term_phrase(value, term)
-        important = _loads(row["important_events_json"], [])
-        unresolved = _loads(row["unresolved_threads_json"], [])
-        new_important = [item for item in important if needle not in normalize_game_key(item)]
-        new_unresolved = [item for item in unresolved if needle not in normalize_game_key(item)]
-        if len(new_important) != len(important):
-            updates["important_events_json"] = _json(new_important)
-        if len(new_unresolved) != len(unresolved):
-            updates["unresolved_threads_json"] = _json(new_unresolved)
-        if not updates:
-            continue
-        assignments = ", ".join(f"{field} = ?" for field in updates) + ", source = ?, updated_at = ?"
-        conn.execute(
-            f"UPDATE game_sessions SET {assignments} WHERE id = ?",
-            (*updates.values(), source, now, row["id"]),
-        )
-        changed += 1
-    conn.commit()
-    conn.close()
-    if changed:
-        print(
-            f"[HEBE][MEMORY_EXTRACT] invalidated game={game!r} term={term!r} rows={changed}",
-            flush=True,
-        )
-    return changed
-
-
-def _remove_term_phrase(text: str, term: str) -> str:
-    cleaned = re.sub(rf"\b{re.escape(str(term or '').strip())}\b", "", str(text or ""), flags=re.IGNORECASE)
-    cleaned = re.sub(r"\s{2,}", " ", cleaned)
-    cleaned = re.sub(r"\s+([,.;:])", r"\1", cleaned)
-    return cleaned.strip(" ,.;:")
 
 
 def build_stream_session_primer(
@@ -750,6 +598,7 @@ def build_stream_session_primer(
     dt: datetime | None = None,
     timezone_name: str = DEFAULT_TIMEZONE,
     twitch_context: dict | None = None,
+    canonical_run_state: dict | None = None,
 ) -> StreamSessionPrimer:
     init_session_primer_schema()
     dt = dt or local_now(timezone_name)
@@ -760,7 +609,17 @@ def build_stream_session_primer(
         scheduled_game = "Unknown game"
     playthrough_type = str(schedule.get("playthrough_type") or infer_playthrough_type(scheduled_game))
     category = str((twitch_context or {}).get("category") or schedule.get("category") or scheduled_game)
-    last = latest_game_session(scheduled_game)
+    state = dict(canonical_run_state or {})
+    last = ({
+        "end_summary": state.get("last_confirmed_progress") or "",
+        "start_summary": "",
+        "current_location": state.get("current_location") or "",
+        "current_objective": state.get("current_objective") or "",
+        "next_time_plan": state.get("current_objective") or "",
+        "spoiler_policy": state.get("spoiler_policy") or "no_spoilers",
+        "source": "canonical_game_run",
+        "game_run_id": state.get("run_id") or "",
+    } if state.get("run_id") else None)
     missing: list[str] = []
     if not schedule:
         missing.append("schedule")

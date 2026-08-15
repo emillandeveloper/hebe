@@ -413,7 +413,6 @@ from app.stream.game_intelligence import (  # noqa: E402
     GameIntelligenceDiagnostics,
     GameIntelligenceStore,
     GameProgressState,
-    GameProgressTracker,
     GameResearchJob,
     GameResearchService,
     GameSearchPlan,

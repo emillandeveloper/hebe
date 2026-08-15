@@ -328,11 +328,11 @@ class GameGuidanceRoutingTests(unittest.TestCase):
         engine._apply_game_run_state_execution(result)
 
         run = engine.runtime.state.game_run_state
-        self.assertEqual(run.game, "Final Fantasy VII")
+        self.assertEqual(run.game, "")
         self.assertEqual(run.current_character, "")
         self.assertEqual(run.party_members, [])
 
-    def test_state_update_with_owner_provenance_and_confidence_mutates_game_fields(self):
+    def test_state_update_without_canonical_service_fails_closed(self):
         from tests.test_voice_command_pipeline import make_engine
 
         engine = make_engine(live=False)
@@ -349,11 +349,9 @@ class GameGuidanceRoutingTests(unittest.TestCase):
         engine._apply_game_run_state_execution(result)
 
         run = engine.runtime.state.game_run_state
-        self.assertEqual(run.game, "Final Fantasy VII")
-        self.assertEqual(run.current_character, "Cloud")
-        self.assertEqual(run.party_members, ["Cloud"])
-        self.assertEqual(run.provenance, "leo_clarification")
-        self.assertEqual(run.confidence, 0.95)
+        self.assertEqual(run.game, "")
+        self.assertEqual(run.current_character, "")
+        self.assertEqual(run.party_members, [])
 
 
 if __name__ == "__main__":

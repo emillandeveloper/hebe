@@ -27,7 +27,14 @@ from app.services.direct_stt_command import parse_direct_stt_command
 from app.stream.action_planner import StreamActionPlanner
 from app.stream.state import StreamSessionState
 from app.continuity import ConversationContinuityService, ConversationRepository, OpenThreadRepository
-from app.replay.migrations import MigrationRunner, conversation_continuity_migrations
+from app.replay.migrations import (
+    MigrationRunner, belief_v2_migrations, conversation_continuity_migrations,
+    game_context_v2_migrations,
+)
+from app.epistemics.repository import BeliefRepository
+from app.epistemics.service import BeliefLifecycleService
+from app.game_context_v2.repository import GameV2Repository
+from app.game_context_v2.service import GameRunService
 
 
 class FakeTwitch:
@@ -243,6 +250,20 @@ def wire_canonical_app_pipeline(engine):
     engine.deliberation_service = DeliberationService(None, None)
     engine.deliberation_service.local_app_planner = engine._get_local_app_planner()
     engine.plan_executor = PlanExecutor(Mock(), engine.action_runtime)
+    return engine
+
+
+def wire_canonical_game_pipeline(engine):
+    tmp=tempfile.mkdtemp(prefix="hebe-game-test-")
+    db=Path(tmp)/"game.sqlite3"
+    connect=lambda:sqlite3.connect(db)
+    runner=MigrationRunner(connect);runner.migrate(belief_v2_migrations());runner.migrate(game_context_v2_migrations())
+    repository=GameV2Repository(connect)
+    lifecycle=BeliefLifecycleService(BeliefRepository(connect),now_fn=time.time)
+    engine._game_test_tmp=tmp
+    engine.game_v2_repository=repository
+    engine.game_run_service=GameRunService(repository,lifecycle,now_fn=time.time)
+    engine.runtime.state.stream.active_stream_session_id="game-test-session"
     return engine
 
 
@@ -2581,8 +2602,14 @@ class VoiceCommandPipelineTests(unittest.TestCase):
         self.assertIn("[HEBE][GAME_PENDING_COMPAT] compatible=true", "\n".join(logs))
 
     def test_game_run_state_write_guard_rejects_stt_junk_and_keeps_previous_state(self):
-        engine = make_engine(["nuria"])
-        engine.runtime.state.game_run_state = GameRunState(game="Persona 5 Royal", current_location="Palacio de Kamoshida")
+        engine = wire_canonical_game_pipeline(make_engine(["nuria"]))
+        engine._apply_game_run_state_execution(StepExecutionResult(
+            step_type="state_update",success=True,data={
+                "kind":"game_run_state","pending_id":"pending-game-seed",
+                "updates":{"game":"Persona 5 Royal","current_location":"Palacio de Kamoshida",
+                           "provenance":"leo_clarification","confidence":0.92},
+            },
+        ))
         state_update = StepExecutionResult(
             step_type="state_update",
             success=True,
@@ -2610,7 +2637,7 @@ class VoiceCommandPipelineTests(unittest.TestCase):
         self.assertIn("[HEBE][GAME_PENDING] state_update_rejected", joined)
 
     def test_game_run_state_write_guard_accepts_known_persona_location(self):
-        engine = make_engine(["nuria"])
+        engine = wire_canonical_game_pipeline(make_engine(["nuria"]))
         state_update = StepExecutionResult(
             step_type="state_update",
             success=True,

@@ -9,6 +9,8 @@ class CognitiveFeatureFlags:
     cognitive_v2_enabled: bool = False
     cognitive_replay_enabled: bool = False
     conversation_continuity_v2: bool = False
+    # Historical fixture metadata. Game is canonical unconditionally; these
+    # values no longer gate production or replay behavior.
     game_context_v2: bool = False
     game_run_v2_reads: bool = False
     game_run_v2_writes: bool = False

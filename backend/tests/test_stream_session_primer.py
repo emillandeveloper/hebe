@@ -49,11 +49,10 @@ class StreamSessionPrimerTests(unittest.TestCase):
         self.assertTrue(primer.title_suggestions)
 
     def test_persona_title_uses_leo_standard_format(self):
-        session = session_primer.save_game_session_note(
-            "Persona 5 Royal",
-            end_summary="terminamos después del museo",
-            next_time_plan="ver qué viene después del museo",
-        )
+        session = {
+            "end_summary": "terminamos después del museo",
+            "next_time_plan": "ver qué viene después del museo",
+        }
 
         titles = session_primer.generate_title_suggestions(
             "Persona 5 Royal",
@@ -66,15 +65,15 @@ class StreamSessionPrimerTests(unittest.TestCase):
         self.assertIn("Museum", titles[0])
 
     def test_last_game_session_is_loaded_when_available(self):
-        session_primer.save_game_session_note(
-            "Persona 5 Royal",
-            end_summary="terminamos después del museo",
-            next_time_plan="ver qué viene después del museo",
-        )
-
         primer = session_primer.build_stream_session_primer(
             game="Persona 5 Royal",
             dt=datetime(2026, 6, 9, 18, 0, tzinfo=ZoneInfo("Europe/Madrid")),
+            canonical_run_state={
+                "run_id": "game_run_persona",
+                "last_confirmed_progress": "terminamos después del museo",
+                "current_objective": "ver qué viene después del museo",
+                "spoiler_policy": "no_spoilers",
+            },
         )
 
         self.assertNotIn("previous_session", primer.missing_info)

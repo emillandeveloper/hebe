@@ -149,6 +149,7 @@ class StreamSessionState:
     shoutout_cooldowns: dict[str, float] = field(default_factory=dict)
     last_stream_context_error: Optional[str] = None
     active_stream_session_id: Optional[int] = None
+    active_game_run_id: Optional[str] = None
 
     normal_start_time: str = "19:00"
     pre_stream_reminder_1: str = "18:30"
