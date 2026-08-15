@@ -145,24 +145,6 @@ def init_db() -> None:
         """
     )
 
-    # Memoria estructurada v1
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS memory_facts (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            kind TEXT NOT NULL,                -- appointment | preference | person | task | fact
-            subject TEXT,
-            payload_json TEXT,
-            source_text TEXT,
-            confidence REAL NOT NULL DEFAULT 1.0,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            last_used_at TEXT,
-            active INTEGER NOT NULL DEFAULT 1
-        )
-        """
-    )
-
     # Recordatorios / scheduler v1
     cur.execute(
         """
@@ -177,8 +159,7 @@ def init_db() -> None:
             source_memory_id INTEGER,
             payload_json TEXT,
             created_at TEXT NOT NULL,
-            fired_at TEXT,
-            FOREIGN KEY(source_memory_id) REFERENCES memory_facts(id)
+            fired_at TEXT
         )
         """
     )
@@ -230,12 +211,6 @@ def init_db() -> None:
 
     # Índices útiles
     cur.execute(
-        "CREATE INDEX IF NOT EXISTS idx_memory_facts_kind_active ON memory_facts(kind, active)"
-    )
-    cur.execute(
-        "CREATE INDEX IF NOT EXISTS idx_memory_facts_subject ON memory_facts(subject)"
-    )
-    cur.execute(
         "CREATE INDEX IF NOT EXISTS idx_reminders_status_due_at ON reminders(status, due_at)"
     )
 
@@ -274,7 +249,6 @@ def cleanup_stt_prompt_injection_rows() -> dict[str, int]:
     targets = [
         ("chat_log", "text", "DELETE FROM chat_log WHERE role = 'user' AND (" + predicates.format(column="text") + ")"),
         ("memories", "text", "DELETE FROM memories WHERE " + predicates.format(column="text")),
-        ("memory_facts", "source_text", "UPDATE memory_facts SET active = 0 WHERE " + predicates.format(column="source_text")),
         ("memory_chunks", "text", "UPDATE memory_chunks SET active = 0 WHERE " + predicates.format(column="text")),
     ]
     for table, _column, sql in targets:
@@ -542,236 +516,6 @@ def get_active_memories(limit: int = 5):
     return rows
 
 
-# =========================
-# Structured memory v1
-# =========================
-
-def insert_memory_fact(
-    kind: str,
-    subject: Optional[str] = None,
-    payload: Optional[dict] = None,
-    source_text: Optional[str] = None,
-    confidence: float = 1.0,
-    active: bool = True,
-) -> int:
-    now = utc_now_iso()
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        INSERT INTO memory_facts (
-            kind, subject, payload_json, source_text, confidence,
-            created_at, updated_at, active
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            kind,
-            subject,
-            dumps_json(payload),
-            source_text,
-            float(confidence),
-            now,
-            now,
-            1 if active else 0,
-        ),
-    )
-    memory_id = cur.lastrowid
-    conn.commit()
-    conn.close()
-    return memory_id
-
-
-def get_memory_fact(memory_id: int) -> Optional[dict]:
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT *
-        FROM memory_facts
-        WHERE id = ?
-        """,
-        (memory_id,),
-    )
-    row = cur.fetchone()
-    conn.close()
-
-    data = row_to_dict(row)
-    if data and data.get("payload_json"):
-        data["payload"] = loads_json(data["payload_json"])
-    return data
-
-
-def search_memory_facts(
-    query_text: Optional[str] = None,
-    kind: Optional[str] = None,
-    active_only: bool = True,
-    limit: int = 10,
-) -> list[dict]:
-    conn = get_db_connection()
-    cur = conn.cursor()
-
-    where = []
-    params: list[Any] = []
-
-    if active_only:
-        where.append("active = 1")
-
-    if kind:
-        where.append("kind = ?")
-        params.append(kind)
-
-    if query_text:
-        where.append("(subject LIKE ? OR source_text LIKE ? OR payload_json LIKE ?)")
-        like = f"%{query_text}%"
-        params.extend([like, like, like])
-
-    sql = """
-        SELECT *
-        FROM memory_facts
-    """
-    if where:
-        sql += " WHERE " + " AND ".join(where)
-
-    sql += " ORDER BY updated_at DESC, created_at DESC LIMIT ?"
-    params.append(limit)
-
-    cur.execute(sql, params)
-    rows = cur.fetchall()
-    conn.close()
-
-    items = rows_to_dicts(rows)
-    for item in items:
-        item["payload"] = loads_json(item.get("payload_json"))
-    return items
-
-
-def find_memory_fact(
-    *,
-    kind: str,
-    subject: Optional[str],
-    active_only: bool = True,
-) -> Optional[dict]:
-    conn = get_db_connection()
-    cur = conn.cursor()
-    where = ["kind = ?"]
-    params: list[Any] = [kind]
-
-    if subject is None:
-        where.append("subject IS NULL")
-    else:
-        where.append("subject = ?")
-        params.append(subject)
-
-    if active_only:
-        where.append("active = 1")
-
-    cur.execute(
-        "SELECT * FROM memory_facts WHERE "
-        + " AND ".join(where)
-        + " ORDER BY updated_at DESC LIMIT 1",
-        params,
-    )
-    row = cur.fetchone()
-    conn.close()
-
-    item = row_to_dict(row)
-    if item:
-        item["payload"] = loads_json(item.get("payload_json"))
-    return item
-
-
-def upsert_memory_fact(
-    kind: str,
-    subject: Optional[str] = None,
-    payload: Optional[dict] = None,
-    source_text: Optional[str] = None,
-    confidence: float = 1.0,
-    active: bool = True,
-) -> tuple[int, bool]:
-    """
-    Insert or update the active fact for the same kind + subject.
-
-    Returns (memory_id, created). This intentionally replaces the active fact's
-    readable text/payload so corrections from Leo win over older wording.
-    """
-    existing = find_memory_fact(kind=kind, subject=subject, active_only=True)
-    now = utc_now_iso()
-
-    if existing:
-        memory_id = int(existing["id"])
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute(
-            """
-            UPDATE memory_facts
-            SET payload_json = ?,
-                source_text = ?,
-                confidence = ?,
-                updated_at = ?,
-                active = ?
-            WHERE id = ?
-            """,
-            (
-                dumps_json(payload),
-                source_text,
-                float(confidence),
-                now,
-                1 if active else 0,
-                memory_id,
-            ),
-        )
-        conn.commit()
-        conn.close()
-        return memory_id, False
-
-    return (
-        insert_memory_fact(
-            kind=kind,
-            subject=subject,
-            payload=payload,
-            source_text=source_text,
-            confidence=confidence,
-            active=active,
-        ),
-        True,
-    )
-
-
-def count_memory_facts(active_only: bool = True) -> int:
-    conn = get_db_connection()
-    cur = conn.cursor()
-    sql = "SELECT COUNT(*) AS c FROM memory_facts"
-    params: list[Any] = []
-    if active_only:
-        sql += " WHERE active = ?"
-        params.append(1)
-    cur.execute(sql, params)
-    n = cur.fetchone()["c"]
-    conn.close()
-    return int(n)
-
-
-def get_recent_memory_facts(limit: int = 10, active_only: bool = True) -> list[dict]:
-    conn = get_db_connection()
-    cur = conn.cursor()
-    sql = "SELECT * FROM memory_facts"
-    params: list[Any] = []
-    if active_only:
-        sql += " WHERE active = ?"
-        params.append(1)
-    sql += " ORDER BY updated_at DESC, created_at DESC LIMIT ?"
-    params.append(limit)
-    cur.execute(sql, params)
-    rows = cur.fetchall()
-    conn.close()
-
-    items = rows_to_dicts(rows)
-    for item in items:
-        item["payload"] = loads_json(item.get("payload_json"))
-    return items
-
-
 def get_recent_chat_log(source: Optional[str] = None, limit: int = 10) -> list[dict]:
     conn = get_db_connection()
     cur = conn.cursor()
@@ -786,38 +530,6 @@ def get_recent_chat_log(source: Optional[str] = None, limit: int = 10) -> list[d
     rows = cur.fetchall()
     conn.close()
     return rows_to_dicts(rows)
-
-
-def touch_memory_fact(memory_id: int) -> None:
-    now = utc_now_iso()
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        UPDATE memory_facts
-        SET last_used_at = ?, updated_at = ?
-        WHERE id = ?
-        """,
-        (now, now, memory_id),
-    )
-    conn.commit()
-    conn.close()
-
-
-def deactivate_memory_fact(memory_id: int) -> None:
-    now = utc_now_iso()
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        UPDATE memory_facts
-        SET active = 0, updated_at = ?
-        WHERE id = ?
-        """,
-        (now, memory_id),
-    )
-    conn.commit()
-    conn.close()
 
 
 # =========================

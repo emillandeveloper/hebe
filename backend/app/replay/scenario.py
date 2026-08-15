@@ -17,7 +17,7 @@ EVENT_TYPES = {
     "maintenance", "configure_external_outcome", "game_research",
     "open_conversation",
     "propose_belief", "seed_known_belief", "correct_belief", "retrieve_beliefs",
-    "add_legacy_memory_fact", "project_legacy_memory_fact", "add_vector_context",
+    "add_vector_context",
     "resolve_game_run", "pause_game_run", "finish_game_run", "record_run_fact",
     "infer_run_fact", "correct_run_fact", "add_game_knowledge", "build_game_context",
     "resolve_person", "record_social_episode", "propose_social_hypothesis",

@@ -1,5 +1,9 @@
 # Phase 0 legacy retirement checkpoint — 2026-08-15
 
+> Historical checkpoint. Its Memory compatibility findings were superseded by
+> `phase1b_memory_canonicalization_checkpoint_2026-08-15.md`; do not treat its
+> adapter/runtime status as current architecture.
+
 This checkpoint is the boundary before Phase 1. It records what was removed,
 what remains, the evidence for each decision, and the migrations that must be
 approved before persistent compatibility state can be retired. No production

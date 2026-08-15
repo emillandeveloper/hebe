@@ -4,7 +4,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from app.services import db_sqlite
+from app.cognitive.memory_store import MemoryStore
 
 
 ALLOWED_KINDS = {
@@ -21,7 +21,7 @@ ALLOWED_STORE_AS = {"fact", "chunk", "both"}
 
 @dataclass(slots=True)
 class StoredMemoryResult:
-    fact_ids: list[int]
+    fact_ids: list[str]
     chunk_ids: list[int]
     skipped: int = 0
 
@@ -34,8 +34,9 @@ class MemoryExtractor:
     turning casual chat into permanent memory.
     """
 
-    def __init__(self, intent_model: Any | None = None):
+    def __init__(self, intent_model: Any | None = None, memory_store: MemoryStore | None = None):
         self.intent_model = intent_model
+        self.memory_store = memory_store
 
     def extract(
         self,
@@ -66,7 +67,7 @@ class MemoryExtractor:
         extracted = self.extract(user_text=user_text, assistant_reply=assistant_reply)
         memories = extracted.get("memories") or []
 
-        fact_ids: list[int] = []
+        fact_ids: list[str] = []
         chunk_ids: list[int] = []
         skipped = 0
 
@@ -93,20 +94,29 @@ class MemoryExtractor:
             }
 
             if store_as in {"fact", "both"}:
-                fact_id, created = db_sqlite.upsert_memory_fact(
-                    kind=kind,
-                    subject=subject,
-                    payload=payload,
-                    source_text=text,
-                    confidence=item["confidence"],
-                    active=True,
-                )
-                fact_ids.append(fact_id)
-                print(
-                    f"[HEBE][MEMORY_EXTRACT] {'inserted' if created else 'updated'} "
-                    f"fact id={fact_id} kind={kind!r} subject={subject!r}",
-                    flush=True,
-                )
+                try:
+                    store = self.memory_store or MemoryStore()
+                    fact, created = store.upsert_fact(
+                        kind=kind,
+                        subject=subject,
+                        payload=payload,
+                        source_text=text,
+                        confidence=item["confidence"],
+                    )
+                    fact_ids.append(fact.id)
+                    print(
+                        f"[HEBE][MEMORY_EXTRACT] {'inserted' if created else 'updated'} "
+                        f"belief id={fact.id} kind={kind!r} subject={subject!r}",
+                        flush=True,
+                    )
+                except ValueError as exc:
+                    skipped += 1
+                    print(
+                        f"[HEBE][MEMORY_EXTRACT] skipped canonical write "
+                        f"kind={kind!r} reason={exc}",
+                        flush=True,
+                    )
+                    continue
 
             if store_as in {"chunk", "both"}:
                 try:

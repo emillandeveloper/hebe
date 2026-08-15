@@ -3,7 +3,7 @@ from __future__ import annotations
 
 OWNERSHIP = [
  ("pending/clarifications","ConversationContinuityService","none"),("conversation state","ConversationContinuityService","none"),("OpenThreads","OpenThreadRepository","none"),
- ("raw evidence/timeline","live_session_timeline","none"),("scene projections","SceneConsequenceReducer","wide runtime scene snapshots"),("memory_facts","BeliefRepository","LegacyMemoryFactAdapter"),("memory_chunks","BeliefMemoryRetrieval","retrieval cache only"),
+ ("raw evidence/timeline","live_session_timeline","none"),("scene projections","SceneConsequenceReducer","wide runtime scene snapshots"),("structured memory","BeliefRepository","memory_facts retained only as migration backup"),("memory_chunks","BeliefMemoryRetrieval","retrieval cache only"),
  ("legacy MemoryExtractor","BeliefLifecycleService","MemoryExtractor deprecated writer"),("rolling summaries","live_session_rolling_summaries","archive/projection"),("stream summaries","stream_summaries","archive/projection"),("schedule systems","ScheduleLearningService","legacy stream_schedule compatibility"),
  ("game knowledge/research/guidance","GameContextResolver","GameDossier compatibility cache"),("GameProgressState","GameRunService","compatibility projection"),("GameRunState","GameRunService","runtime projection"),("GameDossier","GameKnowledgeV2Service","compatibility cache"),
  ("chatter profiles/facts/summaries","SocialWorldService","legacy social compatibility archive"),("SocialWorld","SocialWorldService","none"),("SharedCulture","SocialWorldService","none"),("persona identity/voice","StableHebeCore","none"),

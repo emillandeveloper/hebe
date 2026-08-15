@@ -33,7 +33,6 @@ class CognitiveStateSnapshot:
     beliefs: dict[str, Any] = field(default_factory=dict)
     belief_evidence: list[dict[str, Any]] = field(default_factory=list)
     retrieval: dict[str, Any] = field(default_factory=dict)
-    memory_compatibility: dict[str, Any] = field(default_factory=dict)
     game_state: dict[str, Any] = field(default_factory=dict)
     social_state: dict[str, Any] = field(default_factory=dict)
     learning: dict[str, Any] = field(default_factory=dict)
@@ -61,7 +60,7 @@ class CognitiveStateProbe:
     """Read-only state projection used by assertions and reports."""
 
     SAFE_COUNT_TABLES = (
-        "chat_log", "memory_facts", "memory_chunks", "stream_sessions",
+        "chat_log", "memory_chunks", "stream_sessions",
         "stream_chat_messages", "stream_events", "live_session_timeline",
         "promotion_events", "viewer_promotion_profiles", "schema_migrations",
         "conversations", "open_threads", "beliefs", "belief_evidence", "scene_assertions",
@@ -207,7 +206,7 @@ class CognitiveStateProbe:
                 "last_resolution": _plain(getattr(engine, "_last_continuity_resolution", {}) or {}),
             },
             open_threads=rows["open_threads"],
-            memory={"facts_count": rows["counts"].get("memory_facts", 0), "chunks_count": rows["counts"].get("memory_chunks", 0)},
+            memory={"facts_count": len(rows["beliefs"]), "chunks_count": rows["counts"].get("memory_chunks", 0)},
             beliefs={
                 "active": [item for item in rows["beliefs"] if item["epistemic_status"] in {"KNOWN","INFERRED","SUSPECTED"} and not item["superseded_by"]],
                 "historical": [item for item in rows["beliefs"] if item["epistemic_status"] == "HISTORICAL"],
@@ -224,7 +223,6 @@ class CognitiveStateProbe:
                 "write_performance": _plain(getattr(getattr(engine,"belief_lifecycle",None),"performance",lambda:{})()),
                 "repository_performance": _plain(getattr(getattr(engine,"belief_repository",None),"performance",lambda:{})()),
             },
-            memory_compatibility=_plain(getattr(getattr(engine,"legacy_memory_fact_adapter",None),"telemetry",{}) or {}),
             game_state=game_state,
             social_state=social_state,
             learning={"consolidation_runs":consolidation_runs,"deltas":consolidation_deltas,"rejected_deltas":[x for x in consolidation_deltas if x["validator_result"]=="REJECTED"],"watermarks":[{"session_id":x["session_id"],"start":x["input_start_event"],"end":x["input_end_event"],"status":x["status"]} for x in consolidation_runs],"last_result":_plain(getattr(getattr(engine,"session_consolidator",None),"last_result",{})),"stable_core_version":getattr(getattr(engine,"stable_hebe_core",None),"version",""),"performance":{"repository":_plain(getattr(learning_repo,"performance",lambda:{})()),"consolidation":_plain(getattr(getattr(engine,"session_consolidator",None),"performance",lambda:{})()),"temporal":_plain(getattr(getattr(engine,"temporal_relevance_service",None),"performance",lambda:{})()),"action_history":_plain(getattr(getattr(engine,"historical_action_ledger",None),"performance",lambda:{})()),"owner_preferences":_plain(getattr(getattr(engine,"owner_procedural_preferences",None),"performance",lambda:{})()),"hebe_self":_plain(getattr(getattr(engine,"hebe_self_model",None),"performance",lambda:{})()),"context":_plain(getattr(getattr(engine,"continuity_context_builder",None),"performance",lambda:{})())}},

@@ -288,8 +288,6 @@ class CognitiveReplayRunner:
             "HEBE_AUTO_ENABLE_STREAM_WHEN_LIVE": "true",
             "HEBE_STREAM_OUTPUT_MODE": "twitch_chat_only",
             "HEBE_COGNITIVE_REPLAY_ENABLED": "true",
-            "HEBE_BELIEF_V2_READS": str(bool(self._active_scenario and self._active_scenario.feature_flags.belief_v2_reads)).lower(),
-            "HEBE_BELIEF_V2_WRITES": str(bool(self._active_scenario and self._active_scenario.feature_flags.belief_v2_writes)).lower(),
             "HEBE_GAME_CONTEXT_V2": str(bool(self._active_scenario and self._active_scenario.feature_flags.game_context_v2)).lower(),
             "HEBE_GAME_RUN_V2_READS": str(bool(self._active_scenario and self._active_scenario.feature_flags.game_run_v2_reads)).lower(),
             "HEBE_GAME_RUN_V2_WRITES": str(bool(self._active_scenario and self._active_scenario.feature_flags.game_run_v2_writes)).lower(),
@@ -605,10 +603,6 @@ class CognitiveReplayRunner:
             result=self.engine.belief_lifecycle.correct(old_id,object_value=payload.get("object"),evidence=evidence,authority_class=str(payload.get("authority_class") or "owner"));self._belief_aliases[event.event_id]=result.id;return
         if event_type == "retrieve_beliefs":
             self.engine.memory_retrieval.retrieve(RetrievalRequest(context_kind=str(payload.get("context_kind") or "owner_local"),purpose=str(payload.get("purpose") or "current_context"),subject=str(payload.get("subject_ref") or ""),allowed_scopes=tuple(payload.get("allowed_scopes") or ()),allowed_sensitivity=tuple(payload.get("allowed_sensitivity") or ("normal",)),temporal_intent=str(payload.get("temporal_intent") or "current"),max_results=int(payload.get("max_results") or 10)));return
-        if event_type == "add_legacy_memory_fact":
-            conn=self.workspace.connection();now=self.clock.iso();cur=conn.execute("INSERT INTO memory_facts(kind,subject,payload_json,source_text,confidence,created_at,updated_at,active) VALUES(?,?,?,?,?,?,?,1)",(str(payload.get("kind") or "fact"),str(payload.get("subject_ref") or "legacy"),json.dumps(payload.get("payload") or {},ensure_ascii=False),str(payload.get("source_text") or ""),float(payload.get("confidence") or .5),now,now));conn.commit();conn.close();self._belief_aliases[event.event_id]=str(cur.lastrowid);return
-        if event_type == "project_legacy_memory_fact":
-            fact_ref=str(payload.get("fact_ref") or "");result=self.engine.legacy_memory_fact_adapter.shadow_project(int(self._belief_aliases.get(fact_ref,fact_ref)));self._belief_aliases[event.event_id]=getattr(result,"id","");return
         if event_type == "add_vector_context":
             conn=self.workspace.connection();conn.execute("INSERT INTO memory_chunks(text,kind,subject,source_session,embedding,embedding_model,embedding_dim,importance,created_at,tags,active) VALUES(?,?,?,?,?,?,?,?,?,?,1)",(str(payload.get("text") or "vector context"),"misc",str(payload.get("subject_ref") or "subject"),"replay",b'0',"replay",1,.5,self.clock.iso(),"{}"));conn.commit();conn.close();return
         if event_type == "ambient_stt":

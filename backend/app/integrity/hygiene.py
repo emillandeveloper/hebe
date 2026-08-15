@@ -30,16 +30,6 @@ class HygienePlanner:
         records=[]
         with closing(self._connect(readonly=True)) as conn:
             tables={str(r[0]) for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-            if "memory_facts" in tables:
-                columns={str(r[1]) for r in conn.execute("PRAGMA table_info(memory_facts)")}
-                for row in conn.execute("SELECT * FROM memory_facts ORDER BY id"):
-                    active=bool(row["active"]); belief_id=str(row["belief_id"] or "") if "belief_id" in columns else ""
-                    source=str(row["source_text"] or "").strip() if "source_text" in columns else ""
-                    if belief_id: classification,reason="ARCHIVE","v2 belief projection; retain compatibility history but not independent truth"
-                    elif not active:classification,reason="KEEP","inactive legacy history"
-                    elif source:classification,reason="NEEDS_REVIEW","active legacy semantic row has source text but no structured v2 provenance"
-                    else:classification,reason="INVALIDATE","active legacy row lacks reconstructable provenance"
-                    records.append(self._record("memory_facts",row["id"],classification,reason,source_present=bool(source)))
             if "memory_chunks" in tables:
                 columns={str(r[1]) for r in conn.execute("PRAGMA table_info(memory_chunks)")}
                 for row in conn.execute("SELECT id,kind,active"+(",belief_id" if "belief_id" in columns else "")+" FROM memory_chunks ORDER BY id"):
@@ -88,9 +78,7 @@ class HygienePlanner:
             for item in plan["records"]:
                 classification=item["classification"]
                 # Only deterministic isolation is applied. No DELETE/MERGE/MIGRATE is automatic here.
-                if classification=="INVALIDATE" and item["store"]=="memory_facts":
-                    conn.execute("UPDATE memory_facts SET active=0 WHERE CAST(id AS TEXT)=? AND active=1",(item["record_id"],));applied.append(item)
-                elif classification=="ARCHIVE" and item["store"]=="conversations":
+                if classification=="ARCHIVE" and item["store"]=="conversations":
                     conn.execute("UPDATE conversations SET status='ARCHIVED',closure_reason='phase6_expired_hygiene',version=version+1 WHERE id=? AND status IN ('WAITING_ON_LEO','WAITING_ON_HEBE','ACTIVE')",(item["record_id"],));applied.append(item)
                 else:continue
                 conn.execute("""INSERT OR IGNORE INTO cognitive_migration_audit

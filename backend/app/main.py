@@ -4,6 +4,7 @@ import inspect
 import logging
 import os
 import uuid
+from dataclasses import asdict
 from datetime import datetime, timezone
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
@@ -375,13 +376,16 @@ def debug_memory():
             last_input = str(turn.get("text") or "")
             break
 
+    engine = getattr(hebe, "_engine", None)
+    memory_store = getattr(engine, "memory_store", None)
     retrieval = {"facts": [], "chunks": []}
     if last_input:
-        retrieval["facts"] = db_sqlite.search_memory_facts(
-            query_text=last_input,
-            active_only=True,
-            limit=5,
-        )
+        if memory_store is not None:
+            retrieval["facts"] = [
+                asdict(item) for item in memory_store.search_facts(
+                    query_text=last_input, active_only=True, limit=5,
+                )
+            ]
         try:
             from app.cognitive.memory.memory_store import search_chunks
 
@@ -393,7 +397,6 @@ def debug_memory():
         except Exception as exc:
             retrieval["chunks_error"] = repr(exc)
 
-    engine = getattr(hebe, "_engine", None)
     runtime = getattr(engine, "runtime", None)
     state = getattr(runtime, "state", None)
     stream = getattr(state, "stream", None)
@@ -413,9 +416,12 @@ def debug_memory():
         "stream_output_mode": str(getattr(stream, "stream_output_mode", "tts_enabled") if stream is not None else "tts_enabled"),
         "vts_status": get_vts_status(),
         "stt_enabled": bool(getattr(runtime, "stt_enabled", False)),
-        "facts_count": db_sqlite.count_memory_facts(active_only=True),
+        "facts_count": memory_store.count_facts(active_only=True) if memory_store is not None else 0,
         "chunks_count": count_chunks(active_only=True),
-        "last_facts": db_sqlite.get_recent_memory_facts(limit=10, active_only=True),
+        "last_facts": (
+            [asdict(item) for item in memory_store.recent_facts(limit=10, active_only=True)]
+            if memory_store is not None else []
+        ),
         "last_chunks": get_recent_chunks(limit=10, active_only=True),
         "last_chat_turns": last_turns,
         "retrieval_for_last_input": retrieval,

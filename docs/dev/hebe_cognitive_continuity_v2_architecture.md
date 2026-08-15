@@ -4,6 +4,10 @@ Status: architecture and migration blueprint only
 Repository reviewed: current working tree on 2026-08-11  
 Production behavior changed by this task: **no**
 
+> Historical blueprint. Conversation continuity and structured Memory have
+> since completed their canonical cutovers. For current Memory ownership and
+> migration behavior, see `phase1b_memory_canonicalization_checkpoint_2026-08-15.md`.
+
 ## Executive decision
 
 Hebe should evolve by putting a typed continuity and belief layer between the existing event stores and the existing cognitive pipeline. The model may propose interpretations and consolidations, but deterministic services own state transitions. Existing ingestion, authority, execution, output, evidence, research, presence, and replay boundaries remain in place.
@@ -88,7 +92,7 @@ The principal ownership rule is: observations are evidence, beliefs are revisabl
 | SocialMemory | chatter profiles/facts/presence/summaries, stream chat, promotion profile, viewer language inference | Separate observed episodes from hypotheses and retain only socially useful continuity. |
 | HistoricalActionLedger | promotion transactions/events/receipts, executor results, internal logs | Add an append-only cross-domain receipt index; retain each domain transaction as authoritative detail. |
 
-`backend/app/cognitive/memory_store.py` is the structured `memory_facts` access layer; `backend/app/cognitive/memory/memory_store.py` is the vector `memory_chunks` layer. Their similar names obscure their different responsibilities and should be clarified later, not merged into one generic store.
+`backend/app/cognitive/memory_store.py` is the canonical beliefs-backed structured-memory facade; `backend/app/cognitive/memory/memory_store.py` is the vector `memory_chunks` layer. Chunks are retrieval aids and never an independent structured source of truth.
 
 ### 5. Beliefs and hypotheses
 

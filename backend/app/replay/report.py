@@ -95,9 +95,7 @@ def build_report(
         for item in scenario_results
     )
     is_phase2 = any(
-        bool((item.get("feature_flags") or {}).get("belief_v2_reads"))
-        or bool((item.get("feature_flags") or {}).get("belief_v2_writes"))
-        or str(item.get("scenario_id") or "").startswith("phase2_")
+        str(item.get("scenario_id") or "").startswith("phase2_")
         for item in scenario_results
     )
     is_phase1 = any(

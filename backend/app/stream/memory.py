@@ -435,9 +435,9 @@ def init_stream_memory_schema() -> None:
         ]
         print(
             "[HEBE][STREAM_MEMORY] schema checked "
-            f"existing_reused={sorted(existing & {'chat_log','internal_events_log','memory_chunks','memory_facts','memories','reminders'})} "
+            f"existing_reused={sorted(existing & {'chat_log','internal_events_log','memory_chunks','memories','reminders'})} "
             f"new_tables_created={created} indexes_created_or_verified=true "
-            "reuse=chat_log/general_conversation,memory_facts/general_facts,memory_chunks/stream_summary_rag",
+            "reuse=chat_log/general_conversation,beliefs/general_facts,memory_chunks/stream_summary_rag",
             flush=True,
         )
         _READY_DB_PATH = db_sqlite.DB_PATH

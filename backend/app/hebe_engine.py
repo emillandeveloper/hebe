@@ -175,11 +175,7 @@ from app.continuity import (
     ExpectedReplyType,
     OpenThreadRepository,
 )
-from app.replay.migrations import MigrationRunner, architecture_consolidation_migrations, conversation_continuity_migrations, belief_v2_migrations, game_context_v2_migrations, social_world_v2_migrations, learning_v2_migrations
-from app.epistemics.repository import BeliefRepository
-from app.epistemics.service import BeliefLifecycleService
-from app.epistemics.retrieval import MemoryRetrievalCoordinator
-from app.epistemics.legacy_adapter import LegacyMemoryFactAdapter
+from app.replay.migrations import MigrationRunner, architecture_consolidation_migrations, conversation_continuity_migrations, game_context_v2_migrations, social_world_v2_migrations, learning_v2_migrations
 from app.epistemics.models import EvidenceRef, EvidenceRelation
 from app.game_context_v2.context import GameContextResolver
 from app.game_context_v2.repository import GameV2Repository
@@ -415,6 +411,7 @@ class HebeEngine:
         self.cheer_ack_renderer = CheerAcknowledgementRenderer()
         self.memory_extractor = MemoryExtractor(
             intent_model=getattr(self.runtime, "intent_llm", None),
+            memory_store=self.memory_store,
         )
         self.input_classifier = InputClassifier()
         self.conversation_state_resolver = ConversationStateResolver()
@@ -524,8 +521,6 @@ class HebeEngine:
         self.cognitive_v2_enabled = cognitive_flag("HEBE_COGNITIVE_V2_ENABLED")
         self._last_continuity_resolution: dict = {}
         self._initialize_conversation_continuity()
-        self.belief_v2_reads = cognitive_flag("HEBE_BELIEF_V2_READS")
-        self.belief_v2_writes = cognitive_flag("HEBE_BELIEF_V2_WRITES")
         self._initialize_belief_v2()
         self.game_context_v2 = cognitive_flag("HEBE_GAME_CONTEXT_V2")
         self.game_run_v2_reads = cognitive_flag("HEBE_GAME_RUN_V2_READS")
@@ -609,15 +604,12 @@ class HebeEngine:
 
     def _initialize_belief_v2(self) -> None:
         try:
-            runner=MigrationRunner(db_sqlite.get_db_connection)
-            self.belief_v2_migrations=runner.migrate(belief_v2_migrations())
-            repository=BeliefRepository(db_sqlite.get_db_connection)
-            self.belief_repository=repository
-            self.belief_lifecycle=BeliefLifecycleService(repository,now_fn=lambda:time.time())
-            self.memory_retrieval=MemoryRetrievalCoordinator(repository,now_fn=lambda:time.time())
-            self.legacy_memory_fact_adapter=LegacyMemoryFactAdapter(self.belief_lifecycle,db_sqlite.get_db_connection)
+            self.belief_v2_migrations=[]
+            self.belief_repository=self.memory_store.repository
+            self.belief_lifecycle=self.memory_store.lifecycle
+            self.memory_retrieval=self.memory_store.retrieval
         except Exception as exc:
-            self.belief_repository=None;self.belief_lifecycle=None;self.memory_retrieval=None;self.legacy_memory_fact_adapter=None;self.belief_v2_migrations=[]
+            self.belief_repository=None;self.belief_lifecycle=None;self.memory_retrieval=None;self.belief_v2_migrations=[]
             print(f"[HEBE][BELIEF_INIT] status=failed_closed reason={type(exc).__name__}",flush=True)
 
     def _initialize_conversation_continuity(self) -> None:

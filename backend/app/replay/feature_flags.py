@@ -9,8 +9,6 @@ class CognitiveFeatureFlags:
     cognitive_v2_enabled: bool = False
     cognitive_replay_enabled: bool = False
     conversation_continuity_v2: bool = False
-    belief_v2_reads: bool = False
-    belief_v2_writes: bool = False
     game_context_v2: bool = False
     game_run_v2_reads: bool = False
     game_run_v2_writes: bool = False
@@ -36,6 +34,10 @@ class CognitiveFeatureFlags:
     @classmethod
     def from_value(cls, value: dict[str, Any] | None) -> "CognitiveFeatureFlags":
         raw = dict(value or {})
+        # Historical replay fixtures may still carry these now-retired cutover
+        # flags. Canonical beliefs are unconditional, so the values are ignored.
+        raw.pop("belief_v2_reads", None)
+        raw.pop("belief_v2_writes", None)
         allowed = set(cls.__dataclass_fields__)
         unknown = sorted(set(raw) - allowed)
         if unknown:

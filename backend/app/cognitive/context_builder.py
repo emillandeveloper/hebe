@@ -428,7 +428,6 @@ class ContextBuilder:
             query_text=input_text,
             active_only=True,
             limit=limit,
-            touch=True,  # importante para ranking futuro
         )
 
         low = input_text.lower()
@@ -438,7 +437,6 @@ class ContextBuilder:
                     kind="hebe_identity",
                     active_only=True,
                     limit=3,
-                    touch=True,
                 )
             )
             facts.extend(
@@ -446,11 +444,10 @@ class ContextBuilder:
                     kind="preference",
                     active_only=True,
                     limit=3,
-                    touch=True,
                 )
             )
 
-        seen: set[int] = set()
+        seen: set[str] = set()
         deduped: list[MemoryFact] = []
         for fact in facts:
             if fact.id in seen:
@@ -633,37 +630,27 @@ class ContextBuilder:
             return []
 
     def _retrieve_memory_for_twitch(self, user_login: str) -> list[dict]:
-        """
-        Lookup estructurado del viewer activo. Sin embeddings → coste constante
-        (no añade latencia por embedding en cada mensaje de chat).
-
-        Usa LIKE sobre el campo subject para encontrar viewer_facts del usuario.
-        Devuelve los chunks en el mismo shape que _retrieve_memory_for_jarvis
-        (dict con clave 'text') para que el synthesizer no los distinga.
-        """
+        """Retrieve viewer facts from canonical beliefs without embeddings."""
         if not user_login:
             return []
         try:
-            from app.services.db_sqlite import search_memory_facts
-
-            rows = search_memory_facts(
+            facts = self.memory_store.search_facts(
                 query_text=user_login,
                 kind="viewer_fact",
                 active_only=True,
                 limit=3,
             )
             result: list[dict] = []
-            for r in rows:
-                # source_text es la representación legible; payload como fallback.
-                text = r.get("source_text") or str(r.get("payload") or "")
+            for fact in facts:
+                text = fact.source_text or str(fact.payload or "")
                 if not text:
                     continue
                 result.append(
                     {
-                        "id": r.get("id"),
+                        "id": fact.id,
                         "text": text,
                         "kind": "viewer_fact",
-                        "subject": r.get("subject"),
+                        "subject": fact.subject,
                     }
                 )
             return result

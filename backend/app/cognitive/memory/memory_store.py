@@ -3,10 +3,8 @@ RAG memory store for Hebe.
 
 Dos capas con patrones de acceso distintos:
 
-  memory_facts        (existente, en db_sqlite.py)
-      Hechos estructurados: viewer_fact, leo_fact, citas, preferencias.
-      Lookup por `subject` y `kind`. Sin embeddings.
-      Funciones existentes: add_memory_fact, search_memory_facts, etc.
+  beliefs             (memoria estructurada canónica)
+      Hechos estructurados con lifecycle, provenance y retrieval coordinado.
 
   memory_chunks       (nueva, definida aquí)
       Memorias en texto libre con embeddings: stream summaries, jarvis
@@ -14,8 +12,7 @@ Dos capas con patrones de acceso distintos:
       kind/subject).
       Funciones: add_chunk, search_chunks, get_recent_chunks.
 
-Las dos capas pueden coexistir y consultarse en el mismo paso de retrieval
-desde response_synthesizer.
+Los chunks son ayudas de retrieval y nunca una segunda fuente de verdad.
 
 El nombre del modelo de embedding se guarda por chunk. Si algún día se cambia
 de modelo, los chunks viejos siguen siendo buscables solo si reembedeas
