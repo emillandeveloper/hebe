@@ -13,30 +13,35 @@ from app.cognitive.models import DeliberationResult, ExecutionResult, Plan, Step
 from app.cognitive.response_synthesizer import ResponseSynthesizer
 from app.hebe_engine import HebeEngine
 from app.cognitive.input_event import InputEvent
+from app.continuity.models import (
+    AttentionState, ConversationContext, ConversationStatus, CurrentConversation,
+    ExpectedReply, ExpectedReplyType,
+)
 
 
 def game_pending(**overrides):
-    pending = {
-        "id": "game-pending",
-        "kind": "game_guidance_clarification",
-        "game": "Final Fantasy VII",
-        "location_or_area": "Midgar",
-        "expected_reply_type": "game_party_or_character",
+    now = time.time()
+    domain = {
+        "game": "Final Fantasy VII", "location_or_area": "Midgar",
         "missing_fields": ["current_character", "party_members", "story_phase", "recent_event"],
         "original_question": "Hebe, en FFVII acabo de llegar a Midgar; ¿cuál es el siguiente objetivo?",
-        "authority": "owner",
         "spoiler_policy": "no_story_spoilers",
-        "created_at": time.time(),
-        "expires_at": time.time() + 300,
     }
-    pending.update(overrides)
-    return pending
+    domain.update(overrides.pop("domain_payload", {}))
+    return CurrentConversation(
+        id="game-pending", context_kind=ConversationContext.PRIVATE_UI, context_id="leo_ui",
+        participants=("leo", "hebe"), attention_state=AttentionState.HANDED_OFF,
+        turn_owner="leo", expected_reply=ExpectedReply(ExpectedReplyType.GAME_PARTY_OR_CHARACTER, expires_at=now + 300),
+        topic="game_guidance_clarification", origin_event_id="question", last_event_id="question",
+        opened_at=now, last_turn_at=now, expires_at=now + 300,
+        status=ConversationStatus.WAITING_ON_LEO, domain_payload=domain, **overrides,
+    )
 
 
 def routing_context(text: str, *, run_state=None, chunks=None, pending=None):
     return SimpleNamespace(
         input_text=text, internal_event=None,
-        state_snapshot={"game_run_state": run_state or {}, "pending_clarification": pending},
+        state_snapshot={"game_run_state": run_state or {}, "current_conversation": pending},
         relevant_chunks=list(chunks or []), relevant_facts=[], recent_appointments=[],
         pending_reminders=[], conversation_history=[], resolved_entities=[],
         message_type="direct_question", context_policy={"memory": "relevant"},
@@ -181,21 +186,22 @@ class GameGuidanceRoutingTests(unittest.TestCase):
         self.assertIn("blocked_game_walkthrough=true", "\n".join(logs))
 
     def test_game_guidance_clarification_creates_real_pending(self):
+        from tests.test_voice_command_pipeline import make_engine
+
         value = routing_context("Hebe, en FFVII he llegado a Midgar y no ubico el siguiente paso")
         value.cognitive_decision = self.router.route(value)
         plan = self.service.deliberate(value).plan
-        engine = HebeEngine.__new__(HebeEngine)
-        engine.runtime = SimpleNamespace(state=SimpleNamespace(pending_clarification=None))
+        engine = make_engine(live=False)
         engine.deliberation_service = self.service
 
         engine._apply_game_guidance_reply_state(
             plan.steps[0].data, value.cognitive_decision, value, "owner_ui",
         )
 
-        pending = engine.runtime.state.pending_clarification
-        self.assertEqual(pending["kind"], "game_guidance_clarification")
-        self.assertEqual(pending["expected_reply_type"], "game_party_or_character")
-        self.assertIn("current_character", pending["missing_fields"])
+        pending = engine._active_current_conversation(latest=True)
+        self.assertEqual(pending.topic, "game_guidance_clarification")
+        self.assertEqual(pending.expected_reply.type, ExpectedReplyType.GAME_PARTY_OR_CHARACTER)
+        self.assertIn("current_character", pending.domain_payload["missing_fields"])
 
     def test_clarification_answer_routes_and_updates_run_state_plan(self):
         value = routing_context("Voy con Cloud", pending=game_pending())
@@ -253,7 +259,7 @@ class GameGuidanceRoutingTests(unittest.TestCase):
         context = BuiltContext(
             input_text="Cloud, Tifa", internal_event=None,
             relevant_facts=[], recent_appointments=[], pending_reminders=[],
-            state_snapshot={"pending_clarification": game_pending()}, relevant_chunks=[],
+            state_snapshot={"current_conversation": game_pending()}, relevant_chunks=[],
             conversation_history=[], message_type="unknown", inject_memory=False,
             context_policy={"memory": "limited"},
         )
@@ -269,10 +275,13 @@ class GameGuidanceRoutingTests(unittest.TestCase):
         self.assertIn("active_game_guidance_pending", "\n".join(logs))
 
     def test_stt_answer_without_wake_is_owner_followup(self):
-        from tests.test_voice_command_pipeline import make_engine
+        from tests.test_voice_command_pipeline import make_engine, open_test_conversation
 
         engine = make_engine(live=False)
-        engine.runtime.state.pending_clarification = game_pending()
+        open_test_conversation(
+            engine, kind="game_guidance_clarification",
+            expected_reply_type="game_party_or_character", **game_pending().domain_payload,
+        )
         event = InputEvent(
             source="stt_voice", raw_text="Estoy con el personaje Cloud", normalized_text="estoy con el personaje cloud",
             stt_metadata={"command_mode": True},

@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from app.continuity.models import CurrentConversation, ConversationStatus
+
 from app.cognitive.input_event import InputEvent
 
 
@@ -181,20 +183,23 @@ class InputClassifier:
 
 
 class ConversationStateResolver:
-    def from_pending_turn(self, pending_turn: dict | None, *, matched: bool = False, reason: str = "") -> ConversationState:
-        if not isinstance(pending_turn, dict) or pending_turn.get("status") != "pending":
+    def from_conversation(self, conversation: CurrentConversation | None, *, matched: bool = False, reason: str = "") -> ConversationState:
+        if conversation is None or conversation.status not in {
+            ConversationStatus.OPEN, ConversationStatus.WAITING_ON_LEO, ConversationStatus.WAITING_ON_HEBE,
+        }:
             return ConversationState(active=False, matched=False, reason=reason or "no_active_conversation")
+        domain = conversation.domain_payload
         return ConversationState(
             active=True,
-            topic=str(pending_turn.get("topic") or pending_turn.get("expected_type") or ""),
-            source=str(pending_turn.get("source") or ""),
-            last_direct_user_input=str(pending_turn.get("last_direct_user_input") or ""),
-            last_assistant_reply=str(pending_turn.get("previous_assistant_message") or ""),
-            expected_reply_type=str(pending_turn.get("expected_type") or ""),
-            expires_at=float(pending_turn.get("expires_at", 0.0) or 0.0),
-            allow_no_wakeword=bool(pending_turn.get("allow_without_wakeword", False)),
-            output_target=list(pending_turn.get("output_target") or []),
-            confidence=float(pending_turn.get("confidence", 0.76) or 0.76),
+            topic=conversation.topic,
+            source=str(domain.get("source") or "conversation_continuity"),
+            last_direct_user_input=str(domain.get("last_direct_user_input") or ""),
+            last_assistant_reply=str(domain.get("previous_assistant_message") or ""),
+            expected_reply_type=conversation.expected_reply.type.value if conversation.expected_reply else "",
+            expires_at=conversation.expires_at,
+            allow_no_wakeword=bool(domain.get("can_accept_no_wake_followup", False)),
+            output_target=list(domain.get("output_target") or []),
+            confidence=float(domain.get("confidence", 0.76) or 0.76),
             matched=matched,
             reason=reason or ("matched" if matched else "active_not_matched"),
         )

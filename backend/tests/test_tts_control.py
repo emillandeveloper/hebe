@@ -5,6 +5,7 @@ from unittest.mock import Mock, patch
 from app.cognitive.command_result import CommandResult
 from app.hebe_engine import HebeEngine
 from app.stream.state import StreamSessionState
+from tests.test_voice_command_pipeline import install_test_continuity, open_test_conversation
 
 
 class FakeTwitch:
@@ -25,9 +26,6 @@ def make_engine(*, tts_enabled=True):
         state=SimpleNamespace(
             tts_enabled=tts_enabled,
             stream=stream,
-            pending_tts_scope=None,
-            pending_clarification=None,
-            pending_reminder=None,
         ),
         speak=Mock(),
         twitch=FakeTwitch(),
@@ -39,6 +37,7 @@ def make_engine(*, tts_enabled=True):
         action_permission_summary={"stream_live": True},
         allows_capability=lambda capability: capability in capabilities,
     )
+    install_test_continuity(engine)
     return engine
 
 
@@ -59,7 +58,7 @@ class TTSControlTests(unittest.TestCase):
         reply = engine._handle_tts_manual_command("Hebe, activa tu voz")
 
         self.assertTrue(engine.runtime.state.tts_enabled)
-        self.assertIsNotNone(engine.runtime.state.pending_tts_scope)
+        self.assertEqual(engine._active_current_conversation().topic, "tts_scope")
         self.assertIsInstance(reply, CommandResult)
         self.assertIn("solo", reply.lower())
 
@@ -69,7 +68,7 @@ class TTSControlTests(unittest.TestCase):
         reply = engine._handle_tts_manual_command("activa la voz hebe")
 
         self.assertTrue(engine.runtime.state.tts_enabled)
-        self.assertIsNotNone(engine.runtime.state.pending_tts_scope)
+        self.assertEqual(engine._active_current_conversation().topic, "tts_scope")
         self.assertIsInstance(reply, CommandResult)
         self.assertIn("stream", reply.lower())
 
@@ -80,7 +79,7 @@ class TTSControlTests(unittest.TestCase):
         reply = engine._handle_pending_manual_intent("solo por ahora para poder escucharte")
 
         self.assertTrue(engine.runtime.state.tts_enabled)
-        self.assertIsNone(engine.runtime.state.pending_tts_scope)
+        self.assertIsNone(engine._active_current_conversation())
         self.assertFalse(engine.runtime.state.stream.policies.allow_tts_idle_prompts)
         self.assertIsInstance(reply, CommandResult)
         self.assertIn("solo", reply.lower())
@@ -92,7 +91,7 @@ class TTSControlTests(unittest.TestCase):
         reply = engine._handle_pending_manual_intent("local")
 
         self.assertTrue(engine.runtime.state.tts_enabled)
-        self.assertIsNone(engine.runtime.state.pending_tts_scope)
+        self.assertIsNone(engine._active_current_conversation())
         self.assertFalse(engine.runtime.state.stream.policies.allow_tts_idle_prompts)
         self.assertIsInstance(reply, CommandResult)
         self.assertIn("stream", reply.lower())
@@ -103,7 +102,7 @@ class TTSControlTests(unittest.TestCase):
 
         reply = engine._handle_pending_manual_intent("aquí")
 
-        self.assertIsNone(engine.runtime.state.pending_tts_scope)
+        self.assertIsNone(engine._active_current_conversation())
         self.assertIsInstance(reply, CommandResult)
         self.assertIn("stream", reply.lower())
 
@@ -114,7 +113,7 @@ class TTSControlTests(unittest.TestCase):
 
         reply = engine._handle_pending_manual_intent("stream")
 
-        self.assertIsNone(engine.runtime.state.pending_tts_scope)
+        self.assertIsNone(engine._active_current_conversation())
         self.assertTrue(engine.runtime.state.stream.policies.allow_tts_replies)
         self.assertTrue(engine.runtime.state.stream.policies.allow_tts_event_replies)
         self.assertTrue(engine.runtime.state.stream.policies.allow_tts_raid_thanks)
@@ -128,7 +127,7 @@ class TTSControlTests(unittest.TestCase):
 
         reply = engine._handle_pending_manual_intent("también en directo")
 
-        self.assertIsNone(engine.runtime.state.pending_tts_scope)
+        self.assertIsNone(engine._active_current_conversation())
         self.assertTrue(engine.runtime.state.stream.policies.allow_tts_replies)
         self.assertIsInstance(reply, CommandResult)
         self.assertIn("eventos", reply.lower())
@@ -140,7 +139,7 @@ class TTSControlTests(unittest.TestCase):
         reply = engine._handle_pending_manual_intent("solo texto")
 
         self.assertIsNone(reply)
-        self.assertIsNone(engine.runtime.state.pending_tts_scope)
+        self.assertIsNone(engine._active_current_conversation())
 
     def test_pending_tts_scope_does_not_hijack_new_explicit_stt_command(self):
         engine = make_engine(tts_enabled=False)
@@ -151,7 +150,7 @@ class TTSControlTests(unittest.TestCase):
         action = engine._handle_stream_manual_command("Hebe, desactiva STT ambiental")
 
         self.assertIsNone(pending_reply)
-        self.assertIsNone(engine.runtime.state.pending_tts_scope)
+        self.assertIsNone(engine._active_current_conversation())
         self.assertIsInstance(action, CommandResult)
         self.assertEqual(action.action_type, "stream_ambient_stt_disabled")
         self.assertFalse(engine.stream_ambient_stt_enabled)
@@ -164,7 +163,7 @@ class TTSControlTests(unittest.TestCase):
         second = engine._handle_pending_manual_intent("patata otra vez")
 
         self.assertIn("local", first.lower())
-        self.assertIsNone(engine.runtime.state.pending_tts_scope)
+        self.assertIsNone(engine._active_current_conversation())
         self.assertIsInstance(second, CommandResult)
         self.assertEqual(second.action_type, "tts_scope_resolved")
         self.assertEqual(second.metadata["scope"], "local")
@@ -197,13 +196,11 @@ class TTSControlTests(unittest.TestCase):
 
     def test_cancel_pending_reminder_clears_state(self):
         engine = make_engine(tts_enabled=False)
-        engine.runtime.state.pending_clarification = {"kind": "appointment_datetime"}
-        engine.runtime.state.pending_reminder = {"kind": "appointment_datetime"}
+        open_test_conversation(engine, kind="appointment_datetime")
 
         reply = engine._handle_pending_manual_intent("no quiero que guardes nada")
 
-        self.assertIsNone(engine.runtime.state.pending_clarification)
-        self.assertIsNone(engine.runtime.state.pending_reminder)
+        self.assertIsNone(engine._active_current_conversation())
         self.assertIsInstance(reply, CommandResult)
         self.assertEqual(reply.action_type, "pending_reminder_cancelled")
         self.assertEqual(reply.fallback_text, "Vale, no guardo nada.")

@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 from typing import Any
 import time
 
+from app.continuity.models import CurrentConversation
+
 
 @dataclass
 class InputEnvelope:
@@ -21,7 +23,7 @@ class InputEnvelope:
     intent_candidates: list[str] = field(default_factory=list)
     app_target: str | None = None
     app_plan_result: dict[str, Any] = field(default_factory=dict)
-    active_pending: dict[str, Any] | None = None
+    active_conversation: CurrentConversation | None = None
     pending_compatible: bool = False
     expected_reply_type: str = ""
     is_followup_candidate: bool = False
@@ -42,7 +44,7 @@ class InputEnvelope:
             "intent_candidates": list(self.intent_candidates),
             "app_target": self.app_target,
             "app_plan_result": dict(self.app_plan_result),
-            "active_pending": dict(self.active_pending) if self.active_pending else None,
+            "active_conversation": self.active_conversation.to_dict() if self.active_conversation else None,
             "pending_compatible": self.pending_compatible,
             "expected_reply_type": self.expected_reply_type,
             "is_followup_candidate": self.is_followup_candidate,

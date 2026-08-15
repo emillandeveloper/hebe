@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
+from app.continuity.models import CurrentConversation
+
 
 @dataclass(slots=True)
 class CognitiveDecision:
@@ -18,7 +20,7 @@ class CognitiveDecision:
     intent_confidence: float
     is_new_request: bool
     uses_pending_task: bool
-    active_pending_task: dict[str, Any] | None = None
+    current_conversation: CurrentConversation | None = None
     pending_task_kind: str | None = None
     pending_resolution_allowed: bool = False
     pending_compatible: bool = False
@@ -48,8 +50,7 @@ class CognitiveDecision:
 
     @property
     def pending_task_id(self) -> str | None:
-        pending = self.active_pending_task or {}
-        return str(pending.get("id") or pending.get("task_id") or "") or None
+        return self.current_conversation.id if self.current_conversation else None
 
     @property
     def required_capability_ids(self) -> list[str]:
@@ -60,4 +61,6 @@ class CognitiveDecision:
         return self.blocked_capabilities
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        value = asdict(self)
+        value["current_conversation"] = self.current_conversation.to_dict() if self.current_conversation else None
+        return value

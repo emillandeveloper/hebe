@@ -88,6 +88,48 @@ class ConversationRepository:
         finally:
             conn.close()
 
+    def list_active(self, *, limit: int = 100) -> list[CurrentConversation]:
+        conn = self.connection_factory()
+        conn.row_factory = sqlite3.Row
+        try:
+            placeholders = ",".join("?" for _ in ACTIVE_CONVERSATION_STATUSES)
+            return [self._from_row(row) for row in conn.execute(
+                f"""SELECT * FROM conversations WHERE status IN ({placeholders})
+                    ORDER BY last_turn_at DESC LIMIT ?""",
+                (*sorted(ACTIVE_CONVERSATION_STATUSES), limit),
+            ).fetchall()]
+        finally:
+            conn.close()
+
+    def update_active(
+        self, conversation_id: str, *, expected_version: int, domain_payload: dict,
+        expected_reply: ExpectedReply | None, expires_at: float, last_event_id: str, now: float,
+    ) -> CurrentConversation:
+        conn = self.connection_factory()
+        conn.row_factory = sqlite3.Row
+        try:
+            cursor = conn.execute(
+                """UPDATE conversations SET domain_payload_json=?, expected_reply_json=?, expires_at=?, last_event_id=?,
+                    last_turn_at=?, version=version+1 WHERE id=? AND version=?
+                    AND status IN ('OPEN','WAITING_ON_LEO','WAITING_ON_HEBE')""",
+                (
+                    json.dumps(domain_payload, ensure_ascii=False),
+                    json.dumps(expected_reply.to_dict(), ensure_ascii=False) if expected_reply else None,
+                    expires_at, last_event_id,
+                    now, conversation_id, expected_version,
+                ),
+            )
+            if cursor.rowcount != 1:
+                conn.rollback()
+                raise ConversationVersionConflict(conversation_id)
+            conn.commit()
+            row = conn.execute("SELECT * FROM conversations WHERE id=?", (conversation_id,)).fetchone()
+            if row is None:
+                raise KeyError(conversation_id)
+            return self._from_row(row)
+        finally:
+            conn.close()
+
     def transition(
         self, conversation_id: str, *, expected_version: int, status: ConversationStatus,
         reason: str, last_event_id: str, now: float, consumed_event_id: str = "",

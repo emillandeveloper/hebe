@@ -168,8 +168,11 @@ from app.continuity import (
     ConversationContext,
     ConversationContinuityService,
     ConversationRepository,
+    ConversationStatus,
     ConversationalAct,
-    LegacyPendingAdapter,
+    CurrentConversation,
+    ExpectedReply,
+    ExpectedReplyType,
     OpenThreadRepository,
 )
 from app.replay.migrations import MigrationRunner, architecture_consolidation_migrations, conversation_continuity_migrations, belief_v2_migrations, game_context_v2_migrations, social_world_v2_migrations, learning_v2_migrations
@@ -519,12 +522,7 @@ class HebeEngine:
         self._last_cognitive_trace: dict = {}
         self._current_input_event: InputEvent | None = None
         self.cognitive_v2_enabled = cognitive_flag("HEBE_COGNITIVE_V2_ENABLED")
-        self.conversation_continuity_v2 = cognitive_flag("HEBE_CONVERSATION_CONTINUITY_V2")
-        self.conversation_continuity_shadow = os.getenv(
-            "HEBE_CONVERSATION_CONTINUITY_SHADOW", "false"
-        ).strip().lower() in ("1", "true", "yes", "on")
         self._last_continuity_resolution: dict = {}
-        self._last_continuity_shadow_diff: dict = {}
         self._initialize_conversation_continuity()
         self.belief_v2_reads = cognitive_flag("HEBE_BELIEF_V2_READS")
         self.belief_v2_writes = cognitive_flag("HEBE_BELIEF_V2_WRITES")
@@ -631,9 +629,6 @@ class HebeEngine:
             self.conversation_continuity = ConversationContinuityService(
                 conversations, threads, now_fn=lambda: time.time(),
             )
-            self.legacy_pending_adapter = LegacyPendingAdapter(
-                self.conversation_continuity, self.runtime.state,
-            )
             invalidated = conversations.interrupt_active_on_start(reason="runtime_restart")
             if invalidated:
                 threads.archive_interrupted_clarifications(event_id="runtime_restart", now=time.time())
@@ -641,21 +636,29 @@ class HebeEngine:
                 print(f"[HEBE][CONVERSATION_RESTART] invalidated_actionable={invalidated}", flush=True)
         except Exception as exc:
             self.conversation_continuity = None
-            self.legacy_pending_adapter = None
             self.conversation_continuity_migrations = []
             print(f"[HEBE][CONVERSATION_INIT] status=failed_closed reason={type(exc).__name__}", flush=True)
 
     def _conversation_context_for_owner_stt(self) -> tuple[str, str]:
         stream = self._get_stream_state()
         if stream is not None and bool(getattr(stream, "enabled", False)) and bool(getattr(stream, "is_live", False)):
-            return ConversationContext.OWNER_LIVE_CONTROL.value, str(
-                getattr(stream, "active_stream_session_id", None) or "active_stream"
-            )
+            context_kind = ConversationContext.OWNER_LIVE_CONTROL.value
+            context_id = str(getattr(stream, "active_stream_session_id", None) or "active_stream")
+            # A stream session id may become known after Hebe has already handed
+            # a turn to Leo. Keep that live conversation addressable for its
+            # lifetime instead of silently switching context ids mid-turn.
+            conversations = getattr(getattr(self, "conversation_continuity", None), "conversations", None)
+            if conversations is not None and context_id != "active_stream":
+                if conversations.get_active(context_kind, context_id) is None:
+                    provisional = conversations.get_active(context_kind, "active_stream")
+                    if provisional is not None:
+                        return context_kind, "active_stream"
+            return context_kind, context_id
         return ConversationContext.OWNER_LOCAL.value, "leo_local"
 
     def _resolve_conversation_continuation(
         self, *, text: str, event_id: str, wake: bool, force_ambient: bool,
-        legacy_match: bool,
+        compatibility: bool | None = None, compatibility_reason: str = "", consume: bool = True,
     ):
         service = getattr(self, "conversation_continuity", None)
         if service is None:
@@ -669,13 +672,10 @@ class HebeEngine:
                 context_kind=context_kind, context_id=context_id, source=source,
                 participant=participant, authority=authority, text=text,
                 event_id=event_id, wake=wake,
-                consume=bool(getattr(self, "conversation_continuity_v2", False)),
+                consume=consume,
+                compatibility=compatibility, compatibility_reason=compatibility_reason,
             )
             self._last_continuity_resolution = resolution.to_dict()
-            if bool(getattr(self, "conversation_continuity_shadow", False)):
-                self._last_continuity_shadow_diff = service.record_shadow(
-                    legacy_result=legacy_match, v2_result=resolution,
-                )
             return resolution
         except Exception as exc:
             self._last_continuity_resolution = {
@@ -728,62 +728,39 @@ class HebeEngine:
         stream = self._get_stream_state()
         return bool(stream and getattr(stream, "is_live", False))
 
-    def _clear_pending_task(self, *, reason: str, pending: dict | None = None) -> None:
-        pending = pending if isinstance(pending, dict) else getattr(self.runtime.state, "pending_clarification", None)
-        adapter = getattr(self, "legacy_pending_adapter", None)
-        if adapter is not None:
-            try:
-                adapter.close_for_legacy(pending, reason=reason)
-            except Exception as exc:
-                print(f"[HEBE][CONVERSATION_COMPAT] close_failed reason={type(exc).__name__}", flush=True)
-        if isinstance(pending, dict) and pending:
-            pending["status"] = "cancelled" if reason not in {"expired", "consumed"} else reason
-            print(
-                f"[HEBE][PENDING_CLEARED] reason={reason} kind={pending.get('kind')} id={pending.get('id') or pending.get('task_id')}",
-                flush=True,
-            )
-        self.runtime.state.pending_clarification = None
-        if getattr(self.runtime.state, "pending_reminder", None) is pending:
-            self.runtime.state.pending_reminder = None
+    def _conversation_context_for_source(self, source: str = "") -> tuple[ConversationContext, str]:
+        event_source = str(source or getattr(getattr(self, "_current_input_event", None), "source", "") or "")
+        if event_source in {"ui", "typed_ui", "owner_ui"}:
+            return ConversationContext.PRIVATE_UI, "leo_ui"
+        context_kind, context_id = self._conversation_context_for_owner_stt()
+        return ConversationContext(context_kind), context_id
 
-    def _active_pending_clarification(self) -> dict | None:
-        pending = getattr(self.runtime.state, "pending_clarification", None)
-        if not isinstance(pending, dict) or not pending:
+    def _active_current_conversation(
+        self, *, source: str = "", latest: bool = False, expire: bool = True,
+    ) -> CurrentConversation | None:
+        service = getattr(self, "conversation_continuity", None)
+        if service is None:
             return None
-        expires_at = pending.get("expires_at")
-        expired = False
-        if expires_at is not None:
-            try:
-                expired = float(expires_at) <= time.time()
-            except (TypeError, ValueError):
-                expired = True
-        if expired:
-            print(
-                f"[HEBE][PENDING_EXPIRED] kind={pending.get('kind')} id={pending.get('id') or pending.get('task_id')}",
-                flush=True,
-            )
-            self._clear_pending_task(reason="expired", pending=pending)
+        conversation = service.latest_active_conversation() if latest else service.conversations.get_active(
+            *self._conversation_context_for_source(source)
+        )
+        if conversation is not None and expire and conversation.expires_at <= time.time():
+            print(f"[HEBE][PENDING_EXPIRED] kind={conversation.topic} id={conversation.id}", flush=True)
+            service.close_conversation(conversation, reason="expired")
             return None
-        kind = str(pending.get("kind") or "")
-        if kind and "status" not in pending:
-            pending["status"] = "active"
-        if kind and "pending_id" not in pending:
-            pending["pending_id"] = pending.get("id") or pending.get("task_id") or f"pending_{uuid.uuid4().hex}"
-        if kind and "expected_reply_type" not in pending:
-            pending["expected_reply_type"] = (
-                "datetime" if kind == "appointment_datetime"
-                else "twitch_username_or_viewer_alias" if kind == "promotion_target_clarification"
-                else ""
-            )
-        if kind in {"appointment_datetime", "promotion_target_clarification", "game_guidance_clarification"}:
-            pending.setdefault("explicit_question_asked", True)
-            pending.setdefault("can_accept_no_wake_followup", True)
-            pending.setdefault("allowed_sources", ["stt_voice", "ui"])
-            pending.setdefault("max_attempts", 1)
-            pending.setdefault("attempts", int(pending.get("incompatible_count") or 0))
-        return pending
+        return conversation
 
-    def _make_pending_task(
+    def _close_current_conversation(
+        self, *, reason: str, conversation: CurrentConversation | None = None,
+    ) -> None:
+        conversation = conversation or self._active_current_conversation(latest=True, expire=False)
+        service = getattr(self, "conversation_continuity", None)
+        if conversation is None or service is None:
+            return
+        service.close_conversation(conversation, reason=reason)
+        print(f"[HEBE][PENDING_CLEARED] reason={reason} kind={conversation.topic} id={conversation.id}", flush=True)
+
+    def _open_pending_conversation(
         self,
         *,
         kind: str,
@@ -800,96 +777,91 @@ class HebeEngine:
         max_attempts: int | None = None,
         compatible_intents: list[str] | None = None,
         incompatible_intents: list[str] | None = None,
+        conversation_source: str = "",
+        creation_reason: str = "pending_created",
         **extra,
-    ) -> dict:
+    ) -> CurrentConversation:
         now = time.time()
         ttl = float(ttl_seconds if ttl_seconds is not None else os.getenv("HEBE_PENDING_TASK_TTL_SECONDS", "900") or 900)
         attempts_max = int(max_attempts if max_attempts is not None else 1)
-        pending = {
-            "id": extra.pop("id", f"pending_{uuid.uuid4().hex}"),
-            "pending_id": extra.pop("pending_id", ""),
-            "kind": kind,
-            "expected_reply_type": expected_reply_type,
-            "authority": authority_required,
-            "authority_required": authority_required,
-            "allowed_sources": allowed_sources or ["stt_voice", "ui"],
+        if authority_required != "owner":
+            raise ValueError("pending conversations require owner authority")
+        reply_type = ExpectedReplyType(expected_reply_type)
+        sources = tuple(
+            "owner_stt" if item in {"stt_voice", "owner_stt", "voice"} else
+            "owner_ui" if item in {"ui", "typed_ui", "owner_ui"} else str(item)
+            for item in (allowed_sources or ["stt_voice", "ui"])
+        )
+        domain = {
             "capability_needed": capability_needed,
-            "opened_by_event_id": opened_by_event_id,
             "opened_by_speech_act": opened_by_speech_act,
             "explicit_question_asked": bool(explicit_question_asked),
             "can_accept_no_wake_followup": bool(can_accept_no_wake_followup),
             "can_accept_emote_followup": bool(can_accept_emote_followup),
-            "ttl_seconds": ttl,
-            "created_at": now,
-            "expires_at": now + ttl,
             "max_attempts": attempts_max,
             "attempts": 0,
-            "status": "active",
             "compatible_intents": compatible_intents or [],
             "incompatible_intents": incompatible_intents or [],
         }
-        pending["pending_id"] = pending["pending_id"] or pending["id"]
-        pending.update(extra)
-        return pending
-
-    def _set_pending_task(self, pending: dict, *, reason: str) -> dict:
-        self.runtime.state.pending_clarification = pending
-        if pending.get("kind") == "appointment_datetime":
-            self.runtime.state.pending_reminder = pending
+        extra.pop("id", None)
+        extra.pop("pending_id", None)
+        domain.update(extra)
+        if kind == "promotion_target_clarification":
+            candidate_count = len(domain.get("candidates") or ())
+            if candidate_count == 1:
+                reply_type = ExpectedReplyType.YES_NO
+            elif candidate_count > 1:
+                reply_type = ExpectedReplyType.ENTITY_SELECTION
+        service = getattr(self, "conversation_continuity", None)
+        if service is None:
+            raise RuntimeError("conversation_continuity_unavailable")
+        context_kind, context_id = self._conversation_context_for_source(conversation_source)
+        event = getattr(self, "_current_input_event", None)
+        event_id = str(opened_by_event_id or getattr(event, "event_id", "") or f"pending_{uuid.uuid4().hex}")
+        conversation = service.open_conversation(
+            context_kind=context_kind, context_id=context_id, topic=kind, origin_event_id=event_id,
+            expected_reply=ExpectedReply(
+                type=reply_type, allowed_sources=tuple(dict.fromkeys(sources)),
+                allowed_participant="leo", semantic_constraints={"min_words": 1, "max_words": 40},
+                candidate_refs=tuple(str(item) for item in domain.get("candidates") or ()),
+                expires_at=now + ttl,
+            ),
+            domain_payload=domain, reason=creation_reason,
+        )
         print(
             "[HEBE][PENDING_CREATED] "
-            f"kind={pending.get('kind')} id={pending.get('id')} "
-            f"expected_reply_type={pending.get('expected_reply_type')} reason={reason}",
+            f"kind={conversation.topic} id={conversation.id} "
+            f"expected_reply_type={reply_type.value} reason={creation_reason}",
             flush=True,
         )
-        adapter = getattr(self, "legacy_pending_adapter", None)
-        if adapter is not None and (
-            bool(getattr(self, "conversation_continuity_shadow", False))
-            or bool(getattr(self, "conversation_continuity_v2", False))
-        ):
-            try:
-                event = getattr(self, "_current_input_event", None)
-                source = str(getattr(event, "source", "") or "")
-                if source in {"ui", "typed_ui", "owner_ui"}:
-                    context_kind, context_id = ConversationContext.PRIVATE_UI, "leo_ui"
-                else:
-                    context_value, context_id = self._conversation_context_for_owner_stt()
-                    context_kind = ConversationContext(context_value)
-                pending["conversation_context"] = context_kind.value
-                pending["conversation_context_id"] = context_id
-                adapter.project_legacy_pending(
-                    pending,
-                    context_kind=context_kind,
-                    context_id=context_id,
-                    event_id=str(
-                        pending.get("opened_by_event_id")
-                        or getattr(event, "event_id", "")
-                        or pending.get("id") or "legacy"
-                    ),
-                )
-            except Exception as exc:
-                print(f"[HEBE][CONVERSATION_COMPAT] projection_failed reason={type(exc).__name__}", flush=True)
-        return pending
+        return conversation
 
-    def _increment_pending_attempt(self, pending: dict | None, *, reason: str) -> bool:
-        if not isinstance(pending, dict):
+    def _update_current_conversation(
+        self, conversation: CurrentConversation, *, domain_updates: dict | None = None,
+        expires_at: float | None = None,
+    ) -> CurrentConversation:
+        return self.conversation_continuity.update_conversation(
+            conversation, domain_updates=domain_updates, expires_at=expires_at,
+        )
+
+    def _increment_conversation_attempt(self, conversation: CurrentConversation | None, *, reason: str) -> bool:
+        if conversation is None:
             return False
-        maximum = max(1, int(pending.get("max_attempts") or 1))
-        current = min(maximum, int(pending.get("attempts") or pending.get("incompatible_count") or 0))
+        domain = conversation.domain_payload
+        maximum = max(1, int(domain.get("max_attempts") or 1))
+        current = min(maximum, int(domain.get("attempts") or 0))
         attempts = min(maximum, current + 1)
-        pending["attempts"] = attempts
-        pending["incompatible_count"] = attempts
+        self._update_current_conversation(conversation, domain_updates={"attempts": attempts, "last_incompatible_reason": reason})
         print(
             f"[HEBE][PENDING_COMPATIBILITY] compatible=false reason={reason} "
-            f"kind={pending.get('kind')} attempts={attempts}",
+            f"kind={conversation.topic} attempts={attempts}",
             flush=True,
         )
         if attempts >= maximum:
             print(
-                f"[HEBE][PENDING_MAX_ATTEMPTS_REACHED] kind={pending.get('kind')} action=hold",
+                f"[HEBE][PENDING_MAX_ATTEMPTS_REACHED] kind={conversation.topic} action=hold",
                 flush=True,
             )
-            pending["status"] = "active"
             return True
         return True
 
@@ -939,25 +911,24 @@ class HebeEngine:
     def _game_guidance_pending_compatibility(
         self,
         *,
-        pending: dict | None,
+        pending: CurrentConversation | None,
         normalized: str,
         raw_text: str,
         addressed: bool,
     ) -> tuple[bool, str]:
-        if not isinstance(pending, dict) or pending.get("kind") != "game_guidance_clarification":
+        if pending is None or pending.topic != "game_guidance_clarification":
             return False, "no_game_guidance_pending"
-        if str(pending.get("authority") or "owner") != "owner":
-            return False, "non_owner_pending"
+        domain = pending.domain_payload
         text = self._normalize_guard_text(normalized or raw_text)
         if not text:
             return False, "empty"
         try:
-            age = time.time() - float(pending.get("created_at") or 0.0)
+            age = time.time() - pending.opened_at
         except (TypeError, ValueError):
             age = 999999.0
         if age > min(float(os.getenv("HEBE_GAME_PENDING_COMPAT_TTL_SECONDS", "90") or 90), 180.0):
             return False, "pending_too_old"
-        expected = str(pending.get("expected_reply_type") or "")
+        expected = pending.expected_reply.type.value if pending.expected_reply else ""
         if expected and expected not in {"game_progress_state", "game_party_or_character"}:
             return False, "unexpected_reply_type"
         ordinary_stream = bool(re.search(
@@ -975,7 +946,7 @@ class HebeEngine:
             r"palacio|castillo|mazmorra|dungeon|templo|nivel|capitulo|acto|party|equipo|personaje|prota)\b",
             text,
         ))
-        game = self._normalize_guard_text(pending.get("game") or "")
+        game = self._normalize_guard_text(domain.get("game") or "")
         known_game_context = bool(game and game in text)
         if not (explicit_progress or known_game_context):
             return False, "no_plausible_game_state"
@@ -983,17 +954,16 @@ class HebeEngine:
             return False, "ambient_followup_window_expired"
         return True, "explicit_game_progress"
 
-    def _log_game_pending_compat(self, compatible: bool, reason: str, *, pending: dict | None = None) -> None:
-        if isinstance(pending, dict):
-            if not compatible:
-                self._increment_pending_attempt(pending, reason=reason)
+    def _log_game_pending_compat(self, compatible: bool, reason: str, *, pending: CurrentConversation | None = None) -> None:
+        if pending is not None and not compatible:
+            self._increment_conversation_attempt(pending, reason=reason)
         print(
             "[HEBE][GAME_PENDING_COMPAT] "
             f"compatible={str(bool(compatible)).lower()} reason={reason}",
             flush=True,
         )
 
-    def _promotion_pending_reply_compatible(self, raw_text: str, normalized: str, pending: dict | None = None) -> tuple[bool, str, dict]:
+    def _promotion_pending_reply_compatible(self, raw_text: str, normalized: str, pending: CurrentConversation | None = None) -> tuple[bool, str, dict]:
         text = self._normalize_promotion_pending_target_text(str(raw_text or normalized or ""))
         marker = self._normalize_guard_text(text)
         def reject(reason: str, resolution: dict | None = None) -> tuple[bool, str, dict]:
@@ -1037,7 +1007,7 @@ class HebeEngine:
             f"candidates={candidates!r} selected={target!r} confidence={float(confidence or 0.0):.3f} reason={reason}",
             flush=True,
         )
-        previous_candidates = list((pending or {}).get("candidates") or [])
+        previous_candidates = list(pending.domain_payload.get("candidates") or []) if pending else []
         explicit_yes = marker in {"si", "si ese", "ese", "esa", "correcto", "exacto"}
         if explicit_yes and len(previous_candidates) == 1:
             resolution["target"] = previous_candidates[0]
@@ -1186,9 +1156,9 @@ class HebeEngine:
         print(f"[HEBE][TTS_CANCEL] reason={reason}", flush=True)
 
     def _clear_noncritical_pending_for_mute(self) -> None:
-        pending = getattr(self.runtime.state, "pending_clarification", None)
-        if isinstance(pending, dict) and pending.get("kind") not in {"promotion_target_clarification", "appointment_datetime"}:
-            self._clear_pending_task(reason="owner_cancel", pending=pending)
+        pending = self._active_current_conversation(latest=True)
+        if pending is not None and pending.topic not in {"promotion_target_clarification", "appointment_datetime"}:
+            self._close_current_conversation(reason="owner_cancel", conversation=pending)
 
     def _stream_voice_mode_active(self) -> tuple[str, str]:
         stream = self._get_stream_state()
@@ -1724,7 +1694,7 @@ class HebeEngine:
             "last_direct_priority_bypass": bool((getattr(stream, "last_twitch_route_state", {}) or {}).get("direct_priority_applied")),
             "last_budget_block_type": str(((getattr(stream, "last_twitch_route_state", {}) or {}).get("budget_result") or {}).get("block_type") or ""),
             "current_game": str(getattr(stream, "current_game", None) or getattr(stream, "current_category", None) or "") if stream is not None else "",
-            "active_pending_tasks": [getattr(self.runtime.state, "pending_clarification", None)] if isinstance(getattr(self.runtime.state, "pending_clarification", None), dict) else [],
+            "active_conversations": [item.to_dict() for item in self.conversation_continuity.conversations.list_active()] if self.conversation_continuity else [],
             "active_behavior_blocks": self.get_active_behavior_blocks(),
             "last_output_route": str(trace.get("output_route") or trace.get("tts_route", {}).get("route") or ""),
             "last_tts_route": trace.get("tts_route") or {},
@@ -1894,18 +1864,17 @@ class HebeEngine:
         old_wake_until = getattr(stream, "wake_only_until", 0.0) if stream is not None else 0.0
         old_muted_until = getattr(stream, "muted_until", 0.0) if stream is not None else 0.0
         if pending_kind == "appointment_datetime":
-            self.runtime.state.pending_clarification = self._make_pending_task(
-                id=f"simulation_pending_{uuid.uuid4().hex}",
+            self._open_pending_conversation(
                 kind="appointment_datetime",
                 expected_reply_type="datetime",
                 capability_needed="calendar.create",
                 can_accept_no_wake_followup=True,
                 ttl_seconds=300,
+                conversation_source=clean_source,
                 draft={"title": "Consulta", "source_text": "simulated appointment request"},
             )
         elif pending_kind == "promotion_target_clarification":
-            self.runtime.state.pending_clarification = self._make_pending_task(
-                id=f"simulation_pending_{uuid.uuid4().hex}",
+            self._open_pending_conversation(
                 kind="promotion_target_clarification",
                 expected_reply_type="twitch_username_or_viewer_alias",
                 capability_needed="twitch.shoutout",
@@ -1913,15 +1882,16 @@ class HebeEngine:
                 can_accept_no_wake_followup=True,
                 ttl_seconds=300,
                 max_attempts=1,
+                conversation_source=clean_source,
             )
         elif pending_kind == "game_guidance_clarification":
-            self.runtime.state.pending_clarification = self._make_pending_task(
-                id=f"simulation_pending_{uuid.uuid4().hex}",
+            self._open_pending_conversation(
                 kind="game_guidance_clarification",
                 expected_reply_type="game_party_or_character",
                 capability_needed="game.guidance",
                 can_accept_no_wake_followup=True,
                 ttl_seconds=300,
+                conversation_source=clean_source,
                 game="Final Fantasy VII",
                 location_or_area="Midgar",
                 missing_fields=["current_character", "party_members", "story_phase", "recent_event"],
@@ -2045,7 +2015,7 @@ class HebeEngine:
             "cognitive_route": cognitive,
             "raw_input": cognitive.get("raw_text") or cognitive.get("input_text") or trace.get("text") or "",
             "normalized_input": cognitive.get("normalized_text") or self._normalize_text(trace.get("text") or ""),
-            "active_pending_task": cognitive.get("active_pending_task") or cognitive.get("pending_task_id"),
+            "current_conversation": cognitive.get("current_conversation") or cognitive.get("pending_task_id"),
             "pending_compatibility": cognitive.get("pending_compatible"),
             "is_new_request": cognitive.get("is_new_request"),
             "uses_pending_task": cognitive.get("uses_pending_task"),
@@ -3571,10 +3541,10 @@ class HebeEngine:
         return bool(tokens & {"duerme", "descansa", "dormir", "sleep", "espera"}) and len(tokens) <= 4
     
     def cognitive_flow(self, command: str, source: str = "voice") -> str:
-        active_pending = self._active_pending_clarification()
-        if source in {"ui", "typed_ui"} and isinstance(active_pending, dict):
+        active_pending = self._active_current_conversation(source=source)
+        if source in {"ui", "typed_ui"} and active_pending is not None:
             print(
-                f"[HEBE][UI_PENDING_INPUT] raw={command!r} pending_kind={active_pending.get('kind')}",
+                f"[HEBE][UI_PENDING_INPUT] raw={command!r} pending_kind={active_pending.topic}",
                 flush=True,
             )
             print("[HEBE][PENDING_ROUTER] source=ui compatible=probe", flush=True)
@@ -3612,7 +3582,7 @@ class HebeEngine:
         if not hasattr(self, "context_builder"):
             context = SimpleNamespace(
                 input_text=command, internal_event=None,
-                state_snapshot={"pending_clarification": active_pending},
+                state_snapshot={"current_conversation": active_pending},
                 source=route_source, authority=route_authority,
                 addressed_to_hebe=route_addressed,
             )
@@ -3635,7 +3605,7 @@ class HebeEngine:
                 context.addressed_to_hebe = route_addressed
         if not hasattr(context, "state_snapshot") or not isinstance(context.state_snapshot, dict):
             context.state_snapshot = {}
-        context.state_snapshot["pending_clarification"] = active_pending
+        context.state_snapshot["current_conversation"] = active_pending
         router = getattr(self, "cognitive_router", None) or CognitiveRouter()
         context.firewall_decision = str(
             stt_firewall_payload.get("firewall_decision")
@@ -3652,7 +3622,7 @@ class HebeEngine:
         if hasattr(self, "_parse_tts_control_intent") and self._parse_tts_control_intent(normalized_route) is not None:
             hints.append("tts_control")
         if (
-            getattr(self.runtime.state, "pending_tts_scope", None)
+            active_pending is not None and active_pending.topic == "tts_scope"
             and self._parse_tts_scope_followup(normalized_route) is not None
         ):
             hints.append("pending_tts_reply")
@@ -3670,8 +3640,8 @@ class HebeEngine:
         if route_tokens & {"shoutout", "promo", "raid"} and stream_control:
             hints.append("stream_action")
             hints.append("stream_manual")
-        pending = self._active_pending_clarification()
-        if isinstance(pending, dict) and pending.get("kind") == "promotion_target_clarification":
+        pending = self._active_current_conversation(source=source)
+        if pending is not None and pending.topic == "promotion_target_clarification":
             hints.append("stream_action")
             hints.append("stream_manual")
         if re.search(r"\b(?:que|cual)\s+(?:toca|juego|directo|stream)\b", normalized_route):
@@ -3744,8 +3714,17 @@ class HebeEngine:
                 return "continue"
 
         cognitive_followup = False
+        followup_conversation = None
         if source in {"ui", "stt_voice"} and self._pending_conversation_matches(source=source, text=command):
-            self._consume_pending_conversation_turn()
+            followup_conversation = self._active_current_conversation(source=source)
+            if source == "ui" and followup_conversation is not None:
+                self.conversation_continuity.resolve_input(
+                    context_kind=followup_conversation.context_kind.value,
+                    context_id=followup_conversation.context_id,
+                    source="owner_ui", participant="leo", authority="owner", text=command,
+                    event_id=f"ui_{uuid.uuid4().hex}", compatibility=True,
+                    compatibility_reason="owner_related_followup",
+                )
             cognitive_followup = True
             print("[HEBE][COG] decision=conversation_followup", flush=True)
 
@@ -3770,8 +3749,8 @@ class HebeEngine:
                 valid=True,
             )
             self._log_input_classification(classification)
-            conversation_state = self._get_conversation_state_resolver().from_pending_turn(
-                self._get_pending_conversation_turn(),
+            conversation_state = self._get_conversation_state_resolver().from_conversation(
+                followup_conversation or self._active_current_conversation(source=source),
                 matched=cognitive_followup,
                 reason="cognitive_flow_followup" if cognitive_followup else "direct_or_typed_input",
             )
@@ -3795,7 +3774,7 @@ class HebeEngine:
 
         print(
             "[HEBE][COG] context pending="
-            f"{context.state_snapshot.get('pending_clarification')!r}",
+            f"{context.state_snapshot.get('current_conversation')!r}",
             flush=True,
         )
 
@@ -3832,7 +3811,7 @@ class HebeEngine:
             )
 
             if mode == "clarify_appointment_datetime":
-                self._set_pending_task(self._make_pending_task(
+                conversation = self._open_pending_conversation(
                     kind="appointment_datetime",
                     expected_reply_type="datetime",
                     capability_needed="appointment.create",
@@ -3841,20 +3820,20 @@ class HebeEngine:
                     can_accept_no_wake_followup=not context.stream_is_live,
                     max_attempts=1 if context.stream_is_live else 2,
                     draft=reply_step.data.get("draft", {}),
-                ), reason="appointment_datetime_missing")
+                    creation_reason="appointment_datetime_missing",
+                )
 
                 print(
-                    "[HEBE][STATE] saved pending_clarification="
-                    f"{self.runtime.state.pending_clarification!r}",
+                    "[HEBE][STATE] saved current_conversation="
+                    f"{conversation!r}",
                     flush=True,
                 )
 
             elif mode == "confirm_appointment":
-                self.runtime.state.pending_clarification = None
-                self.runtime.state.pending_reminder = None
+                self._close_current_conversation(reason="resolved", conversation=active_pending)
 
                 print(
-                    "[HEBE][STATE] cleared pending_clarification",
+                    "[HEBE][STATE] closed current_conversation",
                     flush=True,
                 )
 
@@ -3905,7 +3884,7 @@ class HebeEngine:
     def _apply_game_guidance_reply_state(self, reply_data, decision, context, route_source: str) -> None:
         mode = str((reply_data or {}).get("mode") or "")
         if mode == "game_guidance" and getattr(decision, "intent", "") == "game_guidance_clarification_answer":
-            pending = getattr(self.runtime.state, "pending_clarification", None)
+            pending = self._active_current_conversation(source=route_source)
             log_jsonl_event("pending", {
                 "event": "pending_consumed",
                 "kind": "game_guidance_clarification",
@@ -3915,10 +3894,10 @@ class HebeEngine:
             })
             print(
                 f"[HEBE][PENDING_CONSUMED] kind=game_guidance_clarification "
-                f"id={(pending or {}).get('id') if isinstance(pending, dict) else ''} reason={getattr(decision, 'pending_reason', '')}",
+                f"id={pending.id if pending else ''} reason={getattr(decision, 'pending_reason', '')}",
                 flush=True,
             )
-            self._clear_pending_task(reason="consumed", pending=pending if isinstance(pending, dict) else None)
+            self._close_current_conversation(reason="consumed", conversation=pending)
             return
         if mode != "game_guidance_clarification":
             return
@@ -3926,7 +3905,7 @@ class HebeEngine:
         guidance = dict(guidance_decision.get("context") or {})
         missing_fields = self.deliberation_service.game_guidance.missing_fields(guidance)
         now_ts = time.time()
-        pending = self._set_pending_task(self._make_pending_task(
+        pending = self._open_pending_conversation(
             kind="game_guidance_clarification",
             expected_reply_type=(
                 "game_party_or_character"
@@ -3953,17 +3932,18 @@ class HebeEngine:
             clarification_attempt_count=0,
             max_clarification_attempts=1 if bool(getattr(context, "stream_is_live", False)) else 2,
             last_clarification_event_id=str(getattr(getattr(self, "_current_input_event", None), "raw_text", "") or ""),
-        ), reason="game_guidance_missing_run_context")
+            creation_reason="game_guidance_missing_run_context",
+        )
         print(
-            f"[HEBE][GAME_PENDING] created id={pending['id']} "
-            f"expected_reply_type={self.runtime.state.pending_clarification['expected_reply_type']}",
+            f"[HEBE][GAME_PENDING] created id={pending.id} "
+            f"expected_reply_type={pending.expected_reply.type.value if pending.expected_reply else ''}",
             flush=True,
         )
         log_jsonl_event("pending", {
             "event": "pending_created",
-            "id": pending["id"],
+            "id": pending.id,
             "kind": "game_guidance_clarification",
-            "expected_reply_type": self.runtime.state.pending_clarification["expected_reply_type"],
+            "expected_reply_type": pending.expected_reply.type.value if pending.expected_reply else "",
             "source": route_source,
             "authority": "owner",
             "missing_fields": missing_fields,
@@ -4031,10 +4011,10 @@ class HebeEngine:
             "compatibility_reason": "authorized_state_update",
             "fields_updated": sorted(accepted_updates),
         })
-        pending = getattr(self.runtime.state, "pending_clarification", None)
-        if isinstance(pending, dict) and pending.get("kind") == "game_guidance_clarification":
-            print(f"[HEBE][PENDING_CONSUMED] kind=game_guidance_clarification id={pending.get('id')} reason=game_run_state_updated", flush=True)
-            self._clear_pending_task(reason="consumed", pending=pending)
+        pending = self._active_current_conversation(latest=True)
+        if pending is not None and pending.topic == "game_guidance_clarification":
+            print(f"[HEBE][PENDING_CONSUMED] kind=game_guidance_clarification id={pending.id} reason=game_run_state_updated", flush=True)
+            self._close_current_conversation(reason="consumed", conversation=pending)
         log_jsonl_event("game_guidance", {
             "game": run.game,
             "location": run.current_location,
@@ -4185,7 +4165,7 @@ class HebeEngine:
             route_context = SimpleNamespace(
                 input_text=raw_text,
                 internal_event=event,
-                state_snapshot={"pending_clarification": None},
+                state_snapshot={"current_conversation": None},
                 source=source,
                 authority=firewall.authority,
                 addressed_to_hebe=bool((payload or {}).get("direct_address_to_hebe") or self._message_mentions_hebe(raw_text)),
@@ -4443,7 +4423,7 @@ class HebeEngine:
             valid=True,
         )
         self._log_input_classification(classification)
-        conversation_state = self._get_conversation_state_resolver().from_pending_turn(
+        conversation_state = self._get_conversation_state_resolver().from_conversation(
             None,
             matched=False,
             reason="stream_event_no_private_pending",
@@ -6024,13 +6004,17 @@ class HebeEngine:
         self._tts_started_at = now
         self._tts_until = until
         self._tts_active = True
-        pending = getattr(getattr(self.runtime, "state", None), "pending_clarification", None)
-        if isinstance(pending, dict) and pending.get("kind") == "promotion_target_clarification":
-            capture_seconds = float(pending.get("capture_window_seconds") or 12.0)
-            pending["starts_after_tts_end"] = until
-            pending["actual_tts_completion_time"] = float(pending.get("actual_tts_completion_time") or 0.0)
-            pending["expires_at"] = until + capture_seconds
-            self.runtime.state.pending_clarification = pending
+        pending = self._active_current_conversation(latest=True)
+        if pending is not None and pending.topic == "promotion_target_clarification":
+            capture_seconds = float(pending.domain_payload.get("capture_window_seconds") or 12.0)
+            self._update_current_conversation(
+                pending,
+                domain_updates={
+                    "starts_after_tts_end": until,
+                    "actual_tts_completion_time": float(pending.domain_payload.get("actual_tts_completion_time") or 0.0),
+                },
+                expires_at=until + capture_seconds,
+            )
             print(
                 f"[HEBE][PROMOTION_PENDING] capture_starts={until:.3f} window_seconds={capture_seconds:.1f} source=tts_completion_estimate",
                 flush=True,
@@ -6189,54 +6173,39 @@ class HebeEngine:
             print(f"[HEBE][PENDING_CREATION_GUARD] allowed=false reason=weak_live_stream_reply expected_reply_type={expected_type}", flush=True)
             return
         print(f"[HEBE][PENDING_CREATION_GUARD] allowed=true reason=explicit_followup expected_reply_type={expected_type}", flush=True)
-        now = time.time()
-        legacy_ttl = float(getattr(self, "pending_conversation_ttl_seconds", 45) or 45)
-        has_legacy_override = abs(legacy_ttl - 45.0) > 0.001
+        configured_ttl = float(getattr(self, "pending_conversation_ttl_seconds", 45) or 45)
+        has_configured_override = abs(configured_ttl - 45.0) > 0.001
         ttl_by_type = {
-            "casual_answer": float(os.getenv("HEBE_PENDING_CASUAL_TTL_SECONDS", str(legacy_ttl if has_legacy_override else 40)) or 40),
-            "clarification": float(os.getenv("HEBE_PENDING_CLARIFICATION_TTL_SECONDS", str(legacy_ttl if has_legacy_override else 55)) or 55),
-            "action_confirmation": float(os.getenv("HEBE_PENDING_ACTION_CONFIRMATION_TTL_SECONDS", str(legacy_ttl if has_legacy_override else 60)) or 60),
+            "casual_answer": float(os.getenv("HEBE_PENDING_CASUAL_TTL_SECONDS", str(configured_ttl if has_configured_override else 40)) or 40),
+            "clarification": float(os.getenv("HEBE_PENDING_CLARIFICATION_TTL_SECONDS", str(configured_ttl if has_configured_override else 55)) or 55),
+            "action_confirmation": float(os.getenv("HEBE_PENDING_ACTION_CONFIRMATION_TTL_SECONDS", str(configured_ttl if has_configured_override else 60)) or 60),
         }
-        ttl = ttl_by_type.get(expected_type, legacy_ttl)
-        turn = {
-            "expected_type": expected_type,
-            "previous_assistant_message_id": f"assistant-{int(now * 1000)}",
-            "previous_assistant_message": str(text or "").strip(),
-            "created_at": now,
-            "expires_at": now + ttl,
-            "source": "assistant_question",
-            "allowed_sources": ["stt_voice", "ui"],
-            "allow_without_wakeword": True,
-            "status": "pending",
-            "followups_used": 0,
-            "max_followups": int(getattr(self, "pending_conversation_max_followups", 1) or 1),
-            "reply_source": source,
-        }
-        setattr(self.runtime.state, "pending_conversation_turn", turn)
+        ttl = ttl_by_type.get(expected_type, configured_ttl)
+        self._open_pending_conversation(
+            kind="assistant_followup",
+            expected_reply_type=expected_type,
+            opened_by_speech_act="assistant_question",
+            can_accept_no_wake_followup=True,
+            ttl_seconds=ttl,
+            previous_assistant_message_id=f"assistant-{int(time.time() * 1000)}",
+            previous_assistant_message=str(text or "").strip(),
+            source="assistant_question",
+            max_attempts=int(getattr(self, "pending_conversation_max_followups", 1) or 1),
+            reply_source=source,
+        )
         print(
             "[HEBE][CONVERSATION] pending_turn_created reason=direct_question source=local "
             f"expected_type={expected_type} ttl={int(ttl)}s",
             flush=True,
         )
 
-    def _get_pending_conversation_turn(self) -> dict | None:
-        turn = getattr(self.runtime.state, "pending_conversation_turn", None)
-        if not isinstance(turn, dict) or turn.get("status") != "pending":
-            return None
-        now = time.time()
-        if now > float(turn.get("expires_at", 0.0) or 0.0):
-            turn["status"] = "expired"
-            setattr(self.runtime.state, "pending_conversation_turn", turn)
-            print("[HEBE][CONVERSATION] pending_turn expired", flush=True)
-            return None
-        return turn
-
     def _pending_conversation_matches(self, *, source: str, text: str | None = None, event_type: str | None = None) -> bool:
-        turn = self._get_pending_conversation_turn()
-        if not turn:
+        conversation = self._active_current_conversation(source=source)
+        if conversation is None or conversation.topic != "assistant_followup":
             return False
-        allowed = set(turn.get("allowed_sources") or ["stt_voice", "ui"])
-        if source not in allowed:
+        expected = conversation.expected_reply
+        canonical_source = "owner_stt" if source == "stt_voice" else "owner_ui"
+        if expected is None or canonical_source not in set(expected.allowed_sources):
             print(f"[HEBE][FOLLOWUP_GATE] rejected reason=source_not_allowed source={source}", flush=True)
             return False
         if source == "stt_voice":
@@ -6257,8 +6226,8 @@ class HebeEngine:
                 "gameplay_failure", "boss_attempt", "grinding", "exploration",
                 "menu/equipment", "frustration", "laughter/joke",
             }
-            expected = str(turn.get("expected_type") or "")
-            if expected != "casual_answer" and event_type in ambient_types:
+            expected_type = expected.type.value
+            if expected_type != "casual_answer" and event_type in ambient_types:
                 print(f"[HEBE][FOLLOWUP_GATE] rejected reason=ambient_stt event_type={event_type}", flush=True)
                 return False
             if self._looks_like_stream_ambient_comment(normalized):
@@ -6280,16 +6249,6 @@ class HebeEngine:
             "que hago en", "qué hago en", "esto sigue peor", "no es nada",
         )
         return any(marker in text for marker in ambient_markers)
-
-    def _consume_pending_conversation_turn(self) -> None:
-        turn = self._get_pending_conversation_turn()
-        if not turn:
-            return
-        used = int(turn.get("followups_used", 0) or 0) + 1
-        turn["followups_used"] = used
-        if used >= int(turn.get("max_followups", 1) or 1):
-            turn["status"] = "consumed"
-        setattr(self.runtime.state, "pending_conversation_turn", turn)
 
     def _is_duplicate_recent_stt(self, raw_text: str) -> tuple[bool, float]:
         normalized = self._normalize_for_echo_match(raw_text)
@@ -6522,7 +6481,7 @@ class HebeEngine:
         )
         retry_debug["utterance_role"] = role_decision.role.value
         retry_debug["utterance_role_decision"] = role_decision.to_dict()
-        self._active_pending_clarification()
+        self._active_current_conversation(source="stt_voice")
         mute_mode = self._owner_mute_command_mode(command)
         if mute_mode and self._is_stream_enabled():
             self._apply_owner_mute_command(
@@ -6566,46 +6525,12 @@ class HebeEngine:
             # They must never borrow an owner continuation window.
             possible_reply_to_hebe = False
             pending_match = False
-        legacy_continuation_match = pending_match
-        legacy_pending = getattr(self.runtime.state, "pending_clarification", None)
-        if (
-            not force_ambient and not exact_wake and isinstance(legacy_pending, dict)
-            and str(legacy_pending.get("authority") or "owner") == "owner"
-        ):
-            legacy_kind = str(legacy_pending.get("kind") or "")
-            if legacy_kind == "promotion_target_clarification":
-                legacy_continuation_match = bool(
-                    self._promotion_pending_reply_compatible(
-                        original_raw_text, command, legacy_pending,
-                    )[0]
-                )
-            elif legacy_kind == "appointment_datetime":
-                legacy_continuation_match = self._appointment_pending_reply_compatible(command)
         continuation_event_id = str(
             stt_metadata.get("continuation_event_id")
             or stt_metadata.get("replay_event_id")
             or getattr(self._current_input_event, "event_id", "")
             or f"stt_{uuid.uuid4().hex}"
         )
-        continuation = self._resolve_conversation_continuation(
-            text=command,
-            event_id=continuation_event_id,
-            wake=exact_wake,
-            force_ambient=force_ambient,
-            legacy_match=legacy_continuation_match,
-        )
-        self._apply_game_run_correction_continuation(continuation,event_id=continuation_event_id,text=command)
-        if continuation is not None and self._current_input_event is not None:
-            self._current_input_event.stt_metadata["continuation"] = continuation.to_dict()
-        if bool(getattr(self, "conversation_continuity_v2", False)) and continuation is not None:
-            if continuation.decision == "interrupt":
-                active_pending = getattr(self.runtime.state, "pending_clarification", None)
-                if isinstance(active_pending, dict):
-                    self._clear_pending_task(reason="new_owner_command_interrupted", pending=active_pending)
-                pending_match = False
-            elif continuation.consumed:
-                pending_match = True
-                possible_reply_to_hebe = True
         conversation_followup = (
             not has_action_intent
             and voice_type != "direct_command_to_hebe"
@@ -6620,6 +6545,32 @@ class HebeEngine:
             voice_type=voice_type,
             conversation_followup=conversation_followup,
         )
+        deferred_domain_topics = {
+            "appointment_datetime", "promotion_target_clarification",
+            "game_guidance_clarification", "tts_scope",
+        }
+        continuation = self._resolve_conversation_continuation(
+            text=command,
+            event_id=continuation_event_id,
+            wake=exact_wake,
+            force_ambient=force_ambient,
+            compatibility=True if (envelope.pending_compatible or conversation_followup) else False,
+            compatibility_reason=envelope.reason,
+            consume=not (
+                envelope.pending_compatible and envelope.active_conversation is not None
+                and envelope.active_conversation.topic in deferred_domain_topics
+            ),
+        )
+        self._apply_game_run_correction_continuation(continuation,event_id=continuation_event_id,text=command)
+        if continuation is not None and self._current_input_event is not None:
+            self._current_input_event.stt_metadata["continuation"] = continuation.to_dict()
+        if continuation is not None:
+            if continuation.decision == "interrupt":
+                pending_match = False
+                conversation_followup = False
+            elif continuation.consumed or envelope.pending_compatible:
+                pending_match = True
+                possible_reply_to_hebe = True
         pending_followup = envelope.is_followup_candidate
         is_direct_command = envelope.source in {"owner_stt_direct", "owner_stt_command"}
         if media_detected and envelope.source == "ambient_stt":
@@ -6657,8 +6608,8 @@ class HebeEngine:
                 valid=True,
             )
             self._log_input_classification(classification)
-            conversation_state = self._get_conversation_state_resolver().from_pending_turn(
-                self._get_pending_conversation_turn(),
+            conversation_state = self._get_conversation_state_resolver().from_conversation(
+                self._active_current_conversation(source="stt_voice"),
                 matched=False,
                 reason="no_matching_active_conversation",
             )
@@ -6694,11 +6645,11 @@ class HebeEngine:
                 self._log_stt_non_command_decision(command, "ambient_ignored_low_value", reason=firewall.reason)
             self._current_input_event = None
             return "continue"
-        pending_turn_for_frame = self._get_pending_conversation_turn()
+        pending_turn_for_frame = self._active_current_conversation(source="stt_voice")
         if envelope.pending_compatible:
             conversation_state = ConversationState(
                 active=True,
-                topic=str((envelope.active_pending or {}).get("kind") or "pending_task"),
+                topic=envelope.active_conversation.topic if envelope.active_conversation else "pending_task",
                 source="cognitive_pending_task",
                 expected_reply_type=envelope.expected_reply_type,
                 allow_no_wakeword=True,
@@ -6708,7 +6659,7 @@ class HebeEngine:
                 reason="pending_compatible_input_envelope",
             )
         else:
-            conversation_state = self._get_conversation_state_resolver().from_pending_turn(
+            conversation_state = self._get_conversation_state_resolver().from_conversation(
                 pending_turn_for_frame,
                 matched=bool(pending_followup),
                 reason="active_conversation_state" if pending_followup else "no_matching_active_conversation",
@@ -6778,10 +6729,9 @@ class HebeEngine:
             self._current_input_event.stt_metadata["conversation_followup"] = not envelope.pending_compatible
             self._current_input_event.stt_metadata["jarvis_allowed"] = True
             if envelope.pending_compatible:
-                pending_kind = str((envelope.active_pending or {}).get("kind") or "pending")
+                pending_kind = envelope.active_conversation.topic if envelope.active_conversation else "pending"
                 print(f"[HEBE][COG] decision=pending_followup kind={pending_kind}", flush=True)
             else:
-                self._consume_pending_conversation_turn()
                 print("[HEBE][COG] decision=conversation_followup", flush=True)
         elif stream_enabled:
             if is_direct_command or not pending_followup:
@@ -7111,12 +7061,11 @@ class HebeEngine:
                 "target": app_target,
             }
 
-        pending = self._active_pending_clarification()
-        active_pending = pending if isinstance(pending, dict) else None
-        pending_kind = str((active_pending or {}).get("kind") or "")
+        active_pending = self._active_current_conversation(source="stt_voice")
+        pending_kind = active_pending.topic if active_pending else ""
         expected_reply_type = (
-            "datetime" if pending_kind == "appointment_datetime"
-            else str((active_pending or {}).get("expected_reply_type") or "")
+            active_pending.expected_reply.type.value
+            if active_pending and active_pending.expected_reply else ""
         )
         router = getattr(self, "cognitive_router", None) or CognitiveRouter()
         game_snapshot = {
@@ -7148,7 +7097,6 @@ class HebeEngine:
         )
         appointment_pending_compatible = bool(
             active_pending
-            and str(active_pending.get("authority") or "owner") == "owner"
             and pending_kind == "appointment_datetime"
             and self._appointment_pending_reply_compatible(normalized)
             and not stronger_request
@@ -7156,7 +7104,7 @@ class HebeEngine:
         promotion_pending_compatible = False
         promotion_pending_reason = "no_promotion_pending"
         promotion_resolution = {}
-        if active_pending and str(active_pending.get("authority") or "owner") == "owner" and pending_kind == "promotion_target_clarification" and not stronger_request:
+        if active_pending and pending_kind == "promotion_target_clarification" and not stronger_request:
             promotion_pending_compatible, promotion_pending_reason, promotion_resolution = self._promotion_pending_reply_compatible(
                 event.raw_text,
                 normalized,
@@ -7169,7 +7117,7 @@ class HebeEngine:
                 flush=True,
             )
             if not promotion_pending_compatible and addressed:
-                self._increment_pending_attempt(active_pending, reason=promotion_pending_reason)
+                self._increment_conversation_attempt(active_pending, reason=promotion_pending_reason)
             elif not promotion_pending_compatible:
                 promotion_pending_reason = "ambient_source_ignored"
                 print(
@@ -7202,10 +7150,26 @@ class HebeEngine:
                     game_pending_compatible = False
                     game_pending_reason = "parser_found_no_game_updates"
                     self._log_game_pending_compat(False, game_pending_reason, pending=active_pending)
-        pending_compatible = bool(appointment_pending_compatible or promotion_pending_compatible or game_pending_updates)
+        generic_pending_compatible = False
+        if (
+            active_pending is not None
+            and pending_kind not in {
+                "appointment_datetime", "promotion_target_clarification",
+                "game_guidance_clarification", "assistant_followup", "tts_scope",
+            }
+            and active_pending.expected_reply is not None
+            and not stronger_request
+        ):
+            generic_pending_compatible = (
+                active_pending.expected_reply.classify(event.raw_text)[0] != ConversationalAct.UNKNOWN
+            )
+        pending_compatible = bool(
+            appointment_pending_compatible or promotion_pending_compatible
+            or game_pending_updates or generic_pending_compatible
+        )
         if pending_compatible and active_pending and not addressed and self._is_stream_enabled() and self._current_stream_is_live():
-            explicit_pending_ok = bool(active_pending.get("explicit_question_asked", False))
-            no_wake_ok = bool(active_pending.get("can_accept_no_wake_followup", False))
+            explicit_pending_ok = bool(active_pending.domain_payload.get("explicit_question_asked", False))
+            no_wake_ok = bool(active_pending.domain_payload.get("can_accept_no_wake_followup", False))
             if not (explicit_pending_ok and no_wake_ok):
                 pending_compatible = False
                 print(
@@ -7241,6 +7205,7 @@ class HebeEngine:
             reason = (
                 "game_guidance_answer" if game_pending_updates
                 else "promotion_target_answer" if promotion_pending_compatible
+                else "canonical_expected_reply" if generic_pending_compatible
                 else "datetime_answer"
             )
         elif addressed and not isolated_dialogue:
@@ -7280,7 +7245,7 @@ class HebeEngine:
             intent_candidates=intent_candidates,
             app_target=app_target,
             app_plan_result=app_plan_result,
-            active_pending=active_pending,
+            active_conversation=active_pending,
             pending_compatible=pending_compatible,
             expected_reply_type=expected_reply_type,
             is_followup_candidate=bool(pending_compatible or conversation_followup),
@@ -7353,22 +7318,18 @@ class HebeEngine:
             return True
         if direct_family == DirectUtteranceIntentFamily.INCOMPLETE_COMMAND.value:
             return False
-        pending = getattr(self.runtime.state, "pending_clarification", None)
-        if isinstance(pending, dict) and pending.get("kind") == "promotion_target_clarification":
-            try:
-                if float(pending.get("expires_at") or 0.0) > time.time():
-                    compatible, reason, _resolution = self._promotion_pending_reply_compatible(
-                        getattr(event, "raw_text", "") or getattr(event, "normalized_text", ""),
-                        getattr(event, "normalized_text", ""),
-                        pending,
-                    )
-                    print(
-                        f"[HEBE][PROMOTION_PENDING] compatible_followup_probe={str(bool(compatible)).lower()} reason={reason}",
-                        flush=True,
-                    )
-                    return bool(compatible)
-            except (TypeError, ValueError):
-                pass
+        pending = self._active_current_conversation(source="stt_voice")
+        if pending is not None and pending.topic == "promotion_target_clarification":
+            compatible, reason, _resolution = self._promotion_pending_reply_compatible(
+                getattr(event, "raw_text", "") or getattr(event, "normalized_text", ""),
+                getattr(event, "normalized_text", ""),
+                pending,
+            )
+            print(
+                f"[HEBE][PROMOTION_PENDING] compatible_followup_probe={str(bool(compatible)).lower()} reason={reason}",
+                flush=True,
+            )
+            return bool(compatible)
         try:
             local_plan = self._get_local_app_planner().plan(
                 event,
@@ -8211,7 +8172,7 @@ class HebeEngine:
         print(
             "[HEBE][COG] incoming "
             f"source='stt_voice' command={command!r} "
-            f"current_pending={getattr(self.runtime.state, 'pending_clarification', None)!r}",
+            f"current_pending={self._active_current_conversation(source='stt_voice')!r}",
             flush=True,
         )
         suffix = f" reason={reason}" if reason else ""
@@ -8619,11 +8580,11 @@ class HebeEngine:
             and fresh_plan.target
             and not ({"previsualiza", "preview"} & set(normalized.split()))
         ):
-            old_pending = getattr(self.runtime.state, "pending_clarification", None)
-            if isinstance(old_pending, dict) and old_pending.get("kind") == "promotion_target_clarification":
-                self._clear_pending_task(reason="superseded_by_fresh_promotion", pending=old_pending)
+            old_pending = self._active_current_conversation(latest=True)
+            if old_pending is not None and old_pending.topic == "promotion_target_clarification":
+                self._close_current_conversation(reason="superseded_by_fresh_promotion", conversation=old_pending)
                 print(
-                    f"[HEBE][PROMOTION_PENDING] superseded id={old_pending.get('id')} target={fresh_plan.target}",
+                    f"[HEBE][PROMOTION_PENDING] superseded id={old_pending.id} target={fresh_plan.target}",
                     flush=True,
                 )
 
@@ -9751,8 +9712,7 @@ class HebeEngine:
 
     def _create_promotion_pending(self, plan: ActionPlan, *, fallback: str) -> None:
         print("[HEBE][PENDING_CREATION_GUARD] allowed=true reason=promotion_target_clarification", flush=True)
-        pending = self._set_pending_task(self._make_pending_task(
-            id=f"promotion_{uuid.uuid4().hex}",
+        pending = self._open_pending_conversation(
             kind="promotion_target_clarification",
             expected_reply_type="twitch_username_or_viewer_alias",
             allowed_sources=["stt_voice", "ui"],
@@ -9775,27 +9735,23 @@ class HebeEngine:
             minimum_target_confidence=0.78,
             actual_tts_completion_time=0.0,
             buffered_answers=[],
-        ), reason="promotion_target_clarification")
+            creation_reason="promotion_target_clarification",
+        )
         print(
-            f"[HEBE][PROMOTION_PENDING] created id={pending['id']} reason={plan.reason} candidates={pending['candidates']!r}",
+            f"[HEBE][PROMOTION_PENDING] created id={pending.id} reason={plan.reason} candidates={pending.domain_payload.get('candidates')!r}",
             flush=True,
         )
 
     def _resolve_pending_promotion_target(self, raw_command: str, normalized: str, stream) -> CommandResult | None:
-        pending = getattr(self.runtime.state, "pending_clarification", None)
-        if not isinstance(pending, dict) or pending.get("kind") != "promotion_target_clarification":
+        pending = self._active_current_conversation(latest=True, expire=False)
+        if pending is None or pending.topic != "promotion_target_clarification":
             return None
-        try:
-            if float(pending.get("expires_at") or 0.0) <= time.time():
-                print(f"[HEBE][PROMOTION_PENDING] expired id={pending.get('id')}", flush=True)
-                print(f"[HEBE][PENDING_EXPIRED] kind=promotion_target_clarification id={pending.get('id')}", flush=True)
-                self._clear_pending_task(reason="expired", pending=pending)
-                return None
-        except (TypeError, ValueError):
-            print(f"[HEBE][PROMOTION_PENDING] expired id={pending.get('id')}", flush=True)
-            print(f"[HEBE][PENDING_EXPIRED] kind=promotion_target_clarification id={pending.get('id')}", flush=True)
-            self._clear_pending_task(reason="expired", pending=pending)
+        if pending.expires_at <= time.time():
+            print(f"[HEBE][PROMOTION_PENDING] expired id={pending.id}", flush=True)
+            print(f"[HEBE][PENDING_EXPIRED] kind=promotion_target_clarification id={pending.id}", flush=True)
+            self._close_current_conversation(reason="expired", conversation=pending)
             return None
+        domain = pending.domain_payload
 
         raw_answer = str(raw_command or normalized or "").strip()
         answer = self._normalize_promotion_pending_target_text(raw_answer)
@@ -9805,12 +9761,12 @@ class HebeEngine:
             flush=True,
         )
         if answer_norm in {"si", "sí", "ese", "si ese", "sí ese", "ese mismo"}:
-            candidates = list(pending.get("candidates") or [])
-            answer = candidates[0] if candidates else str(pending.get("target_raw") or "")
+            candidates = list(domain.get("candidates") or [])
+            answer = candidates[0] if candidates else str(domain.get("target_raw") or "")
         if answer_norm in {"el nuevo", "el de antes", "el que acaba de hablar"}:
             answer = ""
 
-        pending_candidates = [str(candidate).strip() for candidate in (pending.get("candidates") or []) if str(candidate).strip()]
+        pending_candidates = [str(candidate).strip() for candidate in (domain.get("candidates") or []) if str(candidate).strip()]
         if answer_norm in {"si", "sÃ­", "ese", "si ese", "sÃ­ ese", "ese mismo"} and len(pending_candidates) > 1:
             answer = ""
         if not answer and answer_norm in {"el nuevo", "el de antes", "el que acaba de hablar"}:
@@ -9826,11 +9782,10 @@ class HebeEngine:
             flush=True,
         )
         if not target or confidence < 0.78 or reason in {"ambiguous_target", "medium_confidence", "unverified_username"}:
-            pending["candidates"] = candidates
-            pending["reason"] = reason
-            still_active = self._increment_pending_attempt(pending, reason=reason or "not_found")
-            if still_active:
-                self.runtime.state.pending_clarification = pending
+            pending = self._update_current_conversation(
+                pending, domain_updates={"candidates": candidates, "reason": reason},
+            )
+            self._increment_conversation_attempt(pending, reason=reason or "not_found")
             print(f"[HEBE][PROMOTION_CLARIFY] reason={reason or 'not_found'} candidates={candidates!r}", flush=True)
             return CommandResult(
                 action_type="twitch_shoutout_clarify",
@@ -9840,13 +9795,12 @@ class HebeEngine:
                 constraints=["Ask one concise follow-up question.", "Do not claim the shoutout was sent."],
                 fallback_text=(f"¿Te refieres a {candidates[0]}?" if candidates else "No ubico a ese usuario, Leo. Dame el login o alias."),
                 requires_model_response=False,
-                metadata={"pending": pending, "candidates": candidates, "confidence": confidence, "reason": reason},
+                metadata={"conversation": pending.to_dict(), "candidates": candidates, "confidence": confidence, "reason": reason},
             )
 
-        pending["status"] = "consumed"
-        print(f"[HEBE][PENDING_CONSUMED] kind=promotion_target_clarification id={pending.get('id')} reason=resolved_target", flush=True)
-        self._clear_pending_task(reason="consumed", pending=pending)
-        print(f"[HEBE][PROMOTION_PENDING] resolved id={pending.get('id')} target={target}", flush=True)
+        print(f"[HEBE][PENDING_CONSUMED] kind=promotion_target_clarification id={pending.id} reason=resolved_target", flush=True)
+        self._close_current_conversation(reason="consumed", conversation=pending)
+        print(f"[HEBE][PROMOTION_PENDING] resolved id={pending.id} target={target}", flush=True)
         print(
             f"[HEBE][PROMOTION_PENDING_ANSWER] raw={raw_answer!r} normalized_target={answer!r} source=trusted_manual accepted=true",
             flush=True,
@@ -9860,7 +9814,7 @@ class HebeEngine:
             requires_stream=True,
             reason="pending_resolved",
             candidates=candidates or [target],
-            slots={"target_raw": answer, "resolved_username": target, "pending_id": pending.get("id")},
+            slots={"target_raw": answer, "resolved_username": target, "pending_id": pending.id},
         )
         return self._execute_twitch_shoutout_plan(plan, stream)
 
@@ -10658,18 +10612,19 @@ class HebeEngine:
         intent = self._parse_tts_control_intent(normalized)
         if intent == "global_on":
             self.runtime.state.tts_enabled = True
-            self.runtime.state.pending_tts_scope = {
-                "kind": "tts_scope",
-                "created_at": datetime.now(timezone.utc).isoformat(),
-            }
+            self._open_pending_conversation(
+                kind="tts_scope", expected_reply_type="clarification",
+                capability_needed="audio.tts_control", can_accept_no_wake_followup=True,
+                ttl_seconds=60, creation_reason="tts_scope_question",
+            )
             print("[HEBE][INTENT] voice command handled before reminder parser", flush=True)
-            print("[HEBE][INTENT] pending_tts_scope set", flush=True)
+            print("[HEBE][INTENT] tts_scope conversation opened", flush=True)
             self._emit_audio_status()
             return CommandResult(
                 action_type="tts_enabled",
                 success=True,
                 user_visible_summary="Global/local TTS enabled; asking Leo whether voice should stay local or also apply to stream.",
-                state_changes={"tts_enabled": True, "pending_tts_scope": True},
+                state_changes={"tts_enabled": True, "tts_scope_conversation_active": True},
                 constraints=["Ask only whether scope is local or stream.", "Do not imply stream TTS is enabled yet."],
                 suggested_tone="short Hebe voice, useful and warm",
                 fallback_text="Voz activada. ¿La quieres solo aquí/local o también para el stream?",
@@ -10678,14 +10633,16 @@ class HebeEngine:
             )
         if intent == "global_off":
             self.runtime.state.tts_enabled = False
-            self.runtime.state.pending_tts_scope = None
+            conversation = self._active_current_conversation(latest=True)
+            if conversation is not None and conversation.topic == "tts_scope":
+                self._close_current_conversation(reason="owner_cancel", conversation=conversation)
             print("[HEBE][INTENT] voice command handled before reminder parser", flush=True)
             self._emit_audio_status()
             return CommandResult(
                 action_type="tts_disabled",
                 success=True,
                 user_visible_summary="Global TTS disabled; Hebe will answer in text.",
-                state_changes={"tts_enabled": False, "pending_tts_scope": False},
+                state_changes={"tts_enabled": False, "tts_scope_conversation_active": False},
                 constraints=["Do not ask a follow-up question."],
                 fallback_text="Vale, Leo. Me quedo en texto.",
                 requires_model_response=True,
@@ -10756,62 +10713,60 @@ class HebeEngine:
 
     def _handle_pending_manual_intent(self, text: str, *, cognitive_decision=None, source: str | None = None) -> CommandResult | str | None:
         normalized = self._normalize_voice_command_text(text)
-        capability = "pending.cancel" if self._is_cancel_pending_reminder(normalized) else "audio.tts_control"
+        capability = "pending.cancel" if self._is_cancel_pending_request(normalized) else "audio.tts_control"
         if not self._manual_handler_guard(
             handler="pending", cognitive_decision=cognitive_decision,
             capabilities={capability}, source=source,
         ):
             return None
-        if self._is_cancel_pending_reminder(normalized):
-            if getattr(self.runtime.state, "pending_clarification", None) or getattr(self.runtime.state, "pending_reminder", None):
-                self.runtime.state.pending_clarification = None
-                self.runtime.state.pending_reminder = None
+        if self._is_cancel_pending_request(normalized):
+            conversation = self._active_current_conversation(latest=True)
+            if conversation is not None:
+                self._close_current_conversation(reason="owner_cancel", conversation=conversation)
                 print("[HEBE][INTENT] reminder pending cancelled", flush=True)
                 return CommandResult(
                     action_type="pending_reminder_cancelled",
                     success=True,
                     user_visible_summary="Pending reminder or appointment clarification was cancelled.",
-                    state_changes={"pending_clarification": None, "pending_reminder": None},
+                    state_changes={"current_conversation": None},
                     constraints=["Do not ask for clarification."],
                     fallback_text="Vale, no guardo nada.",
                     requires_model_response=True,
                     metadata={"message_goal": "Tell Leo the pending reminder clarification was cancelled."},
                 )
 
-        if not getattr(self.runtime.state, "pending_tts_scope", None):
+        pending_tts = self._active_current_conversation(source=source or "")
+        if pending_tts is None or pending_tts.topic != "tts_scope":
             return None
 
-        pending_tts = getattr(self.runtime.state, "pending_tts_scope", {}) or {}
-        print("[HEBE][PENDING] active=pending_tts_scope", flush=True)
-        print("[HEBE][INTENT] pending_tts_scope active", flush=True)
+        print("[HEBE][PENDING] active=tts_scope", flush=True)
+        print("[HEBE][INTENT] tts_scope conversation active", flush=True)
         if self._is_explicit_command_while_pending(normalized):
-            self.runtime.state.pending_tts_scope = None
-            print("[HEBE][PENDING] new explicit command detected; clearing pending_tts_scope", flush=True)
-            print("[HEBE][INTENT] cleared pending_tts_scope", flush=True)
+            self._close_current_conversation(reason="new_owner_command_interrupted", conversation=pending_tts)
+            print("[HEBE][PENDING] new explicit command detected; closing tts_scope", flush=True)
             return None
 
         scope = self._parse_tts_scope_followup(normalized)
         if scope == "local":
-            return self._resolve_pending_tts_scope_local()
+            return self._resolve_tts_scope_local(pending_tts)
         if scope == "stream":
-            return self._resolve_pending_tts_scope_stream()
+            return self._resolve_tts_scope_stream(pending_tts)
 
-        if not pending_tts.get("unclear_asked"):
-            pending_tts["unclear_asked"] = True
-            self.runtime.state.pending_tts_scope = pending_tts
+        if not pending_tts.domain_payload.get("unclear_asked"):
+            self._update_current_conversation(pending_tts, domain_updates={"unclear_asked": True})
             return CommandResult(
                 action_type="tts_scope_clarify",
                 success=False,
                 user_visible_summary="TTS scope follow-up was unclear; ask whether local or stream.",
-                state_changes={"pending_tts_scope": True},
+                state_changes={"tts_scope_conversation_active": True},
                 constraints=["Ask one concise clarification question."],
                 fallback_text="No te he entendido, Leo. ¿Local o también para stream?",
                 requires_model_response=False,
                 metadata={"message_goal": "Ask Leo whether voice should be local only or also for stream."},
             )
-        return self._resolve_pending_tts_scope_local(defaulted=True)
+        return self._resolve_tts_scope_local(pending_tts, defaulted=True)
 
-    def _is_cancel_pending_reminder(self, normalized: str) -> bool:
+    def _is_cancel_pending_request(self, normalized: str) -> bool:
         tokens = set(str(normalized or "").split())
         return bool(tokens & {"cancela", "olvida"}) or ({"no", "guardes"}.issubset(tokens))
 
@@ -10832,7 +10787,7 @@ class HebeEngine:
             return "local"
         return None
 
-    def _resolve_pending_tts_scope_local(self, *, defaulted: bool = False) -> CommandResult:
+    def _resolve_tts_scope_local(self, conversation: CurrentConversation, *, defaulted: bool = False) -> CommandResult:
         stream = self._get_stream_state()
         policies = getattr(stream, "policies", None) if stream else None
         self.runtime.state.tts_enabled = True
@@ -10840,21 +10795,20 @@ class HebeEngine:
             policies.allow_tts_idle_prompts = False
         if stream is not None:
             stream.stream_output_mode = "ui_only"
-        self.runtime.state.pending_tts_scope = None
-        print("[HEBE][INTENT] resolved pending_tts_scope=local", flush=True)
-        print("[HEBE][INTENT] cleared pending_tts_scope", flush=True)
+        self._close_current_conversation(reason="resolved", conversation=conversation)
+        print("[HEBE][INTENT] resolved tts_scope=local", flush=True)
         return CommandResult(
             action_type="tts_scope_resolved",
             success=True,
             user_visible_summary="Voice is enabled locally only; stream remains text-only unless Leo asks otherwise.",
-            state_changes={"tts_enabled": True, "stream_idle_tts": False, "stream_output_mode": "ui_only", "pending_tts_scope": False, "defaulted": defaulted},
+            state_changes={"tts_enabled": True, "stream_idle_tts": False, "stream_output_mode": "ui_only", "tts_scope_conversation_active": False, "defaulted": defaulted},
             constraints=["Do not ask for more clarification.", "Do not claim stream voice is enabled."],
             fallback_text="Perfecto, voz activada solo aquí. En stream seguiré en texto salvo que me digas lo contrario.",
             requires_model_response=True,
             metadata={"scope": "local", "message_goal": "Confirm voice is enabled locally only, and stream remains text-only unless Leo asks otherwise."},
         )
 
-    def _resolve_pending_tts_scope_stream(self) -> CommandResult:
+    def _resolve_tts_scope_stream(self, conversation: CurrentConversation) -> CommandResult:
         stream = self._get_stream_state()
         policies = getattr(stream, "policies", None) if stream else None
         self.runtime.state.tts_enabled = True
@@ -10864,14 +10818,13 @@ class HebeEngine:
             policies.allow_tts_raid_thanks = True
         if stream is not None:
             stream.stream_output_mode = "tts_enabled"
-        self.runtime.state.pending_tts_scope = None
-        print("[HEBE][INTENT] resolved pending_tts_scope=stream", flush=True)
-        print("[HEBE][INTENT] cleared pending_tts_scope", flush=True)
+        self._close_current_conversation(reason="resolved", conversation=conversation)
+        print("[HEBE][INTENT] resolved tts_scope=stream", flush=True)
         return CommandResult(
             action_type="tts_scope_resolved",
             success=True,
             user_visible_summary="Voice is enabled locally and for stream event replies; idle spontaneity remains text-only unless Leo asks otherwise.",
-            state_changes={"tts_enabled": True, "stream_replies_tts": True, "stream_event_tts": True, "stream_raid_tts": True, "stream_output_mode": "tts_enabled", "pending_tts_scope": False},
+            state_changes={"tts_enabled": True, "stream_replies_tts": True, "stream_event_tts": True, "stream_raid_tts": True, "stream_output_mode": "tts_enabled", "tts_scope_conversation_active": False},
             constraints=["Do not ask for more clarification.", "Do not claim idle spontaneous voice is enabled."],
             fallback_text="Perfecto, voz activada aquí y también para eventos del stream. La espontaneidad idle sigue en texto salvo que me digas lo contrario.",
             requires_model_response=True,

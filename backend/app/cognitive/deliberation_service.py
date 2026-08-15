@@ -29,6 +29,7 @@ from app.cognitive.cognitive_router import (
     CognitiveRouter,
 )
 from app.core.persistent_logs import log_jsonl_event
+from app.continuity.models import CurrentConversation
 
 
 CAPABILITY_BACKLOG_QUERY = "hebe.capability_backlog_query"
@@ -181,26 +182,29 @@ class DeliberationService:
             return finish(self._plan_personal_state(decision.personal_state))
 
         if decision.intent == "game_guidance_clarification_answer":
-            pending = (getattr(context, "state_snapshot", {}) or {}).get("pending_clarification") or {}
+            pending = (getattr(context, "state_snapshot", {}) or {}).get("current_conversation")
+            if not isinstance(pending, CurrentConversation):
+                return finish(DeliberationResult(plan=Plan(steps=[PlanStep(type="noop")], reasoning="Missing canonical conversation")))
+            domain = pending.domain_payload
             updates = self.game_guidance.parse_clarification_answer(pending, context.input_text or "")
             run = GameRunState.from_value((getattr(context, "state_snapshot", {}) or {}).get("game_run_state"))
             for field_name, value in updates.items():
                 if field_name in GameRunState.__dataclass_fields__:
                     setattr(run, field_name, value)
             continuation = copy.copy(context)
-            continuation.input_text = str(pending.get("original_question") or context.input_text or "")
+            continuation.input_text = str(domain.get("original_question") or context.input_text or "")
             continuation.state_snapshot = {**(getattr(context, "state_snapshot", {}) or {}), "game_run_state": run.to_dict()}
             continuation.game_guidance_decision = None
             guidance = self.game_guidance.evaluate(continuation)
             self._log_game_guidance_event(guidance)
-            before = list(pending.get("missing_fields") or [])
+            before = list(domain.get("missing_fields") or [])
             after = self.game_guidance.missing_fields(guidance.context)
             print(f"[HEBE][GAME_CLARIFICATION] missing_fields_before={before!r} missing_fields_after={after!r}", flush=True)
             return finish(DeliberationResult(plan=Plan(
                 steps=[
                     PlanStep(
                         type="state_update",
-                        data={"kind": "game_run_state", "updates": updates, "pending_id": pending.get("id")},
+                        data={"kind": "game_run_state", "updates": updates, "pending_id": pending.id},
                         capability_id=CAP_GAME_GUIDANCE,
                     ),
                     PlanStep(
@@ -235,7 +239,7 @@ class DeliberationService:
             if local_plan is not None:
                 return finish(self._plan_canonical_open_app(local_plan.target))
 
-        pending = (getattr(context, "state_snapshot", {}) or {}).get("pending_clarification")
+        pending = (getattr(context, "state_snapshot", {}) or {}).get("current_conversation")
         if decision.uses_pending_task and decision.pending_resolution_allowed and pending:
             return finish(self._resolve_pending_appointment(context, pending))
 
@@ -444,10 +448,10 @@ class DeliberationService:
         question = interp.clarification_question or self._build_missing_fields_question(interp)
         return self._build_clarify_plan(question, draft, interp.reason or "no_match")
 
-    def _resolve_pending_appointment(self, context: BuiltContext, pending: dict) -> DeliberationResult:
+    def _resolve_pending_appointment(self, context: BuiltContext, pending: CurrentConversation) -> DeliberationResult:
         now = datetime.now(ZoneInfo("Europe/Madrid"))
         reply_text = context.input_text or ""
-        pending_draft = pending.get("draft", {})
+        pending_draft = pending.domain_payload.get("draft", {})
 
         print(
             "[HEBE][PENDING] loaded draft="

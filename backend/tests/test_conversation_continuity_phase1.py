@@ -4,9 +4,6 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
-
-from app.continuity.legacy_adapter import LegacyPendingAdapter
 from app.continuity.models import (
     ConversationContext, ConversationStatus, ConversationalAct, ExpectedReply,
     ExpectedReplyType, OpenThreadStatus,
@@ -124,30 +121,49 @@ class ConversationServiceTests(ContinuityFixture):
         self.assertEqual(self.conversations.interrupt_active_on_start(), 2)
         self.assertEqual(self.conversations.get(stale.id).closure_reason, "runtime_restart")
 
-    def test_shadow_resolution_does_not_mutate(self):
+    def test_compatibility_probe_does_not_mutate(self):
         opened = self.open()
         result = self.service.resolve_input(
             context_kind="owner_live_control", context_id="stream-1", source="owner_stt",
-            participant="leo", authority="owner", text="sí", event_id="shadow", consume=False,
+            participant="leo", authority="owner", text="sí", event_id="probe", consume=False,
         )
         self.assertTrue(result.consumed)
-        self.assertEqual(result.decision, "compatible_reply_shadow")
+        self.assertEqual(result.decision, "compatible_reply_probe")
         self.assertEqual(self.conversations.get(opened.id).status, ConversationStatus.WAITING_ON_LEO)
 
-    def test_legacy_adapter_projects_one_candidate_as_yes_no(self):
-        state = SimpleNamespace(pending_clarification=None)
-        adapter = LegacyPendingAdapter(self.service, state)
-        pending = {
-            "id": "pending-1", "kind": "promotion_target_clarification",
-            "expected_reply_type": "twitch_username_or_viewer_alias",
-            "candidates": ["ivanxi_kun"], "expires_at": self.now + 60,
-        }
-        conversation = adapter.project_legacy_pending(
-            pending, context_kind=ConversationContext.OWNER_LIVE_CONTROL,
-            context_id="stream-1", event_id="question",
+    def test_canonical_pending_is_created_updated_and_replaced_without_dict_state(self):
+        first = self.service.open_conversation(
+            context_kind=ConversationContext.OWNER_LIVE_CONTROL,
+            context_id="stream-1", topic="promotion_target_clarification",
+            origin_event_id="question", expected_reply=ExpectedReply(
+                type=ExpectedReplyType.TWITCH_USERNAME_OR_VIEWER_ALIAS,
+                allowed_sources=("owner_stt", "owner_ui"), expires_at=self.now + 60,
+            ), domain_payload={"candidates": ["ivanxi_kun"], "attempts": 0},
         )
-        self.assertEqual(conversation.expected_reply.type, ExpectedReplyType.YES_NO)
-        self.assertEqual(pending["conversation_id"], conversation.id)
+        self.assertEqual(first.topic, "promotion_target_clarification")
+        self.assertEqual(first.expected_reply.type, ExpectedReplyType.TWITCH_USERNAME_OR_VIEWER_ALIAS)
+        updated = self.service.update_conversation(
+            first, domain_updates={"attempts": 1}, expires_at=self.now + 120,
+        )
+        self.assertEqual(updated.domain_payload["attempts"], 1)
+        self.assertEqual(updated.expires_at, self.now + 120)
+        self.assertEqual(updated.expected_reply.expires_at, self.now + 120)
+        second = self.open(reply_type=ExpectedReplyType.DATETIME)
+        self.assertEqual(self.conversations.get(first.id).status, ConversationStatus.INTERRUPTED)
+        self.assertEqual(self.conversations.get(second.id).status, ConversationStatus.WAITING_ON_LEO)
+
+    def test_different_contexts_coexist_and_cancelled_conversation_is_not_reused(self):
+        live = self.open()
+        ui = self.open(context_kind=ConversationContext.PRIVATE_UI, context_id="leo-ui")
+        self.assertEqual(len(self.conversations.list_active()), 2)
+        self.service.close_conversation(live, reason="owner_cancel", event_id="cancel")
+        result = self.service.resolve_input(
+            context_kind="owner_live_control", context_id="stream-1", source="owner_stt",
+            participant="leo", authority="owner", text="sí", event_id="late-reuse",
+        )
+        self.assertFalse(result.consumed)
+        self.assertEqual(result.decision, "no_conversation")
+        self.assertEqual(self.conversations.get(ui.id).status, ConversationStatus.WAITING_ON_LEO)
 
 
 class Phase1ReplayIntegrationTests(unittest.TestCase):

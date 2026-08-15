@@ -10,6 +10,7 @@ from typing import Any
 from app.cognitive.cognitive_decision import CognitiveDecision
 from app.cognitive.game_guidance import CAP_GAME_GUIDANCE, GameGuidanceCapability
 from app.core.persistent_logs import log_jsonl_event
+from app.continuity.models import CurrentConversation, ConversationStatus
 
 
 CAP_TIME = "time.get_current_time"
@@ -44,7 +45,7 @@ class CognitiveRouter:
         authority = str(getattr(context, "authority", "") or self._authority(source))
         addressed = bool(getattr(context, "addressed_to_hebe", authority == "owner"))
         message_id = str(getattr(context, "message_id", "") or f"msg_{uuid.uuid4().hex}")
-        pending = (getattr(context, "state_snapshot", {}) or {}).get("pending_clarification")
+        pending = (getattr(context, "state_snapshot", {}) or {}).get("current_conversation")
         firewall_decision = str(getattr(context, "firewall_decision", "") or "")
         event_type = str(getattr(getattr(context, "internal_event", None), "event_type", "") or "")
         stream_is_live = bool(getattr(context, "stream_is_live", False))
@@ -239,11 +240,10 @@ class CognitiveRouter:
         return CognitiveDecision(**base)
 
     def _apply_pending_contract(self, decision: CognitiveDecision, pending: Any) -> CognitiveDecision:
-        if not isinstance(pending, dict) or not pending:
+        if not isinstance(pending, CurrentConversation):
             return decision
-        pending_id = str(pending.get("id") or pending.get("task_id") or "pending_clarification")
-        kind = str(pending.get("kind") or "unknown")
-        common = {"active_pending_task": {**pending, "id": pending_id}, "pending_task_kind": kind}
+        kind = pending.topic
+        common = {"current_conversation": pending, "pending_task_kind": kind}
         if self._pending_expired(pending):
             return replace(decision, **common, pending_reason="expired")
         if not self._authority_may_answer(decision, pending):
@@ -312,19 +312,13 @@ class CognitiveRouter:
         return replace(decision, **common, pending_reason="incompatible_reply_type")
 
     @staticmethod
-    def _pending_expired(pending: dict) -> bool:
-        expires_at = pending.get("expires_at")
-        if expires_at is None:
-            return False
-        try:
-            return float(expires_at) <= time.time()
-        except (TypeError, ValueError):
-            return True
+    def _pending_expired(pending: CurrentConversation) -> bool:
+        return pending.status == ConversationStatus.EXPIRED or pending.expires_at <= time.time()
 
     @staticmethod
-    def _authority_may_answer(decision: CognitiveDecision, pending: dict) -> bool:
-        expected = str(pending.get("authority") or pending.get("expected_authority") or "owner")
-        return decision.authority == expected
+    def _authority_may_answer(decision: CognitiveDecision, pending: CurrentConversation) -> bool:
+        expected = pending.expected_reply
+        return decision.authority == "owner" and expected is not None and expected.allowed_participant == "leo"
 
     @staticmethod
     def _source(context: Any) -> str:
@@ -492,15 +486,15 @@ class CognitiveRouter:
             "personal_state": decision.personal_state,
             "reason": decision.reason,
         })
-        if isinstance(pending, dict) and pending:
+        if isinstance(pending, CurrentConversation):
             event_name = "pending_consumed" if decision.uses_pending_task else "pending_rejected"
             if decision.pending_reason == "expired":
                 event_name = "pending_expired"
             log_jsonl_event("pending", {
                 "event": event_name,
                 "message_id": decision.message_id,
-                "kind": decision.pending_task_kind or pending.get("kind"),
-                "expected_reply_type": pending.get("expected_reply_type"),
+                "kind": decision.pending_task_kind or pending.topic,
+                "expected_reply_type": pending.expected_reply.type.value if pending.expected_reply else "",
                 "source": decision.source,
                 "authority": decision.authority,
                 "pending_compatible": decision.pending_compatible,

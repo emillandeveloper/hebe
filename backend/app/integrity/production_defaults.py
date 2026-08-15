@@ -4,7 +4,7 @@ import os
 
 
 CANONICAL_FLAGS = (
-    "HEBE_CONVERSATION_CONTINUITY_V2", "HEBE_BELIEF_V2_READS", "HEBE_BELIEF_V2_WRITES",
+    "HEBE_BELIEF_V2_READS", "HEBE_BELIEF_V2_WRITES",
     "HEBE_GAME_CONTEXT_V2", "HEBE_GAME_RUN_V2_READS", "HEBE_GAME_RUN_V2_WRITES",
     "HEBE_GAME_KNOWLEDGE_V2_READS", "HEBE_GAME_KNOWLEDGE_V2_WRITES", "HEBE_GAME_RESEARCH_MEMORY_FIRST",
     "HEBE_SOCIAL_WORLD_V2", "HEBE_SOCIAL_IDENTITY_V2", "HEBE_SOCIAL_EPISODE_WRITES_V2",
@@ -24,6 +24,4 @@ def enabled(name: str, *, environ: dict[str, str] | None = None) -> bool:
 
 def production_defaults(*, environ: dict[str, str] | None = None) -> dict[str, bool]:
     env=os.environ if environ is None else environ
-    result={name:enabled(name,environ=env) for name in CANONICAL_FLAGS}
-    result["HEBE_CONVERSATION_CONTINUITY_SHADOW"]=str(env.get("HEBE_CONVERSATION_CONTINUITY_SHADOW","false")).strip().casefold() in {"1","true","yes","on"}
-    return result
+    return {name:enabled(name,environ=env) for name in CANONICAL_FLAGS}

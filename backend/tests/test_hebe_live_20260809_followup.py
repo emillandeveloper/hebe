@@ -16,6 +16,7 @@ from app.stream.game_intelligence import GameIntelligenceStore, GameResearchServ
 from app.stream.spontaneity import StreamSpontaneityService
 from app.stream.state import StreamSessionState
 from backend.tests.test_stream_presence import make_engine
+from tests.test_voice_command_pipeline import install_test_continuity, open_test_conversation
 
 
 SAFE_ROWS = [{
@@ -183,14 +184,15 @@ class RoutingRegressionTests(unittest.TestCase):
     def test_fresh_complete_promo_executes_after_expired_clarification(self):
         stream = StreamSessionState(enabled=True, is_live=True)
         engine = make_engine(stream)
-        engine.runtime.state.pending_clarification = {
-            "id": "old-promo", "kind": "promotion_target_clarification",
-            "expires_at": time.time() - 1, "status": "active",
-        }
+        install_test_continuity(engine)
+        open_test_conversation(
+            engine, kind="promotion_target_clarification",
+            expected_reply_type="twitch_username_or_viewer_alias", ttl_seconds=-1,
+        )
         result = engine._handle_stream_manual_command("Ebe, hazle una promo a Charlie")
         self.assertTrue(result.success)
         self.assertEqual(engine.runtime.twitch.sent, ["!so Charlie"])
-        self.assertIsNone(engine.runtime.state.pending_clarification)
+        self.assertIsNone(engine._active_current_conversation())
 
 
 if __name__ == "__main__":

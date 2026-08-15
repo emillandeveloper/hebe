@@ -9,6 +9,8 @@ from pathlib import Path
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
+from app.continuity.models import CurrentConversation
+
 from app.stream.game_profiles import GameProfileStore
 from app.cognitive.wake_name_resolver import WakeNameResolver
 
@@ -212,9 +214,10 @@ class GameGuidanceCapability:
         self._log(guidance, rag_chunks, web_results)
         return GameGuidanceDecision(guidance, mode, reason, rag_chunks, web_results)
 
-    def parse_clarification_answer(self, pending: dict[str, Any], text: str) -> dict[str, Any]:
-        if str(pending.get("kind") or "") != "game_guidance_clarification":
+    def parse_clarification_answer(self, conversation: CurrentConversation, text: str) -> dict[str, Any]:
+        if conversation.topic != "game_guidance_clarification":
             return {}
+        pending = conversation.domain_payload
         game = str(pending.get("game") or "")
         missing = set(pending.get("missing_fields") or [])
         clean_text, stripped = self._strip_assistant_aliases(text)

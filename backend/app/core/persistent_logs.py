@@ -257,10 +257,6 @@ def engine_state_summary(engine: Any) -> dict:
     if hasattr(game_run_state, "to_dict"):
         game_run_state = game_run_state.to_dict()
     summary = {
-        "pending_clarification": getattr(state, "pending_clarification", None),
-        "pending_tts_scope": getattr(state, "pending_tts_scope", None),
-        "pending_reminder": getattr(state, "pending_reminder", None),
-        "pending_confirmation": getattr(state, "pending_confirmation", None),
         "game_run_state": game_run_state,
         "stream": {
             "enabled": getattr(stream, "enabled", None),

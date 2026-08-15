@@ -12,6 +12,14 @@ from app.cognitive.speech_act_pipeline import (
     final_response_guard,
     safe_local_fallback,
 )
+from app.continuity.models import (
+    AttentionState,
+    ConversationContext,
+    ConversationStatus,
+    CurrentConversation,
+    ExpectedReply,
+    ExpectedReplyType,
+)
 
 
 class CapturingModel:
@@ -36,6 +44,18 @@ def context(text="Hebe, abre OBS", source="stt_voice", message_type="task_reques
         state_snapshot={},
         cognitive_decision=SimpleNamespace(intent="command_open_app"),
         internal_event=None,
+    )
+
+
+def current_conversation(topic: str) -> CurrentConversation:
+    return CurrentConversation(
+        id=f"conversation-{topic}", context_kind=ConversationContext.OWNER_LOCAL,
+        context_id="leo_local", participants=("leo", "hebe"),
+        attention_state=AttentionState.HANDED_OFF, turn_owner="leo",
+        expected_reply=ExpectedReply(type=ExpectedReplyType.CLARIFICATION, expires_at=2000.0),
+        topic=topic, origin_event_id="test-open", last_event_id="test-open",
+        opened_at=1000.0, last_turn_at=1000.0, expires_at=2000.0,
+        status=ConversationStatus.WAITING_ON_LEO,
     )
 
 
@@ -133,7 +153,7 @@ class UniversalResponsePipelineTests(unittest.TestCase):
             route="owner_private_chat",
             speech_act_type="owner_supportive_reaction",
             input_text="el 16 de septiembre",
-            active_pending_task={"kind": "appointment_datetime"},
+            current_conversation=current_conversation("appointment_datetime"),
         )
 
         result = action_claim_guard("Apuntado: cita el 16 de septiembre.", bundle)
@@ -146,7 +166,7 @@ class UniversalResponsePipelineTests(unittest.TestCase):
             route="owner_private_chat",
             speech_act_type="owner_supportive_reaction",
             input_text="Cloud, Tifa",
-            active_pending_task={"kind": "game_guidance_clarification"},
+            current_conversation=current_conversation("game_guidance_clarification"),
         )
 
         result = final_response_guard("Ve al castillo y busca el objeto.", bundle)

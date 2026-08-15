@@ -5,7 +5,7 @@ from unittest.mock import Mock, patch
 
 from app.cognitive.response_synthesizer import ResponseSynthesizer
 from app.stream.policy import classify_viewer_semantic_intent
-from tests.test_voice_command_pipeline import make_engine
+from tests.test_voice_command_pipeline import make_engine, open_test_conversation
 
 
 class StreamAntiTrollRegressionTests(unittest.TestCase):
@@ -64,7 +64,7 @@ class StreamAntiTrollRegressionTests(unittest.TestCase):
         self.assertEqual(decision.intent, "promo_request_from_viewer")
         self.assertFalse(decision.allow_free_llm)
         self.assertFalse(decision.execute_as_command)
-        self.assertIsNone(engine.runtime.state.pending_clarification)
+        self.assertIsNone(engine._active_current_conversation())
         guard = engine._anti_troll_frame_guard(
             "Paga la tarifa VIP y me lo pienso.",
             category="promo_request_from_viewer",
@@ -80,50 +80,50 @@ class StreamAntiTrollRegressionTests(unittest.TestCase):
             username="lache_bg12", display_name="Lache", text="hola"
         )
         engine.runtime.state.stream.recent_active_users = ["lache_bg12"]
-        engine.runtime.state.pending_clarification = engine._make_pending_task(
-            id="promo-lache",
+        open_test_conversation(
+            engine,
             kind="promotion_target_clarification",
             expected_reply_type="twitch_username_or_viewer_alias",
             explicit_question_asked=True,
-            can_accept_no_wake_followup=True,
             ttl_seconds=60,
             max_attempts=1,
         )
         result = engine._resolve_pending_promotion_target("a Lache", "a lache", engine.runtime.state.stream)
         self.assertTrue(result.success)
         self.assertEqual(engine.runtime.twitch.sent, ["!so lache_bg12"])
-        self.assertIsNone(engine.runtime.state.pending_clarification)
+        self.assertIsNone(engine._active_current_conversation())
 
     def test_ambient_stt_does_not_consume_promotion_attempt(self):
         engine = make_engine(["lache_bg12"], live=True)
         engine.runtime.state.stream.enabled = True
-        pending = engine._make_pending_task(
-            id="promo-ambient",
+        pending = open_test_conversation(
+            engine,
             kind="promotion_target_clarification",
             expected_reply_type="twitch_username_or_viewer_alias",
             explicit_question_asked=True,
-            can_accept_no_wake_followup=True,
             ttl_seconds=60,
             max_attempts=1,
         )
-        engine.runtime.state.pending_clarification = pending
         with patch("app.hebe_engine.emit"), patch("app.hebe_engine.log_chat"):
             engine._process_stt_voice_transcript("No, pero porque me coge la letra H")
-        self.assertEqual(pending["attempts"], 0)
-        self.assertIs(engine.runtime.state.pending_clarification, pending)
+        active = engine._active_current_conversation()
+        self.assertEqual(active.domain_payload["attempts"], 0)
+        self.assertEqual(active.id, pending.id)
 
     def test_pending_attempts_hold_at_max_without_paused_state(self):
         engine = make_engine(["viewer"], live=True)
-        pending = engine._make_pending_task(
+        pending = open_test_conversation(
+            engine,
             kind="promotion_target_clarification",
             expected_reply_type="twitch_username_or_viewer_alias",
             max_attempts=1,
         )
-        engine.runtime.state.pending_clarification = pending
-        engine._increment_pending_attempt(pending, reason="invalid_target")
-        engine._increment_pending_attempt(pending, reason="invalid_target")
-        self.assertEqual(pending["attempts"], 1)
-        self.assertEqual(pending["status"], "active")
+        engine._increment_conversation_attempt(pending, reason="invalid_target")
+        active = engine._active_current_conversation()
+        engine._increment_conversation_attempt(active, reason="invalid_target")
+        active = engine._active_current_conversation()
+        self.assertEqual(active.domain_payload["attempts"], 1)
+        self.assertEqual(active.status.value, "WAITING_ON_LEO")
 
     def test_raid_renderer_uses_defined_event_context(self):
         synth = ResponseSynthesizer.__new__(ResponseSynthesizer)

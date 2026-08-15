@@ -5,6 +5,22 @@ from unittest.mock import patch
 from app.cognitive.context_builder import ContextBuilder, BuiltContext
 from app.cognitive.response_synthesizer import ResponseSynthesizer
 from app.cognitive.models import ExecutionResult, StepExecutionResult, DeliberationResult, Plan
+from app.continuity.models import (
+    AttentionState, ConversationContext, ConversationStatus, CurrentConversation,
+    ExpectedReply, ExpectedReplyType,
+)
+
+
+def appointment_conversation():
+    return CurrentConversation(
+        id="conversation-appointment", context_kind=ConversationContext.OWNER_LOCAL,
+        context_id="leo_local", participants=("leo", "hebe"),
+        attention_state=AttentionState.HANDED_OFF, turn_owner="leo",
+        expected_reply=ExpectedReply(type=ExpectedReplyType.DATETIME, expires_at=2000.0),
+        topic="appointment_datetime", origin_event_id="test-open", last_event_id="test-open",
+        opened_at=1000.0, last_turn_at=1000.0, expires_at=2000.0,
+        status=ConversationStatus.WAITING_ON_LEO,
+    )
 
 
 class DummyMemoryStore:
@@ -203,7 +219,7 @@ class ContextMessageTypeTests(unittest.TestCase):
             relevant_facts=[],
             recent_appointments=[],
             pending_reminders=[],
-            state_snapshot={"pending_clarification": {"kind": "appointment_datetime"}},
+            state_snapshot={"current_conversation": appointment_conversation()},
             relevant_chunks=[],
             conversation_history=[],
             message_type="small_talk",

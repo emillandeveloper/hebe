@@ -9,6 +9,7 @@ from difflib import SequenceMatcher
 from typing import Any
 
 from app.cognitive.persona.chatter_names import normalize_chatter_name
+from app.continuity.models import CurrentConversation
 
 
 HEBE_PERSONA_CONSTITUTION_V1 = """HEBE_PERSONA_CONSTITUTION_V1
@@ -107,12 +108,14 @@ class SceneContext:
     sanitized_topic: str = ""
     recent_local_context: list[str] = field(default_factory=list)
     recent_chat_context: list[dict[str, str]] = field(default_factory=list)
-    active_pending_task: dict[str, Any] | None = None
+    current_conversation: CurrentConversation | None = None
     active_boundary_context: dict[str, Any] = field(default_factory=dict)
     technical_state: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        value = asdict(self)
+        value["current_conversation"] = self.current_conversation.to_dict() if self.current_conversation else None
+        return value
 
 
 @dataclass(frozen=True)
@@ -620,7 +623,7 @@ def build_universal_speech_act_bundle(
     current_activity: str = "",
     stream_live: bool = False,
     technical_state: dict[str, Any] | None = None,
-    active_pending_task: dict[str, Any] | None = None,
+    current_conversation: CurrentConversation | None = None,
     response_language: str = "match_speaker",
     max_length_chars: int = 260,
 ) -> SpeechActBundle:
@@ -645,7 +648,7 @@ def build_universal_speech_act_bundle(
         speaker_type=envelope.speaker_type,
         speaker_authority=authority,
         raw_user_message=input_text,
-        active_pending_task=dict(active_pending_task) if isinstance(active_pending_task, dict) else None,
+        current_conversation=current_conversation,
         technical_state=technical_state or {},
     )
     scene_memory = SceneMemory(
@@ -844,7 +847,7 @@ def final_response_guard(
     action_claim = action_claim_guard(response, bundle)
     if not action_claim.passed:
         violations.extend(action_claim.violations)
-    pending_violation = _active_pending_task_violation(response, bundle)
+    pending_violation = _current_conversation_violation(response, bundle)
     if pending_violation is not None:
         violations.append(pending_violation)
     walkthrough_violation = _ungrounded_game_walkthrough_violation(response, bundle)
@@ -1011,9 +1014,9 @@ def action_claim_guard(text: str, bundle: SpeechActBundle) -> FinalResponseGuard
     )
 
 
-def _active_pending_task_violation(text: str, bundle: SpeechActBundle) -> GuardViolation | None:
-    pending = bundle.scene.active_pending_task or {}
-    if str(pending.get("kind") or "") != "game_guidance_clarification":
+def _current_conversation_violation(text: str, bundle: SpeechActBundle) -> GuardViolation | None:
+    conversation = bundle.scene.current_conversation
+    if conversation is None or conversation.topic != "game_guidance_clarification":
         return None
     if bundle.speech_act.speech_act_type in {
         "pending_task_followup",

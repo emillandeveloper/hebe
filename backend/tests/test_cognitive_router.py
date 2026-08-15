@@ -7,13 +7,17 @@ from unittest.mock import patch
 
 from app.cognitive.cognitive_router import CognitiveRouter
 from app.cognitive.deliberation_service import DeliberationService
+from app.continuity.models import (
+    AttentionState, ConversationContext, ConversationStatus, CurrentConversation,
+    ExpectedReply, ExpectedReplyType,
+)
 
 
-def context(text: str, pending: dict | None = None):
+def context(text: str, pending: CurrentConversation | None = None):
     return SimpleNamespace(
         input_text=text,
         internal_event=None,
-        state_snapshot={"pending_clarification": pending} if pending else {},
+        state_snapshot={"current_conversation": pending} if pending else {},
         resolved_entities=[],
         message_type="direct_question",
         source="ui",
@@ -25,15 +29,17 @@ def context(text: str, pending: dict | None = None):
 
 
 def active_pending(**overrides):
-    value = {
-        "id": "pending-test",
-        "kind": "appointment_datetime",
-        "authority": "owner",
-        "expires_at": time.time() + 300,
-        "draft": {"title": "Consulta", "source_text": "appointment source"},
-    }
-    value.update(overrides)
-    return value
+    expires_at = overrides.pop("expires_at", time.time() + 300)
+    domain = {"draft": {"title": "Consulta", "source_text": "appointment source"}}
+    domain.update(overrides.pop("domain_payload", {}))
+    return CurrentConversation(
+        id="pending-test", context_kind=ConversationContext.PRIVATE_UI, context_id="leo_ui",
+        participants=("leo", "hebe"), attention_state=AttentionState.HANDED_OFF,
+        turn_owner="leo", expected_reply=ExpectedReply(ExpectedReplyType.DATETIME, expires_at=expires_at),
+        topic="appointment_datetime", origin_event_id="question", last_event_id="question",
+        opened_at=time.time(), last_turn_at=time.time(), expires_at=expires_at,
+        status=ConversationStatus.WAITING_ON_LEO, domain_payload=domain, **overrides,
+    )
 
 
 class CognitiveRouterTests(unittest.TestCase):
@@ -65,7 +71,7 @@ class CognitiveRouterTests(unittest.TestCase):
         self.assertFalse(decision.uses_pending_task)
         self.assertEqual(decision.pending_reason, "new_request_override")
         self.assertEqual(plan.steps[0].data["mode"], "time_answer")
-        self.assertIs(value.state_snapshot["pending_clarification"], pending)
+        self.assertIs(value.state_snapshot["current_conversation"], pending)
 
     def test_semantic_datetime_answer_may_resolve_pending(self):
         value = context("A las cinco", active_pending())

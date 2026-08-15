@@ -111,8 +111,8 @@ class Phase6DeterministicScenarios(Phase6Fixture):
         self.assertIn("action.promotion_authority",self.codes())
 
     def test_scenario_o_production_defaults_are_canonical_with_kill_switch(self):
-        defaults=production_defaults(environ={});self.assertTrue(all(value for key,value in defaults.items() if key!='HEBE_CONVERSATION_CONTINUITY_SHADOW'));self.assertFalse(defaults['HEBE_CONVERSATION_CONTINUITY_SHADOW'])
-        disabled=production_defaults(environ={'HEBE_COGNITIVE_V2_ENABLED':'false'});self.assertFalse(any(value for key,value in disabled.items() if key!='HEBE_CONVERSATION_CONTINUITY_SHADOW'))
+        defaults=production_defaults(environ={});self.assertTrue(all(defaults.values()))
+        disabled=production_defaults(environ={'HEBE_COGNITIVE_V2_ENABLED':'false'});self.assertFalse(any(disabled.values()))
 
     def test_scenario_p_migration_restart_safety(self):
         first,second=migrate(self.path);self.assertTrue(all(x["already_applied"] for x in first));self.assertTrue(all(x["already_applied"] for x in second));self.assertEqual(len(inventory(before=False)),len(inventory(before=True)))

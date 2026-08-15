@@ -36,6 +36,13 @@ class ExpectedReplyType(str, Enum):
     VALUE = "value"
     CORRECTION = "correction"
     FREE_RESPONSE = "free_response"
+    DATETIME = "datetime"
+    GAME_PROGRESS_STATE = "game_progress_state"
+    GAME_PARTY_OR_CHARACTER = "game_party_or_character"
+    TWITCH_USERNAME_OR_VIEWER_ALIAS = "twitch_username_or_viewer_alias"
+    CASUAL_ANSWER = "casual_answer"
+    CLARIFICATION = "clarification"
+    ACTION_CONFIRMATION = "action_confirmation"
 
 
 class ConversationalAct(str, Enum):
@@ -120,7 +127,16 @@ class ExpectedReply:
             if phrase.startswith("no ") or phrase.startswith("no, ") or any(token in tokens for token in ("segundo", "tercero", "primero")):
                 return ConversationalAct.CORRECT, {"correction_text": normalized}, "bounded_correction"
             return ConversationalAct.UNKNOWN, {}, "correction_not_resolved"
-        if self.type == ExpectedReplyType.FREE_RESPONSE:
+        if self.type in {
+            ExpectedReplyType.FREE_RESPONSE,
+            ExpectedReplyType.DATETIME,
+            ExpectedReplyType.GAME_PROGRESS_STATE,
+            ExpectedReplyType.GAME_PARTY_OR_CHARACTER,
+            ExpectedReplyType.TWITCH_USERNAME_OR_VIEWER_ALIAS,
+            ExpectedReplyType.CASUAL_ANSWER,
+            ExpectedReplyType.CLARIFICATION,
+            ExpectedReplyType.ACTION_CONFIRMATION,
+        }:
             maximum = int(self.semantic_constraints.get("max_words") or 40)
             minimum = int(self.semantic_constraints.get("min_words") or 1)
             if minimum <= len(tokens) <= maximum:

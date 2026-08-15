@@ -940,6 +940,8 @@ class StreamPresenceTests(unittest.TestCase):
 
     def test_manual_shoutout_without_target_asks_for_clarification(self):
         engine = make_engine(StreamSessionState(enabled=True))
+        from tests.test_voice_command_pipeline import install_test_continuity
+        install_test_continuity(engine)
 
         reply = engine._handle_stream_manual_command("Hebe, haz SO")
 

@@ -15,11 +15,6 @@ class HebeState:
     last_input_source: Optional[str] = None
     last_intent: Optional[str] = None
 
-    pending_clarification: Optional[dict] = None
-    pending_tts_scope: Optional[dict] = None
-    pending_reminder: Optional[dict] = None
-    pending_confirmation: Optional[dict] = None
-
     current_task: Optional[str] = None
     current_context: dict[str, Any] = field(default_factory=dict)
     game_run_state: GameRunState = field(default_factory=GameRunState)

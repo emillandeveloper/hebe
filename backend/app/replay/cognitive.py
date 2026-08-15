@@ -288,10 +288,6 @@ class CognitiveReplayRunner:
             "HEBE_AUTO_ENABLE_STREAM_WHEN_LIVE": "true",
             "HEBE_STREAM_OUTPUT_MODE": "twitch_chat_only",
             "HEBE_COGNITIVE_REPLAY_ENABLED": "true",
-            "HEBE_CONVERSATION_CONTINUITY_V2": str(
-                bool(self._active_scenario and self._active_scenario.feature_flags.conversation_continuity_v2)
-            ).lower(),
-            "HEBE_CONVERSATION_CONTINUITY_SHADOW": "true",
             "HEBE_BELIEF_V2_READS": str(bool(self._active_scenario and self._active_scenario.feature_flags.belief_v2_reads)).lower(),
             "HEBE_BELIEF_V2_WRITES": str(bool(self._active_scenario and self._active_scenario.feature_flags.belief_v2_writes)).lower(),
             "HEBE_GAME_CONTEXT_V2": str(bool(self._active_scenario and self._active_scenario.feature_flags.game_context_v2)).lower(),
@@ -734,8 +730,6 @@ class CognitiveReplayRunner:
 
     def _run_maintenance(self) -> None:
         assert self.engine is not None
-        self.engine._active_pending_clarification()
-        self.engine._get_pending_conversation_turn()
         temporal=getattr(self.engine,"temporal_relevance_service",None)
         if temporal is not None and bool(getattr(self.engine,"temporal_relevance_v2",False)):
             temporal.maintain()

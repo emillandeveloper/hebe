@@ -27,7 +27,6 @@ class CognitiveStateSnapshot:
     runtime: dict[str, Any] = field(default_factory=dict)
     stream_session: dict[str, Any] = field(default_factory=dict)
     current_scene: dict[str, Any] = field(default_factory=dict)
-    pending: dict[str, Any] = field(default_factory=dict)
     conversation: dict[str, Any] = field(default_factory=dict)
     open_threads: list[dict[str, Any]] = field(default_factory=list)
     memory: dict[str, Any] = field(default_factory=dict)
@@ -95,8 +94,6 @@ class CognitiveStateProbe:
     def snapshot(self, engine: Any) -> CognitiveStateSnapshot:
         state = getattr(getattr(engine, "runtime", None), "state", None)
         stream = getattr(state, "stream", None)
-        pending = getattr(state, "pending_clarification", None)
-        pending_turn = getattr(state, "pending_conversation_turn", None)
         rows = self._db_rows()
         trace = dict(getattr(engine, "_last_policy_trace", {}) or {})
         cognitive = dict(getattr(engine, "_last_cognitive_trace", {}) or {})
@@ -203,22 +200,11 @@ class CognitiveStateProbe:
             runtime=runtime,
             stream_session=stream_session,
             current_scene=scene,
-            pending={"clarification": _plain(pending), "conversation_turn": _plain(pending_turn)},
             conversation={
                 "active": rows["active_conversation"],
                 "latest": rows["conversations"][0] if rows["conversations"] else {},
                 "all": rows["conversations"],
                 "last_resolution": _plain(getattr(engine, "_last_continuity_resolution", {}) or {}),
-                "legacy_pending_projection": _plain(
-                    getattr(getattr(engine, "legacy_pending_adapter", None), "last_projection", {}) or {}
-                ),
-                "continuity_shadow_diff": _plain(getattr(engine, "_last_continuity_shadow_diff", {}) or {}),
-                "shadow_metrics": _plain(
-                    getattr(getattr(engine, "conversation_continuity", None), "shadow_metrics", lambda: {})()
-                ),
-                "performance": _plain(
-                    getattr(getattr(engine, "conversation_continuity", None), "performance", lambda: {})()
-                ),
             },
             open_threads=rows["open_threads"],
             memory={"facts_count": rows["counts"].get("memory_facts", 0), "chunks_count": rows["counts"].get("memory_chunks", 0)},

@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-import statistics
-import math
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable
 
 from app.continuity.models import (
@@ -51,7 +49,6 @@ class ConversationContinuityService:
         self.conversations = conversations
         self.threads = threads
         self.now_fn = now_fn
-        self.shadow_diffs: list[dict[str, Any]] = []
         self.latencies_ms: list[float] = []
         self.last_resolution: ContinuationResolution | None = None
 
@@ -95,7 +92,8 @@ class ConversationContinuityService:
     def resolve_input(
         self, *, context_kind: str, context_id: str, source: str, participant: str,
         authority: str, text: str, event_id: str, wake: bool = False,
-        consume: bool = True,
+        consume: bool = True, compatibility: bool | None = None,
+        compatibility_reason: str = "",
     ) -> ContinuationResolution:
         started = time.perf_counter()
 
@@ -114,7 +112,7 @@ class ConversationContinuityService:
             return finish(consumed=False, decision="no_conversation", reason="no_compatible_active_conversation")
         if wake:
             if not consume:
-                return finish(consumed=False, decision="interrupt_shadow", reason="new_owner_command_interrupted", conversation_id=active.id, conversation=active)
+                return finish(consumed=False, decision="interrupt_probe", reason="new_owner_command_interrupted", conversation_id=active.id, conversation=active)
             updated, _ = self.conversations.transition(
                 active.id, expected_version=active.version, status=ConversationStatus.INTERRUPTED,
                 reason="new_owner_command_interrupted", last_event_id=event_id, now=self.now_fn(),
@@ -145,7 +143,13 @@ class ConversationContinuityService:
         if source not in set(expected.allowed_sources):
             print(f"[HEBE][CONVERSATION_REJECT_REPLY] conversation_id={active.id} source={source} reason=source_mismatch", flush=True)
             return finish(consumed=False, decision="reject", reason="source_mismatch", conversation_id=active.id, conversation=active)
+        if compatibility is False:
+            reason = compatibility_reason or "incompatible_reply"
+            print(f"[HEBE][CONVERSATION_REJECT_REPLY] conversation_id={active.id} source={source} reason={reason}", flush=True)
+            return finish(consumed=False, decision="reject", reason=reason, conversation_id=active.id, conversation=active)
         act, payload, reason = expected.classify(text)
+        if compatibility is True and act == ConversationalAct.UNKNOWN:
+            act, payload, reason = ConversationalAct.FREE_RESPONSE, {"response_text": text}, compatibility_reason or "domain_guard"
         if act == ConversationalAct.UNKNOWN:
             print(f"[HEBE][CONVERSATION_REJECT_REPLY] conversation_id={active.id} source={source} reason=incompatible_reply", flush=True)
             return finish(consumed=False, decision="reject", reason="incompatible_reply", conversation_id=active.id, conversation=active)
@@ -154,7 +158,7 @@ class ConversationContinuityService:
         payload = {**payload, "domain": dict(active.domain_payload), "expected_reply_type": expected.type.value}
         if not consume:
             return finish(
-                consumed=True, decision="compatible_reply_shadow", reason=reason,
+                consumed=True, decision="compatible_reply_probe", reason=reason,
                 conversation_id=active.id, reply_act=act, payload=payload, conversation=active,
             )
         try:
@@ -188,40 +192,50 @@ class ConversationContinuityService:
             self.threads.expire_closed_clarifications(event_id="ttl", now=now)
         return expired
 
-    def record_shadow(self, *, legacy_result: bool, v2_result: ContinuationResolution) -> dict[str, Any]:
-        item = {
-            "legacy_result": bool(legacy_result), "v2_result": bool(v2_result.consumed),
-            "match": bool(legacy_result) == bool(v2_result.consumed),
-            "difference_reason": "" if bool(legacy_result) == bool(v2_result.consumed) else v2_result.reason,
-        }
-        self.shadow_diffs.append(item)
-        print(
-            f"[HEBE][CONVERSATION_SHADOW] legacy_result={str(item['legacy_result']).lower()} "
-            f"v2_result={str(item['v2_result']).lower()} match={str(item['match']).lower()} "
-            f"difference_reason={item['difference_reason'] or 'none'}", flush=True,
+    def active_conversation(self, *, context_kind: str, context_id: str) -> CurrentConversation | None:
+        return self.conversations.get_active(context_kind, context_id)
+
+    def latest_active_conversation(self) -> CurrentConversation | None:
+        active = self.conversations.list_active(limit=1)
+        return active[0] if active else None
+
+    def update_conversation(
+        self, conversation: CurrentConversation, *, domain_updates: dict[str, Any] | None = None,
+        expires_at: float | None = None, event_id: str = "",
+    ) -> CurrentConversation:
+        domain = dict(conversation.domain_payload)
+        domain.update(domain_updates or {})
+        now = self.now_fn()
+        updated_expiry = float(expires_at if expires_at is not None else conversation.expires_at)
+        expected_reply = conversation.expected_reply
+        if expected_reply is not None and expected_reply.expires_at != updated_expiry:
+            expected_reply = replace(expected_reply, expires_at=updated_expiry)
+        return self.conversations.update_active(
+            conversation.id, expected_version=conversation.version, domain_payload=domain,
+            expected_reply=expected_reply, expires_at=updated_expiry,
+            last_event_id=event_id or conversation.last_event_id, now=now,
         )
-        return item
 
-    def performance(self) -> dict[str, float | int]:
-        values = sorted(self.latencies_ms)
-        if not values:
-            return {"count": 0, "p50_ms": 0.0, "p95_ms": 0.0}
-        p50 = statistics.median(values)
-        p95 = values[min(len(values) - 1, max(0, math.ceil(len(values) * 0.95) - 1))]
-        return {"count": len(values), "p50_ms": round(p50, 6), "p95_ms": round(p95, 6)}
-
-    def shadow_metrics(self) -> dict[str, Any]:
-        total = len(self.shadow_diffs)
-        matches = sum(bool(item.get("match")) for item in self.shadow_diffs)
-        reasons: dict[str, int] = {}
-        for item in self.shadow_diffs:
-            reason = str(item.get("difference_reason") or "")
-            if reason:
-                reasons[reason] = reasons.get(reason, 0) + 1
-        return {
-            "total": total,
-            "matches": matches,
-            "differences": total - matches,
-            "match_rate": round(matches / total, 6) if total else 1.0,
-            "difference_reasons": reasons,
-        }
+    def close_conversation(
+        self, conversation: CurrentConversation, *, reason: str, event_id: str = "",
+    ) -> CurrentConversation:
+        status = {
+            "expired": ConversationStatus.EXPIRED,
+            "consumed": ConversationStatus.CLOSED,
+            "resolved": ConversationStatus.CLOSED,
+            "superseded_by_fresh_promotion": ConversationStatus.INTERRUPTED,
+            "new_owner_command_interrupted": ConversationStatus.INTERRUPTED,
+        }.get(reason, ConversationStatus.CANCELLED)
+        updated, _ = self.conversations.transition(
+            conversation.id, expected_version=conversation.version, status=status,
+            reason=reason, last_event_id=event_id or reason, now=self.now_fn(),
+        )
+        thread_status = {
+            ConversationStatus.CLOSED: OpenThreadStatus.RESOLVED,
+            ConversationStatus.EXPIRED: OpenThreadStatus.EXPIRED,
+        }.get(status, OpenThreadStatus.ARCHIVED)
+        self.threads.transition_for_subject(
+            conversation.id, status=thread_status, event_id=event_id or reason, now=self.now_fn(),
+        )
+        print(f"[HEBE][CONVERSATION_CLOSE] conversation_id={conversation.id} reason={reason}", flush=True)
+        return updated

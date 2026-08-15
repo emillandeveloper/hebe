@@ -6,6 +6,7 @@ from unittest.mock import Mock
 
 from app.hebe_engine import HebeEngine
 from app.stream.state import StreamSessionState
+from tests.test_voice_command_pipeline import install_test_continuity, open_test_conversation
 
 
 def decision(*capabilities: str, authority: str = "owner", source: str = "ui", live: bool = True, simulation: bool = False):
@@ -27,13 +28,12 @@ def engine_with_state():
             hebe_sleeping=True,
             mode="sleep",
             tts_enabled=True,
-            pending_clarification={"id": "pending", "kind": "appointment_datetime"},
-            pending_reminder=None,
-            pending_tts_scope=None,
             stream=StreamSessionState(),
         ),
         speak=Mock(),
     )
+    install_test_continuity(engine)
+    open_test_conversation(engine, kind="appointment_datetime")
     return engine
 
 
@@ -84,23 +84,25 @@ class ManualHandlerGuardTests(unittest.TestCase):
         for text in ("Hebe, qué hora es", "Hebe, tengo hambre"):
             with self.subTest(text=text):
                 engine = engine_with_state()
-                original = engine.runtime.state.pending_clarification
+                original = engine._active_current_conversation()
                 result = engine._handle_pending_manual_intent(
                     text, cognitive_decision=decision("hebe.chat_reply"), source="ui"
                 )
                 self.assertIsNone(result)
-                self.assertIs(engine.runtime.state.pending_clarification, original)
+                current = engine._active_current_conversation()
+                self.assertEqual((current.id, current.version), (original.id, original.version))
 
     def test_ambient_cannot_cancel_pending(self):
         engine = engine_with_state()
-        original = engine.runtime.state.pending_clarification
+        original = engine._active_current_conversation()
         result = engine._handle_pending_manual_intent(
             "cancela esa cita",
             cognitive_decision=decision("pending.cancel", authority="ambient", source="ambient_stt"),
             source="ambient_stt",
         )
         self.assertIsNone(result)
-        self.assertIs(engine.runtime.state.pending_clarification, original)
+        current = engine._active_current_conversation()
+        self.assertEqual((current.id, current.version), (original.id, original.version))
 
 
 if __name__ == "__main__":

@@ -2,6 +2,9 @@
 import time
 import sys
 import unittest
+import sqlite3
+import tempfile
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -23,6 +26,8 @@ from app.services.voice_command_recovery import normalize_stt_transcript
 from app.services.direct_stt_command import parse_direct_stt_command
 from app.stream.action_planner import StreamActionPlanner
 from app.stream.state import StreamSessionState
+from app.continuity import ConversationContinuityService, ConversationRepository, OpenThreadRepository
+from app.replay.migrations import MigrationRunner, conversation_continuity_migrations
 
 
 class FakeTwitch:
@@ -130,11 +135,10 @@ class FakeContextBuilder:
 
     def build(self, state, input_text=None, internal_event=None):
         self.inputs.append(input_text)
-        pending = getattr(state, "pending_clarification", None)
         return SimpleNamespace(
             input_text=input_text,
             internal_event=internal_event,
-            state_snapshot={"pending_clarification": pending} if pending else {},
+            state_snapshot={},
             relevant_facts=[],
             relevant_chunks=[],
             conversation_history=[],
@@ -183,7 +187,7 @@ def make_engine(chatters=None, *, live=True):
     stream.recent_active_users = list(chatters or ["nuria", "charlie", "totodile", "alguien_del_chat"])
     engine = HebeEngine.__new__(HebeEngine)
     engine.runtime = SimpleNamespace(
-        state=SimpleNamespace(stream=stream, hebe_sleeping=False, mode="active", pending_clarification=None),
+        state=HebeState(stream=stream),
         twitch=FakeTwitch(),
         twitch_chat_bot=SimpleNamespace(is_connected=True),
         speak=Mock(),
@@ -198,6 +202,8 @@ def make_engine(chatters=None, *, live=True):
     engine.shoutout_blocked_users = {"hebenifelheim", "jotunbot", "streamelements", "nightbot"}
     engine._manual_reply_ui_only = False
     engine._current_input_event = None
+    engine._last_cognitive_trace = {}
+    engine._last_input_envelope = None
     engine.spontaneous_twitch_chat_enabled = False
     engine.stream_action_planner = engine._build_stream_action_planner()
     capabilities = {"audio.tts_control", "pending.cancel", "stream.local_state_control", "twitch_action", "hebe.wake_control"}
@@ -207,7 +213,29 @@ def make_engine(chatters=None, *, live=True):
         action_permission_summary={"stream_live": bool(live)},
         allows_capability=lambda capability: capability in capabilities,
     )
+    install_test_continuity(engine)
     return engine
+
+
+def install_test_continuity(engine):
+    engine._continuity_test_tmp = tempfile.mkdtemp(prefix="hebe-continuity-test-")
+    db = Path(engine._continuity_test_tmp) / "continuity.sqlite3"
+    connect = lambda: sqlite3.connect(db)
+    MigrationRunner(connect).migrate(conversation_continuity_migrations())
+    engine.conversation_continuity = ConversationContinuityService(
+        ConversationRepository(connect), OpenThreadRepository(connect), now_fn=time.time,
+    )
+    engine._last_continuity_resolution = {}
+    return engine
+
+
+def open_test_conversation(engine, kind="appointment_datetime", expected_reply_type="datetime", **metadata):
+    source = metadata.pop("conversation_source", "stt_voice")
+    return engine._open_pending_conversation(
+        kind=kind, expected_reply_type=expected_reply_type,
+        can_accept_no_wake_followup=True, ttl_seconds=metadata.pop("ttl_seconds", 300),
+        conversation_source=source, **metadata,
+    )
 
 
 def wire_canonical_app_pipeline(engine):
@@ -597,13 +625,10 @@ class VoiceCommandPipelineTests(unittest.TestCase):
 
     def test_promotion_pending_followup_allows_promotion_action(self):
         engine = make_engine([])
-        engine.runtime.state.pending_clarification = {
-            "id": "promo-1",
-            "kind": "promotion_target_clarification",
-            "authority": "owner",
-            "expires_at": time.time() + 60,
-            "candidates": [],
-        }
+        open_test_conversation(
+            engine, kind="promotion_target_clarification",
+            expected_reply_type="twitch_username_or_viewer_alias", candidates=[], ttl_seconds=60,
+        )
         engine.observe_twitch_chat_message("superdamu", "SUPERDAMU", "hola", "#chan")
 
         result = engine._process_stt_voice_transcript("Super Damu")
@@ -776,7 +801,7 @@ class VoiceCommandPipelineTests(unittest.TestCase):
         self.assertEqual(result.action_type, "twitch_shoutout_clarify")
         self.assertFalse(result.success)
         self.assertEqual(engine.runtime.twitch.sent, [])
-        self.assertEqual(engine.runtime.state.pending_clarification["kind"], "promotion_target_clarification")
+        self.assertEqual(engine._active_current_conversation().topic, "promotion_target_clarification")
 
     def test_no_debug_metadata_in_spoken_promo_response(self):
         engine = make_engine([])
@@ -1181,20 +1206,12 @@ class VoiceCommandPipelineTests(unittest.TestCase):
     def test_tts_echo_variation_does_not_consume_followup_window(self):
         engine = make_engine(["nuria"])
         engine.runtime.state.stream.enabled = False
-        engine.runtime.state.pending_conversation_turn = {
-            "expected_type": "casual_answer",
-            "previous_assistant_message_id": "assistant-test",
-            "previous_assistant_message": "Pues bien, dormida a ratos pero lista para tus locuras, cabron.",
-            "created_at": 1.0,
-            "expires_at": time.time() + 30,
-            "source": "assistant_question",
-            "allowed_sources": ["stt_voice", "ui"],
-            "allow_without_wakeword": True,
-            "status": "pending",
-            "followups_used": 0,
-            "max_followups": 1,
-            "reply_source": "stt_voice",
-        }
+        pending = open_test_conversation(
+            engine, kind="assistant_followup", expected_reply_type="casual_answer",
+            ttl_seconds=30, previous_assistant_message_id="assistant-test",
+            previous_assistant_message="Pues bien, dormida a ratos pero lista para tus locuras, cabron.",
+            source="assistant_question", max_attempts=1, reply_source="stt_voice",
+        )
         engine.stt_tts_echo_window_seconds = 10
         engine.stt_tts_echo_similarity_threshold = 0.82
         engine._remember_tts_text("Pues bien, dormida a ratos pero lista para tus locuras, cabron.")
@@ -1207,8 +1224,9 @@ class VoiceCommandPipelineTests(unittest.TestCase):
 
         self.assertEqual(result, "continue")
         self.assertEqual(handled, [])
-        self.assertEqual(engine.runtime.state.pending_conversation_turn["status"], "pending")
-        self.assertEqual(engine.runtime.state.pending_conversation_turn["followups_used"], 0)
+        current = engine._active_current_conversation()
+        self.assertEqual((current.id, current.version), (pending.id, pending.version))
+        self.assertEqual(current.domain_payload["attempts"], 0)
         rejected = [data for event_type, data in emitted if event_type == "voice.command" and data.get("status") == "rejected"]
         self.assertTrue(rejected)
         self.assertEqual(rejected[-1]["reason"], "self_tts_echo")
@@ -1290,12 +1308,7 @@ class VoiceCommandPipelineTests(unittest.TestCase):
     def test_pending_appointment_datetime_without_wake_is_unified_owner_followup(self):
         engine = make_engine()
         engine.runtime.state.stream.enabled = False
-        engine.runtime.state.pending_clarification = {
-            "id": "appointment-1",
-            "kind": "appointment_datetime",
-            "authority": "owner",
-            "expires_at": time.time() + 300,
-        }
+        open_test_conversation(engine, kind="appointment_datetime", ttl_seconds=300)
         engine.context_builder = FakeContextBuilder()
         engine.deliberation_service = FakeDeliberationService()
         engine.plan_executor = FakePlanExecutor()
@@ -1324,10 +1337,7 @@ class VoiceCommandPipelineTests(unittest.TestCase):
     def test_pending_appointment_with_wake_remains_pending_followup(self):
         engine = make_engine()
         engine.runtime.state.stream.enabled = False
-        engine.runtime.state.pending_clarification = {
-            "id": "appointment-2", "kind": "appointment_datetime", "authority": "owner",
-            "expires_at": time.time() + 300,
-        }
+        open_test_conversation(engine, kind="appointment_datetime", ttl_seconds=300)
         engine.context_builder = FakeContextBuilder()
         engine.deliberation_service = FakeDeliberationService()
         engine.plan_executor = FakePlanExecutor()
@@ -1345,10 +1355,7 @@ class VoiceCommandPipelineTests(unittest.TestCase):
     def test_current_time_with_pending_appointment_is_new_direct_request(self):
         engine = make_engine()
         engine.runtime.state.stream.enabled = False
-        engine.runtime.state.pending_clarification = {
-            "id": "appointment-3", "kind": "appointment_datetime", "authority": "owner",
-            "expires_at": time.time() + 300,
-        }
+        open_test_conversation(engine, kind="appointment_datetime", ttl_seconds=300)
         engine.context_builder = FakeContextBuilder()
         engine.deliberation_service = FakeDeliberationService()
         engine.plan_executor = FakePlanExecutor()
@@ -1454,18 +1461,19 @@ class VoiceCommandPipelineTests(unittest.TestCase):
         self.assertEqual(result.reason, "stt_alias_vocative")
         self.assertGreaterEqual(result.confidence, 0.78)
 
-    def test_assistant_question_creates_pending_conversation_turn(self):
+    def test_assistant_question_creates_canonical_conversation(self):
         engine = make_engine(["nuria"])
         engine.runtime.state.stream.enabled = False
         engine.pending_conversation_ttl_seconds = 120
 
         engine._record_assistant_reply_for_conversation("AquÃ­ sobreviviendo. Â¿tÃº quÃ© tal?", source="stt_voice", synthesizer=pending_marker())
 
-        turn = engine.runtime.state.pending_conversation_turn
-        self.assertEqual(turn["source"], "assistant_question")
-        self.assertEqual(turn["expected_type"], "casual_answer")
-        self.assertEqual(turn["allowed_sources"], ["stt_voice", "ui"])
-        self.assertFalse(turn.get("requires_wakeword", False))
+        conversation = engine._active_current_conversation()
+        self.assertEqual(conversation.topic, "assistant_followup")
+        self.assertEqual(conversation.domain_payload["source"], "assistant_question")
+        self.assertEqual(conversation.expected_reply.type.value, "casual_answer")
+        self.assertEqual(list(conversation.expected_reply.allowed_sources), ["owner_stt", "owner_ui"])
+        self.assertTrue(conversation.domain_payload["can_accept_no_wake_followup"])
 
     def test_stt_followup_after_assistant_question_enters_conversation_without_wakeword(self):
         engine = make_engine(["nuria"])
@@ -1522,12 +1530,7 @@ class VoiceCommandPipelineTests(unittest.TestCase):
     def test_expired_pending_is_purged_before_stt_classification(self):
         engine = make_engine(["nuria"], live=True)
         engine.runtime.state.stream.enabled = True
-        engine.runtime.state.pending_clarification = {
-            "id": "appointment-expired",
-            "kind": "appointment_datetime",
-            "authority": "owner",
-            "expires_at": time.time() - 1,
-        }
+        expired = open_test_conversation(engine, kind="appointment_datetime", ttl_seconds=-1)
         logs = []
 
         with patch("builtins.print", lambda *args, **kwargs: logs.append(" ".join(str(arg) for arg in args))), \
@@ -1536,19 +1539,15 @@ class VoiceCommandPipelineTests(unittest.TestCase):
 
         joined = "\n".join(logs)
         self.assertEqual(result, "continue")
-        self.assertIsNone(engine.runtime.state.pending_clarification)
-        self.assertIn("[HEBE][PENDING_EXPIRED] kind=appointment_datetime id=appointment-expired", joined)
-        self.assertIn("[HEBE][PENDING_CLEARED] reason=expired", joined)
+        self.assertIsNone(engine._active_current_conversation())
+        stored = engine.conversation_continuity.conversations.get(expired.id)
+        self.assertEqual(stored.status.value, "EXPIRED")
+        self.assertIn(f"[HEBE][PENDING_EXPIRED] kind=appointment_datetime id={expired.id}", joined)
 
     def test_appointment_pending_rejects_stream_planning_weekday_chatter(self):
         engine = make_engine(["nuria"], live=True)
         engine.runtime.state.stream.enabled = True
-        engine.runtime.state.pending_clarification = {
-            "id": "appointment-live",
-            "kind": "appointment_datetime",
-            "authority": "owner",
-            "expires_at": time.time() + 300,
-        }
+        open_test_conversation(engine, kind="appointment_datetime", ttl_seconds=300)
         engine.context_builder = FakeContextBuilder()
         logs = []
 
@@ -1565,14 +1564,9 @@ class VoiceCommandPipelineTests(unittest.TestCase):
     def test_live_owner_monologue_not_reply_even_with_unrelated_pending(self):
         engine = make_engine(["nuria"], live=True)
         engine.runtime.state.stream.enabled = True
-        engine.runtime.state.pending_clarification = engine._make_pending_task(
-            id="appointment-live",
-            kind="appointment_datetime",
-            expected_reply_type="datetime",
-            explicit_question_asked=True,
-            can_accept_no_wake_followup=True,
-            ttl_seconds=300,
-            max_attempts=1,
+        open_test_conversation(
+            engine, kind="appointment_datetime", expected_reply_type="datetime",
+            explicit_question_asked=True, ttl_seconds=300, max_attempts=1,
         )
         engine.context_builder = FakeContextBuilder()
         delivered = []
@@ -1586,7 +1580,7 @@ class VoiceCommandPipelineTests(unittest.TestCase):
         self.assertEqual(result, "continue")
         self.assertEqual(delivered, [])
         self.assertEqual(engine.context_builder.inputs, [])
-        self.assertIsNotNone(engine.runtime.state.pending_clarification)
+        self.assertIsNotNone(engine._active_current_conversation())
         joined = "\n".join(logs)
         self.assertIn("[HEBE][LIVE_OWNER_SPEECH_GATE] action=context_only", joined)
         self.assertIn("pending_compatible=false", joined)
@@ -1610,14 +1604,10 @@ class VoiceCommandPipelineTests(unittest.TestCase):
     def test_promotion_pending_rejects_stream_words_without_resolver_target(self):
         engine = make_engine(["nuria"], live=True)
         engine.runtime.state.stream.enabled = True
-        engine.runtime.state.pending_clarification = engine._make_pending_task(
-            id="promo-live",
-            kind="promotion_target_clarification",
+        open_test_conversation(
+            engine, kind="promotion_target_clarification",
             expected_reply_type="twitch_username_or_viewer_alias",
-            explicit_question_asked=True,
-            can_accept_no_wake_followup=True,
-            ttl_seconds=60,
-            max_attempts=1,
+            explicit_question_asked=True, ttl_seconds=60, max_attempts=1,
         )
         engine.context_builder = FakeContextBuilder()
         logs = []
@@ -1713,12 +1703,12 @@ class VoiceCommandPipelineTests(unittest.TestCase):
 
         engine._apply_game_guidance_reply_state(reply_data, decision, context, "owner_stt_direct")
 
-        pending = engine.runtime.state.pending_clarification
-        self.assertEqual(pending["kind"], "game_guidance_clarification")
-        self.assertEqual(pending["status"], "active")
-        self.assertEqual(pending["max_attempts"], 1)
-        self.assertTrue(pending["explicit_question_asked"])
-        self.assertTrue(pending["can_accept_no_wake_followup"])
+        pending = engine._active_current_conversation()
+        self.assertEqual(pending.topic, "game_guidance_clarification")
+        self.assertEqual(pending.status.value, "WAITING_ON_LEO")
+        self.assertEqual(pending.domain_payload["max_attempts"], 1)
+        self.assertTrue(pending.domain_payload["explicit_question_asked"])
+        self.assertTrue(pending.domain_payload["can_accept_no_wake_followup"])
 
     def test_pending_conversation_does_not_capture_filler_mumble(self):
         engine = make_engine(["nuria"])
@@ -1903,7 +1893,7 @@ class VoiceCommandPipelineTests(unittest.TestCase):
         self.assertIn("[HEBE][TWITCH][CHATBOT] send_message reason=spontaneity", joined)
         self.assertFalse(any(event_type == "chat.assistant" for event_type, _ in emitted))
 
-    def test_twitch_mention_reply_posts_to_twitch_chat_and_no_private_pending_turn(self):
+    def test_twitch_mention_reply_posts_to_twitch_chat_and_no_private_conversation(self):
         engine = make_engine(["nuria"])
         engine.runtime.state.stream.is_live = True
         engine.runtime.state.tts_enabled = False
@@ -1919,7 +1909,7 @@ class VoiceCommandPipelineTests(unittest.TestCase):
             engine._record_assistant_reply_for_conversation("¿tú qué tal?", source="twitch_chat_react", synthesizer=pending_marker())
 
         self.assertEqual(engine.runtime.twitch.sent, ["Corta y al pie."])
-        self.assertFalse(hasattr(engine.runtime.state, "pending_conversation_turn"))
+        self.assertIsNone(engine._active_current_conversation())
         self.assertIn("input_type=twitch_mention_or_event output_target=twitch_chat", "\n".join(logs))
 
     def test_twitch_mention_not_always_public_reply(self):
@@ -2549,16 +2539,10 @@ class VoiceCommandPipelineTests(unittest.TestCase):
     def test_casual_monologue_not_game_guidance_followup(self):
         engine = make_engine(["nuria"], live=True)
         engine.runtime.state.stream.enabled = True
-        engine.runtime.state.pending_clarification = {
-            "id": "game-pending",
-            "kind": "game_guidance_clarification",
-            "game": "Persona 5 Royal",
-            "expected_reply_type": "game_progress_state",
-            "missing_fields": ["current_location"],
-            "authority": "owner",
-            "created_at": time.time(),
-            "expires_at": time.time() + 300,
-        }
+        open_test_conversation(
+            engine, kind="game_guidance_clarification", expected_reply_type="game_progress_state",
+            game="Persona 5 Royal", missing_fields=["current_location"], ttl_seconds=300,
+        )
         engine.context_builder = FakeContextBuilder()
         logs = []
 
@@ -2570,23 +2554,17 @@ class VoiceCommandPipelineTests(unittest.TestCase):
         joined = "\n".join(logs)
         self.assertEqual(result, "continue")
         self.assertEqual(engine.context_builder.inputs, [])
-        self.assertIsNotNone(engine.runtime.state.pending_clarification)
+        self.assertIsNotNone(engine._active_current_conversation())
         self.assertIn("[HEBE][GAME_PENDING_COMPAT] compatible=false", joined)
         self.assertIn("ordinary_stream_or_real_life_talk", joined)
 
     def test_compatible_game_progress_followup_accepted(self):
         engine = make_engine(["nuria"], live=True)
         engine.runtime.state.stream.enabled = True
-        engine.runtime.state.pending_clarification = {
-            "id": "game-pending",
-            "kind": "game_guidance_clarification",
-            "game": "Persona 5 Royal",
-            "expected_reply_type": "game_progress_state",
-            "missing_fields": ["current_location"],
-            "authority": "owner",
-            "created_at": time.time(),
-            "expires_at": time.time() + 300,
-        }
+        open_test_conversation(
+            engine, kind="game_guidance_clarification", expected_reply_type="game_progress_state",
+            game="Persona 5 Royal", missing_fields=["current_location"], ttl_seconds=300,
+        )
         event = engine._build_input_event(
             source="stt_voice",
             raw_text="Hebe, estoy en el palacio de Kamoshida",
@@ -2661,12 +2639,12 @@ class VoiceCommandPipelineTests(unittest.TestCase):
         self.assertEqual(result.metadata["action_plan"]["reason"], "ambiguous_single_letter_target")
         self.assertEqual(engine.runtime.twitch.sent, [])
 
-    def test_pending_turn_not_created_for_twitch_source(self):
+    def test_conversation_not_created_for_twitch_source(self):
         engine = make_engine(["nuria"])
 
         engine._record_assistant_reply_for_conversation("¿tú qué tal?", source="twitch_chat_react", synthesizer=pending_marker())
 
-        self.assertFalse(hasattr(engine.runtime.state, "pending_conversation_turn"))
+        self.assertIsNone(engine._active_current_conversation())
 
     def test_pending_conversation_expires_after_ttl(self):
         engine = make_engine(["nuria"])
@@ -2675,10 +2653,12 @@ class VoiceCommandPipelineTests(unittest.TestCase):
 
         with patch("time.time", return_value=1000.0):
             engine._record_assistant_reply_for_conversation("Â¿tÃº quÃ© tal?", source="stt_voice", synthesizer=pending_marker())
+            conversation = engine._active_current_conversation()
         with patch("time.time", return_value=1002.0):
             self.assertFalse(engine._pending_conversation_matches(source="stt_voice"))
 
-        self.assertEqual(engine.runtime.state.pending_conversation_turn["status"], "expired")
+        stored = engine.conversation_continuity.conversations.get(conversation.id)
+        self.assertEqual(stored.status.value, "EXPIRED")
 
     def test_unrelated_action_during_pending_conversation_still_uses_action_flow(self):
         engine = wire_canonical_app_pipeline(make_engine(["nuria"]))
