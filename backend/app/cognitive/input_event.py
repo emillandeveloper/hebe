@@ -20,7 +20,7 @@ class InputEnvelope:
     command_mode: bool = False
     intent_candidates: list[str] = field(default_factory=list)
     app_target: str | None = None
-    app_resolver_result: dict[str, Any] = field(default_factory=dict)
+    app_plan_result: dict[str, Any] = field(default_factory=dict)
     active_pending: dict[str, Any] | None = None
     pending_compatible: bool = False
     expected_reply_type: str = ""
@@ -41,7 +41,7 @@ class InputEnvelope:
             "command_mode": self.command_mode,
             "intent_candidates": list(self.intent_candidates),
             "app_target": self.app_target,
-            "app_resolver_result": dict(self.app_resolver_result),
+            "app_plan_result": dict(self.app_plan_result),
             "active_pending": dict(self.active_pending) if self.active_pending else None,
             "pending_compatible": self.pending_compatible,
             "expected_reply_type": self.expected_reply_type,

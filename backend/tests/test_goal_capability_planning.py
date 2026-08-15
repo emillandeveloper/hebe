@@ -55,7 +55,7 @@ class GoalCapabilityPlanningTests(unittest.TestCase):
         self.assertIn("pc.open_application", plan.selected_capabilities)
         self.assertEqual(plan.steps[0].type, "action")
         self.assertEqual(plan.steps[0].capability_id, "pc.open_application")
-        self.assertEqual(plan.steps[0].data["params"]["app_name"], "obs")
+        self.assertEqual(plan.steps[0].data["params"]["requested_target"], "OBS")
 
     def test_catalogue_backlog_question_returns_query_plan(self):
         service = DeliberationService(intent_model=None, reasoning_model=None)

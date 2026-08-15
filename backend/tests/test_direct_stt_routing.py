@@ -76,11 +76,10 @@ class DirectSTTRoutingTests(unittest.TestCase):
                 ).to_dict()
             },
         )
-        with patch.dict(os.environ, {"HEBE_APP_MELONDS_PATH": r"C:\Tools\melonDS\melonDS.exe"}):
-            plan = LocalAppActionPlanner().plan(event)
+        plan = LocalAppActionPlanner().plan(event)
         self.assertIsNotNone(plan)
         self.assertEqual(plan.slots["application_target"], "Melon DS")
-        self.assertEqual(plan.slots["app_id"], "melonds")
+        self.assertEqual(set(plan.slots), {"application_target"})
 
     def test_melonds_known_aliases_resolve_but_unknown_does_not(self):
         for alias in ("melonds", "melon ds", "melón ds", "melón de ese", "melon de ese", "melon deese"):

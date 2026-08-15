@@ -78,7 +78,7 @@ ACTION_CLAIM_PATTERNS = (
 
 
 @dataclass(frozen=True)
-class InputEnvelope:
+class SpeechActInputEnvelope:
     source: str
     raw_text: str
     speaker: str = ""
@@ -365,7 +365,7 @@ class FinalResponseGuardResult:
 
 @dataclass(frozen=True)
 class SpeechActBundle:
-    envelope: InputEnvelope
+    envelope: SpeechActInputEnvelope
     scene: SceneContext
     memory: SceneMemory
     cognitive_decision: CognitiveDecision
@@ -461,7 +461,7 @@ def build_twitch_speech_act_bundle(payload: dict, context: Any | None, *, is_bro
     viewer_profile = _compact_viewer_profile(payload, context, speaker=speaker, authority=authority)
     proxy_request = authority == "viewer" and contains_viewer_proxy_request(raw_message)
 
-    envelope = InputEnvelope(
+    envelope = SpeechActInputEnvelope(
         source=source,
         raw_text=raw_message,
         speaker=speaker,
@@ -624,7 +624,7 @@ def build_universal_speech_act_bundle(
 ) -> SpeechActBundle:
     if speech_act_type not in UNIVERSAL_SPEECH_ACT_TYPES:
         raise ValueError(f"Unknown speech_act_type: {speech_act_type}")
-    envelope = InputEnvelope(
+    envelope = SpeechActInputEnvelope(
         source=source,
         raw_text=input_text,
         speaker=speaker,

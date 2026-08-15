@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Iterable, List, Optional, Sequence
 
 from app.services import app_registry
-from app.services.app_registry import resolve_candidates, resolve_whitelisted_app, persist_learned_app
+from app.services.app_registry import persist_learned_app, resolve_whitelisted_app
 
 
 @dataclass
@@ -47,6 +47,7 @@ class CapabilityResolution:
     persisted: bool = False
     clarification_question: Optional[str] = None
     diagnostics: dict[str, Any] = field(default_factory=dict)
+    app_record: Optional[dict[str, Any]] = None
 
 
 @dataclass
@@ -322,8 +323,6 @@ class ApplicationDiscoveryService:
             candidate.validation_notes = []
             if not candidate.executable:
                 candidate.validation_notes.append("path_missing_or_invalid")
-            if candidate.executable_path and candidate.executable_path.lower().endswith(".lnk"):
-                candidate.executable = True
             candidate_name = self._normalize_target(candidate.executable_name_match)
             if normalized_target and candidate_name == f"{normalized_target}.exe":
                 candidate.confidence += 0.25
@@ -348,10 +347,20 @@ class LocalCapabilityResolver:
     def __init__(self, discovery_service: ApplicationDiscoveryService | None = None) -> None:
         self.discovery = discovery_service or ApplicationDiscoveryService()
 
-    def resolve_open_application(self, app_record: dict[str, Any], requested_target: str) -> CapabilityResolution:
+    def resolve_open_application(self, requested_target: str) -> CapabilityResolution:
+        app_record = resolve_whitelisted_app(requested_target)
+        registered = app_record is not None
+        if app_record is None:
+            app_id = re.sub(r"[^a-z0-9]+", "", requested_target.casefold())
+            app_record = {
+                "app_id": app_id or requested_target,
+                "display_name": requested_target,
+                "aliases": [requested_target],
+                "executable_path": "",
+                "source": "unregistered",
+            }
         app_id = str(app_record.get("app_id") or app_record.get("name") or requested_target).strip()
         display_name = str(app_record.get("display_name") or app_record.get("name") or app_id).strip()
-        current_command = str(app_record.get("executable_path") or app_record.get("command") or "").strip()
         current_candidate = self._build_candidate_from_record(app_record)
         if current_candidate and self._is_valid_executable(current_candidate):
             return CapabilityResolution(
@@ -364,6 +373,7 @@ class LocalCapabilityResolver:
                 confidence=1.0,
                 provenance="existing_registration",
                 persisted=False,
+                app_record=app_record,
             )
 
         search_aliases = self._extract_aliases(app_record)
@@ -387,7 +397,12 @@ class LocalCapabilityResolver:
                 provenance=invalid_reason,
                 persisted=False,
                 clarification_question=question,
-                diagnostics={"reason": invalid_reason, "checked_sources": [c.source_type for c in candidates]},
+                diagnostics={
+                    "reason": invalid_reason,
+                    "registered": registered,
+                    "checked_sources": [c.source_type for c in candidates],
+                },
+                app_record=app_record if registered else None,
             )
 
         if len(valid_candidates) == 1:
@@ -403,6 +418,7 @@ class LocalCapabilityResolver:
                 confidence=selected.confidence,
                 provenance=selected.source_type,
                 persisted=persisted,
+                app_record=self._record_for_candidate(app_id, display_name, search_aliases, selected),
             )
 
         top = valid_candidates[0]
@@ -419,6 +435,7 @@ class LocalCapabilityResolver:
                 confidence=top.confidence,
                 provenance=top.source_type,
                 persisted=persisted,
+                app_record=self._record_for_candidate(app_id, display_name, search_aliases, top),
             )
 
         options = [c.source_location or c.executable_path for c in valid_candidates[:2] if c.source_location or c.executable_path]
@@ -441,6 +458,23 @@ class LocalCapabilityResolver:
             clarification_question=question,
             diagnostics={"candidate_paths": [c.source_location or c.executable_path for c in valid_candidates]},
         )
+
+    @staticmethod
+    def _record_for_candidate(
+        app_id: str,
+        display_name: str,
+        aliases: list[str],
+        candidate: ApplicationCandidate,
+    ) -> dict[str, Any]:
+        return {
+            "app_id": app_id,
+            "display_name": display_name,
+            "aliases": aliases,
+            "executable_path": candidate.executable_path,
+            "command": candidate.command,
+            "source": candidate.source_type,
+            "name": display_name,
+        }
 
     def _build_candidate_from_record(self, app_record: dict[str, Any]) -> Optional[ApplicationCandidate]:
         path = str(app_record.get("executable_path") or app_record.get("command") or "").strip()
@@ -477,12 +511,12 @@ class LocalCapabilityResolver:
             return False
         path = Path(candidate.executable_path)
         if candidate.executable_path.lower().endswith(".lnk"):
-            return path.exists()
+            return path.exists() and path.is_file()
         return path.exists() and path.is_file() and path.suffix.lower() == ".exe"
 
     def _persist_candidate(self, app_id: str, display_name: str, aliases: list[str], candidate: ApplicationCandidate) -> bool:
         try:
-            persist_learned_app(
+            saved = persist_learned_app(
                 app_id=app_id,
                 canonical_name=display_name,
                 aliases=aliases,
@@ -493,7 +527,7 @@ class LocalCapabilityResolver:
                 process_name=candidate.executable_name_match,
                 window_title=candidate.display_name,
             )
-            return True
+            return saved is not None
         except Exception:
             return False
 
@@ -509,5 +543,5 @@ class LocalCapabilityResolver:
             return "esta ruta"
         path = str(path)
         if len(path) > 40:
-            return path[:40].rstrip("\/ ") + "..."
+            return path[:40].rstrip("\\/ ") + "..."
         return path

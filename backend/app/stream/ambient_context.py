@@ -240,7 +240,6 @@ class AmbientContextExtractor:
         tokens = set(normalized.split())
         if not tokens:
             return []
-
         facts: list[dict] = []
         healing_terms = {
             "cura", "curan", "curar", "curarse", "heal", "healing", "hp", "vida",
@@ -254,6 +253,10 @@ class AmbientContextExtractor:
             "counter", "contraataque", "counterattack", "autopocion", "autopotion",
             "aguanta", "sobrevive", "cura", "curarse", "autoheal", "autocura",
         }
+        guide_terms = {"guia", "guide", "walkthrough", "recomienda", "dice", "decia", "said", "sugiere", "aconseja"}
+        strategy_terms = {"magia", "magic", "luz", "light", "oscura", "hielo", "fuego", "hechizo", "spell", "estrategia", "strategy", "usar", "use"}
+        attack_terms = {"ataque", "attack", "golpe", "hostia", "dano", "damage", "critico", "crit", "oneshot"}
+        surprise_terms = {"que", "wtf", "hell", "diablos", "cono", "joder", "sorpresa", "inesperado"}
         rng_terms = {"rng", "suerte", "azar", "random", "aleatorio", "dados", "dado", "parchis", "depender"}
         challenge_terms = {
             "desafio", "challenge", "level", "nivel", "exp", "experiencia", "forzado",
@@ -344,6 +347,33 @@ class AmbientContextExtractor:
                 referent=referent,
                 supported_claims=[raw],
             ))
+        if tokens & guide_terms and (tokens & strategy_terms or tokens & challenge_terms):
+            facts.append(self._category_fact(
+                "guide_strategy",
+                "A guide or strategy hint is relevant to the current boss or difficulty.",
+                raw,
+                normalized,
+                0.82,
+                now,
+                mood="strategy planning",
+                referent=referent,
+                supported_claims=[raw],
+            ))
+        if (tokens & attack_terms and tokens & surprise_terms) or re.search(
+            r"\b(?:que|joder|wtf|hell)\b.*\b(?:ataque|attack|golpe)\b|\b(?:ataque|attack|golpe).*(?:borrado|me ha borrado)\b",
+            normalized,
+        ):
+            facts.append(self._category_fact(
+                "unexpected_attack",
+                "Leo was surprised by a strong or confusing enemy attack.",
+                raw,
+                normalized,
+                0.78,
+                now,
+                mood="surprised",
+                referent=referent,
+                supported_claims=[raw],
+            ))
         if tokens & rng_terms:
             facts.append(self._category_fact(
                 "rng_dependency",
@@ -409,109 +439,8 @@ class AmbientContextExtractor:
         if tokens & progress_terms and len(tokens) >= 4:
             facts.append(self._category_fact("progress_marker", "Leo marked concrete progress in the run.", raw, normalized, 0.7, now))
 
-        legacy = self._extract_gameplay_category(raw, normalized, now)
-        if legacy and legacy.get("category") == "navigation_confusion" and any(
-            fact.get("category") in {"failure_or_death", "rng_dependency", "combat_risk"}
-            for fact in facts
-        ):
-            legacy = None
-        if legacy and not any(fact.get("category") == legacy.get("category") for fact in facts):
-            facts.append(legacy)
         return facts
 
-    def _extract_gameplay_category(self, raw: str, normalized: str, now: float) -> dict | None:
-        tokens = set(normalized.split())
-        if not tokens:
-            return None
-
-        healing = {"cura", "curan", "curar", "heal", "healing", "hp", "vida", "pocion", "pociones", "limon", "limones", "item", "objeto"}
-        weak = {"poco", "poquisimo", "apenas", "nada", "insuficiente", "inutil", "useless", "weak", "barely"}
-        attack = {"ataque", "attack", "golpe", "hostia", "dano", "damage", "critico", "crit", "oneshot"}
-        surprise = {"que", "wtf", "hell", "diablos", "cono", "joder", "sorpresa", "inesperado"}
-        guide = {"guia", "guide", "walkthrough", "recomienda", "dice", "decia", "said", "sugiere", "aconseja"}
-        strategy = {"magia", "magic", "luz", "light", "oscura", "hielo", "fuego", "hechizo", "spell", "estrategia", "strategy", "usar", "use"}
-        enemy = {"enemigo", "enemy", "boss", "jefe", "bicho", "monstruo"}
-        mechanic = {"queda", "quedan", "aguanta", "sobrevive", "sobrevivir", "stays", "survive", "hp", "cura", "curarse", "heals", "heal"}
-        low_hp = {"muero", "muriendo", "morir", "vida", "hp", "rojo", "red", "oneshot", "one"}
-        resource = {"comida", "food", "exp", "experiencia", "recurso", "recursos", "dinero", "oro", "mana", "mp", "farmear", "farm"}
-        progress = {"pasado", "pasamos", "derrotado", "avance", "avanzamos", "llegamos", "conseguido", "success", "victoria"}
-        confusion = {"donde", "adonde", "perdido", "perdida", "confuso", "confundido"}
-        failure = {"otra", "vez", "again", "muerto", "matado", "fallado", "fallo", "intento"}
-        difficulty = {"facil", "dificil", "hard", "easy", "imposible", "complicado"}
-
-        if tokens & healing and tokens & weak:
-            return self._category_fact(
-                "healing_or_recovery",
-                "Leo complained that a healing item barely restores enough HP.",
-                raw,
-                normalized,
-                0.84,
-                now,
-                mood="resource frustration",
-            )
-        if tokens & guide and (tokens & strategy or tokens & difficulty):
-            return self._category_fact(
-                "guide_strategy",
-                "A guide suggested something relevant about the current strategy or boss difficulty.",
-                raw,
-                normalized,
-                0.82,
-                now,
-                mood="strategy planning",
-            )
-        if ({"1", "uno", "one"} & tokens) and tokens & {"hp", "vida"} and tokens & mechanic and tokens & (enemy | {"se", "lo"}):
-            return self._category_fact(
-                "enemy_mechanic",
-                "An enemy or boss seems to survive at 1 HP and then heal.",
-                raw,
-                normalized,
-                0.86,
-                now,
-                mood="mechanic confusion",
-            )
-        if tokens & attack and tokens & surprise:
-            return self._category_fact(
-                "unexpected_attack",
-                "Leo was surprised by a strong or confusing enemy attack.",
-                raw,
-                normalized,
-                0.78,
-                now,
-                mood="surprised",
-            )
-        if tokens & low_hp and tokens & {"casi", "almost", "poca", "poco", "rojo", "red"}:
-            return self._category_fact("combat_risk", "Leo is low on HP or close to dying.", raw, normalized, 0.76, now, mood="danger")
-        if tokens & resource and tokens & {"falta", "poco", "necesito", "sin", "gastar", "guardar", "farmear", "farm"}:
-            return self._category_fact(
-                "resource_management",
-                "Leo is thinking about food, EXP, or resource management.",
-                raw,
-                normalized,
-                0.72,
-                now,
-                mood="resource planning",
-            )
-        if tokens & difficulty and tokens & (enemy | {"zona", "area", "nivel"}):
-            return self._category_fact(
-                "boss_or_area_difficulty",
-                "Leo commented on the current boss or area difficulty.",
-                raw,
-                normalized,
-                0.72,
-                now,
-                mood="difficulty read",
-            )
-        explicit_navigation_confusion = bool(
-            tokens & confusion
-            or re.search(r"\bno se (?:por )?donde (?:ir|voy|seguir)\b", normalized)
-        )
-        if explicit_navigation_confusion and len(tokens) >= 4:
-            return self._category_fact("navigation_confusion", "Leo is unsure where to go next.", raw, normalized, 0.7, now, mood="confused")
-        if tokens & failure and len(tokens) >= 4:
-            return self._category_fact("failure_or_death", "Leo mentioned repeated failure or another death.", raw, normalized, 0.68, now, mood="frustrated")
-        if tokens & progress and len(tokens) >= 4:
-            return self._category_fact("progress_marker", "Leo marked recent progress in the run.", raw, normalized, 0.68, now)
-        return None
 
     def _is_generic_filler(self, normalized: str) -> bool:
         if not normalized:

@@ -207,8 +207,7 @@ class CognitiveRouter:
                 "allowed_step_types": ["reply"], "response_mode": "game_guidance",
                 "response_intent": "provide_grounded_game_guidance", "reason": "structured_game_guidance_request"})
 
-        app_target = self._open_app_target(normalized)
-        if app_target:
+        if self._is_open_app_command(normalized):
             return CognitiveDecision(**{**base, "intent": "command_open_app", "intent_confidence": .95,
                 "goal_type": "control_pc", "allowed_capabilities": [CAP_OPEN_APP],
                 "blocked_capabilities": CREATE_CAPABILITIES, "allowed_step_types": ["action", "reply"],
@@ -419,9 +418,12 @@ class CognitiveRouter:
         }
 
     @staticmethod
-    def _open_app_target(text: str) -> str:
-        match = re.search(r"(?:^|\s)(?:abre|abrir|inicia|iniciar|arranca|lanza|ejecuta|open|start|launch|run)\s+(.+)$", text)
-        return match.group(1).strip() if match else ""
+    def _is_open_app_command(text: str) -> bool:
+        return bool(re.match(
+            r"^(?:(?:hebe|ebe|eve)\s+)?(?:(?:oye|mira|vale|ok|okay|por favor|puedes|podrias)\s+)*"
+            r"(?:abre|abrir|inicia|iniciar|arranca|arrancar|lanza|lanzar|ejecuta|ejecutar|open|start|launch|run)\s+(.+)$",
+            text,
+        ))
 
     @staticmethod
     def _personal_state(text: str) -> str | None:

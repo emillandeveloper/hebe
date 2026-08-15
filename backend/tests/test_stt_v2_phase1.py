@@ -109,13 +109,13 @@ class STTV2Phase1Tests(unittest.TestCase):
         self.assertGreaterEqual(health["p95_latency_seconds"], 0)
         self.assertEqual(health["transcriptions_per_minute"], 1)
 
-    def test_partial_hebe_obs_clarifies_not_prompt_echo(self):
+    def test_partial_hebe_obs_without_action_verb_is_conversation(self):
         service = self.service()
         hypothesis = service._build_command_hypothesis(
             "Hebe, Ebe, OBS", "Hebe, OBS", {"detected_language": "es"},
             {"detected_language": "es", "language_allowed": True},
         )
-        self.assertEqual(hypothesis.decision, "clarify")
+        self.assertEqual(hypothesis.decision, "conversation")
         self.assertFalse(hypothesis.action_eligible)
         self.assertFalse(is_stt_prompt_hotword_list("Hebe, Ebe, OBS"))
         self.assertTrue(is_stt_prompt_hotword_list("Hebe, OBS, Twitch, stream, promo"))

@@ -96,7 +96,7 @@ def parse_direct_stt_command(
     addressed = bool(wake_match)
     body = exact[wake_match.end():] if wake_match else exact
     body = _FILLER_PREFIX.sub("", body).strip()
-    verb_match = _OPEN_VERB.search(body)
+    verb_match = _OPEN_VERB.match(body)
     action_verb = "open" if verb_match else ""
     raw_target = _clean_target(body[verb_match.end():]) if verb_match else ""
     body_normalized = normalize_direct_command_text(body)
@@ -104,19 +104,9 @@ def parse_direct_stt_command(
     first_word = next(iter(re.findall(r"[a-záéíóúüñ]+", body_normalized)), "")
     is_direct_question = bool(addressed and ("?" in exact or first_word in _QUESTION_PREFIXES))
 
-    recognized_target = False
-    if addressed and not verb_match and body and not is_direct_question:
-        try:
-            from app.services.app_registry import resolve_whitelisted_app
-            recognized_target = resolve_whitelisted_app(_clean_target(body)) is not None
-        except Exception:
-            recognized_target = False
-        if recognized_target:
-            raw_target = _clean_target(body)
-
     if verb_match and raw_target:
         family = DirectUtteranceIntentFamily.APPLICATION_ACTION
-    elif verb_match or recognized_target:
+    elif verb_match:
         family = DirectUtteranceIntentFamily.INCOMPLETE_COMMAND
     elif tokens & _STREAM_TERMS and tokens & {"promo", "promocion", "shoutout", "raid", "stream", "directo"}:
         family = DirectUtteranceIntentFamily.STREAM_OPERATION

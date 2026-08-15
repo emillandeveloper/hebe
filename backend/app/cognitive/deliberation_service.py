@@ -16,13 +16,14 @@ from app.cognitive.capabilities import (
     GoalExtractor,
 )
 from app.cognitive.context_builder import BuiltContext
+from app.cognitive.input_event import InputEvent
+from app.cognitive.local_app_planner import LocalAppActionPlanner
 from app.cognitive.models import PlanStep, Plan, DeliberationResult
 from app.cognitive.game_guidance import CAP_GAME_GUIDANCE, GameGuidanceCapability, GameRunState
 from app.cognitive.temporal import TemporalInterpreter
 from app.cognitive.cognitive_router import (
     CAP_APPOINTMENT,
     CAP_DATE,
-    CAP_OPEN_APP,
     CAP_REMINDER,
     CAP_TIME,
     CognitiveRouter,
@@ -65,6 +66,7 @@ class DeliberationService:
                 self.capability_catalogue_error = f"{type(exc).__name__}: {exc}"
         self.goal_extractor = goal_extractor or GoalExtractor()
         self.cognitive_router = CognitiveRouter()
+        self.local_app_planner = LocalAppActionPlanner()
         self.game_guidance = self.cognitive_router.game_guidance
         if capability_matcher is not None:
             self.capability_matcher = capability_matcher
@@ -225,8 +227,13 @@ class DeliberationService:
             )))
 
         if decision.intent == "command_open_app":
-            app_name = self._extract_open_app_target(text)
-            return finish(self._plan_open_app(app_name)) if app_name else finish(self._plan_with_llm(context))
+            local_plan = self.local_app_planner.plan(InputEvent(
+                source=decision.source,
+                raw_text=decision.raw_text,
+                normalized_text=decision.normalized_text,
+            ))
+            if local_plan is not None:
+                return finish(self._plan_canonical_open_app(local_plan.target))
 
         pending = (getattr(context, "state_snapshot", {}) or {}).get("pending_clarification")
         if decision.uses_pending_task and decision.pending_resolution_allowed and pending:
@@ -778,40 +785,20 @@ class DeliberationService:
         cleaned = re.sub(r"[^a-z0-9ñ\s]", " ", without_accents)
         return " ".join(cleaned.split())
 
-    def _extract_open_app_target(self, text: str) -> str | None:
-        markers = {
-            "abre", "abrir", "inicia", "iniciar", "arranca", "arrancar",
-            "lanza", "lanzar", "ejecuta", "ejecutar", "open", "start", "launch", "run",
-        }
-        tokens = self._normalize_text(text).split()
-        for index, token in enumerate(tokens):
-            if token in markers:
-                candidate = " ".join(tokens[index + 1:]).strip()
-                if candidate:
-                    return candidate
-        return None
-
-    def _plan_open_app(self, app_name: str) -> DeliberationResult:
-        return DeliberationResult(
-            plan=Plan(
-                steps=[
-                    PlanStep(
-                        type="action",
-                        data={
-                            "name": "open_application",
-                            "params": {"app_name": app_name},
-                        },
-                        capability_id=CAP_OPEN_APP,
-                        risk_level="medium",
-                    ),
-                    PlanStep(
-                        type="reply",
-                        data={"mode": "confirm_action"},
-                    ),
-                ],
-                reasoning=f"User requested open_application for {app_name}",
-            )
-        )
+    @staticmethod
+    def _plan_canonical_open_app(target: str) -> DeliberationResult:
+        return DeliberationResult(plan=Plan(
+            steps=[
+                PlanStep(
+                    type="action",
+                    data={"name": "open_application", "params": {"requested_target": target}},
+                    capability_id="pc.open_application",
+                    risk_level="medium",
+                ),
+                PlanStep(type="reply", data={"mode": "confirm_action"}),
+            ],
+            reasoning=f"Canonical local app planner extracted target {target}",
+        ))
 
     def _plan_with_llm(self, context: BuiltContext) -> DeliberationResult:
         return DeliberationResult(

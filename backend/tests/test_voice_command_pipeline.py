@@ -1,11 +1,13 @@
 ﻿import os
 import time
+import sys
 import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from app.cognitive.input_event import InputEvent
 from app.cognitive.action_runtime import ActionRuntime
+from app.cognitive.local_app_planner import LocalAppActionPlanner
 from app.cognitive.models import DeliberationResult, ExecutionResult, Plan, PlanStep, StepExecutionResult
 from app.cognitive.response_synthesizer import ResponseSynthesizer
 from app.cognitive.cognitive_router import CognitiveRouter
@@ -222,7 +224,7 @@ class VoiceCommandPipelineTests(unittest.TestCase):
         delivered = []
         engine._deliver_manual_reply = lambda text, *, source: delivered.append((source, text))
 
-        with patch.dict(os.environ, {"HEBE_APP_OBS_PATH": r"C:\Tools\OBS\obs64.exe"}):
+        with patch.dict(os.environ, {"HEBE_APP_OBS_PATH": sys.executable}):
             result = engine.cognitive_flow("hebe abre obs", source="ui")
 
         self.assertEqual(result, "continue")
@@ -237,7 +239,7 @@ class VoiceCommandPipelineTests(unittest.TestCase):
         delivered = []
         engine._deliver_manual_reply = lambda text, *, source: delivered.append((source, text))
 
-        with patch.dict(os.environ, {"HEBE_APP_OBS_PATH": r"C:\Tools\OBS\obs64.exe"}):
+        with patch.dict(os.environ, {"HEBE_APP_OBS_PATH": sys.executable}):
             result = engine.cognitive_flow("abre obs", source="ui")
 
         self.assertEqual(result, "continue")
@@ -249,7 +251,7 @@ class VoiceCommandPipelineTests(unittest.TestCase):
         delivered = []
         engine._deliver_manual_reply = lambda text, *, source: delivered.append((source, text))
 
-        with patch.dict(os.environ, {"HEBE_APP_OBS_PATH": r"C:\Tools\OBS\obs64.exe"}):
+        with patch.dict(os.environ, {"HEBE_APP_OBS_PATH": sys.executable}):
             result = engine._process_stt_voice_transcript("Hebe abre OBS")
 
         self.assertEqual(result, "continue")
@@ -280,7 +282,7 @@ class VoiceCommandPipelineTests(unittest.TestCase):
                     "action_eligible": True,
                     "detected_language": "es",
                 }
-                with patch.dict(os.environ, {"HEBE_APP_MELONDS_PATH": r"C:\Tools\melonDS\melonDS.exe"}), \
+                with patch.dict(os.environ, {"HEBE_APP_MELONDS_PATH": sys.executable}), \
                      patch("app.hebe_engine.emit", lambda event_type, data=None: emitted.append((event_type, data or {}))):
                     result = engine._process_stt_voice_transcript(transcript, stt_metadata=metadata)
 
@@ -364,25 +366,42 @@ class VoiceCommandPipelineTests(unittest.TestCase):
         self.assertEqual(synth_result.action_type, "open_application")
         self.assertFalse(synth_result.success)
         self.assertEqual(synth_result.metadata["error_code"], "app_path_missing")
-        self.assertIn("HEBE_APP_OBS_PATH", synth_result.fallback_text)
+        self.assertIn("ruta ejecutable", synth_result.fallback_text)
 
     def test_unknown_app_does_not_execute_or_call_command_synth(self):
         engine = make_engine()
 
         result = engine._plan_and_execute_local_app_action("hebe abre paint raro", "ui")
 
-        self.assertIsNone(result)
+        self.assertIsNotNone(result)
+        self.assertFalse(result.success)
+        self.assertEqual(result.state_changes.get("error_code"), "app_not_found")
         self.assertEqual(engine.runtime.win.opened, [])
-        self.assertEqual(engine.response_synthesizer.results, [])
 
     def test_non_whitelisted_app_does_not_execute_even_with_command_words(self):
         engine = make_engine()
 
-        with patch.dict(os.environ, {"HEBE_APP_OBS_PATH": r"C:\Tools\OBS\obs64.exe"}):
+        with patch.dict(os.environ, {"HEBE_APP_OBS_PATH": sys.executable}):
             result = engine._plan_and_execute_local_app_action("abre calculadora", "ui")
 
-        self.assertIsNone(result)
+        self.assertIsNotNone(result)
+        self.assertFalse(result.success)
+        self.assertEqual(result.state_changes.get("error_code"), "app_not_found")
         self.assertEqual(engine.runtime.win.opened, [])
+
+    def test_local_app_planner_does_not_resolve_registry_before_runtime(self):
+        event = InputEvent(source="ui", raw_text="abre obs", normalized_text="abre obs")
+
+        planner = LocalAppActionPlanner()
+        plan = planner.plan(event, is_awake=True)
+
+        self.assertIsNotNone(plan)
+        self.assertEqual(plan.action_type, "open_application")
+        self.assertEqual(plan.status, "complete")
+        self.assertEqual(plan.target, "obs")
+        self.assertEqual(plan.slots.get("application_target"), "obs")
+        self.assertNotIn("app_id", plan.slots)
+        self.assertIsNone(plan.slots.get("app_record"))
 
     def test_model_is_not_called_before_open_application_action_plan(self):
         class GuardSynth(FakeSynth):
@@ -397,7 +416,7 @@ class VoiceCommandPipelineTests(unittest.TestCase):
         delivered = []
         engine._deliver_manual_reply = lambda text, *, source: delivered.append((source, text))
 
-        with patch.dict(os.environ, {"HEBE_APP_OBS_PATH": r"C:\Tools\OBS\obs64.exe"}):
+        with patch.dict(os.environ, {"HEBE_APP_OBS_PATH": sys.executable}):
             result = engine.cognitive_flow("hebe inicia obs", source="ui")
 
         self.assertEqual(result, "continue")
@@ -1314,7 +1333,7 @@ class VoiceCommandPipelineTests(unittest.TestCase):
         delivered = []
         engine._deliver_manual_reply = lambda text, *, source: delivered.append((source, text))
 
-        with patch.dict(os.environ, {"HEBE_APP_OBS_PATH": r"C:\Tools\OBS\obs64.exe"}), \
+        with patch.dict(os.environ, {"HEBE_APP_OBS_PATH": sys.executable}), \
              patch("app.hebe_engine.emit"), patch("app.hebe_engine.log_chat"):
             result = engine._process_stt_voice_transcript("Abre OBS")
 
@@ -1322,7 +1341,7 @@ class VoiceCommandPipelineTests(unittest.TestCase):
         trace = engine._last_cognitive_trace
         self.assertEqual(result, "continue")
         self.assertEqual(envelope.source, "owner_stt_command")
-        self.assertEqual(envelope.app_target, "obs")
+        self.assertEqual(envelope.app_target, "OBS")
         self.assertEqual(trace["intent"], "command_open_app")
         self.assertIn("pc.open_application", trace["allowed_capabilities"])
         self.assertEqual(engine.runtime.win.opened[0]["app_id"], "obs")
@@ -2628,7 +2647,7 @@ class VoiceCommandPipelineTests(unittest.TestCase):
         engine._deliver_manual_reply = lambda text, *, source: delivered.append((source, text))
         engine._record_assistant_reply_for_conversation("Â¿tÃº quÃ© tal?", source="stt_voice", synthesizer=pending_marker())
 
-        with patch.dict(os.environ, {"HEBE_APP_OBS_PATH": r"C:\Tools\OBS\obs64.exe"}), \
+        with patch.dict(os.environ, {"HEBE_APP_OBS_PATH": sys.executable}), \
              patch("app.hebe_engine.log_chat"):
             result = engine._process_stt_voice_transcript("Hebe abre OBS")
 
@@ -2869,5 +2888,3 @@ class VoiceCommandPipelineTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
-

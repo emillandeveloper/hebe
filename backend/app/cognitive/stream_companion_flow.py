@@ -118,7 +118,7 @@ class InputClassifier:
                 input_type=envelope.input_type,
                 purpose="pending_resolution" if envelope.pending_compatible else "local_command" if envelope.app_target else "",
                 addressed_to_hebe=envelope.addressed_to_hebe,
-                confidence=float((envelope.app_resolver_result or {}).get("confidence") or (
+                confidence=float((envelope.app_plan_result or {}).get("confidence") or (
                     .95 if envelope.pending_compatible else .55 if envelope.source == "ambient_stt" else .9
                 )),
                 reason=envelope.reason,

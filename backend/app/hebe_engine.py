@@ -49,14 +49,6 @@ from app.core.stt_worker import STTWorker
 from app.core.runtime import build_runtime, HebeRuntime
 from app.core.persistent_logs import log_jsonl_event
 
-from app.orchestrator.orchestrator import Orchestrator
-from app.orchestrator.executor import OrchestratorExecutor
-from app.orchestrator.policy import OrchestratorPolicy
-from app.orchestrator.gates import OrchestratorGates
-from app.orchestrator.intents.resolver import IntentResolver
-from app.orchestrator.dispatcher import OrchestratorDispatcher
-from app.orchestrator.tool_handlers import build_tool_handlers
-
 from app.cognitive import MemoryStore, SchedulerService
 from app.cognitive.scheduler import InternalEvent
 from app.cognitive.command_result import CommandResult
@@ -241,25 +233,6 @@ class HebeEngine:
                 flush=True,
             )
 
-        chat_runtime = getattr(self.runtime, "llm", None)
-
-        dispatcher = OrchestratorDispatcher(
-            runtime=self.runtime,
-            tools=build_tool_handlers(self.runtime),
-        )
-
-        self.orchestrator = Orchestrator(
-            state=self.runtime.state,
-            intent_resolver=IntentResolver(
-                llm=getattr(self.runtime, "llm", None),
-            ),
-            executor=OrchestratorExecutor(
-                chat_runtime=chat_runtime,
-                dispatcher=dispatcher,
-            ),
-            policy=OrchestratorPolicy(),
-            gates=OrchestratorGates(),
-        )
         # -------------------------
         # Cognitive flow (Hebe v1)
         # -------------------------
@@ -3724,11 +3697,8 @@ class HebeEngine:
             print("[HEBE][WAKE] sleeping; ignored input reason=router_did_not_authorize_wake", flush=True)
             return "continue"
 
-        # Legacy harnesses do not construct the deliberation stack. Their
-        # command planner remains a compatibility endpoint, but only after the
-        # central route has classified the input.
-        if not hasattr(self, "context_builder"):
-            local_app = self._plan_and_execute_local_app_action(command, source) if decision.allows_capability("pc.open_application") else None
+        if decision.allows_capability("pc.open_application"):
+            local_app = self._plan_and_execute_local_app_action(command, source)
             if local_app is not None:
                 text = self._synthesize_command_result(local_app, input_text=command)
                 self._deliver_manual_reply(text, source=source)
@@ -7158,18 +7128,17 @@ class HebeEngine:
             event, is_awake=not bool(getattr(self.runtime.state, "hebe_sleeping", False)),
         )
         event._local_app_plan = local_plan
-        app_result: dict = {}
+        app_plan_result: dict = {}
         intent_candidates: list[str] = []
         app_target = None
         if local_plan is not None and local_plan.action_type == "open_application":
             app_target = local_plan.target or (local_plan.slots or {}).get("application_target")
             intent_candidates.append("open_application")
-            app_result = {
+            app_plan_result = {
                 "status": local_plan.status,
                 "confidence": float(local_plan.confidence or 0.0),
                 "reason": local_plan.reason,
                 "target": app_target,
-                "whitelisted": bool((local_plan.context_checks or {}).get("whitelisted")),
             }
 
         pending = self._active_pending_clarification()
@@ -7201,7 +7170,7 @@ class HebeEngine:
         stronger_request = bool(
             router._is_current_time_query(normalized)
             or router._is_current_date_query(normalized)
-            or router._open_app_target(normalized)
+            or router._is_open_app_command(normalized)
             or router._is_reminder_request(normalized)
             or router._personal_state(normalized)
             or router.game_guidance.looks_like_query(event.raw_text, game_snapshot)
@@ -7277,8 +7246,9 @@ class HebeEngine:
 
         high_confidence_local_app = bool(
             command_mode
-            and app_result.get("whitelisted")
-            and float(app_result.get("confidence") or 0.0) >= 0.8
+            and direct_family == DirectUtteranceIntentFamily.APPLICATION_ACTION.value
+            and app_target
+            and float(app_plan_result.get("confidence") or 0.0) >= 0.8
         )
         live_gate_action, live_gate_reason = self._live_owner_speech_gate(
             addressed=addressed,
@@ -7339,7 +7309,7 @@ class HebeEngine:
             command_mode=command_mode,
             intent_candidates=intent_candidates,
             app_target=app_target,
-            app_resolver_result=app_result,
+            app_plan_result=app_plan_result,
             active_pending=active_pending,
             pending_compatible=pending_compatible,
             expected_reply_type=expected_reply_type,
@@ -7465,43 +7435,11 @@ class HebeEngine:
             )
         if plan is None:
             return None
-        app_decision = "execute" if plan.status == "complete" and float(plan.confidence or 0.0) >= 0.8 else "clarify" if plan.target else "reject"
         print(
-            "[HEBE][APP_COMMAND_RESOLVE] "
+            "[HEBE][APP_TARGET_EXTRACT] "
             f"verb=open raw_target={plan.slots.get('application_target') or plan.target or ''!r} "
-            f"resolved_app={plan.slots.get('app_id') or ''} confidence={float(plan.confidence or 0.0):.3f} "
-            f"decision={app_decision}", flush=True,
+            f"confidence={float(plan.confidence or 0.0):.3f}", flush=True,
         )
-        if plan.status == "rejected" and plan.reason == "app_not_whitelisted":
-            print(
-                "[HEBE][ACTION_PLAN] "
-                f"action_type={plan.action_type} target={plan.target} status={plan.status} reason={plan.reason}",
-                flush=True,
-            )
-            is_direct_stt = input_event.source in {"stt_voice", "owner_stt_direct", "owner_stt_command"}
-            if not is_direct_stt:
-                return None
-            if getattr(self, "_current_input_event", None) is not None:
-                self._current_input_event.stt_metadata["direct_stt_execution"] = {
-                    "success": False,
-                    "reason": "application_not_found",
-                    "target": plan.slots.get("application_target") or plan.target,
-                }
-            self._commit_current_direct_stt_terminal(
-                outcome="action_failed", reason="application_not_found",
-            )
-            target_name = plan.slots.get("application_target") or plan.target or "esa aplicación"
-            return CommandResult(
-                action_type="open_application",
-                success=False,
-                user_visible_summary=f"No encuentro {target_name} en el registro de aplicaciones.",
-                state_changes={"app_name": target_name, "error_code": "application_not_found"},
-                constraints=["Do not claim the application was opened."],
-                fallback_text=f"No encuentro {target_name} en el registro de aplicaciones.",
-                requires_model_response=False,
-                metadata={"error_code": "application_not_found", "action_plan": plan.as_log_dict()},
-            )
-
         print(
             "[HEBE][ACTION_PLAN] "
             f"action_type={plan.action_type} target={plan.target} status={plan.status}",
@@ -7519,55 +7457,6 @@ class HebeEngine:
             "final_decision": "accepted" if plan.status == "complete" else "rejected",
         })
 
-        if plan.reason == "app_path_missing":
-            print(
-                "[HEBE][ACTION_EXECUTOR] "
-                "action_type=open_application success=false error_code=app_path_missing",
-                flush=True,
-            )
-            app_name = plan.slots.get("display_name") or plan.target or "la aplicacion"
-            current_input_event = getattr(self, "_current_input_event", None)
-            if current_input_event is not None:
-                current_input_event.stt_metadata["direct_stt_execution"] = {
-                    "success": False,
-                    "reason": "app_path_missing",
-                    "target": plan.slots.get("app_id") or plan.target,
-                }
-            self._commit_current_direct_stt_terminal(
-                outcome="action_failed", reason="app_path_missing",
-            )
-            return CommandResult(
-                action_type="open_application",
-                success=False,
-                user_visible_summary=(
-                    f"{app_name} is recognized but its executable path is not configured."
-                ),
-                state_changes={
-                    "app_id": plan.slots.get("app_id") or plan.target,
-                    "app_name": app_name,
-                    "error_code": "app_path_missing",
-                },
-                constraints=[
-                    "Do not ask for remote access.",
-                    "Do not give manual app-opening instructions.",
-                    "Do not ask whether to open it.",
-                ],
-                fallback_text=(
-                    f"Reconozco {app_name}, pero no tengo configurada su ruta ejecutable. "
-                    "Todavía estoy intentando encontrarla."
-                ),
-                requires_model_response=True,
-                metadata={
-                    "action_plan": plan.as_log_dict(),
-                    "error_code": "app_path_missing",
-                    "app_id": plan.slots.get("app_id") or plan.target,
-                    "message_goal": (
-                        "Tell Leo that the application is recognized but its executable path is not configured, "
-                        "and that Hebe is attempting local discovery."
-                    ),
-                },
-            )
-
         print(
             "[HEBE][ACTION_EXECUTOR] "
             f"executing action_type={plan.action_type}",
@@ -7575,10 +7464,7 @@ class HebeEngine:
         )
         action_result = self.action_runtime.execute(
             "open_application",
-            {
-                "app_id": plan.slots.get("app_id") or plan.target,
-                "app_record": plan.slots.get("app_record"),
-            },
+            {"requested_target": plan.slots.get("application_target") or plan.target},
         )
         success = bool(getattr(action_result, "success", False))
         payload = getattr(action_result, "data", {}) or {}
@@ -7593,19 +7479,28 @@ class HebeEngine:
             self._current_input_event.stt_metadata["direct_stt_execution"] = {
                 "success": success,
                 "reason": error_code or ("executed" if success else "launch_failed"),
-                "target": payload.get("app_id") or plan.slots.get("app_id") or plan.target,
+                "target": payload.get("app_id") or plan.target,
             }
         self._commit_current_direct_stt_terminal(
             outcome="action_executed" if success else "action_failed",
             reason="application_launch_succeeded" if success else str(error_code or "launch_failed"),
             action_receipt={
-                "action_type": "open_application", "target": payload.get("app_id") or plan.slots.get("app_id") or plan.target,
+                "action_type": "open_application", "target": payload.get("app_id") or plan.target,
                 "executor_invoked": True, "success": success, "external_confirmation": str(payload.get("process_id") or ""),
                 "timestamp": time.time(),
             } if success else None,
         )
-        app_name = payload.get("app_name") or plan.slots.get("display_name") or plan.target or "la aplicacion"
-        fallback = f"Abriendo {app_name}." if success else f"Reconozco {app_name}, pero no he podido abrirla."
+        app_name = payload.get("app_name") or plan.target or "la aplicacion"
+        if success:
+            fallback = f"Abriendo {app_name}."
+        elif error_code == "ambiguous_app_selection" and payload.get("clarification_question"):
+            fallback = str(payload["clarification_question"])
+        elif error_code == "app_path_missing":
+            fallback = f"Reconozco {app_name}, pero no tengo configurada su ruta ejecutable."
+        elif error_code == "app_not_found":
+            fallback = f"No encuentro {app_name}."
+        else:
+            fallback = f"Reconozco {app_name}, pero no he podido abrirla."
         print(
             "[HEBE][ACTION_CLAIM_GUARD] "
             f"claimed_action=open_application execution_success={str(success).lower()} passed=true",
@@ -7616,7 +7511,7 @@ class HebeEngine:
             success=success,
             user_visible_summary=fallback,
             state_changes={
-                "app_id": payload.get("app_id") or plan.slots.get("app_id") or plan.target,
+                "app_id": payload.get("app_id") or plan.target,
                 "app_name": app_name,
                 "error_code": error_code,
             },
@@ -7626,7 +7521,7 @@ class HebeEngine:
                 "Do not ask whether to open it.",
             ],
             fallback_text=fallback,
-            requires_model_response=True,
+            requires_model_response=error_code not in {"ambiguous_app_selection", "app_not_found"},
             metadata={
                 "action_plan": plan.as_log_dict(),
                 "error_code": error_code,

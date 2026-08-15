@@ -1041,12 +1041,7 @@ class STTService:
             direct.detected_intent_family == DirectUtteranceIntentFamily.APPLICATION_ACTION.value
             and direct.action_verb and direct.raw_target
         ):
-            try:
-                from app.services.app_registry import resolve_whitelisted_app
-                if resolve_whitelisted_app(direct.raw_target) is not None:
-                    return True
-            except Exception:
-                pass
+            return True
         normalized = self._normalize_guard_text(raw)
         return bool(re.match(
             r"^\s*(?:haz(?:le)?|dale|tira|pon)\s+(?:una?\s+)?"

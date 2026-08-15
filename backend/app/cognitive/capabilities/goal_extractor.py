@@ -84,17 +84,6 @@ class GoalExtractor:
                 "event": "progress_update",
                 "state_change": raw_text.strip(),
             })
-        elif self._looks_like_open_app(normalized):
-            goal_type = "control_pc"
-            confidence = 0.88
-            reasoning = "local PC control request detected"
-            slots.update({
-                "action": "open_application",
-                "app_name": self._extract_open_app_target(normalized),
-            })
-            if not slots["app_name"]:
-                missing_slots.append("app_name")
-            risk_level = "medium"
         elif self._looks_like_schedule(normalized):
             goal_type = "schedule_task"
             confidence = 0.78
@@ -203,23 +192,6 @@ class GoalExtractor:
 
     def _looks_like_correction(self, normalized: str) -> bool:
         return any(token in normalized for token in ("pero", "no ", "actually", "en realidad", "ya "))
-
-    def _looks_like_open_app(self, normalized: str) -> bool:
-        return any(
-            normalized.startswith(prefix) or f" {prefix}" in normalized
-            for prefix in ("abre ", "abrir ", "inicia ", "iniciar ", "lanza ", "open ", "start ", "launch ")
-        )
-
-    def _extract_open_app_target(self, normalized: str) -> str:
-        markers = {
-            "abre", "abrir", "inicia", "iniciar", "arranca", "arrancar",
-            "lanza", "lanzar", "ejecuta", "ejecutar", "open", "start", "launch", "run",
-        }
-        tokens = normalized.split()
-        for index, token in enumerate(tokens):
-            if token in markers:
-                return " ".join(tokens[index + 1:]).strip()
-        return ""
 
     def _looks_like_schedule(self, normalized: str) -> bool:
         return any(token in normalized for token in ("recuerdame", "avisame", "recordatorio", "cita", "agenda"))

@@ -80,6 +80,18 @@ class AmbientContextExtractorTests(unittest.TestCase):
                 self.assertFalse(result.useful)
                 self.assertEqual(result.reason, "generic_filler")
 
+    def test_otra_vez_does_not_auto_classify_failure(self):
+        text = "Mira, otra vez con lo de abre la puerta esa. Lleva todo el puto stream diciéndome que abra la puerta, pero te quieres callar con la puta puerta que no hay ninguna puerta."
+        result = self.extractor.extract(text, now=self.now)
+        self.assertTrue(result.useful or result.reason == "low_value")
+        categories = {fact["category"] for fact in result.facts}
+        self.assertNotIn("failure_or_death", categories)
+        self.assertNotIn("navigation_confusion", categories)
+
+    def test_otra_vez_by_itself_is_not_gameplay_failure(self):
+        result = self.extractor.extract("otra vez", now=self.now)
+        self.assertFalse(result.useful)
+
 
 if __name__ == "__main__":
     unittest.main()

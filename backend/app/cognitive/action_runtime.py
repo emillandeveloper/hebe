@@ -1,4 +1,3 @@
-from app.services.app_registry import resolve_candidates, register_app, resolve_whitelisted_app
 from app.services.local_capability import LocalCapabilityResolver
 from app.cognitive.models import ActionResult
 
@@ -10,8 +9,6 @@ class ActionRuntime:
     def execute(self, action_name: str, params: dict) -> ActionResult:
         print(f"[HEBE][ACTION] execute name={action_name!r} params={params!r}", flush=True)
 
-        if action_name == "open_app":
-            return self._open_app(params)
         if action_name == "open_application":
             return self._open_application(params)
 
@@ -20,76 +17,31 @@ class ActionRuntime:
 
         return ActionResult(success=False, error=f"Unknown action: {action_name}")
 
-    def _open_app(self, params: dict) -> ActionResult:
-        app_name = str(params.get("app_name", "")).strip()
-        if not app_name:
-            return ActionResult(success=False, error="Missing app_name")
-
-        candidates = resolve_candidates(app_name)
-        if not candidates:
-            return ActionResult(
-                success=False,
-                error=f"App not found: {app_name}",
-                data={"app_name": app_name},
-            )
-
-        if not hasattr(self.runtime, "win") or not hasattr(self.runtime.win, "open_app"):
-            return ActionResult(
-                success=False,
-                error="runtime.win.open_app no implementado",
-                data={"app_name": app_name},
-            )
-
-        for candidate in candidates:
-            print(f"[HEBE][ACTION][OPEN_APP] trying candidate={candidate!r}", flush=True)
-            ok = self.runtime.win.open_app(candidate)
-            if ok:
-                if candidate.get("source") != "db":
-                    saved = register_app(candidate)
-                    if saved:
-                        candidate = saved
-
-                return ActionResult(
-                    success=True,
-                    data={
-                        "app_name": candidate.get("name", app_name),
-                        "app_record": candidate,
-                    },
-                )
-
-        return ActionResult(
-            success=False,
-            error=f"Failed opening app: {app_name}",
-            data={"app_name": app_name},
-        )
-
     def _open_application(self, params: dict) -> ActionResult:
-        app_id = str(params.get("app_id") or params.get("app_name") or "").strip()
-        app_record = params.get("app_record")
-        if not isinstance(app_record, dict):
-            app_record = resolve_whitelisted_app(app_id) if app_id else None
-        if not app_record:
+        requested_target = str(params.get("requested_target") or "").strip()
+        if not requested_target:
             return ActionResult(
                 success=False,
-                error="app_not_whitelisted",
-                data={"error_code": "app_not_whitelisted", "app_id": app_id},
+                error="application_target_missing",
+                data={"error_code": "application_target_missing"},
             )
 
-        app_id = str(app_record.get("app_id") or app_id).strip()
-        display_name = str(app_record.get("display_name") or app_record.get("name") or app_id).strip()
-
-        resolution = self.local_capability.resolve_open_application(app_record, requested_target=params.get("requested_target") or display_name)
+        resolution = self.local_capability.resolve_open_application(requested_target)
         implementation = resolution.implementation
+        app_record = dict(resolution.app_record or {})
+        app_id = str(app_record.get("app_id") or getattr(implementation, "canonical_name", "") or requested_target).strip()
+        display_name = str(app_record.get("display_name") or app_record.get("name") or resolution.canonical_target or requested_target).strip()
 
         if resolution.status == "not_found":
+            error_code = "app_path_missing" if resolution.diagnostics.get("registered") else "app_not_found"
             return ActionResult(
                 success=False,
-                error="app_not_found",
+                error=error_code,
                 data={
-                    "error_code": "app_not_found",
+                    "error_code": error_code,
                     "app_id": app_id,
                     "app_name": display_name,
-                    "app_record": app_record,
+                    "app_record": app_record or None,
                     "clarification_question": resolution.clarification_question,
                     "diagnostics": resolution.diagnostics,
                 },
@@ -129,7 +81,6 @@ class ActionRuntime:
             flush=True,
         )
 
-        app_record = dict(app_record)
         app_record["executable_path"] = executable_path
         app_record["command"] = implementation.command
 
