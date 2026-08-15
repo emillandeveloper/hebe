@@ -128,6 +128,48 @@ class UniversalResponsePipelineTests(unittest.TestCase):
         self.assertFalse(result.passed)
         self.assertIn("action_claim_without_execution_success", [v.type for v in result.violations])
 
+    def test_action_claim_guard_blocks_leading_completion_without_execution(self):
+        bundle = build_universal_speech_act_bundle(
+            route="owner_private_chat",
+            speech_act_type="owner_supportive_reaction",
+            input_text="el 16 de septiembre",
+            active_pending_task={"kind": "appointment_datetime"},
+        )
+
+        result = action_claim_guard("Apuntado: cita el 16 de septiembre.", bundle)
+
+        self.assertFalse(result.passed)
+        self.assertIn("action_claim_without_execution_success", [v.type for v in result.violations])
+
+    def test_pending_game_task_is_owned_by_final_response_guard(self):
+        bundle = build_universal_speech_act_bundle(
+            route="owner_private_chat",
+            speech_act_type="owner_supportive_reaction",
+            input_text="Cloud, Tifa",
+            active_pending_task={"kind": "game_guidance_clarification"},
+        )
+
+        result = final_response_guard("Ve al castillo y busca el objeto.", bundle)
+
+        self.assertFalse(result.passed)
+        self.assertIn("active_game_guidance_pending", [v.type for v in result.violations])
+
+    def test_ungrounded_game_walkthrough_is_owned_by_final_response_guard(self):
+        bundle = build_universal_speech_act_bundle(
+            route="owner_private_chat",
+            speech_act_type="direct_answer",
+            input_text="Hebe, cual es el proximo objetivo?",
+            technical_state={
+                "game_guidance_query": True,
+                "has_game_guidance_source": False,
+            },
+        )
+
+        result = final_response_guard("Ve al castillo y busca el objeto clave.", bundle)
+
+        self.assertFalse(result.passed)
+        self.assertIn("ungrounded_game_walkthrough", [v.type for v in result.violations])
+
     def test_action_failure_rendered_in_hebe_voice(self):
         model = CapturingModel(["No ha abierto, Leo. Me quedo con el fallo a la vista."])
         synth = ResponseSynthesizer(conversation_model=model)

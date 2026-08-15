@@ -53,6 +53,7 @@ from app.cognitive import MemoryStore, SchedulerService
 from app.cognitive.scheduler import InternalEvent
 from app.cognitive.command_result import CommandResult
 from app.cognitive.input_event import InputEnvelope, InputEvent
+from app.cognitive.models import ExecutionResult, Plan
 from app.cognitive.core_loop import (
     HebeCoreLoop,
     PerceivedEvent,
@@ -281,6 +282,7 @@ class HebeEngine:
 
         self.action_runtime = ActionRuntime(self.runtime)
         self.local_app_planner = LocalAppActionPlanner(self.wake_name_resolver)
+        self.deliberation_service.local_app_planner = self.local_app_planner
 
         self.plan_executor = PlanExecutor(
             memory_store=self.memory_store,
@@ -3697,13 +3699,6 @@ class HebeEngine:
             print("[HEBE][WAKE] sleeping; ignored input reason=router_did_not_authorize_wake", flush=True)
             return "continue"
 
-        if decision.allows_capability("pc.open_application"):
-            local_app = self._plan_and_execute_local_app_action(command, source)
-            if local_app is not None:
-                text = self._synthesize_command_result(local_app, input_text=command)
-                self._deliver_manual_reply(text, source=source)
-                return "continue"
-
         owner_decision = self._owner_policy_decision(command, source=source)
         if owner_decision is not None and not owner_decision.allow_llm:
             if owner_decision.allow_reply:
@@ -3813,7 +3808,11 @@ class HebeEngine:
             "selected_route": context.cognitive_decision.intent,
             "final_plan_steps": [step.type for step in deliberation.plan.steps],
         })
+        if decision.intent == "command_open_app":
+            self._trace_canonical_open_app_plan(deliberation.plan, input_event)
         execution = self.plan_executor.execute(deliberation.plan)
+        if decision.intent == "command_open_app":
+            self._record_canonical_open_app_execution(execution)
         self._last_cognitive_trace["plan_executor_guard"] = list(getattr(self.plan_executor, "last_guard_results", []) or [])
         state_update = execution.first_result_of_type("state_update")
         self._apply_game_run_state_execution(state_update)
@@ -3889,8 +3888,8 @@ class HebeEngine:
 
         if reply_text:
             try:
-                if source == "ui":
-                    self._deliver_manual_reply(reply_text, source="ui")
+                if source == "ui" or decision.intent == "command_open_app":
+                    self._deliver_manual_reply(reply_text, source=source)
                 else:
                     self._deliver_voice_reply(reply_text)
                     self._record_assistant_reply_for_conversation(reply_text, source=source, synthesizer=getattr(self, "response_synthesizer", None))
@@ -4224,27 +4223,6 @@ class HebeEngine:
                     f"event_id={getattr(event_decision, 'message_id', '')} should_reply=true next=twitch_response_pipeline",
                     flush=True,
                 )
-            if (
-                event_decision.should_stop_pipeline
-                and (
-                    str(getattr(event_decision, "response_mode", "")) == "viewer_context_only"
-                    or str(getattr(event_decision, "reason", "")) == "viewer_context_only"
-                )
-            ):
-                self._get_twitch_interaction_coordinator().record_policy_suppression(
-                    event_id, str(getattr(event_decision, "reason", "") or "viewer_context_only"),
-                )
-                self._set_last_twitch_route_state(
-                    output_route="context_only", should_generate=False,
-                    suppress_reason=str(getattr(event_decision, "reason", "") or "viewer_context_only"),
-                    emitted_to_twitch=False, tts_sent=False,
-                )
-                print(
-                    "[HEBE][TWITCH_PIPELINE_FINAL] route=context_only emitted=false "
-                    f"reason={getattr(event_decision, 'reason', 'viewer_context_only')}",
-                    flush=True,
-                )
-                return
             if event_decision.should_stop_pipeline:
                 if event_type == "twitch_chat_react":
                     stream = self._get_stream_state()
@@ -7419,118 +7397,68 @@ class HebeEngine:
             self.local_app_planner = planner
         return planner
 
-    def _plan_and_execute_local_app_action(self, command: str, source: str) -> CommandResult | None:
-        normalized = self._normalize_text(command)
-        input_event = getattr(self, "_current_input_event", None) or self._build_input_event(
-            source="ui" if source in {"ui", "typed_ui"} else source,
-            raw_text=command,
-            normalized_text=normalized,
-        )
-        plan = getattr(input_event, "_local_app_plan", None)
-        if plan is None:
-            planner = self._get_local_app_planner()
-            plan = planner.plan(
-                input_event,
-                is_awake=not bool(getattr(self.runtime.state, "hebe_sleeping", False)),
-            )
-        if plan is None:
-            return None
+    def _trace_canonical_open_app_plan(self, plan: Plan, input_event: InputEvent) -> None:
+        action_step = next((step for step in plan.steps if step.type == "action"), None)
+        data = (action_step.data or {}) if action_step else {}
+        if data.get("name") != "open_application":
+            return
+        target = str((data.get("params") or {}).get("requested_target") or "").strip()
+        print(f"[HEBE][APP_TARGET_EXTRACT] verb=open raw_target={target!r}", flush=True)
         print(
-            "[HEBE][APP_TARGET_EXTRACT] "
-            f"verb=open raw_target={plan.slots.get('application_target') or plan.target or ''!r} "
-            f"confidence={float(plan.confidence or 0.0):.3f}", flush=True,
-        )
-        print(
-            "[HEBE][ACTION_PLAN] "
-            f"action_type={plan.action_type} target={plan.target} status={plan.status}",
+            f"[HEBE][ACTION_PLAN] action_type=open_application target={target} status=complete",
             flush=True,
         )
         emit("voice.command", {
             "raw_text": input_event.raw_text,
             "normalized_text": input_event.normalized_text,
-            "intent": plan.action_type,
-            "target": plan.target,
-            "confidence": round(float(plan.confidence), 3),
-            "status": plan.status,
-            "reason": plan.reason,
+            "intent": "open_application",
+            "target": target,
+            "status": "complete",
             "source": input_event.source,
-            "final_decision": "accepted" if plan.status == "complete" else "rejected",
+            "final_decision": "accepted",
+            "owner": "DeliberationService",
         })
 
+    def _record_canonical_open_app_execution(self, execution: ExecutionResult) -> None:
+        step = execution.first_result_of_type("action")
+        data = (step.data or {}) if step else {}
+        if data.get("action_name") != "open_application":
+            return
+        params = data.get("params") or {}
+        result = data.get("action_result")
+        payload = getattr(result, "data", {}) or {}
+        success = bool(step and step.success)
+        error_code = payload.get("error_code") or getattr(result, "error", None)
+        target = payload.get("app_id") or params.get("requested_target")
         print(
-            "[HEBE][ACTION_EXECUTOR] "
-            f"executing action_type={plan.action_type}",
-            flush=True,
-        )
-        action_result = self.action_runtime.execute(
-            "open_application",
-            {"requested_target": plan.slots.get("application_target") or plan.target},
-        )
-        success = bool(getattr(action_result, "success", False))
-        payload = getattr(action_result, "data", {}) or {}
-        error_code = payload.get("error_code") or getattr(action_result, "error", None)
-        print(
-            "[HEBE][ACTION_EXECUTOR] "
-            f"action_type=open_application success={str(success).lower()}"
+            "[HEBE][ACTION_EXECUTOR] action_type=open_application "
+            f"success={str(success).lower()}"
             + (f" error_code={error_code}" if error_code else ""),
             flush=True,
         )
-        if self._current_input_event is not None:
-            self._current_input_event.stt_metadata["direct_stt_execution"] = {
+        event = getattr(self, "_current_input_event", None)
+        if event is not None and isinstance(getattr(event, "stt_metadata", None), dict):
+            event.stt_metadata["direct_stt_execution"] = {
                 "success": success,
                 "reason": error_code or ("executed" if success else "launch_failed"),
-                "target": payload.get("app_id") or plan.target,
+                "target": target,
             }
         self._commit_current_direct_stt_terminal(
             outcome="action_executed" if success else "action_failed",
             reason="application_launch_succeeded" if success else str(error_code or "launch_failed"),
             action_receipt={
-                "action_type": "open_application", "target": payload.get("app_id") or plan.target,
-                "executor_invoked": True, "success": success, "external_confirmation": str(payload.get("process_id") or ""),
+                "action_type": "open_application",
+                "target": target,
+                "executor_invoked": True,
+                "success": success,
+                "external_confirmation": str(payload.get("executed_command") or ""),
                 "timestamp": time.time(),
             } if success else None,
         )
-        app_name = payload.get("app_name") or plan.target or "la aplicacion"
-        if success:
-            fallback = f"Abriendo {app_name}."
-        elif error_code == "ambiguous_app_selection" and payload.get("clarification_question"):
-            fallback = str(payload["clarification_question"])
-        elif error_code == "app_path_missing":
-            fallback = f"Reconozco {app_name}, pero no tengo configurada su ruta ejecutable."
-        elif error_code == "app_not_found":
-            fallback = f"No encuentro {app_name}."
-        else:
-            fallback = f"Reconozco {app_name}, pero no he podido abrirla."
         print(
             "[HEBE][ACTION_CLAIM_GUARD] "
             f"claimed_action=open_application execution_success={str(success).lower()} passed=true",
             flush=True,
-        )
-        return CommandResult(
-            action_type="open_application",
-            success=success,
-            user_visible_summary=fallback,
-            state_changes={
-                "app_id": payload.get("app_id") or plan.target,
-                "app_name": app_name,
-                "error_code": error_code,
-            },
-            constraints=[
-                "Do not ask for remote access.",
-                "Do not give manual app-opening instructions unless action_unavailable/manual_help_requested is present.",
-                "Do not ask whether to open it.",
-            ],
-            fallback_text=fallback,
-            requires_model_response=error_code not in {"ambiguous_app_selection", "app_not_found"},
-            metadata={
-                "action_plan": plan.as_log_dict(),
-                "error_code": error_code,
-                "message_goal": (
-                    f"Confirm that {app_name} is opening locally."
-                    if success
-                    else f"Tell Leo that {app_name} was recognized but could not be opened locally."
-                ),
-            },
         )
 
     def _today_at(self, hhmm: str) -> datetime:

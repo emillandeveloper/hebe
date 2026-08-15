@@ -8,7 +8,9 @@ from unittest.mock import Mock, patch
 from app.cognitive.input_event import InputEvent
 from app.cognitive.action_runtime import ActionRuntime
 from app.cognitive.local_app_planner import LocalAppActionPlanner
+from app.cognitive.deliberation_service import DeliberationService
 from app.cognitive.models import DeliberationResult, ExecutionResult, Plan, PlanStep, StepExecutionResult
+from app.cognitive.plan_executor import PlanExecutor
 from app.cognitive.response_synthesizer import ResponseSynthesizer
 from app.cognitive.cognitive_router import CognitiveRouter
 from app.cognitive.game_guidance import GameRunState
@@ -71,6 +73,25 @@ class FakeSynth:
         if not result.requires_model_response:
             return result.fallback_text
         return f"modelo:{result.action_type}:{result.state_changes.get('target', result.state_changes.get('app_id', ''))}"
+
+    def synthesize(self, **kwargs):
+        execution = kwargs["execution"]
+        step = execution.first_result_of_type("action")
+        result = (step.data or {}).get("action_result") if step else None
+        payload = getattr(result, "data", {}) or {}
+        error_code = payload.get("error_code") or getattr(result, "error", None)
+        command_result = SimpleNamespace(
+            action_type=(step.data or {}).get("action_name") if step else "",
+            success=bool(step and step.success),
+            state_changes={
+                "app_id": payload.get("app_id") or payload.get("requested_target"),
+                "app_name": payload.get("app_name"),
+                "error_code": error_code,
+            },
+            metadata={"error_code": error_code},
+        )
+        self.results.append((command_result, kwargs))
+        return f"modelo:{command_result.action_type}:{command_result.state_changes.get('app_id') or ''}"
 
 
 class FakeWin:
@@ -189,6 +210,14 @@ def make_engine(chatters=None, *, live=True):
     return engine
 
 
+def wire_canonical_app_pipeline(engine):
+    engine.context_builder = FakeContextBuilder()
+    engine.deliberation_service = DeliberationService(None, None)
+    engine.deliberation_service.local_app_planner = engine._get_local_app_planner()
+    engine.plan_executor = PlanExecutor(Mock(), engine.action_runtime)
+    return engine
+
+
 def pending_marker(expected="casual_answer"):
     return SimpleNamespace(last_opens_conversation_turn=True, last_expected_reply_type=expected)
 
@@ -220,7 +249,7 @@ class VoiceCommandPipelineTests(unittest.TestCase):
         self.assertFalse(hasattr(result, "action_type"))
 
     def test_ui_hebe_abre_obs_creates_open_application_action_plan(self):
-        engine = make_engine()
+        engine = wire_canonical_app_pipeline(make_engine())
         delivered = []
         engine._deliver_manual_reply = lambda text, *, source: delivered.append((source, text))
 
@@ -235,7 +264,7 @@ class VoiceCommandPipelineTests(unittest.TestCase):
         self.assertTrue(synth_result.success)
 
     def test_ui_abre_obs_creates_open_application_when_awake_and_whitelisted(self):
-        engine = make_engine()
+        engine = wire_canonical_app_pipeline(make_engine())
         delivered = []
         engine._deliver_manual_reply = lambda text, *, source: delivered.append((source, text))
 
@@ -247,7 +276,7 @@ class VoiceCommandPipelineTests(unittest.TestCase):
         self.assertEqual(delivered, [("ui", "modelo:open_application:obs")])
 
     def test_stt_hebe_abre_obs_uses_same_open_application_pipeline(self):
-        engine = make_engine()
+        engine = wire_canonical_app_pipeline(make_engine())
         delivered = []
         engine._deliver_manual_reply = lambda text, *, source: delivered.append((source, text))
 
@@ -266,7 +295,7 @@ class VoiceCommandPipelineTests(unittest.TestCase):
         )
         for index, transcript in enumerate(variants):
             with self.subTest(transcript=transcript):
-                engine = make_engine()
+                engine = wire_canonical_app_pipeline(make_engine())
                 emitted = []
                 engine._deliver_manual_reply = lambda text, *, source: None
                 direct = parse_direct_stt_command(transcript, event_id=f"melon-{index}")
@@ -352,7 +381,7 @@ class VoiceCommandPipelineTests(unittest.TestCase):
         self.assertEqual(outcomes[-1]["outcome"], "action_failed")
 
     def test_obs_path_missing_returns_structured_action_result_not_generic_advice(self):
-        engine = make_engine()
+        engine = wire_canonical_app_pipeline(make_engine())
         delivered = []
         engine._deliver_manual_reply = lambda text, *, source: delivered.append((source, text))
 
@@ -366,27 +395,35 @@ class VoiceCommandPipelineTests(unittest.TestCase):
         self.assertEqual(synth_result.action_type, "open_application")
         self.assertFalse(synth_result.success)
         self.assertEqual(synth_result.metadata["error_code"], "app_path_missing")
-        self.assertIn("ruta ejecutable", synth_result.fallback_text)
+        execution = engine.response_synthesizer.results[-1][1]["execution"]
+        action_result = execution.first_result_of_type("action").data["action_result"]
+        self.assertEqual(action_result.error, "app_path_missing")
+        self.assertEqual(action_result.data["error_code"], "app_path_missing")
 
     def test_unknown_app_does_not_execute_or_call_command_synth(self):
-        engine = make_engine()
+        engine = wire_canonical_app_pipeline(make_engine())
+        delivered = []
+        engine._deliver_manual_reply = lambda text, *, source: delivered.append((source, text))
 
-        result = engine._plan_and_execute_local_app_action("hebe abre paint raro", "ui")
+        result = engine.cognitive_flow("hebe abre paint raro", source="ui")
 
-        self.assertIsNotNone(result)
-        self.assertFalse(result.success)
-        self.assertEqual(result.state_changes.get("error_code"), "app_not_found")
+        self.assertEqual(result, "continue")
+        synth_result = engine.response_synthesizer.results[-1][0]
+        self.assertFalse(synth_result.success)
+        self.assertEqual(synth_result.state_changes.get("error_code"), "app_not_found")
         self.assertEqual(engine.runtime.win.opened, [])
 
     def test_non_whitelisted_app_does_not_execute_even_with_command_words(self):
-        engine = make_engine()
+        engine = wire_canonical_app_pipeline(make_engine())
+        engine._deliver_manual_reply = lambda text, *, source: None
 
         with patch.dict(os.environ, {"HEBE_APP_OBS_PATH": sys.executable}):
-            result = engine._plan_and_execute_local_app_action("abre calculadora", "ui")
+            result = engine.cognitive_flow("abre calculadora", source="ui")
 
-        self.assertIsNotNone(result)
-        self.assertFalse(result.success)
-        self.assertEqual(result.state_changes.get("error_code"), "app_not_found")
+        self.assertEqual(result, "continue")
+        synth_result = engine.response_synthesizer.results[-1][0]
+        self.assertFalse(synth_result.success)
+        self.assertEqual(synth_result.state_changes.get("error_code"), "app_not_found")
         self.assertEqual(engine.runtime.win.opened, [])
 
     def test_local_app_planner_does_not_resolve_registry_before_runtime(self):
@@ -405,13 +442,15 @@ class VoiceCommandPipelineTests(unittest.TestCase):
 
     def test_model_is_not_called_before_open_application_action_plan(self):
         class GuardSynth(FakeSynth):
-            def synthesize_command_result(self, result, **kwargs):
+            def synthesize(self, **kwargs):
+                step = kwargs["execution"].first_result_of_type("action")
+                result = (step.data or {}).get("action_result") if step else None
                 self.results.append((result, kwargs))
-                assert result.action_type == "open_application"
-                assert result.state_changes.get("app_id")
+                assert (step.data or {}).get("action_name") == "open_application"
+                assert (getattr(result, "data", {}) or {}).get("app_id")
                 return "ok"
 
-        engine = make_engine()
+        engine = wire_canonical_app_pipeline(make_engine())
         engine.response_synthesizer = GuardSynth()
         delivered = []
         engine._deliver_manual_reply = lambda text, *, source: delivered.append((source, text))
@@ -1328,7 +1367,7 @@ class VoiceCommandPipelineTests(unittest.TestCase):
         self.assertFalse(trace["uses_pending_task"])
 
     def test_no_wake_whitelisted_app_command_routes_while_stream_offline(self):
-        engine = make_engine(live=False)
+        engine = wire_canonical_app_pipeline(make_engine(live=False))
         engine.runtime.state.stream.enabled = False
         delivered = []
         engine._deliver_manual_reply = lambda text, *, source: delivered.append((source, text))
@@ -2642,7 +2681,7 @@ class VoiceCommandPipelineTests(unittest.TestCase):
         self.assertEqual(engine.runtime.state.pending_conversation_turn["status"], "expired")
 
     def test_unrelated_action_during_pending_conversation_still_uses_action_flow(self):
-        engine = make_engine(["nuria"])
+        engine = wire_canonical_app_pipeline(make_engine(["nuria"]))
         delivered = []
         engine._deliver_manual_reply = lambda text, *, source: delivered.append((source, text))
         engine._record_assistant_reply_for_conversation("Â¿tÃº quÃ© tal?", source="stt_voice", synthesizer=pending_marker())

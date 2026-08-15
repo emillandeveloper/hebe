@@ -15,7 +15,7 @@ from app.services.local_capability import (
     ApplicationCandidate,
     LocalCapabilityResolver,
 )
-from tests.test_voice_command_pipeline import FakeContextBuilder, make_engine
+from tests.test_voice_command_pipeline import make_engine, wire_canonical_app_pipeline
 
 
 def _candidate(name: str, path: str, *, confidence: float = 0.9) -> ApplicationCandidate:
@@ -48,7 +48,7 @@ def _route(text: str, *, source: str = "ui", authority: str = "owner", addressed
 
 class AppOpenArchitectureTests(unittest.TestCase):
     def test_steam_command_extracts_then_resolves_and_executes_once(self):
-        engine = make_engine()
+        engine = wire_canonical_app_pipeline(make_engine())
         engine._deliver_manual_reply = lambda _text, *, source: None
         discovery = Mock()
         discovery.search.return_value = [_candidate("Steam", r"C:\Fixture\steam.exe")]
@@ -58,7 +58,9 @@ class AppOpenArchitectureTests(unittest.TestCase):
         planner = LocalAppActionPlanner()
         planner.plan = Mock(wraps=planner.plan)
         engine.local_app_planner = planner
-        engine.context_builder = FakeContextBuilder()
+        engine.deliberation_service.local_app_planner = planner
+        engine.plan_executor.execute = Mock(wraps=engine.plan_executor.execute)
+        engine.action_runtime.execute = Mock(wraps=engine.action_runtime.execute)
         registry_lookup = Mock(wraps=resolve_whitelisted_app)
 
         with patch("app.services.local_capability.resolve_whitelisted_app", registry_lookup), \
@@ -66,6 +68,10 @@ class AppOpenArchitectureTests(unittest.TestCase):
             result = engine.cognitive_flow("Hebe, abre Steam", source="ui")
 
         self.assertEqual(result, "continue")
+        engine.plan_executor.execute.assert_called_once()
+        engine.action_runtime.execute.assert_called_once_with(
+            "open_application", {"requested_target": "Steam"}
+        )
         planner.plan.assert_called_once()
         resolver.resolve_open_application.assert_called_once_with("Steam")
         registry_lookup.assert_called_once_with("Steam")

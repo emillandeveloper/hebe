@@ -166,6 +166,8 @@ class ResponseSynthesizer:
         source_value = source or str(getattr(context, "source", "") or "ui_text")
         input_value = input_text or str(getattr(context, "input_text", "") or "")
         stream_mode = bool(stream_live) or output_target in {"twitch_chat", "stream_tts"} or source_value.startswith("twitch")
+        state_snapshot = getattr(context, "state_snapshot", {}) or {} if context is not None else {}
+        pending_task = state_snapshot.get("pending_clarification") if isinstance(state_snapshot, dict) else None
         bundle = build_universal_speech_act_bundle(
             route=route,
             speech_act_type=speech_act_type,
@@ -192,6 +194,7 @@ class ResponseSynthesizer:
             current_activity=current_activity,
             stream_live=stream_live,
             technical_state=technical_state,
+            active_pending_task=pending_task if isinstance(pending_task, dict) else None,
             max_length_chars=max_length_chars,
         )
         response = self._universal_pipeline().render(
@@ -209,11 +212,14 @@ class ResponseSynthesizer:
         if context is None:
             return {}
         leo_memory: list[str] = []
-        for fact in getattr(context, "relevant_facts", []) or []:
-            leo_memory.append(str(getattr(fact, "payload", ""))[:220])
-        for chunk in getattr(context, "relevant_chunks", []) or []:
-            if isinstance(chunk, dict) and chunk.get("text"):
-                leo_memory.append(str(chunk.get("text"))[:220])
+        memory_mode = str((getattr(context, "context_policy", {}) or {}).get("memory") or "")
+        memory_allowed = bool(getattr(context, "inject_memory", False)) and memory_mode in {"full", "relevant"}
+        if memory_allowed:
+            for fact in getattr(context, "relevant_facts", []) or []:
+                leo_memory.append(str(getattr(fact, "payload", ""))[:220])
+            for chunk in getattr(context, "relevant_chunks", []) or []:
+                if isinstance(chunk, dict) and chunk.get("text"):
+                    leo_memory.append(str(chunk.get("text"))[:220])
         response_frame = getattr(context, "response_frame", {}) or {}
         game_context = {}
         if isinstance(response_frame, dict):
@@ -222,6 +228,7 @@ class ResponseSynthesizer:
             "channel_context": {
                 "leo_memory_summary": "; ".join(leo_memory[:4]),
                 "allowed_use": "tone/context/familiarity",
+                "memory_injection_allowed": memory_allowed,
             },
             "current_stream_state": game_context,
             "game_knowledge": game_context if game_context else {},
@@ -690,6 +697,21 @@ class ResponseSynthesizer:
         msg = (context.input_text or "").strip()
         message_type = getattr(context, "message_type", "unknown")
         speech_act = "owner_supportive_reaction" if message_type in {"small_talk", "banter"} else "direct_answer"
+        entity_facts = entity_prompt_lines(getattr(context, "resolved_entities", []) or [])
+        contextual_constraints: list[str] = []
+        if message_type in {"small_talk", "banter"}:
+            contextual_constraints.extend([
+                "Do not recap previous conversation",
+                "do not mention retrieved memory",
+                "do not ask planning questions",
+                "do not change the topic into stream planning",
+            ])
+        state_snapshot = getattr(context, "state_snapshot", {}) or {}
+        game_guidance_query = self._game_guidance_classifier.looks_like_query(msg, state_snapshot)
+        has_game_guidance_source = bool(
+            getattr(context, "relevant_chunks", [])
+            or ((getattr(context, "response_frame", {}) or {}).get("current_session_context") if isinstance(getattr(context, "response_frame", {}), dict) else None)
+        )
         response = self._run_universal_response(
             route="owner_private_chat",
             speech_act_type=speech_act,
@@ -698,11 +720,16 @@ class ResponseSynthesizer:
             source=str(getattr(context, "source", "") or "ui_text"),
             output_target="local_ui" if str(getattr(context, "source", "") or "") == "ui" else "local_tts",
             goal="answer Leo in private mode from the scene contract",
-            allowed_content=[f"Message type: {message_type}", f"Leo message: {msg}"],
+            allowed_content=[f"Message type: {message_type}", f"Leo message: {msg}"] + entity_facts,
+            required_facts=entity_facts,
             must_not_do=[
                 "do not offer to save, publish, configure, remember, or use a line unless execution_result exists",
                 "do not end with a service-style follow-up question",
-            ],
+            ] + contextual_constraints,
+            technical_state={
+                "game_guidance_query": bool(game_guidance_query),
+                "has_game_guidance_source": bool(has_game_guidance_source),
+            },
             fallback="Te leo, Leo. Dame un poco mas de contexto y lo aterrizo.",
             max_length_chars=360,
         )
@@ -713,199 +740,6 @@ class ResponseSynthesizer:
             flush=True,
         )
         return reply
-
-        system = (
-            f"{build_hebe_core_identity()}\n\n"
-            f"{build_private_mode_style()}\n\n"
-            "Style guard:\n"
-            "- Voice replies are one sentence, max two.\n"
-            "- Default reply shape: one short statement, optional playful jab, no follow-up question.\n"
-            "- Do not sound like a generic assistant or support bot.\n"
-            "- Do not try to keep every conversation going. React naturally and stop.\n"
-            "- Do not turn Leo's mood or casual statements into tasks.\n"
-            "- Do not end with questions unless the system explicitly requested clarification or confirmation.\n"
-            "- Do not offer to save, publish, configure, remember, or use a line unless Leo explicitly asked.\n"
-            "- Avoid: tomo nota, te lo guardo, publicar en stream, quieres que, puedo ayudarte, dimelo claro, tu mandas creador.\n"
-        )
-
-        # Construccion del user actual: mensaje PRIMERO, memoria al FINAL.
-        # El mensaje va primero para que el prefijo del ultimo user sea relativamente
-        # estable; la memoria (variable por similitud semantica) va al final.
-        user_parts: list[str] = [
-            "Speaker: Leo, your companion and broadcaster. "
-            "Do not treat him like a random viewer. You can tease him with trust.\n\n"
-            f"Message type: {getattr(context, 'message_type', 'unknown')}.\n"
-            f"Context policy: {getattr(context, 'context_policy', {})}.\n"
-            + (
-                "This is casual small talk or banter. Answer directly in character, maximum two short sentences. "
-                "Respond to Leo's mood first. Do not recap previous conversation, do not mention memory, "
-                "do not mention calendar or stream schedule, and do not ask planning questions or follow-up questions. "
-                "Do not open casual greetings with a hostile direct insult toward Leo; playful profanity is allowed, "
-                "but keep voice-mode replies short and warm underneath the sarcasm.\n\n"
-                if getattr(context, "message_type", "unknown") in {"small_talk", "banter"}
-                else ""
-            )
-            +
-            f"Leo: {msg}"
-        ]
-        response_frame = getattr(context, "response_frame", {}) or {}
-        if isinstance(response_frame, dict) and response_frame:
-            user_parts.append(
-                "ResponseFrame:\n"
-                f"- input_type: {response_frame.get('input_type')}\n"
-                f"- source: {response_frame.get('source')}\n"
-                f"- should_reply: {response_frame.get('should_reply')}\n"
-                f"- output_target: {response_frame.get('output_target')}\n"
-                f"- allow_question: {response_frame.get('allow_question')}\n"
-                f"- max_questions: {response_frame.get('max_questions')}\n"
-                f"- max_sentences: {response_frame.get('max_sentences')}\n"
-                f"- intent: {response_frame.get('intent')}\n"
-                "Follow this frame. If allow_question is false, end with a statement."
-            )
-            session_context = response_frame.get("current_session_context")
-            if isinstance(session_context, dict) and session_context:
-                user_parts.append(
-                    "Live session context from DB/RAG brain:\n"
-                    f"{session_context}"
-                )
-
-        entity_lines = entity_prompt_lines(getattr(context, "resolved_entities", []) or [])
-        if entity_lines:
-            user_parts.append("Entity resolution:\n" + "\n".join(f"- {line}" for line in entity_lines))
-
-        memory_lines: list[str] = []
-        if context.relevant_facts:
-            for fact in context.relevant_facts:
-                memory_lines.append(f"- (about '{fact.subject}') {fact.payload}")
-        if context.relevant_chunks:
-            for ch in context.relevant_chunks:
-                subj = ch.get("subject") or "general"
-                text = ch.get("text", "")
-                if text:
-                    memory_lines.append(f"- (about '{subj}') {text}")
-        memory_mode = (getattr(context, "context_policy", {}) or {}).get("memory")
-        if memory_lines and memory_mode in {"full", "relevant"}:
-            user_parts.append(
-                "Relevant memory (each item is about a specific entity; "
-                "do not merge details across unrelated items):\n"
-                + "\n".join(memory_lines)
-            )
-
-        current_user_content = "\n\n".join(user_parts)
-
-        # Construccion del array messages: historial + turno actual.
-        # Los turnos historicos van limpios (sin bloque de memoria).
-        messages: list[dict] = []
-        for turn in context.conversation_history:
-            messages.append({"role": turn["role"], "content": turn["content"]})
-        messages.append({"role": "user", "content": current_user_content})
-
-        print(
-            f"[HEBE][JARVIS][CHAT] msg={msg!r} "
-            f"facts={len(context.relevant_facts)} "
-            f"chunks={len(context.relevant_chunks)} "
-            f"history={len(context.conversation_history)}",
-            flush=True,
-        )
-
-        raw = self._call_model(system, messages=messages, fallback="")
-        reply = self._guard_style(
-            clean_jarvis_reply(raw),
-            context=context,
-            source_text=msg,
-            system=system,
-            messages=messages,
-            allow_minimal_fallback=getattr(context, "source", "") == "stt_voice",
-        )
-        reply = self._guard_hostile_direct_insult_greeting(reply, context)
-        reply = self._guard_unexecuted_action_claim(reply, context, execution)
-        reply = self._guard_ungrounded_game_walkthrough(reply, context)
-        self._mark_conversation_turn(reply, context)
-
-        print(
-            f"[HEBE][JARVIS][REPLY] raw={raw!r} cleaned={reply!r}",
-            flush=True,
-        )
-
-        return reply or self._fallback_text("No tengo una respuesta util ahora mismo.")
-
-    def _guard_ungrounded_game_walkthrough(self, reply: str, context: BuiltContext) -> str:
-        decision = getattr(context, "cognitive_decision", None)
-        if str(getattr(decision, "intent", "") or "") not in {"unknown_chat", "direct_question", ""}:
-            return reply
-        pending = (getattr(context, "state_snapshot", {}) or {}).get("pending_clarification") or {}
-        if str(pending.get("kind") or "") == "game_guidance_clarification":
-            print("[HEBE][FALLBACK_GUARD] blocked reason=active_game_guidance_pending", flush=True)
-            return "La respuesta pertenece a la aclaración de partida pendiente; no la voy a tratar como charla genérica."
-        if not self._game_guidance_classifier.looks_like_query(
-            str(getattr(context, "input_text", "") or ""), getattr(context, "state_snapshot", {}) or {}
-        ):
-            return reply
-        normalized = self._normalize_guard_text(reply)
-        concrete = bool(re.search(
-            r"\b(?:ve|dirigete|entra|sal|habla|busca|consigue|equipa|usa|derrota|mata|"
-            r"siguiente\s+objetivo|debes\s+ir|tienes\s+que\s+ir)\b",
-            normalized,
-        ))
-        if not concrete:
-            return reply
-        print("[HEBE][FALLBACK_GUARD] blocked_game_walkthrough=true reason=no_game_guidance_source", flush=True)
-        return "No voy a darte una ruta concreta sin contexto de partida y una fuente fiable; primero necesito ubicar tu progreso."
-
-    @staticmethod
-    def _normalize_guard_text(text: str) -> str:
-        return "".join(
-            char for char in unicodedata.normalize("NFKD", str(text or "").casefold())
-            if not unicodedata.combining(char)
-        )
-
-    def _guard_unexecuted_action_claim(
-        self, reply: str, context: BuiltContext, execution: ExecutionResult,
-    ) -> str:
-        decision = getattr(context, "cognitive_decision", None)
-        route = str(getattr(decision, "intent", "") or "")
-        if route not in {"unknown_chat", "direct_question", ""}:
-            return reply
-        executed = any(
-            result.success and result.step_type in {"action", "reminder", "memory", "tool"}
-            for result in (execution.results or [])
-        )
-        if executed or not self._looks_like_action_completion_claim(reply):
-            return reply
-        print(
-            "[HEBE][FALLBACK_GUARD] blocked_action_claim=true reason=no_execution_result",
-            flush=True,
-        )
-        pending = (getattr(context, "state_snapshot", {}) or {}).get("pending_clarification")
-        if isinstance(pending, dict) and pending:
-            return "La respuesta parece corresponder a la tarea pendiente, pero no se ejecutó ninguna operación."
-        return "No se ejecutó ninguna operación; necesito una petición estructurada para confirmarla."
-
-    @staticmethod
-    def _looks_like_action_completion_claim(text: str) -> bool:
-        normalized = "".join(
-            char for char in unicodedata.normalize("NFKD", str(text or "").casefold())
-            if not unicodedata.combining(char)
-        )
-        completed_action = re.compile(
-            r"\b(?:apuntad[oa]|anotad[oa]|guardad[oa]|cread[oa]|agendad[oa]|programad[oa]|"
-            r"registrad[oa]|abiert[oa]|lanzad[oa]|iniciad[oa]|enviad[oa]|publicad[oa]|"
-            r"actualizad[oa]|configurad[oa]|hecho|completad[oa]|listo)\b"
-        )
-        first_person_completion = re.compile(
-            r"\b(?:he|hemos|ya he|ya hemos|queda|quedo|esta)\s+(?:guardado|creado|agendado|"
-            r"programado|abierto|lanzado|iniciado|enviado|actualizado|configurado|hecho)\b"
-        )
-        action_object = re.compile(
-            r"\b(?:cita|recordatorio|aplicacion|app|archivo|mensaje|shoutout|raid|memoria|calendario)\b"
-        )
-        leading_completion = re.compile(
-            r"^(?:ya\s+)?(?:hecho|listo|apuntad[oa]|anotad[oa]|guardad[oa]|cread[oa]|"
-            r"agendad[oa]|programad[oa]|abiert[oa]|lanzad[oa]|enviad[oa]|actualizad[oa])\b"
-        )
-        return bool(first_person_completion.search(normalized) or leading_completion.search(normalized) or (
-            completed_action.search(normalized) and action_object.search(normalized)
-        ))
 
     # =========================
     # Prompt builders  devuelven (system, user)

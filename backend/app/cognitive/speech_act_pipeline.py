@@ -66,6 +66,7 @@ MEMORY_CREEP_PATTERNS = (
 ACTION_CLAIM_PATTERNS = (
     r"\bhecho\b",
     r"\blisto\b",
+    r"^\s*(?:ya\s+)?(?:apuntad[oa]|anotad[oa]|guardad[oa]|cread[oa]|agendad[oa]|programad[oa]|registrad[oa])\b",
     r"\babiert[oa]\b",
     r"\bya\s+esta\b",
     r"\bya\s+lo\s+(?:tengo|he)\b",
@@ -619,6 +620,7 @@ def build_universal_speech_act_bundle(
     current_activity: str = "",
     stream_live: bool = False,
     technical_state: dict[str, Any] | None = None,
+    active_pending_task: dict[str, Any] | None = None,
     response_language: str = "match_speaker",
     max_length_chars: int = 260,
 ) -> SpeechActBundle:
@@ -643,6 +645,7 @@ def build_universal_speech_act_bundle(
         speaker_type=envelope.speaker_type,
         speaker_authority=authority,
         raw_user_message=input_text,
+        active_pending_task=dict(active_pending_task) if isinstance(active_pending_task, dict) else None,
         technical_state=technical_state or {},
     )
     scene_memory = SceneMemory(
@@ -841,6 +844,12 @@ def final_response_guard(
     action_claim = action_claim_guard(response, bundle)
     if not action_claim.passed:
         violations.extend(action_claim.violations)
+    pending_violation = _active_pending_task_violation(response, bundle)
+    if pending_violation is not None:
+        violations.append(pending_violation)
+    walkthrough_violation = _ungrounded_game_walkthrough_violation(response, bundle)
+    if walkthrough_violation is not None:
+        violations.append(walkthrough_violation)
     if _looks_like_malformed_echo(response, bundle.envelope.raw_text):
         violations.append(GuardViolation("malformed_stt_echo", "response appears to echo malformed input"))
     for item in previous_responses or []:
@@ -1002,6 +1011,43 @@ def action_claim_guard(text: str, bundle: SpeechActBundle) -> FinalResponseGuard
     )
 
 
+def _active_pending_task_violation(text: str, bundle: SpeechActBundle) -> GuardViolation | None:
+    pending = bundle.scene.active_pending_task or {}
+    if str(pending.get("kind") or "") != "game_guidance_clarification":
+        return None
+    if bundle.speech_act.speech_act_type in {
+        "pending_task_followup",
+        "game_guidance_answer",
+        "game_guidance_clarification",
+    }:
+        return None
+    normalized = _normalize_text(text)
+    if "aclaracion" in normalized and ("pendiente" in normalized or "partida" in normalized):
+        return None
+    return GuardViolation(
+        "active_game_guidance_pending",
+        "generic response cannot replace the active game-guidance clarification",
+    )
+
+
+def _ungrounded_game_walkthrough_violation(text: str, bundle: SpeechActBundle) -> GuardViolation | None:
+    state = bundle.scene.technical_state or {}
+    if not bool(state.get("game_guidance_query")) or bool(state.get("has_game_guidance_source")):
+        return None
+    normalized = _normalize_text(text)
+    concrete_instruction = bool(re.search(
+        r"\b(?:ve|dirigete|entra|sal|habla|busca|consigue|equipa|usa|derrota|mata|"
+        r"siguiente\s+objetivo|debes\s+ir|tienes\s+que\s+ir)\b",
+        normalized,
+    ))
+    if not concrete_instruction:
+        return None
+    return GuardViolation(
+        "ungrounded_game_walkthrough",
+        "concrete game route has no validated guidance source",
+    )
+
+
 class HebeResponsePipeline:
     def __init__(
         self,
@@ -1111,7 +1157,7 @@ class HebeResponsePipeline:
                 )
             previous = repair_clean
             guard = repair_guard
-        fallback_text = fallback or safe_local_fallback(bundle)
+        fallback_text = _fallback_for_guard(bundle, guard, requested_fallback=fallback)
         fallback_guard = final_response_guard(fallback_text, bundle, game_advice_gate=self.game_advice_gate)
         if not fallback_guard.passed:
             fallback_text = safe_local_fallback(bundle)
@@ -1176,6 +1222,12 @@ class HebeResponsePipeline:
             f"execution_result={bundle.execution_result}",
             flush=True,
         )
+        if "action_claim_without_execution_success" in violations:
+            print("[HEBE][FALLBACK_GUARD] blocked_action_claim=true reason=no_execution_result", flush=True)
+        if "active_game_guidance_pending" in violations:
+            print("[HEBE][FALLBACK_GUARD] blocked reason=active_game_guidance_pending", flush=True)
+        if "ungrounded_game_walkthrough" in violations:
+            print("[HEBE][FALLBACK_GUARD] blocked_game_walkthrough=true reason=no_game_guidance_source", flush=True)
         boundary_passed = "boundary_voice_guard" not in violations
         print(
             f"[HEBE][BOUNDARY_VOICE_GUARD] passed={str(boundary_passed).lower()} violations={violations}",
@@ -1220,6 +1272,22 @@ class HebeResponsePipeline:
             "final_response": final_response,
             "response_source": response_source,
         }
+
+
+def _fallback_for_guard(
+    bundle: SpeechActBundle,
+    guard_result: FinalResponseGuardResult,
+    *,
+    requested_fallback: str = "",
+) -> str:
+    violations = {item.type for item in list(guard_result.violations or [])}
+    if "active_game_guidance_pending" in violations:
+        return "La respuesta pertenece a la aclaración de partida pendiente; no la voy a tratar como charla genérica."
+    if "ungrounded_game_walkthrough" in violations:
+        return "No voy a darte una ruta concreta sin contexto de partida y una fuente fiable; primero necesito ubicar tu progreso."
+    if "action_claim_without_execution_success" in violations:
+        return "La respuesta parece corresponder a la tarea pendiente, pero no se ejecutó ninguna operación."
+    return requested_fallback or safe_local_fallback(bundle)
 
 
 def safe_local_fallback(bundle: SpeechActBundle) -> str:

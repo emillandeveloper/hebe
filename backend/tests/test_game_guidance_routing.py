@@ -26,6 +26,7 @@ def game_pending(**overrides):
         "original_question": "Hebe, en FFVII acabo de llegar a Midgar; ¿cuál es el siguiente objetivo?",
         "authority": "owner",
         "spoiler_policy": "no_story_spoilers",
+        "created_at": time.time(),
         "expires_at": time.time() + 300,
     }
     pending.update(overrides)
@@ -273,7 +274,7 @@ class GameGuidanceRoutingTests(unittest.TestCase):
         engine = make_engine(live=False)
         engine.runtime.state.pending_clarification = game_pending()
         event = InputEvent(
-            source="stt_voice", raw_text="Voy con Cloud", normalized_text="voy con cloud",
+            source="stt_voice", raw_text="Estoy con el personaje Cloud", normalized_text="estoy con el personaje cloud",
             stt_metadata={"command_mode": True},
         )
         envelope = engine._build_stt_input_envelope(
@@ -307,7 +308,7 @@ class GameGuidanceRoutingTests(unittest.TestCase):
         self.assertNotIn("current_character", updates)
         self.assertNotIn("party_members", updates)
 
-    def test_successful_state_update_mutates_runtime_game_run_state(self):
+    def test_state_update_without_provenance_rejects_semantic_game_fields(self):
         from tests.test_voice_command_pipeline import make_engine
 
         engine = make_engine(live=False)
@@ -319,8 +320,31 @@ class GameGuidanceRoutingTests(unittest.TestCase):
 
         run = engine.runtime.state.game_run_state
         self.assertEqual(run.game, "Final Fantasy VII")
+        self.assertEqual(run.current_character, "")
+        self.assertEqual(run.party_members, [])
+
+    def test_state_update_with_owner_provenance_and_confidence_mutates_game_fields(self):
+        from tests.test_voice_command_pipeline import make_engine
+
+        engine = make_engine(live=False)
+        result = StepExecutionResult("state_update", True, {
+            "kind": "game_run_state", "pending_id": "game-pending",
+            "updates": {
+                "game": "Final Fantasy VII",
+                "current_character": "Cloud",
+                "party_members": ["Cloud"],
+                "provenance": "leo_clarification",
+                "confidence": 0.95,
+            },
+        })
+        engine._apply_game_run_state_execution(result)
+
+        run = engine.runtime.state.game_run_state
+        self.assertEqual(run.game, "Final Fantasy VII")
         self.assertEqual(run.current_character, "Cloud")
         self.assertEqual(run.party_members, ["Cloud"])
+        self.assertEqual(run.provenance, "leo_clarification")
+        self.assertEqual(run.confidence, 0.95)
 
 
 if __name__ == "__main__":

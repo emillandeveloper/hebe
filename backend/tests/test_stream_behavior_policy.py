@@ -12,6 +12,7 @@ from app.stream.policy import (
     policy_trace,
 )
 from app.stream.state import StreamSessionState
+from app.stream.behavior_constraints import constraint_matches
 
 
 class StreamBehaviorPolicyTests(unittest.TestCase):
@@ -29,16 +30,21 @@ class StreamBehaviorPolicyTests(unittest.TestCase):
         self.assertFalse(decision.allow_llm)
         self.assertFalse(decision.allow_free_llm)
         self.assertEqual(decision.intent, "owner_stop_behavior")
-        self.assertEqual(decision.requested_behavior, COMPLIMENTS_TO_LEO)
-        self.assertEqual(decision.behavior_family, COMPLIMENTS_TO_LEO)
-        self.assertEqual(decision.target, "Leo")
-        self.assertEqual(decision.matched_by, ["semantic_classifier"])
+        self.assertEqual(decision.requested_behavior, "compliment")
+        self.assertEqual(decision.behavior_family, "compliment")
+        self.assertEqual(decision.target, "owner")
+        self.assertEqual(decision.matched_by, ["behavior_constraint_compiler"])
         self.assertTrue(decision.execute_as_command)
-        self.assertEqual(decision.direct_template_response, "")
+        self.assertIn("compliment hacia Leo", decision.direct_template_response)
         self.assertTrue(decision.response_directive)
         self.assertTrue(decision.response_constraints)
-        self.assertEqual(decision.update_behavior_block["behavior"], COMPLIMENTS_TO_LEO)
-        self.assertTrue(has_active_behavior_block(stream, COMPLIMENTS_TO_LEO, now=1001.0))
+        self.assertEqual(decision.update_behavior_block["behavior_family"], "compliment")
+        self.assertEqual(decision.update_behavior_block["recipient_scope"], "owner")
+        self.assertTrue(constraint_matches(
+            decision.update_behavior_block,
+            behavior_family="compliment",
+            recipient_login="Leo",
+        ))
 
         trace = policy_trace(
             source="ui",
@@ -49,24 +55,26 @@ class StreamBehaviorPolicyTests(unittest.TestCase):
         )
         self.assertEqual(trace["authority"], "owner")
         self.assertEqual(trace["intent"], "owner_stop_behavior")
-        self.assertEqual(trace["requested_behavior"], COMPLIMENTS_TO_LEO)
-        self.assertEqual(trace["behavior_family"], COMPLIMENTS_TO_LEO)
-        self.assertEqual(trace["target"], "Leo")
-        self.assertEqual(trace["matched_by"], ["semantic_classifier"])
+        self.assertEqual(trace["requested_behavior"], "compliment")
+        self.assertEqual(trace["behavior_family"], "compliment")
+        self.assertEqual(trace["target"], "owner")
+        self.assertEqual(trace["matched_by"], ["behavior_constraint_compiler"])
         self.assertFalse(trace["allow_free_llm"])
         self.assertTrue(trace["execute_as_command"])
         self.assertEqual(trace["policy_decision"], "allowed")
         self.assertEqual(trace["response_mode"], "llm")
 
-    def test_semantic_owner_stop_mode_creates_behavior_block(self):
+    def test_ambiguous_owner_stop_mode_requests_clarification_without_constraint(self):
         stream = self.make_stream()
 
         decision = owner_behavior_decision(stream, "Hebe, cancela el modo baboso", now=1000.0)
 
         self.assertFalse(decision.allow_llm)
         self.assertEqual(decision.intent, "owner_stop_behavior")
-        self.assertEqual(decision.requested_behavior, COMPLIMENTS_TO_LEO)
-        self.assertTrue(has_active_behavior_block(stream, COMPLIMENTS_TO_LEO, now=1001.0))
+        self.assertEqual(decision.reason, "behavior_constraint_resolution_required")
+        self.assertEqual(decision.behavior_family, "compliment")
+        self.assertIsNone(decision.update_behavior_block)
+        self.assertEqual(stream.active_behavior_blocks, [])
 
     def test_semantic_owner_stop_halogos_creates_behavior_block(self):
         stream = self.make_stream()
@@ -75,8 +83,14 @@ class StreamBehaviorPolicyTests(unittest.TestCase):
 
         self.assertFalse(decision.allow_llm)
         self.assertEqual(decision.intent, "owner_stop_behavior")
-        self.assertEqual(decision.requested_behavior, COMPLIMENTS_TO_LEO)
-        self.assertTrue(has_active_behavior_block(stream, COMPLIMENTS_TO_LEO, now=1001.0))
+        self.assertEqual(decision.requested_behavior, "compliment")
+        self.assertEqual(decision.behavior_family, "compliment")
+        self.assertEqual(decision.update_behavior_block["recipient_scope"], "owner")
+        self.assertTrue(constraint_matches(
+            decision.update_behavior_block,
+            behavior_family="compliment",
+            recipient_login="Leo",
+        ))
 
     def test_viewer_compliment_request_is_blocked_by_owner_order(self):
         stream = self.make_stream()
@@ -165,7 +179,7 @@ class StreamBehaviorPolicyTests(unittest.TestCase):
 
     def test_behavior_block_applies_to_semantic_viewer_variant(self):
         stream = self.make_stream()
-        owner_behavior_decision(stream, "Hebe, cancela el modo baboso", now=1000.0)
+        owner_behavior_decision(stream, "Hebe, deja de decirme piropos", now=1000.0)
 
         decision = ViewerIntentPolicy().decide(
             stream,

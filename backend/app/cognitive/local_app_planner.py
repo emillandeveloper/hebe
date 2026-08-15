@@ -75,7 +75,10 @@ class LocalAppActionPlanner:
         if not target:
             return None
 
-        addressed_or_trusted = resolution.addressed_to_hebe or input_event.source in {"ui", "typed_ui", "stt_voice", "voice", "button"}
+        addressed_or_trusted = resolution.addressed_to_hebe or input_event.source in {
+            "ui", "typed_ui", "stt_voice", "voice", "button",
+            "owner_stt_direct", "owner_stt_command", "owner_stt_followup",
+        }
         if not addressed_or_trusted:
             return None
 
