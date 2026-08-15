@@ -2,7 +2,7 @@ from __future__ import annotations
 
 
 OWNERSHIP = [
- ("pending/clarifications","ConversationContinuityService","LegacyPendingCompatibilityAdapter"),("conversation state","ConversationContinuityService","HebeState compatibility projection"),("OpenThreads","OpenThreadRepository","none"),
+ ("pending/clarifications","ConversationContinuityService","LegacyPendingAdapter"),("conversation state","ConversationContinuityService","HebeState compatibility projection"),("OpenThreads","OpenThreadRepository","none"),
  ("raw evidence/timeline","live_session_timeline","none"),("scene projections","SceneConsequenceReducer","wide runtime scene snapshots"),("memory_facts","BeliefRepository","LegacyMemoryFactAdapter"),("memory_chunks","BeliefMemoryRetrieval","retrieval cache only"),
  ("legacy MemoryExtractor","BeliefLifecycleService","MemoryExtractor deprecated writer"),("rolling summaries","live_session_rolling_summaries","archive/projection"),("stream summaries","stream_summaries","archive/projection"),("schedule systems","ScheduleLearningService","legacy stream_schedule compatibility"),
  ("game knowledge/research/guidance","GameContextResolver","GameDossier compatibility cache"),("GameProgressState","GameRunService","compatibility projection"),("GameRunState","GameRunService","runtime projection"),("GameDossier","GameKnowledgeV2Service","compatibility cache"),

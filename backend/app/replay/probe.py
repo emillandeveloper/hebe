@@ -154,7 +154,6 @@ class CognitiveStateProbe:
             "knowledge":{"selected":game_context.get("knowledge_claims") or [],"rejected":game_context.get("rejected_knowledge") or [],"spoiler_blocked":[item for item in game_context.get("rejected_knowledge") or [] if item.get("rejection_reason")=="spoiler_blocked"],"all":rows["game_knowledge_facts"]},
             "gaps":rows["game_knowledge_gaps"],
             "research":{**context_diag,"fixture_calls":_plain(self.research_calls),"status":game_context.get("research_status") or ""},
-            "compatibility":_plain(getattr(getattr(engine,"legacy_game_adapter",None),"telemetry",{}) or {}),
             "provenance_manifest":game_context.get("provenance_manifest") or [],
             "advice_allowed":game_context.get("advice_allowed"),"reaction_allowed":game_context.get("reaction_allowed"),
             "performance":_plain(getattr(getattr(engine,"game_v2_repository",None),"performance",lambda:{})()),
@@ -178,7 +177,6 @@ class CognitiveStateProbe:
             "opportunities":_plain(getattr(getattr(engine,"social_world",None),"last_opportunities",[])),
             "resolution":_plain(getattr(getattr(engine,"social_world",None),"last_resolution",{})),
             "rejected_writes":_plain(getattr(getattr(engine,"social_world",None),"rejections",[])),
-            "compatibility":_plain(getattr(getattr(engine,"legacy_social_adapter",None),"telemetry",{})),
             "performance":_plain(getattr(getattr(engine,"social_world_repository",None),"performance",lambda:{})()),
             "belief_lookup_performance":_plain(getattr(getattr(engine,"belief_repository",None),"performance",lambda:{})()),
         }

@@ -79,17 +79,3 @@ INTENTS: dict[str, IntentSpec] = {
         keywords=[],
     ),
 }
-
-
-TOOL_INTENTS: set[str] = {
-    "open_app",
-    "close_window",
-    "set_volume",
-    "play_music",
-    "pause_music",
-    "shutdown_pc",
-    "restart_pc",
-    "sleep_mode",
-    # Los de stream los meteremos aquí solo si luego el dispatcher
-    # los ejecuta como herramientas/handlers.
-}

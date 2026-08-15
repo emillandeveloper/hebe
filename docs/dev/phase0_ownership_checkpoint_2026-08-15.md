@@ -4,6 +4,11 @@ This checkpoint records the 16-failure triage before changing the affected
 contracts, plus the app-open compatibility audit. "Current" in the triage
 table means the behavior observed at the 1003-pass/16-failure baseline.
 
+> Final audit update: the internally dead legacy dispatcher and old
+> orchestrator execution/tool-handler stack described below were subsequently
+> removed. The retained public runtime and migration blockers are recorded in
+> `phase0_legacy_retirement_checkpoint_2026-08-15.md`.
+
 ## Failure triage by root cause
 
 | Test | Expected by test | Current behavior at baseline | Owner | Root cause / shared group | Classification | Recommended action and disposition |

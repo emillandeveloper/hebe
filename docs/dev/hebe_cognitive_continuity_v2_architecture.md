@@ -56,7 +56,7 @@ The principal ownership rule is: observations are evidence, beliefs are revisabl
 
 **Overlap and gaps.** There are two principal pending representations (`pending_clarification` and `pending_conversation_turn`) plus capability-specific payload shapes. They describe a task continuation more often than a generic conversation. Participant set, turn owner, semantic topic, compatibility rule, closure reason, and durable thread linkage are not represented consistently.
 
-**Legacy/duplicate path.** Promotion, appointment, and game-guidance compatibility helpers encode domain-specific follow-ups. The dormant `backend/app/orchestrator/gates.py` has another pending model and must not be reconnected.
+**Legacy/duplicate path.** Promotion, appointment, and game-guidance compatibility helpers encode domain-specific follow-ups. The dormant `backend/app/orchestrator/gates.py` duplicate pending model was removed during Phase 0 on 2026-08-15.
 
 **Migration direction.** Introduce one `ConversationContinuityService` and one typed `CurrentConversation` projection. Initially it reads existing pending dictionaries and writes compatibility projections back to them. A wake word acquires attention only when no eligible conversation exists. When Hebe explicitly hands the turn to Leo, a compatible reply within the relevance window is addressed to Hebe without another wake word. Compatibility is deterministic first (source, participant, expected reply type, expiry, interruption state), with semantic classification as bounded supporting evidence.
 
@@ -755,7 +755,7 @@ Automated verification should establish continuity prerequisites: correct attent
 ## H. Cleanup candidates (do not remove in this task)
 
 1. The dual pending systems and promotion/appointment/game-specific continuation helpers after `ConversationContinuityService` owns all continuations.
-2. Dormant `backend/app/orchestrator` routing/gates after import scans confirm no runtime dependency. It must never be reintroduced as a parallel cognitive owner.
+2. The dormant `backend/app/orchestrator` routing/gates were removed during Phase 0 after import scans confirmed no runtime dependency. They must never be reintroduced as a parallel cognitive owner.
 3. The overlapping game knowledge/research/guidance entry points after `GameContextResolver` and repository adapters reach parity.
 4. Duplicated run state across `GameRunState`, `game_progress_states`, `game_sessions`, live-session fields, and stream-state fields after durable run projections are primary.
 5. Duplicated scene truth in wide snapshots and the in-memory scene manager after all readers use the versioned `CurrentScene` projection. Retain caches where they have a measured latency purpose.

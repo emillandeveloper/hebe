@@ -178,11 +178,10 @@ from app.epistemics.service import BeliefLifecycleService
 from app.epistemics.retrieval import MemoryRetrievalCoordinator
 from app.epistemics.legacy_adapter import LegacyMemoryFactAdapter
 from app.epistemics.models import EvidenceRef, EvidenceRelation
-from app.game_context_v2.adapters import LegacyGameCompatibilityAdapter
 from app.game_context_v2.context import GameContextResolver
 from app.game_context_v2.repository import GameV2Repository
 from app.game_context_v2.service import GameKnowledgeService as GameKnowledgeV2Service, GameRunService
-from app.social_world_v2 import LegacySocialCompatibilityAdapter, SocialWorldRepository, SocialWorldService
+from app.social_world_v2 import SocialWorldRepository, SocialWorldService
 from app.learning_v2 import (
     ContinuityContextBuilder, HebeSelfModel, HistoricalActionLedger, LeoLanguageModel,
     OwnerProceduralPreferences, SceneConsequenceReducer, SessionConsolidator,
@@ -595,9 +594,8 @@ class HebeEngine:
             runner=MigrationRunner(db_sqlite.get_db_connection);self.social_world_v2_migrations=runner.migrate(social_world_v2_migrations())
             repository=SocialWorldRepository(db_sqlite.get_db_connection);self.social_world_repository=repository
             self.social_world=SocialWorldService(repository,self.belief_lifecycle,self.conversation_continuity.threads,getattr(self,"memory_retrieval",None),now_fn=lambda:time.time())
-            self.legacy_social_adapter=LegacySocialCompatibilityAdapter()
         except Exception as exc:
-            self.social_world_repository=None;self.social_world=None;self.legacy_social_adapter=None;self.social_world_v2_migrations=[]
+            self.social_world_repository=None;self.social_world=None;self.social_world_v2_migrations=[]
             print(f"[HEBE][SOCIAL_WORLD_V2_INIT] status=failed_closed reason={type(exc).__name__}",flush=True)
 
     def _initialize_game_context_v2(self) -> None:
@@ -607,9 +605,8 @@ class HebeEngine:
             repository=GameV2Repository(db_sqlite.get_db_connection);runs=GameRunService(repository,self.belief_lifecycle,now_fn=lambda:time.time());knowledge=GameKnowledgeV2Service(repository,self.belief_lifecycle,now_fn=lambda:time.time())
             self.game_v2_repository=repository;self.game_run_service=runs;self.game_knowledge_v2_service=knowledge
             self.game_context_resolver=GameContextResolver(repository,runs,knowledge,research_service=getattr(self,"game_intelligence",None),memory_retrieval=getattr(self,"memory_retrieval",None),now_fn=lambda:time.time())
-            self.legacy_game_adapter=LegacyGameCompatibilityAdapter()
         except Exception as exc:
-            self.game_v2_repository=None;self.game_run_service=None;self.game_knowledge_v2_service=None;self.game_context_resolver=None;self.legacy_game_adapter=None;self.game_context_v2_migrations=[]
+            self.game_v2_repository=None;self.game_run_service=None;self.game_knowledge_v2_service=None;self.game_context_resolver=None;self.game_context_v2_migrations=[]
             print(f"[HEBE][GAME_CONTEXT_V2_INIT] status=failed_closed reason={type(exc).__name__}",flush=True)
 
     def _initialize_belief_v2(self) -> None:
@@ -1897,15 +1894,15 @@ class HebeEngine:
         old_wake_until = getattr(stream, "wake_only_until", 0.0) if stream is not None else 0.0
         old_muted_until = getattr(stream, "muted_until", 0.0) if stream is not None else 0.0
         if pending_kind == "appointment_datetime":
-            now_ts = time.time()
-            self.runtime.state.pending_clarification = {
-                "id": f"simulation_pending_{uuid.uuid4().hex}",
-                "kind": "appointment_datetime",
-                "authority": "owner",
-                "created_at": now_ts,
-                "expires_at": now_ts + 300,
-                "draft": {"title": "Consulta", "source_text": "simulated appointment request"},
-            }
+            self.runtime.state.pending_clarification = self._make_pending_task(
+                id=f"simulation_pending_{uuid.uuid4().hex}",
+                kind="appointment_datetime",
+                expected_reply_type="datetime",
+                capability_needed="calendar.create",
+                can_accept_no_wake_followup=True,
+                ttl_seconds=300,
+                draft={"title": "Consulta", "source_text": "simulated appointment request"},
+            )
         elif pending_kind == "promotion_target_clarification":
             self.runtime.state.pending_clarification = self._make_pending_task(
                 id=f"simulation_pending_{uuid.uuid4().hex}",
@@ -1918,21 +1915,20 @@ class HebeEngine:
                 max_attempts=1,
             )
         elif pending_kind == "game_guidance_clarification":
-            now_ts = time.time()
-            self.runtime.state.pending_clarification = {
-                "id": f"simulation_pending_{uuid.uuid4().hex}",
-                "kind": "game_guidance_clarification",
-                "game": "Final Fantasy VII",
-                "location_or_area": "Midgar",
-                "expected_reply_type": "game_party_or_character",
-                "missing_fields": ["current_character", "party_members", "story_phase", "recent_event"],
-                "original_question": "Necesito orientación de progreso en la zona actual de FFVII.",
-                "authority": "owner",
-                "source": clean_source,
-                "spoiler_policy": "no_story_spoilers",
-                "created_at": now_ts,
-                "expires_at": now_ts + 300,
-            }
+            self.runtime.state.pending_clarification = self._make_pending_task(
+                id=f"simulation_pending_{uuid.uuid4().hex}",
+                kind="game_guidance_clarification",
+                expected_reply_type="game_party_or_character",
+                capability_needed="game.guidance",
+                can_accept_no_wake_followup=True,
+                ttl_seconds=300,
+                game="Final Fantasy VII",
+                location_or_area="Midgar",
+                missing_fields=["current_character", "party_members", "story_phase", "recent_event"],
+                original_question="Necesito orientación de progreso en la zona actual de FFVII.",
+                source=clean_source,
+                spoiler_policy="no_story_spoilers",
+            )
         before_event_id = self.get_last_policy_trace().get("event_id")
         previous_simulation_mode = bool(getattr(self, "_manual_simulation_mode", False))
         self._manual_simulation_mode = True
@@ -4639,15 +4635,11 @@ class HebeEngine:
             )
             service.diagnostics.progress_state = asdict(progress)
             service.diagnostics.spoiler_mode = progress.spoiler_policy
-            if resolution is not None and resolution.active_run is not None and getattr(self,"legacy_game_adapter",None) is not None:
-                self.legacy_game_adapter.observe_progress(progress,run_id=resolution.active_run.id)
             existing = service.store.get_dossier(game)
             if existing is not None and service._dossier_sufficient(existing):
                 service.diagnostics.current_game = existing.canonical_title
                 service.diagnostics.dossier_status = "loaded"
                 service._log_dossier(existing, "loaded")
-                if getattr(self,"legacy_game_adapter",None) is not None:
-                    self.legacy_game_adapter.observe_dossier(existing)
             elif not (getattr(self,"game_context_v2",False) and getattr(self,"game_research_memory_first",False)):
                 service.prepare_game_async(game_title=game, session_id=session_id)
             else:

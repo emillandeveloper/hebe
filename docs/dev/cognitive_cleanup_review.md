@@ -3,6 +3,11 @@
 Reviewed against the current pipeline on 2026-06-20. The repository already contains
 `CognitiveRouter`; this pass audits remaining decision owners without redesigning them.
 
+> 2026-08-15 Phase 0 update: the dormant orchestrator execution stack and its
+> legacy dispatcher/resolver were removed after a repository-wide consumer
+> audit. Only the intent resolver/catalog used by `app/scripts/eval_intents.py`
+> remains under `app/orchestrator`; it is developer tooling, not a runtime loop.
+
 ## Central router implementation status
 
 The high-risk follow-up is now implemented. Wake/sleep and owner manual command families require
@@ -11,9 +16,9 @@ carry a decision after the input firewall and before policy/deliberation; and `P
 steps without decision, step-type, capability, authority, risk, and live-stream authorization.
 Safety policy remains veto-only and cannot grant a capability blocked by the router.
 
-There are no known active high-risk manual-handler bypasses after this pass. The remaining
-critical item is dormant legacy code in `orchestrator/gates.py`: it is not reachable from
-`legacy_flow` or `handle_command`, but must not be reconnected without a decision adapter.
+There are no known active high-risk manual-handler bypasses after this pass. The
+dormant `orchestrator/gates.py` item identified by the original review has now
+been removed rather than reconnected.
 
 Simulation now exposes the decision and executor guard and includes owner/pending, ambient, bot,
 viewer-authority, and live/offline raid scenarios. Manual handler entry points also validate the
@@ -59,8 +64,7 @@ without a wake name use `owner_stt_command`; neither is treated as ambient strea
 | `hebe_engine.py` | `cognitive_flow` wake/sleep branch | Applies authorized local wake state | Yes for behavior | Yes | Low | Keep resolver evidence subordinate to the router intent. |
 | `hebe_engine.py` | manual pending/TTS/stream handlers in `cognitive_flow` | Mutates pending, audio, stream state and can execute stream commands | Temporarily | Yes; caller and handler both validate grants | Medium | Replace route hints with registered matchers as command families migrate; retain the hard handler guard. |
 | `hebe_engine.py` | canonical app-open coordination | Traces a deliberated app plan and records its execution receipt | Yes; coordination only | Yes; execution is owned by `PlanExecutor` | Low | Keep orchestration free of direct `ActionRuntime.execute` calls. |
-| `hebe_engine.py` | `legacy_flow` + `orchestrator/*` | Compatibility entry point | Entry point retained | Delegates to CognitiveRouter pipeline | Low | Remove the unused alternate implementation after external callers are ruled out. |
-| `orchestrator/gates.py` | `check`, `_handle_pending_clarification` | Consumes pending replies before semantic new-request checks | Only for legacy flow | No | Critical if re-enabled | Do not reconnect to `handle_command`; adapt it to `CognitiveDecision` before reuse. |
+| `hebe_engine.py` | `legacy_flow` | Compatibility entry point | Entry point retained | Delegates to CognitiveRouter pipeline | Low | Keep delegation until callers migrate; there is no alternate orchestrator implementation. |
 | `hebe_engine.py` | `process_internal_event` | Twitch firewall, router, viewer-policy veto, then event plan | Yes | Yes | Medium | Preserve the firewall-before-router and offline-stream gates. |
 | `stream/input_firewall.py` | `InputAuthorityFirewall.decide` | Ingress trust, bot/media filtering, allowed output/action envelope | Yes; security boundary | Must remain before router | Low | Never merge this into language intent routing. |
 | `cognitive/wake_name_resolver.py` | `WakeNameResolver.resolve` | Addressing/wake-name evidence | Yes | Yes; resolver runs only inside authorized wake handler | Low | Keep resolver evidence subordinate to router intent and capability. |
@@ -76,7 +80,8 @@ without a wake name use `owner_stt_command`; neither is treated as ambient strea
 - Generic time vocabulary no longer triggers appointments. Appointment recognition is centralized
   and the removed legacy detector had no callers.
 - Appointment pending resolution in the active cognitive flow requires router compatibility,
-  authority, TTL, and no stronger new intent. The legacy orchestrator gate does not; it is flagged.
+  authority, TTL, and no stronger new intent. The incompatible legacy
+  orchestrator gate has been removed.
 - Reminder parsing occurs only for `reminder_create_request` in active deliberation. The scheduler
   only fires stored reminders and does not infer user intent.
 - Twitch viewer traffic is filtered by the firewall and viewer policy before model generation.
@@ -102,10 +107,10 @@ without a wake name use `owner_stt_command`; neither is treated as ambient strea
 - Response/persona fallbacks remain because they are failure output, not intent classifiers. Some
   are stylistically template-like; changing them is a persona refactor and is intentionally deferred.
 
-## Obsolete artifacts reviewed but retained
+## Obsolete artifacts reviewed
 
-- `backend/app/orchestrator/*` remains on disk for compatibility, but `HebeEngine.legacy_flow`
-  delegates to `cognitive_flow`. External imports cannot be disproved, so the package remains flagged.
+- The old `backend/app/orchestrator` execution stack was removed on 2026-08-15.
+  Its intent-evaluation subset remains solely for `app/scripts/eval_intents.py`.
 - `backend/ollama/Modelfile.dolphin-old` is not runtime code. Its deployment use cannot be proven
   from this repository, so it remains.
 - Database migrations, schemas, debug routing logs, temporal parsers, stream gates, capability
@@ -113,8 +118,7 @@ without a wake name use `owner_stt_command`; neither is treated as ambient strea
 
 ## Next bounded cleanup
 
-1. Confirm no external caller imports the alternate orchestrator package, then remove that package.
-2. Replace the remaining owner-manual route hints with registered capability matchers as each
+1. Replace the remaining owner-manual route hints with registered capability matchers as each
    command family is migrated. The hints remain temporary and medium risk, while handler-side
    authorization is mandatory regardless of how a route was selected.
-3. Add capability inference mappings whenever a new risky `PlanStep` kind is introduced.
+2. Add capability inference mappings whenever a new risky `PlanStep` kind is introduced.
