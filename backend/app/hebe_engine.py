@@ -138,11 +138,11 @@ from app.stream.policy import (
     owner_behavior_decision,
     policy_trace,
 )
-from app.stream.behavior_constraints import (
-    BehaviorConstraintOutputGuard,
-    constraint_matches,
-)
 from app.stream.behavior_adaptation import AdaptationAction, BehaviorAdaptationService
+from app.stream.behavior_constraint_store import (
+    BehaviorConstraintRepository,
+    behavior_constraint_migrations,
+)
 from app.stream.viewer_profiles import (
     GrammaticalAgreementGuard,
     ViewerLinguisticProfileStore,
@@ -162,10 +162,7 @@ from app.stream import session_primer
 from app.stream.spontaneity import StreamSpontaneityConfig, StreamSpontaneityService
 from app.stream.proactive import (
     StreamPreparationRoutine,
-    cooldown_active,
-    mark_cooldown,
     scheduled_reminder_decision,
-    semantic_cooldown_key,
 )
 from app.continuity import (
     ConversationContext,
@@ -348,7 +345,6 @@ class HebeEngine:
                 companion_max_per_hour=int(os.getenv("HEBE_MAX_IDLE_PROMPTS_PER_HOUR_COMPANION", "2")),
                 show_max_per_hour=int(os.getenv("HEBE_MAX_IDLE_PROMPTS_PER_HOUR_SHOW", "5")),
                 max_per_stream=int(os.getenv("HEBE_MAX_IDLE_PROMPTS_PER_STREAM", "6")),
-                save_equip_topic_cooldown_sec=float(os.getenv("HEBE_SAVE_EQUIP_TOPIC_COOLDOWN_MINUTES", "60")) * 60,
                 require_specific_context=os.getenv("HEBE_SPONTANEITY_REQUIRE_SPECIFIC_CONTEXT", "true").strip().lower() in ("1", "true", "yes", "on"),
                 chat_activity_window_sec=float(os.getenv("HEBE_CHAT_ACTIVITY_WINDOW_SECONDS", "180")),
                 chat_active_message_threshold=int(os.getenv("HEBE_CHAT_ACTIVE_MESSAGE_THRESHOLD", "3")),
@@ -357,7 +353,25 @@ class HebeEngine:
             ),
         )
         self.stream_preparation = StreamPreparationRoutine()
-        self.behavior_adaptation = BehaviorAdaptationService()
+        try:
+            self.behavior_constraint_migrations = MigrationRunner(
+                db_sqlite.get_db_connection,
+            ).migrate(behavior_constraint_migrations())
+            self.behavior_constraint_repository = BehaviorConstraintRepository(
+                db_sqlite.get_db_connection,
+            )
+        except Exception as exc:
+            self.behavior_constraint_migrations = []
+            self.behavior_constraint_repository = None
+            print(
+                f"[HEBE][BEHAVIOR_CONSTRAINT_STORE] status=failed_closed reason={type(exc).__name__}",
+                flush=True,
+            )
+        self.behavior_adaptation = BehaviorAdaptationService(
+            repository=self.behavior_constraint_repository,
+        )
+        if initial_stream_state is not None:
+            self.behavior_adaptation.load_durable_constraints(initial_stream_state)
         self.stream_spontaneity.start_grace_period(getattr(self.runtime.state, "stream", None))
         self.stream_companion_loop = StreamCompanionLoop(
             spontaneity=self.stream_spontaneity,
@@ -519,8 +533,7 @@ class HebeEngine:
         self._stt_prompt_echo_rejection_ts: list[float] = []
         self._stt_visible_transcripts: set[str] = set()
         self.stream_action_planner = self._build_stream_action_planner()
-        self.viewer_intent_policy = ViewerIntentPolicy()
-        self.behavior_constraint_output_guard = BehaviorConstraintOutputGuard()
+        self.viewer_intent_policy = ViewerIntentPolicy(constraint_owner=self.behavior_adaptation)
         self.grammatical_agreement_guard = GrammaticalAgreementGuard()
         self.social_authority_commitment_guard = SocialAuthorityCommitmentGuard()
         self.channel_retention_guard = ChannelRetentionGuard()
@@ -1690,7 +1703,10 @@ class HebeEngine:
         stream = self._get_stream_state()
         if stream is None:
             return []
-        stream.active_behavior_blocks = []
+        stream.active_behavior_blocks = [
+            item for item in self.behavior_adaptation.active_constraints(stream)
+            if str(item.get("scope") or "current_stream") == "durable"
+        ]
         self._record_policy_trace({
             "source": "dev",
             "speaker": "dev",
@@ -1702,7 +1718,7 @@ class HebeEngine:
             "reason": "dev_clear",
             "response_mode": "silent",
         })
-        return []
+        return list(stream.active_behavior_blocks)
 
     def _simulation_stream_live_from_payload(self, payload: dict | None) -> tuple[bool | None, str]:
         payload = payload or {}
@@ -2076,6 +2092,7 @@ class HebeEngine:
             stream, command,
             resolver=resolve_behavior_target,
             source_event_id=str(getattr(getattr(self, "_current_input_event", None), "timestamp", "") or ""),
+            constraint_owner=getattr(self, "behavior_adaptation", None),
         )
         if not behavior_decision.allow_llm:
             block = dict(getattr(behavior_decision, "update_behavior_block", None) or {})
@@ -2146,11 +2163,12 @@ class HebeEngine:
         normalized = self._normalize_guard_text(text)
         compliment_request = bool(re.search(r"\b(?:cumplid\w*|pirop\w*|halag\w*|elog\w*)\b", normalized))
         if compliment_request:
-            blocks = active_behavior_blocks(stream)
-            matched = next((block for block in blocks if constraint_matches(
-                block, behavior_family="compliment", recipient_login=username or display_name,
+            matched = self.behavior_adaptation.matching_explicit_constraint(
+                stream,
+                behavior_family="compliment",
+                recipient_login=username or display_name,
                 requester_login=username or display_name,
-            )), None)
+            )
             if matched is not None:
                 print("[HEBE][OWNER_CONSTRAINT_GATE] matched=true action=block", flush=True)
                 print("[HEBE][DIRECT_PRIORITY] bypass_denied reason=owner_constraint", flush=True)
@@ -4522,14 +4540,14 @@ class HebeEngine:
                 if adaptation_service is None:
                     adaptation_service = BehaviorAdaptationService()
                     self.behavior_adaptation = adaptation_service
-                adaptation = adaptation_service.evaluate_candidate(
+                adaptation = adaptation_service.validate_generated_output(
                     stream,
                     reply_text,
                     topic=str((getattr(event, "payload", {}) or {}).get("idle_topic") or ""),
                     mode="proactive",
                 )
-                if adaptation.action in {AdaptationAction.COOLDOWN, AdaptationAction.SUPPRESS}:
-                    service.consume_semantic_opportunity(
+                if adaptation.action == AdaptationAction.SUPPRESS:
+                    service.consume_opportunity(
                         stream,
                         getattr(event, "payload", {}) or {},
                         reason=f"behavior_adaptation_{adaptation.action.value}",
@@ -4540,21 +4558,7 @@ class HebeEngine:
                         flush=True,
                     )
                     return
-                if service.is_too_similar_to_recent(stream, reply_text):
-                    service.consume_semantic_opportunity(stream, getattr(event, "payload", {}) or {}, reason="too_similar_to_recent")
-                    print("[HEBE][SPONTANEITY] skipped reason=too_similar_to_recent", flush=True)
-                    return
-                motif = service.motif_on_cooldown(stream, reply_text)
-                if motif:
-                    service.consume_semantic_opportunity(stream, getattr(event, "payload", {}) or {}, reason="motif_cooldown")
-                    print(f"[HEBE][SPONTANEITY] skipped reason=motif_cooldown motif={motif}", flush=True)
-                    return
-                cooldown_key = semantic_cooldown_key(reply_text, (getattr(event, "payload", {}) or {}).get("idle_topic"))
-                if cooldown_active(stream, cooldown_key):
-                    print(f"[HEBE][SPONTANEITY] skipped reason=semantic_cooldown cooldown_key={cooldown_key}", flush=True)
-                    return
-                mark_cooldown(stream, cooldown_key)
-                print(f"[HEBE][SPONTANEITY] spoken reason=validated cooldown_key={cooldown_key}", flush=True)
+                print("[HEBE][SPONTANEITY] spoken reason=canonical_behavior_policy_validated", flush=True)
 
         if event.event_type.startswith("twitch_"):
             self._deliver_twitch_reply(reply_text, event_type=event.event_type, payload=getattr(event, "payload", {}) or {})
@@ -7732,9 +7736,12 @@ class HebeEngine:
             if retention_result.action != "allow":
                 final_response = retention_result.text
                 repair_summary = {**dict(repair_summary or {}), "channel_retention": retention_result.reason}
-            constraint_guard = getattr(self, "behavior_constraint_output_guard", None) or BehaviorConstraintOutputGuard()
-            constraint_result = constraint_guard.evaluate(
-                active_behavior_blocks(stream), intended_recipient=viewer,
+            adaptation_service = getattr(self, "behavior_adaptation", None)
+            if adaptation_service is None:
+                adaptation_service = BehaviorAdaptationService()
+                self.behavior_adaptation = adaptation_service
+            constraint_result = adaptation_service.validate_constraint_output(
+                stream, intended_recipient=viewer,
                 generated_response=final_response, source_viewer=source_viewer,
                 speech_act=str(debug_payload.get("speech_act") or ""), scene_context=debug_payload,
             )
@@ -8331,6 +8338,11 @@ class HebeEngine:
                     stream,
                     interpretation,
                     recent_hebe_utterance=recent_utterance,
+                    source_event_id=str(
+                        getattr(current_event, "timestamp", "")
+                        or (metadata or {}).get("event_id")
+                        or ""
+                    ),
                 )
                 if isinstance(metadata, dict):
                     metadata["behavior_feedback_applied"] = True
@@ -12595,7 +12607,7 @@ class HebeEngine:
             if is_spontaneous:
                 service = getattr(self, "stream_spontaneity", None)
                 if service is not None:
-                    service.consume_semantic_opportunity(stream, payload, reason=reason)
+                    service.consume_opportunity(stream, payload, reason=reason)
         if event_type and event_type.startswith("twitch_"):
             raw_text = str((payload or {}).get("message_text") or (payload or {}).get("text") or "")
             username = str((payload or {}).get("user_login") or (payload or {}).get("username") or "")
@@ -12892,7 +12904,7 @@ class HebeEngine:
                         topic=topic,
                         used_fact_id=(payload or {}).get("used_fact_id"),
                     )
-                    service.consume_semantic_opportunity(stream, payload, reason="emitted")
+                    service.consume_opportunity(stream, payload, reason="emitted")
                 anchor_id = str((payload or {}).get("used_fact_id") or (payload or {}).get("anchor_id") or topic or "").strip() or None
                 try:
                     if anchor_id:

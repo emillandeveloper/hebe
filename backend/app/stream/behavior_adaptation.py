@@ -12,7 +12,13 @@ from typing import Any
 
 from app.cognitive.input_interpretation import InputInterpretation, InputSpeechAct
 from app.core.persistent_logs import log_jsonl_event
-from app.stream.behavior_constraints import BehaviorConstraint, persist_constraint
+from app.stream.behavior_constraints import (
+    BehaviorConstraint,
+    BehaviorConstraintOutputGuard,
+    constraint_matches,
+    persist_constraint,
+)
+from app.stream.behavior_constraint_store import BehaviorConstraintRepository
 
 
 class FeedbackKind(StrEnum):
@@ -26,7 +32,6 @@ class FeedbackKind(StrEnum):
 class ReferentProvenance(StrEnum):
     EXPLICIT_TEXT = "explicit_text"
     RECENT_HEBE_UTTERANCE = "recent_hebe_utterance"
-    RECENT_HEBE_ACTION = "recent_hebe_action"
     RECENT_TOPIC = "recent_topic"
     UNRESOLVED = "unresolved"
 
@@ -41,7 +46,7 @@ class AdaptationAction(StrEnum):
 _GENERIC_REFERENTS = {
     "", "eso", "esa", "esto", "esta", "aquello", "response", "respuesta",
     "previous", "previous_hebe_utterance", "previous hebe utterance", "lo", "la", "broma", "comentario",
-    "hacerla", "hacerlo", "seguirla", "seguirlo",
+    "hacerla", "hacerlas", "hacerlo", "hacerlos", "seguirla", "seguirlas", "seguirlo", "seguirlos",
 }
 _STOP_WORDS = {
     "abre", "abrir", "dale", "dile", "decir", "diciendo", "diciendome", "hace",
@@ -124,6 +129,8 @@ class CandidateEvaluation:
     negative_weight: float
     positive_weight: float
     constraint_id: str = ""
+    score_multiplier: float = 1.0
+    stage: str = "candidate"
 
     def to_dict(self) -> dict[str, Any]:
         value = asdict(self)
@@ -142,6 +149,73 @@ class BehaviorAdaptationService:
     POSITIVE_HALF_LIFE_SEC = 20 * 60
     USE_WINDOW_SEC = 45 * 60
 
+    def __init__(self, repository: BehaviorConstraintRepository | None = None) -> None:
+        self.repository = repository
+        self.output_guard = BehaviorConstraintOutputGuard()
+
+    def load_durable_constraints(self, stream: Any) -> list[dict[str, Any]]:
+        if self.repository is None:
+            return []
+        existing = [
+            BehaviorConstraint.from_value(item)
+            for item in list(getattr(stream, "active_behavior_blocks", []) or [])
+            if isinstance(item, (dict, BehaviorConstraint))
+        ]
+        durable = self.repository.list_active()
+        merged = [item for item in existing if item.scope != "durable"]
+        merged.extend(durable)
+        stream.active_behavior_blocks = [item.to_dict() for item in merged if item.active]
+        return [item.to_dict() for item in durable]
+
+    def active_constraints(self, stream: Any, *, now: float | None = None) -> list[dict[str, Any]]:
+        now = time.time() if now is None else float(now)
+        active = [
+            item for item in (
+                BehaviorConstraint.from_value(raw)
+                for raw in list(getattr(stream, "active_behavior_blocks", []) or [])
+                if isinstance(raw, (dict, BehaviorConstraint))
+            )
+            if item.active
+            and item.status == "ACTIVE"
+            and (not item.expires_at or item.expires_at > now)
+        ]
+        stream.active_behavior_blocks = [item.to_dict() for item in active]
+        return list(stream.active_behavior_blocks)
+
+    def register_explicit_constraint(
+        self,
+        stream: Any,
+        constraint: BehaviorConstraint,
+    ) -> dict[str, Any]:
+        if constraint.authority != "owner" or constraint.explicitness != "explicit":
+            raise ValueError("behavior_constraint_requires_explicit_owner_authority")
+        if constraint.scope == "durable":
+            if self.repository is None:
+                raise RuntimeError("durable_constraint_store_unavailable")
+            self.repository.save_durable(constraint)
+        return persist_constraint(stream, constraint)
+
+    def matching_explicit_constraint(
+        self,
+        stream: Any,
+        *,
+        behavior_family: str,
+        recipient_login: str = "",
+        requester_login: str = "",
+        now: float | None = None,
+    ) -> dict[str, Any] | None:
+        if not behavior_family:
+            return None
+        return next((
+            item for item in self.active_constraints(stream, now=now)
+            if constraint_matches(
+                item,
+                behavior_family=behavior_family,
+                recipient_login=recipient_login,
+                requester_login=requester_login,
+            )
+        ), None)
+
     def apply_feedback(
         self,
         stream: Any,
@@ -149,6 +223,7 @@ class BehaviorAdaptationService:
         *,
         now: float | None = None,
         recent_hebe_utterance: dict[str, Any] | str | None = None,
+        source_event_id: str = "",
     ) -> FeedbackApplication:
         now = time.time() if now is None else float(now)
         unresolved = ResolvedReferent("", (), ReferentProvenance.UNRESOLVED, 0.0)
@@ -190,6 +265,10 @@ class BehaviorAdaptationService:
             result = FeedbackApplication(False, kind, referent, reason="durable_evidence_insufficient")
             self._remember_last(stream, result)
             return result
+        if kind == FeedbackKind.EXPLICIT_DURABLE_PREFERENCE and self.repository is None:
+            result = FeedbackApplication(False, kind, referent, reason="durable_constraint_store_unavailable")
+            self._remember_last(stream, result)
+            return result
 
         constraint_id = ""
         if kind in {
@@ -201,8 +280,9 @@ class BehaviorAdaptationService:
                 referent,
                 scope="durable" if kind == FeedbackKind.EXPLICIT_DURABLE_PREFERENCE else "current_stream",
                 now=now,
+                source_event_id=source_event_id,
             )
-            persist_constraint(stream, constraint)
+            self.register_explicit_constraint(stream, constraint)
             constraint_id = constraint.id
             self._log("constraint_applied", {
                 "constraint_id": constraint.id,
@@ -210,7 +290,9 @@ class BehaviorAdaptationService:
                 "motif_id": motif_id(referent.terms),
             })
         elif kind == FeedbackKind.CORRECTION_REVERSAL:
-            constraint_id = self._reverse_constraints(stream, referent)
+            constraint_id = self._reverse_constraints(
+                stream, referent, source_event_id=source_event_id, now=now,
+            )
             self._log("constraint_reversed", {
                 "constraint_ids": constraint_id,
                 "motif_id": motif_id(referent.terms),
@@ -285,12 +367,15 @@ class BehaviorAdaptationService:
         terms = motif_terms(f"{text} {topic}")
         candidate_id = motif_id(terms) if terms else "motif_unresolved"
         if mode == "direct_response":
-            return CandidateEvaluation(AdaptationAction.ALLOW, 0.0, "direct_required_response", candidate_id, 0, 0.0, 0.0)
+            return CandidateEvaluation(
+                AdaptationAction.ALLOW, 0.0, "direct_required_response",
+                candidate_id, 0, 0.0, 0.0, score_multiplier=1.0,
+            )
         constraint = self._matching_constraint(stream, terms)
         if constraint is not None:
             result = CandidateEvaluation(
                 AdaptationAction.SUPPRESS, 1.0, "explicit_behavior_constraint",
-                candidate_id, 0, 1.0, 0.0, constraint.id,
+                candidate_id, 0, 1.0, 0.0, constraint.id, 0.0,
             )
             self._record_candidate(stream, result)
             return result
@@ -332,9 +417,93 @@ class BehaviorAdaptationService:
         else:
             action = AdaptationAction.ALLOW
             reason = "no_material_motif_fatigue"
-        result = CandidateEvaluation(action, fatigue, reason, candidate_id, recent_uses, negative, positive)
+        multiplier = {
+            AdaptationAction.ALLOW: 1.0,
+            AdaptationAction.DOWNRANK: 0.45,
+            AdaptationAction.COOLDOWN: 0.0,
+            AdaptationAction.SUPPRESS: 0.0,
+        }[action]
+        result = CandidateEvaluation(
+            action, fatigue, reason, candidate_id, recent_uses, negative, positive,
+            score_multiplier=multiplier,
+        )
         self._record_candidate(stream, result)
         return result
+
+    def validate_generated_output(
+        self,
+        stream: Any,
+        text: str,
+        *,
+        topic: str = "",
+        mode: str = "proactive",
+        now: float | None = None,
+    ) -> CandidateEvaluation:
+        """Validate final text against canonical active suppression only.
+
+        Candidate ranking owns fatigue and recent-use scoring. This safety check
+        does not rank again; it catches a generated text that drifted into an
+        explicitly constrained or currently suppressed motif.
+        """
+        now = time.time() if now is None else float(now)
+        terms = motif_terms(f"{text} {topic}")
+        candidate_id = motif_id(terms) if terms else "motif_unresolved"
+        if mode == "direct_response":
+            return CandidateEvaluation(
+                AdaptationAction.ALLOW, 0.0, "direct_required_response",
+                candidate_id, 0, 0.0, 0.0, score_multiplier=1.0,
+                stage="generated_output",
+            )
+        constraint = self._matching_constraint(stream, terms)
+        if constraint is not None:
+            result = CandidateEvaluation(
+                AdaptationAction.SUPPRESS, 1.0, "generated_output_matches_constraint",
+                candidate_id, 0, 1.0, 0.0, constraint.id, 0.0,
+                "generated_output",
+            )
+            self._record_candidate(stream, result)
+            return result
+        for entry in list(self._state(stream).get("entries") or []):
+            similarity = semantic_similarity(terms, tuple(entry.get("motif_terms") or ()))
+            if similarity < 0.25:
+                continue
+            self._decay_entry(entry, now)
+            negative = float(entry.get("negative_weight") or 0.0) * similarity
+            if now < float(entry.get("suppress_until") or 0.0) and negative >= 0.25:
+                result = CandidateEvaluation(
+                    AdaptationAction.SUPPRESS, min(1.0, negative),
+                    "generated_output_reincides_in_suppressed_motif",
+                    candidate_id, 0, negative, 0.0, score_multiplier=0.0,
+                    stage="generated_output",
+                )
+                self._record_candidate(stream, result)
+                return result
+        result = CandidateEvaluation(
+            AdaptationAction.ALLOW, 0.0, "generated_output_matches_selected_policy",
+            candidate_id, 0, 0.0, 0.0, score_multiplier=1.0,
+            stage="generated_output",
+        )
+        self._record_candidate(stream, result)
+        return result
+
+    def validate_constraint_output(
+        self,
+        stream: Any,
+        *,
+        intended_recipient: str,
+        generated_response: str,
+        source_viewer: str = "",
+        speech_act: str = "",
+        scene_context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return self.output_guard.evaluate(
+            list(getattr(stream, "active_behavior_blocks", []) or []),
+            intended_recipient=intended_recipient,
+            generated_response=generated_response,
+            source_viewer=source_viewer,
+            speech_act=speech_act,
+            scene_context=scene_context,
+        )
 
     def resolve_referent(
         self,
@@ -362,10 +531,6 @@ class BehaviorAdaptationService:
             recent.append((str(utterance.get("text")), ReferentProvenance.RECENT_HEBE_UTTERANCE.value, 0.0, str(utterance.get("topic") or "")))
         elif isinstance(utterance, str) and utterance.strip():
             recent.append((utterance, ReferentProvenance.RECENT_HEBE_UTTERANCE.value, 0.0, ""))
-        action = getattr(stream, "last_hebe_action", None)
-        if isinstance(action, dict) and (action.get("description") or action.get("text")):
-            recent.append((str(action.get("description") or action.get("text")), ReferentProvenance.RECENT_HEBE_ACTION.value, 0.0, str(action.get("topic") or "")))
-
         query = explicit if explicit_named else interpretation.feedback_text
         best: tuple[float, str, str, str] | None = None
         for text, provenance, age, topic in recent:
@@ -398,7 +563,15 @@ class BehaviorAdaptationService:
             return FeedbackKind.EPISODIC_POSITIVE
         return FeedbackKind.EPISODIC_NEGATIVE
 
-    def _create_constraint(self, interpretation: InputInterpretation, referent: ResolvedReferent, *, scope: str, now: float) -> BehaviorConstraint:
+    def _create_constraint(
+        self,
+        interpretation: InputInterpretation,
+        referent: ResolvedReferent,
+        *,
+        scope: str,
+        now: float,
+        source_event_id: str,
+    ) -> BehaviorConstraint:
         key = motif_id(referent.terms)
         return BehaviorConstraint(
             id=f"constraint_{uuid.uuid4().hex[:12]}",
@@ -406,10 +579,14 @@ class BehaviorAdaptationService:
             behavior_family="semantic_motif",
             behavior_variants=[f"motif:{key}", *referent.terms],
             recipient_scope="everyone",
-            source_text=interpretation.feedback_text,
+            source_event_id=source_event_id,
+            source_text=interpretation.feedback_text if scope != "durable" else "",
             created_by="owner",
+            authority=interpretation.authority,
             priority="owner_absolute",
             scope=scope,
+            explicitness=interpretation.feedback.explicitness if interpretation.feedback else "",
+            confidence=interpretation.confidence,
             created_at=now,
             reason=f"explicit owner {scope} motif constraint",
         )
@@ -451,7 +628,14 @@ class BehaviorAdaptationService:
                 return item
         return None
 
-    def _reverse_constraints(self, stream: Any, referent: ResolvedReferent) -> str:
+    def _reverse_constraints(
+        self,
+        stream: Any,
+        referent: ResolvedReferent,
+        *,
+        source_event_id: str,
+        now: float,
+    ) -> str:
         reversed_ids: list[str] = []
         kept: list[dict[str, Any]] = []
         for raw in list(getattr(stream, "active_behavior_blocks", []) or []):
@@ -461,6 +645,14 @@ class BehaviorAdaptationService:
             variants = tuple(value for value in item.behavior_variants if not value.startswith("motif:"))
             if item.behavior_family == "semantic_motif" and semantic_similarity(referent.terms, variants) >= 0.25:
                 reversed_ids.append(item.id)
+                if item.scope == "durable" and self.repository is not None:
+                    self.repository.retire(
+                        item.id,
+                        reason="explicit_owner_reversal",
+                        source_event_id=source_event_id,
+                        authority="owner",
+                        now=now,
+                    )
                 continue
             kept.append(item.to_dict())
         stream.active_behavior_blocks = kept

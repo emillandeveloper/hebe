@@ -12,7 +12,7 @@ from app.stream.policy import (
     ACTIVITY_SOCIAL_LINKS,
     validate_spontaneity_anchor,
 )
-from app.stream.proactive import ProactiveDecision, cooldown_active, log_proactive_decision, semantic_cooldown_key
+from app.stream.proactive import ProactiveDecision, log_proactive_decision, technical_cooldown_active
 from app.stream.state import StreamSessionState
 
 
@@ -35,9 +35,8 @@ class StreamSpontaneityConfig:
     max_per_stream: int = 6
     require_specific_context: bool = False
     title_marker_ttl_sec: float = 55 * 60
-    save_equip_topic_cooldown_sec: float = 60 * 60
     cooldown_key: str = "stream_idle_prompt_next_ts"
-    semantic_opportunity_cooldown_sec: float = 20 * 60
+    opportunity_rate_limit_sec: float = 20 * 60
 
 
 class StreamSpontaneityService:
@@ -248,22 +247,15 @@ class StreamSpontaneityService:
         result["recent_idle_topics"] = [item.get("topic") for item in recent_idle[-8:] if item.get("topic")]
         topic = self._choose_topic(stream, now)
         if topic is None:
-            result["blocked_reason"] = "topic_recently_used"
+            result["blocked_reason"] = "no_candidate_topic"
             self._log_decision(stream, result, now=now, anchor_quality=anchor_quality)
             return result
-        semantic_key = semantic_cooldown_key("", topic)
-        if cooldown_active(stream, semantic_key, now=now):
-            result["blocked_reason"] = "semantic_cooldown"
-            result["candidate_topic"] = topic
-            self._log_decision(stream, result, now=now, anchor_quality=anchor_quality, cooldown_key=semantic_key)
-            print(f"[HEBE][SPONTANEITY] skipped reason=semantic_cooldown cooldown_key={semantic_key}", flush=True)
-            return result
         used_fact = self._recent_run_context_fact(stream, now)
-        opportunity_key = self.semantic_opportunity_key(stream, topic=topic, fact=used_fact)
-        if cooldown_active(stream, opportunity_key, now=now):
-            result["blocked_reason"] = "semantic_opportunity_consumed"
+        opportunity_key = self.opportunity_rate_limit_key(stream, topic=topic, fact=used_fact)
+        if technical_cooldown_active(stream, opportunity_key, now=now):
+            result["blocked_reason"] = "opportunity_rate_limited"
             result["candidate_topic"] = topic
-            print(f"[HEBE][SPONTANEITY] skipped reason=semantic_opportunity_consumed cooldown_key={opportunity_key}", flush=True)
+            print(f"[HEBE][SPONTANEITY] skipped reason=opportunity_rate_limited cooldown_key={opportunity_key}", flush=True)
             return result
         validation = validate_spontaneity_anchor(stream, topic=topic, fact=used_fact)
         if not validation.allow:
@@ -272,6 +264,7 @@ class StreamSpontaneityService:
             self._log_decision(stream, result, now=now, anchor_quality=anchor_quality)
             return result
         result["candidate_topic"] = topic
+        result["candidate_topics"] = self.candidate_topics(stream, now)
         used_fact_id = used_fact.get("id") if used_fact else None
         if used_fact:
             print(
@@ -288,14 +281,14 @@ class StreamSpontaneityService:
         if score["total"] < 0.62:
             result["blocked_reason"] = "low_spontaneity_score"
             self._log_score(**score)
-            self._log_decision(stream, result, now=now, anchor_quality=anchor_quality, cooldown_key=semantic_key)
+            self._log_decision(stream, result, now=now, anchor_quality=anchor_quality, cooldown_key=opportunity_key)
             print("[HEBE][SPONTANEITY] skipped reason=low_spontaneity_score", flush=True)
             return result
         self._log_score(**score)
         result["would_send"] = True
         result["blocked_reason"] = "ready"
         result["cooldown_ready"] = True
-        self._log_decision(stream, result, now=now, anchor_quality=anchor_quality, cooldown_key=semantic_key)
+        self._log_decision(stream, result, now=now, anchor_quality=anchor_quality, cooldown_key=opportunity_key)
         return result
 
     def reset_spontaneity_cooldowns(self, stream: StreamSessionState | None) -> int:
@@ -324,7 +317,6 @@ class StreamSpontaneityService:
         now = self._now()
         title_context = self._title_marker_context(stream, now)
         chat_snapshot = self._chat_activity_snapshot(stream, now)
-        recent_idle = list(getattr(stream, "recent_idle_messages", []) or [])
         selected_fact = self._recent_run_context_fact(stream, now)
         selected_topic = topic or self._choose_topic(stream, now) or "game_vibe"
         return {
@@ -380,19 +372,12 @@ class StreamSpontaneityService:
             },
             "specific_context_anchors": self._specific_context_anchors(stream, now, title_context=title_context, chat_snapshot=chat_snapshot),
             "used_fact_id": (selected_fact or {}).get("id"),
-            "semantic_opportunity_key": self.semantic_opportunity_key(
+            "opportunity_rate_limit_key": self.opportunity_rate_limit_key(
                 stream, topic=selected_topic, fact=selected_fact,
             ),
             "scene_guard": dict(getattr(stream, "current_scene_timeline", None) or {}),
             "proactive_type": "contextual_spontaneity",
             "proactive_decision": getattr(stream, "last_proactive_decision", None),
-            "recent_idle_topics": [item.get("topic") for item in recent_idle[-8:] if item.get("topic")],
-            "recent_idle_messages": [item.get("text") for item in recent_idle[-5:] if item.get("text")],
-            "recent_style_motifs": [
-                item.get("motif")
-                for item in list(getattr(stream, "recent_style_motifs", []) or [])[-12:]
-                if item.get("motif")
-            ],
             "game_profile": profile.compact_prompt_context(),
         }
 
@@ -421,29 +406,27 @@ class StreamSpontaneityService:
         messages.append(entry)
         stream.recent_idle_messages = messages[-30:]
         stream.idle_prompts_sent_stream = int(getattr(stream, "idle_prompts_sent_stream", 0) or 0) + 1
-        self._record_style_motifs(stream, text, now=now)
 
-    def semantic_opportunity_key(self, stream: StreamSessionState, *, topic: str, fact: dict | None) -> str:
+    def opportunity_rate_limit_key(self, stream: StreamSessionState, *, topic: str, fact: dict | None) -> str:
         scene = dict(getattr(stream, "current_scene_timeline", None) or {})
         scene_key = str(scene.get("scene_id") or scene.get("topic_id") or "current_scene")
         anchor_family = str((fact or {}).get("category") or (fact or {}).get("kind") or "session_context")
         contribution_mode = str(topic or "game_vibe")
-        semantic_motif = anchor_family
         return "spontaneity_opportunity:" + ":".join(
             self._normalize_for_similarity(value).replace(" ", "_")
-            for value in (scene_key, anchor_family, contribution_mode, semantic_motif)
+            for value in (scene_key, anchor_family, contribution_mode)
         )
 
-    def consume_semantic_opportunity(
+    def consume_opportunity(
         self, stream: StreamSessionState | None, payload: dict | None, *, reason: str,
     ) -> str:
         if stream is None:
             return ""
         payload = payload or {}
-        key = str(payload.get("semantic_opportunity_key") or "").strip()
+        key = str(payload.get("opportunity_rate_limit_key") or "").strip()
         if not key:
             facts = list((payload.get("run_context") or {}).get("facts") or [])
-            key = self.semantic_opportunity_key(
+            key = self.opportunity_rate_limit_key(
                 stream,
                 topic=str(payload.get("idle_topic") or "game_vibe"),
                 fact=facts[0] if facts else None,
@@ -452,31 +435,12 @@ class StreamSpontaneityService:
         if not isinstance(cooldowns, dict):
             cooldowns = {}
             stream.cooldowns = cooldowns
-        cooldowns[key] = self._now() + self.config.semantic_opportunity_cooldown_sec
+        cooldowns[key] = self._now() + self.config.opportunity_rate_limit_sec
         consumed = list(getattr(stream, "consumed_spontaneity_opportunities", []) or [])
         consumed.append({"key": key, "reason": reason, "timestamp": self._now()})
         stream.consumed_spontaneity_opportunities = consumed[-50:]
         print(f"[HEBE][SPONTANEITY] opportunity=consumed reason={reason} cooldown_key={key}", flush=True)
         return key
-
-    def is_too_similar_to_recent(self, stream: StreamSessionState | None, text: str) -> bool:
-        if not stream:
-            return False
-        current = set(self._normalize_for_similarity(text).split())
-        if not current:
-            return False
-        repeated_phrases = ("revisa equipo", "guarda", "objetos", "level 1", "ramuh", "lindblum")
-        lowered = str(text or "").lower()
-        for item in list(getattr(stream, "recent_idle_messages", []) or [])[-8:]:
-            previous_text = str(item.get("text") or "").lower()
-            if any(phrase in lowered and phrase in previous_text for phrase in repeated_phrases):
-                return True
-            previous = set(str(item.get("normalized_text") or "").split())
-            if previous:
-                score = len(current & previous) / max(1, len(current | previous))
-                if score > 0.58:
-                    return True
-        return False
 
     def _chat_activity_snapshot(self, stream: StreamSessionState, now: float) -> dict:
         window = self.config.chat_activity_window_sec
@@ -516,24 +480,21 @@ class StreamSpontaneityService:
         return {"fresh": fresh, "stale": stale}
 
     def _choose_topic(self, stream: StreamSessionState, now: float) -> str | None:
-        if getattr(stream, "current_activity", None) in {ACTIVITY_SOCIAL_LINKS, ACTIVITY_CONFIDANT_EVENT}:
-            recent = list(getattr(stream, "recent_idle_messages", []) or [])
-            social_topics = ["social_link_comment", "character_dynamics", "school_life_comment", "game_vibe"]
-            last_topic = recent[-1].get("topic") if recent else None
-            for topic in social_topics:
-                if topic != last_topic:
-                    return topic
-            return None
+        topics = self.candidate_topics(stream, now)
+        return topics[0] if topics else None
 
+    def candidate_topics(self, stream: StreamSessionState, now: float) -> list[str]:
+        if getattr(stream, "current_activity", None) in {ACTIVITY_SOCIAL_LINKS, ACTIVITY_CONFIDANT_EVENT}:
+            return ["social_link_comment", "character_dynamics", "school_life_comment", "game_vibe"]
+
+        topics: list[str] = []
         recent_fact = self._recent_run_context_fact(stream, now)
         if recent_fact:
             category_topic = self._topic_for_fact(recent_fact)
             if category_topic:
-                recent = list(getattr(stream, "recent_idle_messages", []) or [])
-                if not recent or recent[-1].get("topic") != category_topic:
-                    return category_topic
+                topics.append(category_topic)
 
-        topics = [
+        topics.extend([
             "challenge_comment",
             "jrpg_trope",
             "game_vibe",
@@ -545,19 +506,8 @@ class StreamSpontaneityService:
             "save_reminder",
             "equipment_check",
             "resource_management",
-        ]
-        recent = list(getattr(stream, "recent_idle_messages", []) or [])
-        last_topic = recent[-1].get("topic") if recent else None
-        long_cooldown_topics = {"save_reminder", "equipment_check", "resource_management"}
-        blocked: set[str] = set()
-        for item in recent:
-            topic = item.get("topic")
-            if topic in long_cooldown_topics and now - float(item.get("timestamp", 0.0) or 0.0) < self.config.save_equip_topic_cooldown_sec:
-                blocked.add(topic)
-        available = [topic for topic in topics if topic != last_topic and topic not in blocked]
-        if not available:
-            return None
-        return available[0]
+        ])
+        return list(dict.fromkeys(topics))
 
     def _recent_run_context_fact(self, stream: StreamSessionState, now: float) -> dict | None:
         used_fact_ids = {
@@ -726,44 +676,31 @@ class StreamSpontaneityService:
         anchor_quality = self._anchor_quality(stream, now, anchors)
         relevance = 0.84 if (getattr(stream, "current_game", None) or getattr(stream, "current_category", None)) else 0.55
         usefulness = 0.86 if fact or topic in {"resource_management", "strategy_without_spoilers", "challenge_comment"} else 0.62
-        novelty = 0.85
-        recent_topics = [item.get("topic") for item in list(getattr(stream, "recent_idle_messages", []) or [])[-6:]]
-        if topic in recent_topics:
-            novelty -= 0.35
         confidence = float((fact or {}).get("confidence", 0.76) or 0.76)
         timing = 0.75
-        repetition_penalty = 0.25 if topic in recent_topics else 0.0
         risk_penalty = 0.15 if topic in {"resource_management", "strategy_without_spoilers"} and not fact else 0.0
-        recent_similar_comment_penalty = 0.0
         total = (
             anchor_quality * 0.28
             + relevance * 0.16
             + usefulness * 0.18
-            + novelty * 0.14
-            + confidence * 0.14
-            + timing * 0.10
-            - repetition_penalty
+            + confidence * 0.20
+            + timing * 0.18
             - risk_penalty
-            - recent_similar_comment_penalty
         )
         return {
             "total": round(max(0.0, min(1.0, total)), 3),
             "anchor_quality": round(anchor_quality, 3),
             "relevance_to_current_game": round(relevance, 3),
             "usefulness": round(usefulness, 3),
-            "novelty": round(novelty, 3),
             "confidence": round(confidence, 3),
             "timing": round(timing, 3),
-            "repetition_penalty": round(repetition_penalty, 3),
             "risk_penalty": round(risk_penalty, 3),
-            "recent_similar_comment_penalty": round(recent_similar_comment_penalty, 3),
         }
 
     def _log_score(self, total: float = 0.0, **score: float) -> None:
         print(
             "[HEBE][SPONTANEITY_SCORE] "
             f"score={float(total or 0.0):.3f} "
-            f"novelty={float(score.get('novelty', 0.0) or 0.0):.3f} "
             f"usefulness={float(score.get('usefulness', 0.0) or 0.0):.3f} "
             f"confidence={float(score.get('confidence', 0.0) or 0.0):.3f}",
             flush=True,
@@ -798,7 +735,7 @@ class StreamSpontaneityService:
             suggested_action="",
             knowledge_source="stream_context",
             confidence=float(score.get("confidence", 0.0) or (0.82 if result.get("would_send") else 0.4)),
-            cooldown_key=cooldown_key or semantic_cooldown_key("", topic),
+            cooldown_key=cooldown_key or f"technical_topic:{topic}",
             should_speak=bool(result.get("would_send")),
             reason="ready" if result.get("would_send") else "",
             blocked_reason="" if result.get("would_send") else str(result.get("blocked_reason") or "blocked"),
@@ -819,54 +756,6 @@ class StreamSpontaneityService:
         if self._recent_run_context_fact(stream, now):
             return False
         return True
-
-    def _record_style_motifs(self, stream: StreamSessionState, text: str, *, now: float) -> None:
-        motifs = self.detect_style_motifs(text)
-        if not motifs:
-            return
-        recent = list(getattr(stream, "recent_style_motifs", []) or [])
-        recent.extend({"motif": motif, "timestamp": now, "text": str(text or "")[:160]} for motif in motifs)
-        stream.recent_style_motifs = recent[-80:]
-
-    def detect_style_motifs(self, text: str) -> list[str]:
-        lowered = str(text or "").lower()
-        motifs: list[str] = []
-        motif_terms = {
-            "cafe": ("cafe", "café", "coffee", "cafeina", "cafeína"),
-            "energy": ("energia", "energía", "pilas", "cansancio"),
-            "florist": ("florist", "florister", "flores"),
-            "creator": ("creador", "creadores"),
-            "chaos": ("caos", "caotico", "caótico"),
-        }
-        for motif, terms in motif_terms.items():
-            if any(term in lowered for term in terms):
-                motifs.append(motif)
-        return motifs
-
-    def motif_on_cooldown(self, stream: StreamSessionState | None, text: str, *, now: float | None = None) -> str | None:
-        if not stream:
-            return None
-        now = self._now() if now is None else float(now)
-        cooldown_min = float(__import__("os").environ.get("HEBE_STYLE_MOTIF_COOLDOWN_MINUTES", "90") or 90)
-        configured = __import__("os").environ.get("HEBE_STYLE_OVERUSED_MOTIFS", "cafe,coffee,energy,florist,creator")
-        overused = {item.strip().lower() for item in configured.split(",") if item.strip()}
-        aliases = {"coffee": "cafe"}
-        motifs = [aliases.get(motif, motif) for motif in self.detect_style_motifs(text)]
-        recent = list(getattr(stream, "recent_style_motifs", []) or [])
-        for motif in motifs:
-            if motif not in overused:
-                continue
-            for item in reversed(recent):
-                item_motif = aliases.get(str(item.get("motif") or "").lower(), str(item.get("motif") or "").lower())
-                if item_motif == motif:
-                    if now - float(item.get("timestamp", 0.0) or 0.0) < cooldown_min * 60 or cooldown_min <= 0:
-                        print(f"[HEBE][STYLE] motif_blocked motif={motif} reason=cooldown", flush=True)
-                        print(f"[HEBE][STYLE] recent_motifs={[entry.get('motif') for entry in recent[-12:]]}", flush=True)
-                        return motif
-                    print(f"[HEBE][STYLE] motif_blocked motif={motif} reason=same_stream", flush=True)
-                    print(f"[HEBE][STYLE] recent_motifs={[entry.get('motif') for entry in recent[-12:]]}", flush=True)
-                    return motif
-        return None
 
     def _normalize_marker(self, text: str) -> str:
         return self._normalize_for_similarity(text)

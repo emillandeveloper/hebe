@@ -110,6 +110,7 @@ class TurnArbitration:
     owner_voice_active: bool
     owner_silence_ms: int
     pending_intents: int
+    ranked_candidates: list[dict[str, Any]] = field(default_factory=list)
 
 
 class SpeechIntentManager:
@@ -213,6 +214,7 @@ class SpeechIntentManager:
         tts_active: bool,
         current_scene: dict[str, Any] | None = None,
         now: float | None = None,
+        rank_policy: Callable[[SpeechIntent], dict[str, Any]] | None = None,
     ) -> TurnArbitration:
         started = time.perf_counter()
         now = float(self._now_fn() if now is None else now)
@@ -250,7 +252,37 @@ class SpeechIntentManager:
             f"[HEBE][TURN_WINDOW_OPEN] owner_silence_ms={silence_ms} pending_intents={len(pending)}",
             flush=True,
         )
-        selected = max(available, key=self._priority)
+        ranked: list[dict[str, Any]] = []
+        eligible: list[tuple[float, SpeechIntent]] = []
+        for item in available:
+            base_score = self._priority(item)
+            policy = dict(rank_policy(item) or {}) if rank_policy is not None else {}
+            multiplier = max(0.0, min(1.0, float(policy.get("score_multiplier", 1.0) or 0.0)))
+            adjusted_score = base_score * multiplier
+            allowed = multiplier > 0.0 and str(policy.get("action") or "allow") not in {"cooldown", "suppress"}
+            ranked.append({
+                "intent_id": item.id,
+                "topic": item.topic,
+                "base_score": round(base_score, 6),
+                "score_multiplier": round(multiplier, 6),
+                "adjusted_score": round(adjusted_score, 6),
+                "eligible": allowed,
+                "policy": policy,
+            })
+            if allowed:
+                eligible.append((adjusted_score, item))
+            else:
+                item.status = SpeechIntentStatus.SUPPRESSED
+                item.reserved_at = 0.0
+                item.suppression_reason = str(policy.get("reason") or "behavior_policy_suppressed")
+                self.metrics["intents_suppressed"] += 1
+                self.metrics[f"behavior_policy_suppressed:{item.suppression_reason}"] += 1
+        if not eligible:
+            return self._arbitration_result(
+                None, "behavior_policy_no_candidate", False, silence_ms, started,
+                ranked_candidates=ranked,
+            )
+        _, selected = max(eligible, key=lambda pair: pair[0])
         selected.status = SpeechIntentStatus.TURN_RESERVED
         selected.reserved_at = now
         selected.suppression_reason = ""
@@ -259,7 +291,10 @@ class SpeechIntentManager:
             f"[HEBE][SPEECH_INTENT_SELECT] id={selected.id} reason=highest_value_current",
             flush=True,
         )
-        return self._arbitration_result(selected, "turn_reserved", False, silence_ms, started)
+        return self._arbitration_result(
+            selected, "turn_reserved", False, silence_ms, started,
+            ranked_candidates=ranked,
+        )
 
     def release(self, intent_id: str, reason: str, *, suppress: bool = False) -> None:
         intent = self.get(intent_id)
@@ -416,9 +451,13 @@ class SpeechIntentManager:
         owner_active: bool,
         silence_ms: int,
         started: float,
+        ranked_candidates: list[dict[str, Any]] | None = None,
     ) -> TurnArbitration:
         self.arbitration_latency_ms.append((time.perf_counter() - started) * 1000.0)
-        return TurnArbitration(intent, reason, owner_active, silence_ms, len(self.pending()))
+        return TurnArbitration(
+            intent, reason, owner_active, silence_ms, len(self.pending()),
+            list(ranked_candidates or []),
+        )
 
     @staticmethod
     def _distribution(values: list[float]) -> dict[str, float | int]:

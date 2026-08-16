@@ -188,34 +188,19 @@ def scheduled_reminder_decision(*, trigger: str, schedule_slot: dict | None, cur
     return decision
 
 
-def semantic_cooldown_key(text: str, topic: str | None = None) -> str:
-    lowered = str(text or "").casefold()
-    if "obs" in lowered:
-        return "open_obs"
-    if any(term in lowered for term in ("cur", "heal", "pocion", "poción", "sp", "hp")):
-        return "game_healing_advice"
-    if any(term in lowered for term in ("boss", "jefe")):
-        return "boss_preparation"
-    if any(term in lowered for term in ("silencio", "quiet")):
-        return "silence_comment"
-    if topic:
-        return str(topic)
-    return "contextual_spontaneity"
-
-
-def cooldown_active(stream: Any, key: str, *, now: float | None = None, seconds: float = 45 * 60) -> bool:
+def technical_cooldown_active(stream: Any, key: str, *, now: float | None = None) -> bool:
     now = time.time() if now is None else float(now)
     cooldowns = getattr(stream, "cooldowns", None)
     if not isinstance(cooldowns, dict):
         return False
-    until = float(cooldowns.get(f"proactive:{key}", 0.0) or 0.0)
+    until = float(cooldowns.get(str(key), 0.0) or 0.0)
     return bool(until and now < until)
 
 
-def mark_cooldown(stream: Any, key: str, *, now: float | None = None, seconds: float = 45 * 60) -> None:
+def mark_technical_cooldown(stream: Any, key: str, *, now: float | None = None, seconds: float = 45 * 60) -> None:
     now = time.time() if now is None else float(now)
     cooldowns = getattr(stream, "cooldowns", None)
     if not isinstance(cooldowns, dict):
         stream.cooldowns = {}
         cooldowns = stream.cooldowns
-    cooldowns[f"proactive:{key}"] = now + seconds
+    cooldowns[str(key)] = now + seconds

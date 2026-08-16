@@ -8,8 +8,8 @@ from typing import Any, Callable
 
 from app.cognitive.core_loop import PerceivedEvent, PolicyContract, PresenceEngine, UnderstandingResult
 from app.cognitive.scheduler import InternalEvent
-from app.stream.proactive import ProactiveDecision, log_proactive_decision, semantic_cooldown_key
-from app.stream.behavior_adaptation import AdaptationAction, BehaviorAdaptationService
+from app.stream.proactive import ProactiveDecision, log_proactive_decision
+from app.stream.behavior_adaptation import BehaviorAdaptationService
 from app.stream.speech_intents import (
     SpeechIntent,
     SpeechIntentManager,
@@ -192,13 +192,35 @@ class StreamCompanionLoop:
             or getattr(stream, "last_voice_event_ts", 0.0)
             or 0.0
         )
+        behavior_evaluations: dict[str, Any] = {}
+
+        def rank_policy(intent: SpeechIntent) -> dict[str, Any]:
+            candidate_ref = " ".join(
+                value for value in (
+                    intent.subject_ref,
+                    intent.topic,
+                    str((intent.contribution_material or {}).get("readiness_topic") or ""),
+                ) if value
+            )
+            evaluation = self.behavior_adaptation.evaluate_candidate(
+                stream,
+                candidate_ref,
+                topic=intent.topic,
+                mode="proactive",
+                now=now,
+            )
+            behavior_evaluations[intent.id] = evaluation
+            return evaluation.to_dict()
+
         arbitration = self.intent_manager.arbitrate(
             owner_voice_active=owner_voice_active,
             owner_utterance_ended_at=owner_ended_at,
             tts_active=bool(self.tts_active_fn()),
             current_scene=dict(getattr(stream, "current_scene_timeline", None) or {}),
             now=now,
+            rank_policy=rank_policy,
         )
+        readiness["behavior_ranked_candidates"] = list(arbitration.ranked_candidates)
         stream.speech_intent_state = self.intent_manager.snapshot()
         selected_intent = arbitration.intent
         if selected_intent is None:
@@ -217,27 +239,9 @@ class StreamCompanionLoop:
                 "channel_cost": 0.0,
             }
         else:
-            candidate_ref = " ".join(
-                value for value in (
-                    selected_intent.subject_ref,
-                    selected_intent.topic,
-                    str(readiness.get("candidate_topic") or ""),
-                ) if value
-            )
-            adaptation = self.behavior_adaptation.evaluate_candidate(
-                stream,
-                candidate_ref,
-                topic=selected_intent.topic,
-                mode="proactive",
-                now=now,
-            )
+            adaptation = behavior_evaluations[selected_intent.id]
             readiness["behavior_adaptation"] = adaptation.to_dict()
-            if adaptation.action == AdaptationAction.DOWNRANK:
-                selected_intent.value *= 0.55
             presence = self._presence_decision(stream, readiness, anchor, selected_intent, now=now)
-            if adaptation.action in {AdaptationAction.COOLDOWN, AdaptationAction.SUPPRESS}:
-                presence["should_intervene"] = False
-                presence["reason"] = f"behavior_adaptation_{adaptation.action.value}"
             if not presence.get("should_intervene"):
                 self.intent_manager.release(selected_intent.id, str(presence.get("reason") or "presence_rejected"))
                 stream.speech_intent_state = self.intent_manager.snapshot()
@@ -254,7 +258,7 @@ class StreamCompanionLoop:
             event = self.spontaneity.build_event(
                 stream,
                 mode=str(readiness.get("presence_mode") or mode),
-                topic=str(readiness.get("candidate_topic") or ""),
+                topic=str(selected_intent.topic or readiness.get("candidate_topic") or ""),
             )
             if event.payload is not None:
                 event.payload["source"] = "stream_companion_tick"
@@ -512,15 +516,18 @@ class StreamCompanionLoop:
                 now=now,
             )
         elif readiness.get("would_send"):
-            created = self.intent_manager.create(
-                intent_type=SpeechIntentType.IDLE_CHATTER,
-                topic=str(readiness.get("candidate_topic") or "stream_context"),
-                value=float((readiness.get("spontaneity_score") or {}).get("total") or 0.62),
-                urgency=0.1,
-                scene_relevance=dict(getattr(stream, "current_scene_timeline", None) or {}),
-                contribution_material={"readiness_topic": readiness.get("candidate_topic")},
-                now=now,
-            )
+            base_value = float((readiness.get("spontaneity_score") or {}).get("total") or 0.62)
+            topics = list(readiness.get("candidate_topics") or [readiness.get("candidate_topic") or "stream_context"])
+            for index, topic in enumerate(topics[:5]):
+                created = self.intent_manager.create(
+                    intent_type=SpeechIntentType.IDLE_CHATTER,
+                    topic=str(topic),
+                    value=max(0.0, base_value - index * 0.015),
+                    urgency=0.1,
+                    scene_relevance=dict(getattr(stream, "current_scene_timeline", None) or {}),
+                    contribution_material={"readiness_topic": topic},
+                    now=now,
+                )
         for candidate in candidates:
             if not isinstance(candidate, dict) or candidate.get("consumed"):
                 continue
@@ -690,7 +697,7 @@ class StreamCompanionLoop:
             suggested_action="",
             knowledge_source="stream_context+ambient_context+presence_engine",
             confidence=float(presence.get("social_value_score") or readiness.get("confidence") or anchor.get("quality") or 0.0),
-            cooldown_key=semantic_cooldown_key("", topic),
+            cooldown_key=f"technical_topic:{topic}" if topic else "technical_spontaneity",
             should_speak=should_speak,
             reason=reason if should_speak else "",
             blocked_reason="" if should_speak else blocked_reason,

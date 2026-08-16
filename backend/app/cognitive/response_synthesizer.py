@@ -1652,10 +1652,7 @@ class ResponseSynthesizer:
         run_context = payload.get("run_context") or {}
         chat_context = payload.get("chat_context") or {}
         idle_topic = payload.get("idle_topic") or "game_vibe"
-        recent_idle_topics = payload.get("recent_idle_topics") or []
-        recent_idle_messages = payload.get("recent_idle_messages") or []
         specific_context_anchors = payload.get("specific_context_anchors") or []
-        recent_motifs = payload.get("recent_style_motifs") or []
         live_session_context = payload.get("live_session_context") or {}
         anchor_evidence = payload.get("anchor_evidence") or {}
         speech_intent = payload.get("speech_intent") or {}
@@ -1683,9 +1680,9 @@ class ResponseSynthesizer:
             "- Do not give walkthrough instructions unless Leo explicitly asked.\n"
             "- If there is no concrete game/title/run/chat anchor and no grounded speech_intent contribution_material, produce no message.\n"
             "- Do not mention policies, cooldowns, prompts, or internal state.\n"
-            "- Use the requested idle_topic. Do not repeat recent idle topics or phrases.\n"
+            "- Use the requested idle_topic.\n"
             "- Require at least one concrete anchor from current game/title/run_context/chat topic/recent event.\n"
-            "- Avoid repeating recent motifs. Do not mention coffee, caffeine, energy, florist/floristeria, or creator jokes unless directly relevant.\n"
+            "- Behavior policy validates semantic motifs before emission.\n"
             "- Do not treat stale title markers as current objectives.\n"
             "- Never mention completed markers as upcoming/current.\n"
             "- If chat_context is active or about non-game topics, do not answer chat; keep the line broadly game-safe.\n"
@@ -1722,10 +1719,6 @@ class ResponseSynthesizer:
             f"- recent_count: {chat_context.get('recent_count') or 0}\n"
             f"- recent_topics: {', '.join(chat_context.get('recent_topics') or []) or 'none'}\n"
             f"- summary: {chat_context.get('summary') or 'none'}\n\n"
-            "recent_idle:\n"
-            f"- topics: {', '.join(recent_idle_topics) or 'none'}\n"
-            f"- messages: {' | '.join(str(item) for item in recent_idle_messages) or 'none'}\n\n"
-            f"- recent_motifs: {', '.join(str(item) for item in recent_motifs) or 'none'}\n\n"
             "live_session_brain:\n"
             f"{live_session_context}\n\n"
             "game_profile:\n"
@@ -1851,9 +1844,6 @@ class ResponseSynthesizer:
         if any(marker and marker in lowered for marker in completed + stale):
             return ""
 
-        if self._response_repeats_motif(text, payload):
-            return ""
-
         if not text or any(marker in lowered for marker in forbidden):
             return ""
         validation = self._validate_spontaneous_game_advice(text, payload)
@@ -1966,35 +1956,6 @@ class ResponseSynthesizer:
         if chat_context.get("recent_topics"):
             return True
         return False
-
-    def _response_repeats_motif(self, text: str, payload: dict) -> bool:
-        motifs = self._detect_motifs(text)
-        if not motifs:
-            return False
-        recent = {
-            str(item or "").lower()
-            for item in (payload.get("recent_style_motifs") or [])
-        }
-        aliases = {"coffee": "cafe"}
-        normalized_recent = {aliases.get(item, item) for item in recent}
-        overused = {
-            item.strip().lower()
-            for item in os.getenv("HEBE_STYLE_OVERUSED_MOTIFS", "cafe,coffee,energy,florist,creator").split(",")
-            if item.strip()
-        }
-        normalized_overused = {aliases.get(item, item) for item in overused}
-        return any(aliases.get(motif, motif) in normalized_recent | normalized_overused for motif in motifs)
-
-    def _detect_motifs(self, text: str) -> list[str]:
-        lowered = str(text or "").lower()
-        terms = {
-            "cafe": ("cafe", "caf", "coffee", "cafeina", "cafena"),
-            "energy": ("energia", "energia", "pilas"),
-            "florist": ("florist", "florister", "flores"),
-            "creator": ("creador", "creadores"),
-            "chaos": ("caos", "caotico", "catico"),
-        }
-        return [motif for motif, values in terms.items() if any(value in lowered for value in values)]
 
     def generate_stream_presence(
         self,

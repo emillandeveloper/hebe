@@ -126,7 +126,6 @@ class StreamSessionState:
     last_cognitive_intent_scan_ts: float = 0.0
     idle_spontaneity_enabled: bool = True
     recent_idle_messages: list[dict] = field(default_factory=list)
-    recent_style_motifs: list[dict] = field(default_factory=list)
     idle_prompts_sent_stream: int = 0
     last_raid_event: Optional[dict] = None
     recent_raid_contexts: list[dict] = field(default_factory=list)

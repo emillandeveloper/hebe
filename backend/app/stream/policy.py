@@ -11,10 +11,9 @@ from typing import Any
 from app.stream.behavior_constraints import (
     BehaviorConstraint,
     BehaviorConstraintCompiler,
-    constraint_matches,
-    persist_constraint,
     render_constraint_confirmation,
 )
+from app.stream.behavior_adaptation import BehaviorAdaptationService
 
 
 ACTIVITY_SOCIAL_LINKS = "social_links"
@@ -200,40 +199,8 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _block_is_active(block: dict[str, Any], now: float) -> bool:
-    expires_at = float(block.get("expires_at") or 0.0)
-    return not expires_at or expires_at > now
-
-
 def active_behavior_blocks(stream: Any, *, now: float | None = None) -> list[dict[str, Any]]:
-    now = time.time() if now is None else float(now)
-    blocks = [
-        block for block in list(getattr(stream, "active_behavior_blocks", []) or [])
-        if isinstance(block, dict) and _block_is_active(block, now)
-    ]
-    setattr(stream, "active_behavior_blocks", blocks)
-    return blocks
-
-
-def has_active_behavior_block(stream: Any, behavior: str, *, now: float | None = None) -> bool:
-    return any(
-        block.get("behavior") == behavior
-        or (behavior == COMPLIMENTS_TO_LEO and block.get("behavior_family") == "compliment" and block.get("recipient_scope") == "owner")
-        for block in active_behavior_blocks(stream, now=now)
-    )
-
-
-def matching_active_behavior_block(stream: Any, behavior: str, *, now: float | None = None) -> dict[str, Any] | None:
-    if not behavior:
-        return None
-    for block in active_behavior_blocks(stream, now=now):
-        if block.get("behavior") == behavior or (behavior == COMPLIMENTS_TO_LEO and block.get("behavior_family") == "compliment" and block.get("recipient_scope") == "owner"):
-            print(
-                f"[HEBE][BEHAVIOR_BLOCK] matched behavior={behavior} source={block.get('source')}",
-                flush=True,
-            )
-            return block
-    return None
+    return BehaviorAdaptationService().active_constraints(stream, now=now)
 
 
 def create_behavior_block(
@@ -262,7 +229,7 @@ def create_behavior_block(
     }
     blocks = [existing for existing in active_behavior_blocks(stream, now=now) if existing.get("behavior") != behavior]
     blocks.append(block)
-    setattr(stream, "active_behavior_blocks", blocks)
+    BehaviorAdaptationService().register_explicit_constraint(stream, BehaviorConstraint.from_value(block))
     print(
         f"[HEBE][BEHAVIOR_BLOCK] created behavior={behavior} scope={scope}",
         flush=True,
@@ -297,7 +264,15 @@ def _looks_like_compliment_stop(text: str) -> bool:
     return any(term in normalized for term in stop_terms) and any(term in normalized for term in compliment_terms)
 
 
-def owner_behavior_decision(stream: Any, text: str, *, now: float | None = None, resolver=None, source_event_id: str = "") -> PolicyDecision:
+def owner_behavior_decision(
+    stream: Any,
+    text: str,
+    *,
+    now: float | None = None,
+    resolver=None,
+    source_event_id: str = "",
+    constraint_owner: BehaviorAdaptationService | None = None,
+) -> PolicyDecision:
     normalized = normalize_policy_text(text)
     semantic = _owner_semantic_intent(text)
     if semantic.intent == "owner_stop_behavior":
@@ -313,7 +288,9 @@ def owner_behavior_decision(stream: Any, text: str, *, now: float | None = None,
                 requested_behavior="compliment", behavior_family="compliment", target=compilation.recipient_text,
                 matched_by=["behavior_constraint_compiler"], execute_as_command=True,
             )
-        block = persist_constraint(stream, compilation.constraint)
+        block = (constraint_owner or BehaviorAdaptationService()).register_explicit_constraint(
+            stream, compilation.constraint,
+        )
         confirmation, invariant = render_constraint_confirmation(compilation.constraint)
         return PolicyDecision(
             allow_reply=True,
@@ -862,6 +839,9 @@ def classify_viewer_intent(text: str) -> str:
 
 
 class ViewerIntentPolicy:
+    def __init__(self, constraint_owner: BehaviorAdaptationService | None = None) -> None:
+        self.constraint_owner = constraint_owner or BehaviorAdaptationService()
+
     def decide(self, stream: Any, *, username: str, display_name: str = "", text: str, now: float | None = None) -> PolicyDecision:
         now = time.time() if now is None else float(now)
         normalized = normalize_policy_text(text)
@@ -869,7 +849,17 @@ class ViewerIntentPolicy:
         semantic = classify_viewer_semantic_intent(text)
         intent = semantic.intent
 
-        active_block = matching_active_behavior_block(stream, semantic.requested_behavior, now=now)
+        constraint_family = (
+            "compliment" if semantic.requested_behavior == COMPLIMENTS_TO_LEO
+            else semantic.requested_behavior
+        )
+        active_block = self.constraint_owner.matching_explicit_constraint(
+            stream,
+            behavior_family=constraint_family,
+            recipient_login=semantic.target or username or display_name,
+            requester_login=username or display_name,
+            now=now,
+        )
         if active_block is not None:
             decision = self._cooldown_boundary(
                 stream,

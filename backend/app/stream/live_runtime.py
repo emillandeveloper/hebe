@@ -9,7 +9,6 @@ VOLATILE_STREAM_DEFAULTS: dict[str, Any] = {
     "companion_tick_count": 0,
     "idle_prompts_sent_stream": 0,
     "recent_idle_messages": [],
-    "recent_style_motifs": [],
     "recent_chat_messages": [],
     "recent_active_users": [],
     "recent_chat_topics": [],
@@ -65,7 +64,6 @@ PERSISTENT_LIVE_FIELDS = (
     "viewer_identities",
     "viewer_linguistic_profiles",
     "promotion_preferences",
-    "owner_behavior_preferences",
     "confirmed_memories",
 )
 

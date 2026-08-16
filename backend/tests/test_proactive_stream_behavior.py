@@ -1,7 +1,11 @@
 import unittest
 
 from app.stream.game_advice_gate import GameAdviceGate
-from app.stream.proactive import StreamPreparationRoutine, cooldown_active, mark_cooldown, semantic_cooldown_key
+from app.stream.proactive import (
+    StreamPreparationRoutine,
+    mark_technical_cooldown,
+    technical_cooldown_active,
+)
 from app.stream.spontaneity import StreamSpontaneityConfig, StreamSpontaneityService
 from app.stream.state import StreamSessionState
 
@@ -74,12 +78,13 @@ class ProactiveStreamBehaviorTests(unittest.TestCase):
         self.assertEqual(decision.blocked_reason, "already_prepared")
         self.assertFalse(decision.action_available)
 
-    def test_repetition_cooldown_blocks_second_healing_advice(self):
+    def test_technical_cooldown_is_keyed_without_semantic_classification(self):
         stream = StreamSessionState()
-        key = semantic_cooldown_key("Cuida el SP y la cura antes del jefe.", "resource_management")
-        mark_cooldown(stream, key, now=1000.0, seconds=600)
+        key = "spontaneity_opportunity:scene-1:anchor-1:resource-management"
+        mark_technical_cooldown(stream, key, now=1000.0, seconds=600)
 
-        self.assertTrue(cooldown_active(stream, key, now=1001.0))
+        self.assertTrue(technical_cooldown_active(stream, key, now=1001.0))
+        self.assertFalse(technical_cooldown_active(stream, "healing-advice", now=1001.0))
 
     def test_no_high_quality_anchor_skips_spontaneity(self):
         now = 2_000_000.0

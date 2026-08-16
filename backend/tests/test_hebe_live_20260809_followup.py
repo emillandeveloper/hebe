@@ -140,20 +140,20 @@ class EvidenceAndOpportunityRegressionTests(unittest.TestCase):
         for unsupported in ("low hp", "survival", "healing", "auto-healing"):
             self.assertNotIn(unsupported, semantic)
 
-    def test_consumed_opportunity_blocks_only_same_scene_semantics(self):
+    def test_consumed_opportunity_rate_limit_is_scoped_to_same_scene(self):
         service = StreamSpontaneityService(now_fn=lambda: 100.0)
         stream = StreamSessionState()
         stream.current_scene_timeline = {"scene_id": "scene-a", "topic_id": "boss"}
         payload = {
             "idle_topic": "challenge_comment",
-            "semantic_opportunity_key": service.semantic_opportunity_key(
+            "opportunity_rate_limit_key": service.opportunity_rate_limit_key(
                 stream, topic="challenge_comment", fact={"category": "combat_risk"},
             ),
         }
-        consumed = service.consume_semantic_opportunity(stream, payload, reason="too_similar_to_recent")
+        consumed = service.consume_opportunity(stream, payload, reason="generated_output_suppressed")
         self.assertGreater(stream.cooldowns[consumed], 100.0)
         stream.current_scene_timeline = {"scene_id": "scene-b", "topic_id": "boss"}
-        reopened = service.semantic_opportunity_key(
+        reopened = service.opportunity_rate_limit_key(
             stream, topic="challenge_comment", fact={"category": "combat_risk"},
         )
         self.assertNotEqual(consumed, reopened)

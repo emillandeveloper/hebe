@@ -164,8 +164,10 @@ class StreamCompanionLoopTests(unittest.TestCase):
 
         self.assertIsNotNone(tick)
         self.assertFalse(tick.should_speak)
-        self.assertEqual(tick.blocked_reason, "behavior_adaptation_suppress")
-        self.assertEqual(tick.readiness["behavior_adaptation"]["action"], "suppress")
+        self.assertEqual(tick.blocked_reason, "behavior_policy_no_candidate")
+        ranked = tick.readiness["behavior_ranked_candidates"]
+        self.assertEqual(ranked[0]["policy"]["action"], "suppress")
+        self.assertFalse(ranked[0]["eligible"])
 
     def test_companion_health_summary_logged(self):
         now = 1_000_000.0

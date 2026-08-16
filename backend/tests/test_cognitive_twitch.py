@@ -294,11 +294,11 @@ class CognitiveTwitchTests(unittest.TestCase):
 
         self.assertEqual(reply, "")
 
-    def test_response_synthesizer_rejects_repeated_overused_motif(self):
+    def test_response_synthesizer_does_not_apply_manual_style_registry(self):
         synth = ResponseSynthesizer(conversation_model=None)
 
         reply = synth._safe_spontaneous_stream_reply(
-            "Otro café antes de entrar, Leo.",
+            "Otro café, Leo.",
             "fallback",
             payload={
                 "specific_context_anchors": ["game"],
@@ -306,7 +306,7 @@ class CognitiveTwitchTests(unittest.TestCase):
             },
         )
 
-        self.assertEqual(reply, "")
+        self.assertEqual(reply, "Otro café, Leo.")
 
     def test_response_synthesizer_blocks_invalid_persona_mechanic(self):
         synth = ResponseSynthesizer(conversation_model=None)

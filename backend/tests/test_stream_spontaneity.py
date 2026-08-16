@@ -158,7 +158,7 @@ class StreamSpontaneityTests(unittest.TestCase):
         self.assertIsNotNone(event)
         self.assertIn("Ramuh", event.payload["run_context"]["title_markers_stale"])
 
-    def test_same_idle_topic_cannot_repeat_twice(self):
+    def test_candidate_generation_does_not_own_semantic_topic_repetition(self):
         now = 1_000_000.0
         stream = self.make_stream(now=now, presence_mode="show")
         stream.last_chat_activity_ts = now - 60 * 60
@@ -167,7 +167,7 @@ class StreamSpontaneityTests(unittest.TestCase):
         event = self.make_service(now).build_due_event(stream)
 
         self.assertIsNotNone(event)
-        self.assertNotEqual(event.payload["idle_topic"], "challenge_comment")
+        self.assertEqual(event.payload["idle_topic"], "challenge_comment")
 
     def test_companion_hourly_limit_is_enforced(self):
         now = 1_000_000.0
@@ -333,15 +333,14 @@ class StreamSpontaneityTests(unittest.TestCase):
         self.assertEqual(event.payload["run_context"]["current_activity"], "social_links")
         self.assertFalse(event.payload["run_context"]["combat_state"])
 
-    def test_motif_cooldown_blocks_repeated_coffee(self):
+    def test_recording_idle_message_does_not_create_manual_style_registry(self):
         now = 1_000_000.0
         stream = self.make_stream(now=now, presence_mode="show")
         service = self.make_service(now)
         service.record_idle_message(stream, "Esto pide café antes del boss.", topic="game_vibe")
 
-        motif = service.motif_on_cooldown(stream, "Otro comentario de café, Leo.", now=now + 60)
-
-        self.assertEqual(motif, "cafe")
+        self.assertFalse(hasattr(stream, "recent_style_motifs"))
+        self.assertFalse(hasattr(service, "motif_on_cooldown"))
 
     def test_idle_tts_is_disabled_by_default(self):
         stream = StreamSessionState()

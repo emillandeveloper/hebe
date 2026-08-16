@@ -36,12 +36,19 @@ class BehaviorConstraint:
     source_event_id: str = ""
     source_text: str = ""
     created_by: str = "owner"
+    authority: str = "owner"
     priority: str = "owner_absolute"
     scope: str = "current_stream"
+    explicitness: str = "explicit"
+    confidence: float = 1.0
     created_at: float = field(default_factory=time.time)
     expires_at: float = 0.0
     active: bool = True
+    status: str = "ACTIVE"
     reason: str = ""
+    retired_at: float = 0.0
+    retirement_reason: str = ""
+    version: int = 1
 
     @property
     def behavior(self) -> str:
@@ -79,8 +86,13 @@ class BehaviorConstraint:
             requester_login=str(data.get("requester_login") or ""),
             source_event_id=str(data.get("source_event_id") or ""), source_text=str(data.get("source_text") or data.get("reason") or ""),
             created_by=str(data.get("created_by") or "owner"), priority=str(data.get("priority") or "owner_absolute"),
+            authority=str(data.get("authority") or "owner"),
             scope=str(data.get("scope") or "current_stream"), created_at=float(data.get("created_at") or time.time()) if not isinstance(data.get("created_at"), str) else time.time(),
-            expires_at=float(data.get("expires_at") or 0.0), active=bool(data.get("active", True)), reason=str(data.get("reason") or ""),
+            explicitness=str(data.get("explicitness") or "explicit"), confidence=float(data.get("confidence") or 1.0),
+            expires_at=float(data.get("expires_at") or 0.0), active=bool(data.get("active", True)),
+            status=str(data.get("status") or "ACTIVE"), reason=str(data.get("reason") or ""),
+            retired_at=float(data.get("retired_at") or 0.0), retirement_reason=str(data.get("retirement_reason") or ""),
+            version=int(data.get("version") or 1),
         )
 
 

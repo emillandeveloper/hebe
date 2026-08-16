@@ -7,7 +7,6 @@ from app.stream.policy import (
     apply_owner_game_activity_correction,
     classify_viewer_semantic_intent,
     filter_ambient_facts_for_activity,
-    has_active_behavior_block,
     owner_behavior_decision,
     policy_trace,
 )
