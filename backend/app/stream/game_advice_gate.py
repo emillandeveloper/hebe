@@ -51,6 +51,28 @@ MECHANIC_ALIASES: dict[str, tuple[str, ...]] = {
 }
 
 
+UNAMBIGUOUS_MECHANIC = "UNAMBIGUOUS_MECHANIC"
+CONTEXTUAL_MECHANIC = "CONTEXTUAL_MECHANIC"
+ENTITY_COLLISION = "ENTITY_COLLISION"
+COMMON_LANGUAGE_COLLISION = "COMMON_LANGUAGE_COLLISION"
+
+# These categories describe lexical ambiguity only. Every alias still needs a
+# mechanic assertion or instruction context before it becomes a claim.
+_ENTITY_COLLISION_ALIASES = {
+    "guard", "materia", "party", "persona", "personas", "trance",
+}
+_COMMON_LANGUAGE_COLLISION_ALIASES = {
+    "accion", "action", "altura", "arma", "ataque", "baraja", "cartas",
+    "compañero", "companero", "cura", "dados", "defensa", "descanso", "dia",
+    "equipo", "grupo", "guardia", "limite", "magia", "media", "salud",
+    "tirada", "truco", "turno", "turnos", "vida",
+}
+_CONTEXTUAL_MECHANIC_ALIASES = {
+    "deck", "fusion", "guardia", "mana", "pocion", "pociones", "potion",
+    "relevo", "robar", "steal", "weapon",
+}
+
+
 @dataclass(frozen=True)
 class GameMechanicsProfile:
     canonical_title: str
@@ -71,6 +93,9 @@ class GameAdviceValidation:
     reason: str
     confidence: float = 0.0
     validated_claims: list[dict[str, Any]] = field(default_factory=list)
+    entity_references: list[str] = field(default_factory=list)
+    mechanic_assertions: list[str] = field(default_factory=list)
+    mechanic_instructions: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -90,6 +115,21 @@ class ClaimSupport:
 
 # Backwards-compatible name used by v1.1 callers.
 ValidatedClaim = ClaimSupport
+
+
+@dataclass(frozen=True)
+class MechanicSemanticAnalysis:
+    entity_references: list[str] = field(default_factory=list)
+    mechanic_assertions: list[str] = field(default_factory=list)
+    mechanic_instructions: list[str] = field(default_factory=list)
+    advice_detected: bool = False
+
+    @property
+    def mechanics(self) -> list[str]:
+        return sorted(dict.fromkeys([
+            *self.mechanic_assertions,
+            *self.mechanic_instructions,
+        ]))
 
 
 def _normalize(value: str) -> str:
@@ -167,6 +207,23 @@ class GameAdviceGate:
         r"\b(?:deberias|debes|tienes que|te conviene|mejor|recuerda|no olvides|"
         r"you should|you need to|you had better|remember|do not forget|dont forget)\b"
     )
+    _MECHANIC_ASSERTION_PREDICATE = re.compile(
+        r"\b(?:"
+        r"aument[a-z0-9]*|increment[a-z0-9]*|reduc[a-z0-9]*|disminu[a-z0-9]*|"
+        r"restaur[a-z0-9]*|recuper[a-z0-9]*|consum[a-z0-9]*|gast[a-z0-9]*|"
+        r"otorg[a-z0-9]*|conced[a-z0-9]*|permit[a-z0-9]*|bloque[a-z0-9]*|"
+        r"duplic[a-z0-9]*|triplic[a-z0-9]*|mejor[a-z0-9]*|empeor[a-z0-9]*|"
+        r"activ[a-z0-9]*|desactiv[a-z0-9]*|desencaden[a-z0-9]*|provoc[a-z0-9]*|"
+        r"caus[a-z0-9]*|requier[a-z0-9]*|fusion[a-z0-9]*|combin[a-z0-9]*|"
+        r"increase[a-z0-9]*|reduce[a-z0-9]*|restore[a-z0-9]*|recover[a-z0-9]*|"
+        r"consume[a-z0-9]*|grant[a-z0-9]*|allow[a-z0-9]*|block[a-z0-9]*|"
+        r"trigger[a-z0-9]*|activate[a-z0-9]*|deactivate[a-z0-9]*|require[a-z0-9]*|"
+        r"fuse[a-z0-9]*|combine[a-z0-9]*|heal[a-z0-9]*"
+        r")\b|\bcura\s+(?:el\s+|los\s+)?(?:hp|vida|salud|puntos de vida)\b"
+    )
+    _MECHANIC_IMPERATIVE = re.compile(
+        r"^(?:por favor\s+)?(?:fusiona|fusionad|fuse|activa|activate|combina|combine)\b"
+    )
 
     def __init__(self, registry: GameMechanicsRegistry | None = None):
         self.registry = registry or GameMechanicsRegistry()
@@ -181,6 +238,98 @@ class GameAdviceGate:
                     found.append(mechanic)
                     break
         return sorted(dict.fromkeys(found))
+
+    def alias_classification(self, alias: str) -> str:
+        normalized = _normalize(alias)
+        if normalized in _ENTITY_COLLISION_ALIASES:
+            return ENTITY_COLLISION
+        if normalized in _COMMON_LANGUAGE_COLLISION_ALIASES:
+            return COMMON_LANGUAGE_COLLISION
+        if normalized in _CONTEXTUAL_MECHANIC_ALIASES:
+            return CONTEXTUAL_MECHANIC
+        return UNAMBIGUOUS_MECHANIC
+
+    def analyze_semantics(
+        self,
+        text: str,
+        *,
+        entity_spans: list[str] | None = None,
+    ) -> MechanicSemanticAnalysis:
+        references: list[str] = []
+        assertions: list[str] = []
+        instructions: list[str] = []
+        advice_detected = False
+        clauses = [part for part in re.split(r"(?:[.!?;:]+|\s*,\s*)", str(text or "")) if _normalize(part)]
+
+        for clause in clauses:
+            normalized = _normalize(clause)
+            substantive = self.extract_substantive_claims(normalized)
+            clause_advice = bool(
+                self.detects_specific_advice(normalized)
+                or self._MECHANIC_IMPERATIVE.search(normalized)
+            )
+            mechanical_predicate = bool(self._MECHANIC_ASSERTION_PREDICATE.search(normalized))
+            semantic_context = bool(clause_advice or substantive or mechanical_predicate)
+            masked, found_references = self._mask_entity_references(
+                normalized,
+                entity_spans or [],
+                semantic_context=semantic_context,
+            )
+            references.extend(found_references)
+
+            substantive = self.extract_substantive_claims(masked)
+            clause_advice = bool(
+                self.detects_specific_advice(masked)
+                or self._MECHANIC_IMPERATIVE.search(masked)
+            )
+            mechanical_predicate = bool(self._MECHANIC_ASSERTION_PREDICATE.search(masked))
+            lexical_mechanics = self.detect_mechanics(masked)
+            advice_detected = advice_detected or clause_advice
+
+            if clause_advice:
+                instructions.extend(substantive)
+                instructions.extend(lexical_mechanics)
+            else:
+                assertions.extend(substantive)
+                if mechanical_predicate:
+                    assertions.extend(lexical_mechanics)
+
+        return MechanicSemanticAnalysis(
+            entity_references=list(dict.fromkeys(references)),
+            mechanic_assertions=sorted(dict.fromkeys(assertions)),
+            mechanic_instructions=sorted(dict.fromkeys(instructions)),
+            advice_detected=advice_detected,
+        )
+
+    def _mask_entity_references(
+        self,
+        normalized_clause: str,
+        entity_spans: list[str],
+        *,
+        semantic_context: bool,
+    ) -> tuple[str, list[str]]:
+        masked = normalized_clause
+        references: list[str] = []
+        ordered = sorted(
+            (str(span).strip() for span in entity_spans if str(span).strip()),
+            key=lambda span: len(_normalize(span).split()),
+            reverse=True,
+        )
+        for span in ordered:
+            normalized_span = _normalize(span)
+            if not normalized_span:
+                continue
+            pattern = rf"(?<![a-z0-9]){re.escape(normalized_span)}(?![a-z0-9])"
+            if not re.search(pattern, masked):
+                continue
+            references.append(span)
+            # Multi-token titles are protected as a unit. A single ambiguous
+            # token is protected only for a pure reference; in a mechanic
+            # proposition it remains available to claim detection.
+            if len(normalized_span.split()) > 1 or not semantic_context:
+                masked = re.sub(pattern, " ", masked)
+                masked = " ".join(masked.split())
+        return masked, references
 
     def detects_specific_advice(self, text: str) -> bool:
         normalized = _normalize(text)
@@ -224,19 +373,21 @@ class GameAdviceGate:
         game_run_state: dict | None = None,
         known_game_mechanics: list[str] | None = None,
         source_evidence: list[str | dict[str, Any]] | None = None,
+        entity_spans: list[str] | None = None,
     ) -> GameAdviceValidation:
-        mechanics = sorted(dict.fromkeys([
-            *self.detect_mechanics(proposed_advice),
-            *self.extract_substantive_claims(proposed_advice),
-        ]))
+        semantic = self.analyze_semantics(proposed_advice, entity_spans=entity_spans)
+        mechanics = semantic.mechanics
         game = str(current_game or (game_run_state or {}).get("game") or "").strip()
-        advice_detected = self.detects_specific_advice(proposed_advice)
+        advice_detected = semantic.advice_detected
         if not mechanics:
             allowed = not advice_detected
             result = GameAdviceValidation(
                 allowed, game, [], [], ["unvalidated_specific_advice"] if advice_detected else [],
                 "empty_validation_specific_advice" if advice_detected else "generic_reaction",
                 confidence=0.2 if advice_detected else 0.88,
+                entity_references=semantic.entity_references,
+                mechanic_assertions=semantic.mechanic_assertions,
+                mechanic_instructions=semantic.mechanic_instructions,
             )
             print(
                 "[HEBE][GAME_ADVICE_GATE] "
@@ -290,6 +441,9 @@ class GameAdviceGate:
                 reason="unknown_game_requires_source" if blocked else "validated_by_source",
                 confidence=0.55 if blocked else 0.82,
                 validated_claims=[provenance[item].to_dict() for item in validated if item in provenance],
+                entity_references=semantic.entity_references,
+                mechanic_assertions=semantic.mechanic_assertions,
+                mechanic_instructions=semantic.mechanic_instructions,
             )
             print(
                 "[HEBE][GAME_ADVICE_GATE] "
@@ -317,6 +471,9 @@ class GameAdviceGate:
             reason="mechanic_not_validated" if blocked else "validated_for_game",
             confidence=0.92 if not blocked else 0.35,
             validated_claims=[provenance[item].to_dict() for item in validated if item in provenance],
+            entity_references=semantic.entity_references,
+            mechanic_assertions=semantic.mechanic_assertions,
+            mechanic_instructions=semantic.mechanic_instructions,
         )
         print(
             "[HEBE][GAME_ADVICE_GATE] "

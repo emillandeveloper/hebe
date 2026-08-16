@@ -233,7 +233,7 @@ class GameKnowledgeTests(unittest.TestCase):
 
         reply = synth.synthesize_command_result(result, input_text="Que sabes de Persona 5 Royal?")
 
-        self.assertTrue(model.calls)
+        self.assertEqual(len(model.calls), 1)
         self.assertIn("Persona 5 Royal", reply)
 
 

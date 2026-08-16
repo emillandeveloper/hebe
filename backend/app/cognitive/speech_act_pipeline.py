@@ -109,6 +109,7 @@ class SceneContext:
     recent_local_context: list[str] = field(default_factory=list)
     recent_chat_context: list[dict[str, str]] = field(default_factory=list)
     current_conversation: CurrentConversation | None = None
+    entity_references: list[str] = field(default_factory=list)
     active_boundary_context: dict[str, Any] = field(default_factory=dict)
     technical_state: dict[str, Any] = field(default_factory=dict)
 
@@ -487,6 +488,7 @@ def build_twitch_speech_act_bundle(payload: dict, context: Any | None, *, is_bro
         raw_user_message="" if proxy_request else raw_message,
         sanitized_topic="viewer_proxy_request" if proxy_request else "",
         recent_chat_context=recent,
+        entity_references=[current_game] if current_game else [],
         active_boundary_context={"viewer_proxy_request": proxy_request},
         technical_state=_compact_technical_state(payload),
     )
@@ -596,6 +598,32 @@ def build_twitch_speech_act_bundle(payload: dict, context: Any | None, *, is_bro
     return SpeechActBundle(envelope, scene, memory, cognitive, policy, speech_act)
 
 
+def _structured_entity_references(
+    *,
+    current_game: str,
+    execution_result: dict[str, Any] | None,
+    explicit_references: list[str] | None,
+) -> list[str]:
+    candidates = [str(item or "").strip() for item in (explicit_references or [])]
+    candidates.append(str(current_game or "").strip())
+    data = (execution_result or {}).get("data")
+    if isinstance(data, dict):
+        candidates.append(str(data.get("game_title") or "").strip())
+        profile = data.get("game_profile")
+        if isinstance(profile, dict):
+            candidates.append(str(profile.get("title") or "").strip())
+
+    references: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = _normalize_text(candidate)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        references.append(candidate)
+    return references
+
+
 def build_universal_speech_act_bundle(
     *,
     route: str,
@@ -624,6 +652,7 @@ def build_universal_speech_act_bundle(
     stream_live: bool = False,
     technical_state: dict[str, Any] | None = None,
     current_conversation: CurrentConversation | None = None,
+    entity_references: list[str] | None = None,
     response_language: str = "match_speaker",
     max_length_chars: int = 260,
 ) -> SpeechActBundle:
@@ -637,6 +666,11 @@ def build_universal_speech_act_bundle(
         authority=authority,
         output_target=output_target,
     )
+    structured_entity_references = _structured_entity_references(
+        current_game=current_game,
+        execution_result=execution_result,
+        explicit_references=entity_references,
+    )
     scene = SceneContext(
         mode=mode,
         output_target=output_target,
@@ -649,6 +683,7 @@ def build_universal_speech_act_bundle(
         speaker_authority=authority,
         raw_user_message=input_text,
         current_conversation=current_conversation,
+        entity_references=structured_entity_references,
         technical_state=technical_state or {},
     )
     scene_memory = SceneMemory(
@@ -868,6 +903,7 @@ def final_response_guard(
             game_run_state=bundle.memory.current_stream_state,
             known_game_mechanics=list((bundle.memory.game_knowledge or {}).get("known_mechanics") or []),
             source_evidence=list((bundle.memory.game_knowledge or {}).get("source_evidence") or []),
+            entity_spans=list(bundle.scene.entity_references or []),
         )
         game_validation = validation.to_dict()
         if validation.mechanics and not validation.allowed:

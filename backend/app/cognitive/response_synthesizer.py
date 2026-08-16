@@ -168,6 +168,11 @@ class ResponseSynthesizer:
         stream_mode = bool(stream_live) or output_target in {"twitch_chat", "stream_tts"} or source_value.startswith("twitch")
         state_snapshot = getattr(context, "state_snapshot", {}) or {} if context is not None else {}
         conversation = state_snapshot.get("current_conversation") if isinstance(state_snapshot, dict) else None
+        entity_references = [
+            str(item.get("mention") or "").strip()
+            for item in (getattr(context, "resolved_entities", []) or [])
+            if isinstance(item, dict) and str(item.get("mention") or "").strip()
+        ]
         bundle = build_universal_speech_act_bundle(
             route=route,
             speech_act_type=speech_act_type,
@@ -195,6 +200,7 @@ class ResponseSynthesizer:
             stream_live=stream_live,
             technical_state=technical_state,
             current_conversation=conversation,
+            entity_references=entity_references,
             max_length_chars=max_length_chars,
         )
         response = self._universal_pipeline().render(
