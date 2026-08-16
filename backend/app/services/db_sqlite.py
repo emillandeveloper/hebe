@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import sqlite3
 from datetime import datetime, timezone
 from typing import Optional, Any
@@ -411,70 +410,6 @@ def seed_default_apps() -> None:
     conn.close()
 
 
-def find_app_for_command(command_text: str):
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM app_commands WHERE enabled = 1")
-    apps = cur.fetchall()
-    conn.close()
-
-    text = (command_text or "").lower()
-    tokens = set(re.findall(r"[a-z0-9]+", text))
-
-    best = None
-    best_score = -1.0
-
-    for app in apps:
-        names = [app["name"]]
-        if app["aliases"]:
-            names += [a.strip() for a in app["aliases"].split(",") if a.strip()]
-
-        for alias in names:
-            a = (alias or "").strip().lower()
-            if not a:
-                continue
-
-            a_tokens = set(re.findall(r"[a-z0-9]+", a))
-            if not a_tokens:
-                continue
-
-            hit = len(a_tokens & tokens)
-            if hit == 0:
-                continue
-
-            bonus = 0.0
-            if re.search(rf"\b{re.escape(a)}\b", text):
-                bonus += 3.0
-
-            bonus += min(len(a), 30) / 10.0
-
-            usage = int(app["usage_count"] or 0)
-            bonus += min(usage, 50) / 25.0
-
-            score = hit * 5 + bonus
-            if score > best_score:
-                best_score = score
-                best = app
-
-    return best
-
-
-def register_app_usage(app_id: int) -> None:
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        UPDATE app_commands
-        SET usage_count = usage_count + 1,
-            last_used_at = ?
-        WHERE id = ?
-        """,
-        (utc_now_iso(), app_id),
-    )
-    conn.commit()
-    conn.close()
-
-
 # =========================
 # Legacy memories
 # =========================
@@ -687,40 +622,3 @@ def cancel_reminder(reminder_id: int) -> None:
     )
     conn.commit()
     conn.close()
-
-
-# =========================
-# Apps
-# =========================
-
-def save_app_command(name: str, command: str, description: str = "", aliases: str = ""):
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        INSERT OR IGNORE INTO app_commands (name, command, description, aliases)
-        VALUES (?, ?, ?, ?)
-        """,
-        (name, command, description, aliases),
-    )
-    conn.commit()
-
-    cur.execute("SELECT id FROM app_commands WHERE name = ?", (name,))
-    row = cur.fetchone()
-    conn.close()
-
-    return row["id"] if row else None
-
-
-def update_app_process_name(app_id: int, process_name: str) -> None:
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute(
-            "UPDATE app_commands SET process_name = ? WHERE id = ?",
-            (process_name, app_id),
-        )
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        print(f"⚠️ No se pudo guardar process_name en DB: {e}")

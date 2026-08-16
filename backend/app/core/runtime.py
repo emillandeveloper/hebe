@@ -13,11 +13,9 @@ from app.core.ui_bridge import emit
 from app.core.state import HebeState
 from app.core.persistent_logs import log_jsonl_event
 from app.services.db_sqlite import get_setting, log_chat
-from app.services.interaction_actions import InteractionActions
 from app.services.llm_factory import create_conversation_llm
 from app.services.speech_output import speak as _speak
 from app.services.stt_whisper import STTConfig, STTService
-from app.services.tool_system import ToolContext, ToolSystem
 from app.services.win_automation import WinAutomationService
 
 from app.llm.ollama_intent_client import OllamaIntentClient
@@ -96,8 +94,6 @@ class HebeRuntime:
     llm: Any
     intent_llm: OllamaIntentClient
     win: WinAutomationService
-    actions: InteractionActions
-    tools: ToolSystem
     speak: Callable[..., None]
     state: HebeState
     twitch: TwitchService
@@ -169,24 +165,6 @@ def build_runtime() -> HebeRuntime:
     win = WinAutomationService(
         emit=emit,
         speak=speak,
-    )
-
-    actions = InteractionActions(
-        speak=speak,
-        stt=stt,
-        win=win,
-    )
-
-    tools = ToolSystem(
-        ToolContext(
-            emit=emit,
-            speak=speak,
-            win=win,
-            open_app_fn=actions.open_app_from_text,
-            volume_fn=win.handle_volume_command,
-            power_fn=None,
-            memory_fn=actions.store_memory_from_text,
-        )
     )
 
     # =========================
@@ -277,8 +255,6 @@ def build_runtime() -> HebeRuntime:
         llm=llm,
         intent_llm=intent_llm,
         win=win,
-        actions=actions,
-        tools=tools,
         speak=speak,
         state=state,
         twitch=twitch,

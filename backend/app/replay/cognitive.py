@@ -252,17 +252,11 @@ class CognitiveReplayRunner:
         stt = FakeSTT()
         state = HebeState()
         state.tts_enabled = False
-        actions = SimpleNamespace(
-            open_app_from_text=lambda text: win.open_app(str(text)),
-            store_memory_from_text=lambda _text: False,
-        )
         runtime = HebeRuntime(
             stt=stt,
             llm=self.model,
             intent_llm=self.intent_model,
             win=win,
-            actions=actions,
-            tools=SimpleNamespace(),
             speak=speech,
             state=state,
             twitch=twitch,
