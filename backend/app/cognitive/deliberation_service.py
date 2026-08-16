@@ -235,6 +235,7 @@ class DeliberationService:
                 source=decision.source,
                 raw_text=decision.raw_text,
                 normalized_text=decision.normalized_text,
+                interpretation=getattr(context, "input_interpretation", None),
             ))
             if local_plan is not None:
                 return finish(self._plan_canonical_open_app(local_plan.target))

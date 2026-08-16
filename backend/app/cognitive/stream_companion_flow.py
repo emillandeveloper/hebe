@@ -6,6 +6,7 @@ from typing import Any
 from app.continuity.models import CurrentConversation, ConversationStatus
 
 from app.cognitive.input_event import InputEvent
+from app.cognitive.input_interpretation import InputSpeechAct
 
 
 @dataclass(frozen=True)
@@ -114,18 +115,56 @@ class InputClassifier:
         valid: bool = True,
     ) -> InputClassification:
         envelope = getattr(event, "envelope", None)
+        interpretation = getattr(event, "interpretation", None)
+        if interpretation is None and envelope is not None:
+            interpretation = envelope.interpretation
         if envelope is not None:
+            canonical_type = {
+                InputSpeechAct.OWNER_COMMAND: "explicit_command",
+                InputSpeechAct.OWNER_FEEDBACK: "owner_feedback",
+                InputSpeechAct.OWNER_COMMENTARY: envelope.input_type,
+                InputSpeechAct.OWNER_ANSWER_FOLLOWUP: "active_conversation_followup",
+                InputSpeechAct.VIEWER_DIRECTED_TO_HEBE: "twitch_chat_mention",
+                InputSpeechAct.VIEWER_CONTEXT: "twitch_chat_observed",
+                InputSpeechAct.AMBIENT_CONTEXT: "ambient_stream_context",
+                InputSpeechAct.SYSTEM_EVENT: "system_event",
+            }.get(getattr(interpretation, "speech_act", None), envelope.input_type)
             return InputClassification(
                 source=envelope.source,
-                input_type=envelope.input_type,
-                purpose="pending_resolution" if envelope.pending_compatible else "local_command" if envelope.app_target else "",
-                addressed_to_hebe=envelope.addressed_to_hebe,
+                input_type=canonical_type,
+                purpose=(
+                    "owner_feedback" if canonical_type == "owner_feedback"
+                    else "pending_resolution" if envelope.pending_compatible
+                    else "local_command" if envelope.app_target else ""
+                ),
+                addressed_to_hebe=(interpretation.addressed_to_hebe if interpretation else envelope.addressed_to_hebe),
                 confidence=float((envelope.app_plan_result or {}).get("confidence") or (
                     .95 if envelope.pending_compatible else .55 if envelope.source == "ambient_stt" else .9
                 )),
                 reason=envelope.reason,
                 voice_event_type=voice_event_type,
-                has_action_intent=has_action_intent,
+                has_action_intent=bool(interpretation.authorized_action_command if interpretation else has_action_intent),
+            )
+        if interpretation is not None:
+            canonical_type = {
+                InputSpeechAct.OWNER_COMMAND: "explicit_command",
+                InputSpeechAct.OWNER_FEEDBACK: "owner_feedback",
+                InputSpeechAct.OWNER_COMMENTARY: "direct_to_hebe" if interpretation.addressed_to_hebe else "ambient_stream_context",
+                InputSpeechAct.OWNER_ANSWER_FOLLOWUP: "active_conversation_followup",
+                InputSpeechAct.VIEWER_DIRECTED_TO_HEBE: "twitch_chat_mention",
+                InputSpeechAct.VIEWER_CONTEXT: "twitch_chat_observed",
+                InputSpeechAct.AMBIENT_CONTEXT: "ambient_stream_context",
+                InputSpeechAct.SYSTEM_EVENT: "system_event",
+            }[interpretation.speech_act]
+            return InputClassification(
+                source=event.source,
+                input_type=canonical_type,
+                purpose="owner_feedback" if canonical_type == "owner_feedback" else "",
+                addressed_to_hebe=interpretation.addressed_to_hebe,
+                confidence=interpretation.confidence,
+                reason=interpretation.reason,
+                voice_event_type=voice_event_type,
+                has_action_intent=interpretation.authorized_action_command,
             )
         source = _canonical_source(event.source)
         if not valid:

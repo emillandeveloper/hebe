@@ -6,6 +6,7 @@ from typing import Iterable
 
 from app.cognitive.action_plan import ActionPlan
 from app.cognitive.input_event import InputEvent
+from app.cognitive.input_interpretation import InputInterpreter
 from app.cognitive.wake_name_resolver import WakeNameResolver
 from app.services.direct_stt_command import (
     DirectUtteranceIntentFamily,
@@ -63,6 +64,27 @@ class LocalAppActionPlanner:
             f"matched_name={resolution.matched_name}",
             flush=True,
         )
+
+        interpretation = getattr(input_event, "interpretation", None)
+        if interpretation is None and getattr(input_event, "envelope", None) is not None:
+            interpretation = input_event.envelope.interpretation
+        if interpretation is None:
+            interpretation = InputInterpreter().interpret_event(
+                input_event,
+                addressed_to_hebe=bool(resolution.addressed_to_hebe),
+                explicit_command_mode=input_event.source in {
+                    "ui", "typed_ui", "owner_ui", "button", "stt_voice",
+                    "owner_stt_direct", "owner_stt_command",
+                },
+                direct_result=parsed,
+            )
+        if not interpretation.authorized_action_command:
+            print(
+                "[HEBE][APP_PLAN_SKIPPED] "
+                f"speech_act={interpretation.speech_act.value} reason=canonical_command_not_authorized",
+                flush=True,
+            )
+            return None
 
         if not is_awake and not resolution.wake_command:
             return None

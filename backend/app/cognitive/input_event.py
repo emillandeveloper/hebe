@@ -5,6 +5,7 @@ from typing import Any
 import time
 
 from app.continuity.models import CurrentConversation
+from app.cognitive.input_interpretation import InputInterpretation
 
 
 @dataclass
@@ -29,6 +30,7 @@ class InputEnvelope:
     is_followup_candidate: bool = False
     input_type: str = "ambient_stream_context"
     reason: str = "unclassified"
+    interpretation: InputInterpretation | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -50,6 +52,7 @@ class InputEnvelope:
             "is_followup_candidate": self.is_followup_candidate,
             "input_type": self.input_type,
             "reason": self.reason,
+            "interpretation": self.interpretation.as_dict() if self.interpretation else None,
         }
 
 
@@ -65,6 +68,7 @@ class InputEvent:
     timestamp: float = field(default_factory=time.time)
     stt_metadata: dict[str, Any] = field(default_factory=dict)
     envelope: InputEnvelope | None = None
+    interpretation: InputInterpretation | None = None
 
     def as_log_dict(self) -> dict[str, Any]:
         return {
@@ -77,4 +81,5 @@ class InputEvent:
             "timestamp": self.timestamp,
             "stt_metadata": self.stt_metadata,
             "envelope": self.envelope.as_dict() if self.envelope else None,
+            "interpretation": self.interpretation.as_dict() if self.interpretation else None,
         }

@@ -9,6 +9,7 @@ from typing import Any
 
 from app.cognitive.cognitive_decision import CognitiveDecision
 from app.cognitive.game_guidance import CAP_GAME_GUIDANCE, GameGuidanceCapability
+from app.cognitive.input_interpretation import InputInterpretation, InputInterpreter, InputSpeechAct
 from app.core.persistent_logs import log_jsonl_event
 from app.continuity.models import CurrentConversation, ConversationStatus
 
@@ -50,6 +51,22 @@ class CognitiveRouter:
         event_type = str(getattr(getattr(context, "internal_event", None), "event_type", "") or "")
         stream_is_live = bool(getattr(context, "stream_is_live", False))
         route_hints = list(getattr(context, "route_hints", []) or [])
+        interpretation = getattr(context, "input_interpretation", None)
+        if not isinstance(interpretation, InputInterpretation):
+            interpretation = InputInterpreter().interpret(
+                raw_text=raw,
+                source=source,
+                authority=authority,
+                addressed_to_hebe=addressed,
+                explicit_command_mode=source in {"ui", "typed_ui", "owner_ui", "button"},
+                recent_hebe_utterance=str(
+                    (getattr(context, "state_snapshot", {}) or {}).get("last_hebe_utterance") or ""
+                ),
+            )
+            try:
+                context.input_interpretation = interpretation
+            except Exception:
+                pass
 
         decision = self._classify(
             message_id=message_id,
@@ -63,12 +80,15 @@ class CognitiveRouter:
             stream_is_live=stream_is_live,
             route_hints=route_hints,
             state_snapshot=getattr(context, "state_snapshot", {}) or {},
+            interpretation=interpretation,
         )
         decision = self._apply_pending_contract(decision, pending)
         decision.debug_trace.extend([
             f"intent:{decision.intent}",
             f"priority_reason:{decision.reason}",
             f"pending:{decision.pending_reason}",
+            f"speech_act:{interpretation.speech_act.value}",
+            f"command_eligible:{str(interpretation.authorized_action_command).lower()}",
         ])
         self._log(decision, pending)
         print(
@@ -90,6 +110,7 @@ class CognitiveRouter:
         self, *, message_id: str, source: str, authority: str,
         addressed: bool, raw: str, normalized: str, firewall_decision: str,
         event_type: str, stream_is_live: bool, route_hints: list[str], state_snapshot: dict[str, Any],
+        interpretation: InputInterpretation,
     ) -> CognitiveDecision:
         base = dict(
             message_id=message_id, source=source, authority=authority,
@@ -99,7 +120,13 @@ class CognitiveRouter:
             allowed_capabilities=[CAP_CHAT], blocked_capabilities=[],
             allowed_step_types=["reply"], should_reply=True, response_mode="chat",
             response_intent="answer_user", reason="fallback_chat",
-            action_permission_summary={"reply": True, "external_actions": False, "stream_live": bool(stream_is_live)},
+            action_permission_summary={
+                "reply": True,
+                "external_actions": False,
+                "stream_live": bool(stream_is_live),
+                "speech_act": interpretation.speech_act.value,
+                "command_eligible": interpretation.authorized_action_command,
+            },
         )
 
         if authority == "bot" or firewall_decision in {"ignore", "block_reply", "block_action"}:
@@ -110,6 +137,34 @@ class CognitiveRouter:
                 "allowed_step_types": ["noop"], "blocked_step_types": ["action", "memory", "reminder", "reply", "tool"],
                 "should_reply": False, "should_stop_pipeline": True, "response_mode": "silent", "reason": reason,
                 "action_permission_summary": {"reply": False, "external_actions": False}})
+
+        if interpretation.speech_act == InputSpeechAct.OWNER_FEEDBACK:
+            should_reply = bool(interpretation.addressed_to_hebe)
+            return CognitiveDecision(**{
+                **base,
+                "intent": "owner_feedback",
+                "intent_confidence": interpretation.confidence,
+                "is_new_request": False,
+                "goal_type": "acknowledge_owner_feedback",
+                "allowed_capabilities": [CAP_CHAT] if should_reply else [],
+                "blocked_capabilities": CREATE_CAPABILITIES + [
+                    CAP_OPEN_APP, CAP_TWITCH_ACTION, CAP_TWITCH_PROMOTION,
+                    CAP_GAME_GUIDANCE, CAP_STREAM_STATE,
+                ],
+                "allowed_step_types": ["reply"] if should_reply else ["state_update"],
+                "blocked_step_types": ["action", "memory", "reminder", "tool"],
+                "should_reply": should_reply,
+                "should_stop_pipeline": not should_reply,
+                "response_mode": "owner_feedback" if should_reply else "silent",
+                "response_intent": "acknowledge_owner_feedback",
+                "reason": "canonical_owner_feedback",
+                "action_permission_summary": {
+                    "reply": should_reply,
+                    "external_actions": False,
+                    "speech_act": interpretation.speech_act.value,
+                    "command_eligible": False,
+                },
+            })
 
         if event_type.startswith("twitch_"):
             if not stream_is_live:
@@ -135,6 +190,35 @@ class CognitiveRouter:
                 "response_intent": "stream_event_reply", "reason": "authorized_live_twitch_event",
                 "action_permission_summary": {"stream_live": True, "reply": True, "promotion": CAP_TWITCH_PROMOTION in allowed}})
 
+        if interpretation.speech_act == InputSpeechAct.VIEWER_DIRECTED_TO_HEBE:
+            return CognitiveDecision(**{
+                **base,
+                "intent": "twitch_viewer_message",
+                "intent_confidence": interpretation.confidence,
+                "allowed_capabilities": [CAP_TWITCH_REPLY] if stream_is_live else [],
+                "blocked_capabilities": CREATE_CAPABILITIES + [CAP_OPEN_APP, CAP_TWITCH_ACTION, CAP_TWITCH_PROMOTION],
+                "allowed_step_types": ["reply"] if stream_is_live else ["noop"],
+                "should_reply": stream_is_live,
+                "should_stop_pipeline": not stream_is_live,
+                "response_mode": "twitch_chat_react" if stream_is_live else "silent",
+                "response_intent": "stream_event_reply",
+                "reason": "canonical_viewer_direct_address",
+            })
+        if interpretation.speech_act == InputSpeechAct.VIEWER_CONTEXT:
+            return CognitiveDecision(**{
+                **base,
+                "intent": "stream_context_update",
+                "intent_confidence": interpretation.confidence,
+                "is_new_request": False,
+                "allowed_capabilities": [],
+                "blocked_capabilities": CREATE_CAPABILITIES + [CAP_OPEN_APP, CAP_TWITCH_ACTION, CAP_TWITCH_PROMOTION],
+                "allowed_step_types": ["state_update"],
+                "should_reply": False,
+                "should_stop_pipeline": True,
+                "response_mode": "silent",
+                "reason": "canonical_viewer_context",
+            })
+
         if event_type == "reminder_due":
             return CognitiveDecision(**{**base, "intent": "reminder_due", "intent_confidence": 1.0,
                 "is_new_request": False, "allowed_capabilities": ["reminder.notify"],
@@ -147,14 +231,14 @@ class CognitiveRouter:
                 "is_new_request": False, "allowed_capabilities": [], "should_reply": False,
                 "should_stop_pipeline": True, "response_mode": "silent", "reason": "empty_input"})
 
-        if authority == "ambient" and not addressed:
+        if interpretation.speech_act == InputSpeechAct.AMBIENT_CONTEXT or (authority == "ambient" and not addressed):
             return CognitiveDecision(**{**base, "intent": "stream_context_update", "intent_confidence": .9,
                 "is_new_request": False, "goal_type": "update_session_state",
                 "allowed_capabilities": [], "blocked_capabilities": CREATE_CAPABILITIES + [CAP_TWITCH_ACTION],
                 "allowed_step_types": ["state_update"], "should_reply": False,
                 "should_stop_pipeline": True, "response_mode": "silent", "reason": "ambient_context_only"})
 
-        if self._is_pending_cancel(normalized):
+        if interpretation.authorized_action_command and self._is_pending_cancel(normalized):
             return CognitiveDecision(**{**base, "intent": "cancel_pending", "intent_confidence": .95,
                 "goal_type": "cancel_pending_task", "allowed_capabilities": [CAP_PENDING_CANCEL],
                 "blocked_capabilities": CREATE_CAPABILITIES + [CAP_OPEN_APP, CAP_CHAT],
@@ -162,14 +246,14 @@ class CognitiveRouter:
                 "reason": "explicit_pending_cancellation"})
 
         wake_intent = self._wake_control_intent(normalized)
-        if wake_intent:
+        if wake_intent and interpretation.authorized_action_command:
             return CognitiveDecision(**{**base, "intent": wake_intent, "intent_confidence": .94,
                 "goal_type": "control_wake_state", "allowed_capabilities": [CAP_WAKE_CONTROL],
                 "blocked_capabilities": CREATE_CAPABILITIES + [CAP_OPEN_APP, CAP_CHAT],
                 "allowed_step_types": ["state_update", "reply"], "response_mode": "command_result",
                 "reason": "explicit_wake_state_command"})
 
-        if authority == "owner" and self._is_promotion_command(normalized):
+        if authority == "owner" and interpretation.authorized_action_command and self._is_promotion_command(normalized):
             return CognitiveDecision(**{**base, "intent": "promotion_shoutout", "intent_confidence": .96,
                 "goal_type": "stream_promotion", "allowed_capabilities": [CAP_TWITCH_PROMOTION, CAP_TWITCH_ACTION],
                 "blocked_capabilities": CREATE_CAPABILITIES + [CAP_OPEN_APP],
@@ -177,7 +261,9 @@ class CognitiveRouter:
                 "response_intent": "confirm_stream_promotion", "reason": "deterministic_promotion_command",
                 "action_permission_summary": {"stream_live": stream_is_live, "promotion": True}})
 
-        hinted = self._hinted_owner_route(authority, addressed, route_hints, stream_is_live)
+        hinted = self._hinted_owner_route(
+            authority, addressed, route_hints, stream_is_live
+        ) if interpretation.authorized_action_command or "stream_query" in route_hints else None
         if hinted:
             return CognitiveDecision(**{**base, **hinted})
 
@@ -208,20 +294,20 @@ class CognitiveRouter:
                 "allowed_step_types": ["reply"], "response_mode": "game_guidance",
                 "response_intent": "provide_grounded_game_guidance", "reason": "structured_game_guidance_request"})
 
-        if self._is_open_app_command(normalized):
+        if interpretation.authorized_action_command and self._is_open_app_command(normalized):
             return CognitiveDecision(**{**base, "intent": "command_open_app", "intent_confidence": .95,
                 "goal_type": "control_pc", "allowed_capabilities": [CAP_OPEN_APP],
                 "blocked_capabilities": CREATE_CAPABILITIES, "allowed_step_types": ["action", "reply"],
                 "response_mode": "confirm_action", "response_intent": "confirm_pc_action",
                 "reason": "explicit_open_application_command"})
 
-        if self._is_reminder_request(normalized):
+        if interpretation.authorized_action_command and self._is_reminder_request(normalized):
             return CognitiveDecision(**{**base, "intent": "reminder_create_request", "intent_confidence": .92,
                 "goal_type": "create_reminder", "allowed_capabilities": [CAP_REMINDER],
                 "blocked_capabilities": [CAP_APPOINTMENT], "allowed_step_types": ["reminder", "reply"],
                 "response_mode": "reminder", "reason": "explicit_reminder_marker"})
 
-        if self._is_appointment_request(normalized):
+        if interpretation.authorized_action_command and self._is_appointment_request(normalized):
             return CognitiveDecision(**{**base, "intent": "appointment_create_request", "intent_confidence": .93,
                 "goal_type": "create_appointment", "allowed_capabilities": [CAP_APPOINTMENT],
                 "blocked_capabilities": [], "allowed_step_types": ["memory", "reminder", "reply"],
@@ -273,6 +359,7 @@ class CognitiveRouter:
             "appointment_create_request", "capability_catalogue_query",
             "game_guidance_query",
             "cancel_pending", "wake_control", "sleep_control", "owner_manual_command",
+            "owner_feedback",
         }
         if high_priority:
             return replace(decision, **common, pending_reason="new_request_override")
@@ -398,6 +485,8 @@ class CognitiveRouter:
             capabilities.append(CAP_TTS_CONTROL)
         if "stream_manual" in hints:
             capabilities.append(CAP_STREAM_STATE)
+        if "stream_query" in hints:
+            capabilities.append(CAP_STREAM_STATE)
         if "stream_action" in hints and stream_is_live:
             capabilities.append(CAP_TWITCH_ACTION)
         if not capabilities:
@@ -407,7 +496,10 @@ class CognitiveRouter:
             "goal_type": "owner_control", "allowed_capabilities": capabilities,
             "blocked_capabilities": CREATE_CAPABILITIES + [CAP_CHAT],
             "allowed_step_types": ["state_update", "action", "reply"],
-            "response_mode": "command_result", "reason": "authorized_owner_route_hint",
+            "response_mode": "command_result", "reason": (
+                "authorized_owner_stream_query" if "stream_query" in hints
+                else "authorized_owner_route_hint"
+            ),
             "action_permission_summary": {"stream_live": stream_is_live, "external_actions": CAP_TWITCH_ACTION in capabilities},
         }
 

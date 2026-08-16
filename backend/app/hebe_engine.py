@@ -54,6 +54,7 @@ from app.cognitive import MemoryStore, SchedulerService
 from app.cognitive.scheduler import InternalEvent
 from app.cognitive.command_result import CommandResult
 from app.cognitive.input_event import InputEnvelope, InputEvent
+from app.cognitive.input_interpretation import InputInterpretation, InputInterpreter, InputSpeechAct
 from app.cognitive.models import ExecutionResult, Plan
 from app.cognitive.core_loop import (
     HebeCoreLoop,
@@ -3500,6 +3501,34 @@ class HebeEngine:
     
     def cognitive_flow(self, command: str, source: str = "voice") -> str:
         active_pending = self._active_current_conversation(source=source)
+        current_event = getattr(self, "_current_input_event", None)
+        if current_event is None or (
+            source in {"ui", "typed_ui"}
+            and str(getattr(current_event, "raw_text", "") or "") != str(command or "")
+        ):
+            current_event = self._build_input_event(
+                source="ui" if source in {"ui", "typed_ui"} else source,
+                raw_text=command,
+                normalized_text=self._normalize_text(command),
+            )
+            self._current_input_event = current_event
+        interpretation = getattr(current_event, "interpretation", None)
+        if interpretation is None:
+            interpretation = self._get_input_interpreter().interpret_event(current_event)
+        if (
+            source in {"ui", "typed_ui"}
+            and active_pending is not None
+            and interpretation.speech_act != InputSpeechAct.OWNER_FEEDBACK
+            and self._pending_conversation_matches(source=source, text=command)
+        ):
+            interpretation = self._get_input_interpreter().interpret_event(
+                current_event,
+                authority="owner",
+                addressed_to_hebe=True,
+                explicit_command_mode=False,
+                pending_valid=True,
+                recent_hebe_utterance=str(getattr(self, "_last_assistant_text", "") or ""),
+            )
         if source in {"ui", "typed_ui"} and active_pending is not None:
             print(
                 f"[HEBE][UI_PENDING_INPUT] raw={command!r} pending_kind={active_pending.topic}",
@@ -3519,22 +3548,18 @@ class HebeEngine:
                 source="owner_ui",
                 text=command,
                 addressed_to_hebe=True,
-                has_action_intent=False,
+                has_action_intent=interpretation.authorized_action_command,
             )
 
         stt_firewall_payload = {}
-        current_event = getattr(self, "_current_input_event", None)
         current_metadata = getattr(current_event, "stt_metadata", None)
         if source == "stt_voice" and isinstance(current_metadata, dict):
             stt_firewall_payload = current_metadata.get("input_firewall") or {}
         route_source = str(stt_firewall_payload.get("source") or ("ui" if source in {"ui", "typed_ui"} else source))
-        route_authority = str(stt_firewall_payload.get("authority") or (
+        route_authority = str(getattr(interpretation, "authority", "") or stt_firewall_payload.get("authority") or (
             "owner" if route_source in {"ui", "stt_voice", "owner_stt_direct", "owner_stt_followup", "voice"} else "system"
         ))
-        route_addressed = bool(
-            route_source == "owner_stt_direct"
-            or route_authority == "owner" and route_source in {"ui", "voice", "stt_voice"}
-        )
+        route_addressed = bool(interpretation.addressed_to_hebe)
         if route_authority == "owner" and self._handle_translate_previous_response(command, source=source):
             return "continue"
         if not hasattr(self, "context_builder"):
@@ -3543,6 +3568,7 @@ class HebeEngine:
                 state_snapshot={"current_conversation": active_pending},
                 source=route_source, authority=route_authority,
                 addressed_to_hebe=route_addressed,
+                input_interpretation=interpretation,
             )
         else:
             try:
@@ -3553,6 +3579,7 @@ class HebeEngine:
                     source=route_source,
                     authority=route_authority,
                     addressed_to_hebe=route_addressed,
+                    input_interpretation=interpretation,
                 )
             except TypeError:
                 context = self.context_builder.build(
@@ -3561,6 +3588,7 @@ class HebeEngine:
                 context.source = route_source
                 context.authority = route_authority
                 context.addressed_to_hebe = route_addressed
+                context.input_interpretation = interpretation
         if not hasattr(context, "state_snapshot") or not isinstance(context.state_snapshot, dict):
             context.state_snapshot = {}
         context.state_snapshot["current_conversation"] = active_pending
@@ -3577,9 +3605,13 @@ class HebeEngine:
         )
         hints = []
         normalized_route = self._normalize_text(command)
-        if hasattr(self, "_parse_tts_control_intent") and self._parse_tts_control_intent(normalized_route) is not None:
-            hints.append("tts_control")
         if (
+            interpretation.authorized_action_command
+            and hasattr(self, "_parse_tts_control_intent")
+            and self._parse_tts_control_intent(normalized_route) is not None
+        ):
+            hints.append("tts_control")
+        if interpretation.authorized_action_command and (
             active_pending is not None and active_pending.topic == "tts_scope"
             and self._parse_tts_scope_followup(normalized_route) is not None
         ):
@@ -3591,19 +3623,23 @@ class HebeEngine:
             "haz", "hazle", "manda", "envia", "dile", "di", "pausa", "reanuda", "cambia", "pon", "quita",
             "enable", "disable", "start", "stop", "send", "pause", "resume",
         }
-        if stream_domain and stream_control:
+        if interpretation.authorized_action_command and stream_domain and stream_control:
             hints.append("stream_manual")
-        if route_tokens & {"chat"} and stream_control:
+        if interpretation.authorized_action_command and route_tokens & {"chat"} and stream_control:
             hints.append("stream_action")
-        if route_tokens & {"shoutout", "promo", "raid"} and stream_control:
+        if interpretation.authorized_action_command and route_tokens & {"shoutout", "promo", "raid"} and stream_control:
             hints.append("stream_action")
             hints.append("stream_manual")
         pending = self._active_current_conversation(source=source)
-        if pending is not None and pending.topic == "promotion_target_clarification":
+        if (
+            interpretation.speech_act == InputSpeechAct.OWNER_ANSWER_FOLLOWUP
+            and pending is not None
+            and pending.topic == "promotion_target_clarification"
+        ):
             hints.append("stream_action")
             hints.append("stream_manual")
         if re.search(r"\b(?:que|cual)\s+(?:toca|juego|directo|stream)\b", normalized_route):
-            hints.append("stream_manual")
+            hints.append("stream_query")
         context.route_hints = hints
         context.cognitive_decision = router.route(context)
         if bool(getattr(self, "_manual_simulation_mode", False)):
@@ -6482,8 +6518,25 @@ class HebeEngine:
         retry_debug["utterance_role"] = role_decision.role.value
         retry_debug["utterance_role_decision"] = role_decision.to_dict()
         self._active_current_conversation(source="stt_voice")
+        self._current_input_event = self._build_input_event(
+            source="stt_voice",
+            raw_text=original_raw_text,
+            normalized_text=command,
+            stt_metadata={**normalization.as_event(), **retry_debug, "accepted_transcript": transcript_for_cognition},
+        )
+        if force_ambient:
+            self._current_input_event.source = "ambient_stt"
+            self._current_input_event.interpretation = None
+            self._get_input_interpreter().interpret_event(
+                self._current_input_event,
+                authority="ambient",
+                addressed_to_hebe=False,
+                explicit_command_mode=False,
+                direct_result=direct_stt,
+            )
+        interpretation = self._current_input_event.interpretation
         mute_mode = self._owner_mute_command_mode(command)
-        if mute_mode and self._is_stream_enabled():
+        if mute_mode and interpretation and interpretation.authorized_action_command and self._is_stream_enabled():
             self._apply_owner_mute_command(
                 mute_mode,
                 ttl=300.0,
@@ -6496,22 +6549,23 @@ class HebeEngine:
                 direct_stt, outcome="action_executed", reason=f"owner_mute_{mute_mode}",
                 action_receipt={"action_type": "owner_mute", "target": mute_mode, "executor_invoked": True, "success": True, "timestamp": time.time()},
             )
+            self._current_input_event = None
             return "continue"
-        if self._owner_unmute_command(command) and self._is_stream_enabled():
+        if (
+            self._owner_unmute_command(command)
+            and interpretation
+            and interpretation.authorized_action_command
+            and self._is_stream_enabled()
+        ):
             self._clear_owner_mute_command(reason="owner_unmute")
             self._log_stt_non_command_decision(command, "owner_unmute_command", reason="normal")
             self._log_direct_stt_outcome(
                 direct_stt, outcome="action_executed", reason="owner_unmute",
                 action_receipt={"action_type": "owner_unmute", "target": "stream", "executor_invoked": True, "success": True, "timestamp": time.time()},
             )
+            self._current_input_event = None
             return "continue"
-        self._current_input_event = self._build_input_event(
-            source="stt_voice",
-            raw_text=original_raw_text,
-            normalized_text=command,
-            stt_metadata={**normalization.as_event(), **retry_debug, "accepted_transcript": transcript_for_cognition},
-        )
-        voice_type, mood_hint = self._classify_voice_event(command)
+        voice_type, mood_hint = self._classify_voice_event(command, interpretation=interpretation)
         has_action_intent = self._input_event_has_action_intent(getattr(self, "_current_input_event", None))
         media_detected, _media_reason = looks_like_media_or_singing(command)
         try:
@@ -6782,7 +6836,7 @@ class HebeEngine:
             return "continue"
         if envelope.input_type == "local_app_command" and envelope.addressed_to_hebe:
             command = str(envelope.wake_evidence.get("stripped_text") or command).strip()
-        elif not pending_followup:
+        elif not pending_followup and interpretation.authorized_action_command:
             handled, stream_command = self._extract_stream_command(command)
             if handled:
                 if not stream_command:
@@ -6792,6 +6846,8 @@ class HebeEngine:
                     self._current_input_event = None
                     return "continue"
                 command = stream_command
+        elif envelope.addressed_to_hebe and self._is_stream_enabled():
+            command = str(envelope.wake_evidence.get("stripped_text") or command).strip()
         if self._current_input_event is not None:
             self._current_input_event.stt_metadata["jarvis_allowed"] = bool(is_direct_command or pending_followup or has_action_intent)
         targets = [OUTPUT_TARGET_LOCAL_UI]
@@ -6984,6 +7040,28 @@ class HebeEngine:
             is_stream_context=self._is_stream_enabled(),
             stt_metadata=stt_metadata or {},
         )
+        direct = DirectSTTCommandResult.from_dict(event.stt_metadata.get("direct_stt_command"))
+        if not direct.command_text:
+            direct = parse_direct_stt_command(event.raw_text)
+        source_authority = InputInterpreter.authority_for_source(source)
+        addressed = bool(
+            direct.wake_detected
+            or source in {"ui", "typed_ui", "owner_ui", "button"}
+        )
+        explicit_command_mode = bool(
+            event.stt_metadata.get(
+                "command_mode",
+                source in {"ui", "typed_ui", "owner_ui", "button"},
+            )
+        )
+        self._get_input_interpreter().interpret_event(
+            event,
+            authority=source_authority,
+            addressed_to_hebe=addressed,
+            explicit_command_mode=explicit_command_mode,
+            recent_hebe_utterance=str(getattr(self, "_last_assistant_text", "") or ""),
+            direct_result=direct,
+        )
         print(
             "[HEBE][INPUT] "
             f"source={event.source} raw={ascii(event.raw_text)} normalized={ascii(event.normalized_text)}",
@@ -6996,10 +7074,18 @@ class HebeEngine:
         )
         return event
 
+    def _get_input_interpreter(self) -> InputInterpreter:
+        interpreter = getattr(self, "input_interpreter", None)
+        if interpreter is None:
+            interpreter = InputInterpreter()
+            self.input_interpreter = interpreter
+        return interpreter
+
     def _build_stt_input_envelope(
         self, event: InputEvent, *, voice_type: str, conversation_followup: bool,
     ) -> InputEnvelope:
         normalized = self._normalize_text(event.normalized_text)
+        interpretation = event.interpretation or self._get_input_interpreter().interpret_event(event)
         resolver = getattr(self, "wake_name_resolver", None) or WakeNameResolver()
         self.wake_name_resolver = resolver
         wake = resolver.resolve(
@@ -7022,8 +7108,12 @@ class HebeEngine:
         # WakeNameResolver intentionally accepts that context, but the unified
         # envelope keeps the two facts separate so no-wake commands are routed
         # as owner_stt_command rather than pretending a name was spoken.
-        addressed = bool(wake.matched_name or voice_type == "direct_command_to_hebe")
-        command_mode = bool((event.stt_metadata or {}).get("command_mode", True))
+        addressed = bool(
+            wake.matched_name
+            or voice_type == "direct_command_to_hebe"
+            or interpretation.addressed_to_hebe
+        )
+        command_mode = bool(interpretation.authorized_action_command)
         utterance_role = str((event.stt_metadata or {}).get("utterance_role") or "")
         isolated_dialogue = utterance_role in {
             UtteranceRole.QUOTED_OR_READ_DIALOGUE.value,
@@ -7044,7 +7134,11 @@ class HebeEngine:
                 DirectUtteranceIntentFamily.INCOMPLETE_COMMAND.value,
             }
         )
-        local_plan = None if isolated_dialogue or not should_resolve_app else self._get_local_app_planner().plan(
+        local_plan = None if (
+            isolated_dialogue
+            or not should_resolve_app
+            or not interpretation.authorized_action_command
+        ) else self._get_local_app_planner().plan(
             event, is_awake=not bool(getattr(self.runtime.state, "hebe_sleeping", False)),
         )
         event._local_app_plan = local_plan
@@ -7074,7 +7168,7 @@ class HebeEngine:
             ).to_dict()
         }
         fresh_stream_plan = None
-        if not isolated_dialogue:
+        if not isolated_dialogue and interpretation.authorized_action_command:
             try:
                 fresh_stream_plan = self._get_stream_action_planner().plan(event)
             except Exception as exc:
@@ -7086,17 +7180,28 @@ class HebeEngine:
             and float(fresh_stream_plan.confidence or 0.0) >= 0.78
             and fresh_stream_plan.target
         )
+        canonical_new_request = interpretation.speech_act != InputSpeechAct.OWNER_FEEDBACK
         stronger_request = bool(
-            router._is_current_time_query(normalized)
-            or router._is_current_date_query(normalized)
-            or router._is_open_app_command(normalized)
-            or router._is_reminder_request(normalized)
-            or router._personal_state(normalized)
-            or router.game_guidance.looks_like_query(event.raw_text, game_snapshot)
-            or fresh_high_confidence_promotion
+            canonical_new_request
+            and (
+                router._is_current_time_query(normalized)
+                or router._is_current_date_query(normalized)
+                or (
+                    interpretation.authorized_action_command
+                    and router._is_open_app_command(normalized)
+                )
+                or (
+                    interpretation.authorized_action_command
+                    and router._is_reminder_request(normalized)
+                )
+                or router._personal_state(normalized)
+                or router.game_guidance.looks_like_query(event.raw_text, game_snapshot)
+                or fresh_high_confidence_promotion
+            )
         )
         appointment_pending_compatible = bool(
             active_pending
+            and interpretation.speech_act != InputSpeechAct.OWNER_FEEDBACK
             and pending_kind == "appointment_datetime"
             and self._appointment_pending_reply_compatible(normalized)
             and not stronger_request
@@ -7104,7 +7209,12 @@ class HebeEngine:
         promotion_pending_compatible = False
         promotion_pending_reason = "no_promotion_pending"
         promotion_resolution = {}
-        if active_pending and pending_kind == "promotion_target_clarification" and not stronger_request:
+        if (
+            active_pending
+            and interpretation.speech_act != InputSpeechAct.OWNER_FEEDBACK
+            and pending_kind == "promotion_target_clarification"
+            and not stronger_request
+        ):
             promotion_pending_compatible, promotion_pending_reason, promotion_resolution = self._promotion_pending_reply_compatible(
                 event.raw_text,
                 normalized,
@@ -7136,7 +7246,12 @@ class HebeEngine:
         game_pending_compatible = False
         game_pending_reason = "no_game_guidance_pending"
         game_pending_updates = {}
-        if active_pending and pending_kind == "game_guidance_clarification" and not stronger_request:
+        if (
+            active_pending
+            and interpretation.speech_act != InputSpeechAct.OWNER_FEEDBACK
+            and pending_kind == "game_guidance_clarification"
+            and not stronger_request
+        ):
             game_pending_compatible, game_pending_reason = self._game_guidance_pending_compatibility(
                 pending=active_pending,
                 normalized=normalized,
@@ -7153,6 +7268,7 @@ class HebeEngine:
         generic_pending_compatible = False
         if (
             active_pending is not None
+            and interpretation.speech_act != InputSpeechAct.OWNER_FEEDBACK
             and pending_kind not in {
                 "appointment_datetime", "promotion_target_clarification",
                 "game_guidance_clarification", "assistant_followup", "tts_scope",
@@ -7200,6 +7316,14 @@ class HebeEngine:
             conversation_followup = False
 
         if pending_compatible and live_gate_action == "reply":
+            interpretation = self._get_input_interpreter().interpret_event(
+                event,
+                authority="owner",
+                addressed_to_hebe=addressed,
+                explicit_command_mode=False,
+                pending_valid=True,
+                recent_hebe_utterance=str(getattr(self, "_last_assistant_text", "") or ""),
+            )
             source, authority, trust = "owner_stt_followup", "owner", "trusted_followup"
             input_type = "pending_reply"
             reason = (
@@ -7211,7 +7335,8 @@ class HebeEngine:
         elif addressed and not isolated_dialogue:
             source, authority, trust = "owner_stt_direct", "owner", "trusted_direct"
             input_type = (
-                "local_app_command" if app_target
+                "owner_feedback" if interpretation.speech_act == InputSpeechAct.OWNER_FEEDBACK
+                else "local_app_command" if app_target
                 else "explicit_question" if router._looks_like_question(normalized)
                 else "direct_to_hebe"
             )
@@ -7251,6 +7376,7 @@ class HebeEngine:
             is_followup_candidate=bool(pending_compatible or conversation_followup),
             input_type=input_type,
             reason=reason,
+            interpretation=interpretation,
         )
         event.envelope = envelope
         self._last_input_envelope = envelope
@@ -7305,6 +7431,17 @@ class HebeEngine:
     def _input_event_has_action_intent(self, event: InputEvent | None) -> bool:
         if event is None:
             return False
+        interpretation = getattr(event, "interpretation", None)
+        if interpretation is None and getattr(event, "envelope", None) is not None:
+            interpretation = event.envelope.interpretation
+        if interpretation is not None and interpretation.speech_act in {
+            InputSpeechAct.OWNER_FEEDBACK,
+            InputSpeechAct.VIEWER_DIRECTED_TO_HEBE,
+            InputSpeechAct.VIEWER_CONTEXT,
+            InputSpeechAct.AMBIENT_CONTEXT,
+            InputSpeechAct.SYSTEM_EVENT,
+        } and not interpretation.authorized_action_command:
+            return False
         direct_family = str(
             ((event.stt_metadata or {}).get("direct_stt_command") or {}).get("detected_intent_family")
             or ""
@@ -7315,7 +7452,7 @@ class HebeEngine:
         }:
             return False
         if direct_family == DirectUtteranceIntentFamily.APPLICATION_ACTION.value:
-            return True
+            return bool(interpretation.authorized_action_command if interpretation else True)
         if direct_family == DirectUtteranceIntentFamily.INCOMPLETE_COMMAND.value:
             return False
         pending = self._active_current_conversation(source="stt_voice")
@@ -7330,6 +7467,8 @@ class HebeEngine:
                 flush=True,
             )
             return bool(compatible)
+        if interpretation is not None:
+            return bool(interpretation.authorized_action_command)
         try:
             local_plan = self._get_local_app_planner().plan(
                 event,
@@ -8078,7 +8217,19 @@ class HebeEngine:
         # Stream activo pero sin wakeword ni ventana armada => ignorar
         return True, None
 
-    def _classify_voice_event(self, text: str) -> tuple[str, str | None]:
+    def _classify_voice_event(
+        self,
+        text: str,
+        *,
+        interpretation: InputInterpretation | None = None,
+    ) -> tuple[str, str | None]:
+        interpretation = interpretation or getattr(
+            getattr(self, "_current_input_event", None), "interpretation", None
+        )
+        if interpretation is not None and interpretation.speech_act == InputSpeechAct.OWNER_FEEDBACK:
+            if not interpretation.context_text:
+                return "owner_feedback", None
+            text = interpretation.context_text
         normalized = self._normalize_text(text)
         if not normalized:
             return "unknown", None
@@ -8097,7 +8248,7 @@ class HebeEngine:
             return "objective_update", None
         if any(marker in normalized for marker in ("estamos en", "estoy en", "hemos llegado a", "salir de")):
             return "location_update", None
-        if any(marker in normalized for marker in ("me han matado", "he muerto", "otra vez", "wipe", "game over")):
+        if any(marker in normalized for marker in ("me han matado", "me ha matado", "he muerto", "wipe", "game over")):
             return "gameplay_failure", "frustrated"
         if any(marker in normalized for marker in ("bien", "toma", "vamos", "victoria", "victory", "por fin", "ha caido")):
             return "victory", "excited"
@@ -8135,6 +8286,29 @@ class HebeEngine:
             relevance = ContextRelevance(useful=False, category="none", confidence=0.0, reason="no_stream_state")
             self._log_context_relevance(relevance)
             return relevance
+        current_event = getattr(self, "_current_input_event", None)
+        interpretation = getattr(current_event, "interpretation", None)
+        if interpretation is not None and interpretation.speech_act == InputSpeechAct.OWNER_FEEDBACK:
+            stream.last_owner_feedback = interpretation.as_dict()
+            if not interpretation.context_text:
+                stream.last_voice_event = "owner_feedback"
+                stream.last_voice_event_ts = time.time()
+                stream.last_owner_utterance_end_ts = stream.last_voice_event_ts
+                stream.owner_voice_active = False
+                stream.last_voice_summary = "owner feedback about Hebe"
+                relevance = ContextRelevance(
+                    useful=False,
+                    category="owner_feedback",
+                    confidence=interpretation.confidence,
+                    reason="canonical_feedback_scope_excluded",
+                )
+                self._log_context_relevance(relevance)
+                print(
+                    "[HEBE][AMBIENT_CONTEXT] ignored reason=canonical_feedback_scope_excluded",
+                    flush=True,
+                )
+                return relevance
+            text = interpretation.context_text
         stream.last_voice_event = event_type
         stream.last_voice_event_ts = time.time()
         # STT inbox entries are normalized completed utterances. Live RMS/VAD
@@ -8143,7 +8317,6 @@ class HebeEngine:
         stream.owner_voice_active = False
         stream.last_voice_summary = self._summarize_voice_event(text, event_type)
         now_ts = time.time()
-        current_event = getattr(self, "_current_input_event", None)
         role = str(getattr(current_event, "stt_metadata", {}).get("utterance_role") or UtteranceRole.OWNER_COMMENTARY.value)
         role_decision = dict(getattr(current_event, "stt_metadata", {}).get("utterance_role_decision") or {})
         language = str(getattr(current_event, "stt_metadata", {}).get("detected_language") or "es")
@@ -8192,6 +8365,9 @@ class HebeEngine:
             language=language,
             topic_id=str((getattr(stream, "current_discourse_topic", {}) or {}).get("topic_id") or ""),
             scene_id=str((getattr(stream, "current_scene_timeline", {}) or {}).get("scene_id") or ""),
+            input_interpretation=getattr(
+                getattr(self, "_current_input_event", None), "interpretation", None
+            ),
         )
         if not extraction.useful:
             stream.last_ambient_context_ignored_reason = extraction.reason

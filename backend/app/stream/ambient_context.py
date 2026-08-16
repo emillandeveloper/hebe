@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import re
 import time
+
+from app.cognitive.input_interpretation import InputInterpretation, InputSpeechAct
 import unicodedata
 from typing import Any
 
@@ -148,7 +150,21 @@ class AmbientContextExtractor:
         language: str | None = None,
         topic_id: str | None = None,
         scene_id: str | None = None,
+        input_interpretation: InputInterpretation | None = None,
     ) -> AmbientContextExtraction:
+        if input_interpretation is not None:
+            if input_interpretation.speech_act == InputSpeechAct.OWNER_FEEDBACK:
+                if not input_interpretation.context_text:
+                    return AmbientContextExtraction(
+                        useful=False,
+                        reason="canonical_feedback_scope_excluded",
+                    )
+                text = input_interpretation.context_text
+            elif not input_interpretation.context_eligible:
+                return AmbientContextExtraction(
+                    useful=False,
+                    reason="canonical_context_not_eligible",
+                )
         raw = str(text or "").strip()
         normalized = self._normalize(raw)
         if not normalized:

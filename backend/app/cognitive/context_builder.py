@@ -14,6 +14,7 @@ from app.core.state import HebeState
 from app.cognitive.cognitive_decision import CognitiveDecision
 from app.cognitive.game_guidance import GameRunState
 from app.cognitive.game_guidance import GameGuidanceDecision
+from app.cognitive.input_interpretation import InputInterpretation, InputSpeechAct
 
 
 @dataclass(slots=True)
@@ -61,6 +62,7 @@ class BuiltContext:
     firewall_decision: str = ""
     stream_is_live: bool = False
     route_hints: list[str] = field(default_factory=list)
+    input_interpretation: InputInterpretation | None = None
 
 
 class ContextBuilder:
@@ -89,6 +91,7 @@ class ContextBuilder:
         authority: str = "owner",
         addressed_to_hebe: bool = True,
         message_id: str = "",
+        input_interpretation: InputInterpretation | None = None,
     ) -> BuiltContext:
         """
         Construye contexto tanto para:
@@ -99,6 +102,7 @@ class ContextBuilder:
         message_type = self._classify_message_type(
             input_text=input_text,
             internal_event=internal_event,
+            input_interpretation=input_interpretation,
         )
         context_policy = self._build_context_policy(message_type)
         inject_memory = context_policy["memory"] in {"full", "relevant"}
@@ -206,6 +210,7 @@ class ContextBuilder:
             authority=authority,
             addressed_to_hebe=addressed_to_hebe,
             message_id=message_id,
+            input_interpretation=input_interpretation,
         )
 
     # =========================
@@ -217,11 +222,20 @@ class ContextBuilder:
         *,
         input_text: Optional[str],
         internal_event: Optional[InternalEvent],
+        input_interpretation: InputInterpretation | None = None,
     ) -> str:
         if internal_event is not None:
             if internal_event.event_type.startswith("twitch_"):
                 return "stream_event"
             return "unknown"
+
+        if input_interpretation is not None:
+            if input_interpretation.speech_act == InputSpeechAct.OWNER_FEEDBACK:
+                return "owner_feedback"
+            if input_interpretation.speech_act == InputSpeechAct.OWNER_COMMAND:
+                return "command"
+            if input_interpretation.speech_act == InputSpeechAct.OWNER_ANSWER_FOLLOWUP:
+                return "followup"
 
         normalized = self._normalize_for_compare(input_text)
         if not normalized:
