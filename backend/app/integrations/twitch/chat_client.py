@@ -6,6 +6,8 @@ import threading
 import uuid
 from typing import Optional
 
+from app.integrations.twitch.message_transport import TWITCH_CHAT_MESSAGE_LIMIT
+
 
 class TwitchChatClient:
 
@@ -88,6 +90,13 @@ class TwitchChatClient:
         message = str(text or "").strip()
         if not message:
             print("[HEBE][TWITCH][CHAT] send blocked: empty message", flush=True)
+            return False
+        if len(message) > TWITCH_CHAT_MESSAGE_LIMIT:
+            print(
+                "[HEBE][TWITCH][CHAT] send blocked: "
+                f"message_too_long length={len(message)} limit={TWITCH_CHAT_MESSAGE_LIMIT}",
+                flush=True,
+            )
             return False
 
         if not self.ensure_connected():

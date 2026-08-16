@@ -4514,24 +4514,25 @@ class HebeEngine:
 
         if not reply_text:
             if event_type == "twitch_chat_react" and event_decision is not None and getattr(event_decision, "should_reply", False):
+                failure_reason = "empty_response_after_generation"
                 print(
-                    "[HEBE][POST_ROUTER_DROP_GUARD] dropped=true reason=empty_response_after_generation",
+                    f"[HEBE][POST_ROUTER_DROP_GUARD] dropped=true reason={failure_reason}",
                     flush=True,
                 )
                 print(
-                    "[HEBE][OUTPUT_ROUTE_DECISION] route=suppress reason=empty_response_after_generation public=false tts=false value_score=0.00",
+                    f"[HEBE][OUTPUT_ROUTE_DECISION] route=suppress reason={failure_reason} public=false tts=false value_score=0.00",
                     flush=True,
                 )
-                self._increment_twitch_pipeline_counter("twitch_messages_suppressed", reason="empty_response_after_generation")
+                self._increment_twitch_pipeline_counter("twitch_messages_suppressed", reason=failure_reason)
                 self._set_last_twitch_route_state(
                     output_route="suppress",
                     should_generate=True,
-                    suppress_reason="empty_response_after_generation",
+                    suppress_reason=failure_reason,
                     emitted_to_twitch=False,
                     tts_sent=False,
                 )
                 print(
-                    "[HEBE][TWITCH_PIPELINE_FINAL] route=suppress emitted=false reason=empty_response_after_generation",
+                    f"[HEBE][TWITCH_PIPELINE_FINAL] route=suppress emitted=false reason={failure_reason}",
                     flush=True,
                 )
                 self._emit_final_response(
@@ -4540,7 +4541,7 @@ class HebeEngine:
                     final_response="",
                     output_route=OutputRoute.SUPPRESS,
                     output_targets=[],
-                    guard_result={"passed": False, "reason": "empty_response_after_generation"},
+                    guard_result={"passed": False, "reason": failure_reason},
                     debug_payload=self._latest_response_debug_payload(),
                 )
             return
@@ -5522,7 +5523,7 @@ class HebeEngine:
         if "?" in text or "¿" in text:
             return ""
         sentences = [item.strip() for item in re.split(r"(?<=[.!])\s+", text) if item.strip()]
-        return " ".join(sentences[:2])[:240].strip()
+        return " ".join(sentences[:2]).strip()
 
     def poll_stream_routine(self) -> None:
         now_ts = time.time()
@@ -12168,13 +12169,9 @@ class HebeEngine:
         return result
 
     def _compact_twitch_answer(self, text: str, *, max_chars: int = 220) -> str:
-        clean = re.sub(r"\s+", " ", str(text or "")).strip()
-        if len(clean) <= max_chars and clean.count(".") + clean.count("!") + clean.count("?") <= 2:
-            return clean
-        first_sentence = re.split(r"(?<=[.!?])\s+", clean, maxsplit=1)[0].strip()
-        if first_sentence and len(first_sentence) <= max_chars:
-            return first_sentence
-        return clean[:max_chars].rstrip(" ,;:.") + "."
+        # Record style/depth separately; approved content is immutable here.
+        # Generation owns style repair and Twitch transport owns chunking.
+        return re.sub(r"\s+", " ", str(text or "")).strip()
 
     def _twitch_answer_depth_policy(self, text: str, *, category: str, payload: dict | None) -> dict:
         raw = str((payload or {}).get("message_text") or (payload or {}).get("text") or "")
@@ -13007,13 +13004,21 @@ class HebeEngine:
             self.runtime.speak(final_text, emit_chat=False)
             self._remember_assistant_text(final_text, source=gate_source)
 
-        def send_twitch_once(final_text: str) -> None:
+        def send_twitch_once(final_text: str) -> bool:
             if twitch is None or not twitch.is_available():
                 print("[HEBE][EVENT][TWITCH] service not available, dropping chat reply", flush=True)
-                return
+                return False
             if is_spontaneous:
                 print("[HEBE][TWITCH][CHATBOT] send_message reason=spontaneity", flush=True)
-            twitch.send_message(final_text)
+            sent = twitch.send_message(final_text) is not False
+            if not sent:
+                outcome = getattr(twitch, "last_delivery_outcome", None)
+                print(
+                    "[HEBE][TWITCH_DELIVERY_OUTCOME] "
+                    f"success=false outcome={outcome!r}",
+                    flush=True,
+                )
+                return False
             if stream is not None and not is_spontaneous:
                 self._record_twitch_public_reply(
                     stream=stream,
@@ -13028,6 +13033,7 @@ class HebeEngine:
             if is_spontaneous:
                 self._record_spontaneous_twitch_chat_sent(final_text, payload)
             self._remember_assistant_text(final_text, source=gate_source)
+            return True
 
         tts_gate_allowed = bool(
             tts_allowed and getattr(self.runtime.state, "tts_enabled", False)
@@ -13193,7 +13199,11 @@ class HebeEngine:
                 )
                 if not gate_result.get("emitted"):
                     if event_type == "twitch_chat_react":
-                        self._record_twitch_pipeline_final(route="suppress", emitted=False, reason="final_emission_gate")
+                        self._record_twitch_pipeline_final(
+                            route="suppress",
+                            emitted=False,
+                            reason=str(gate_result.get("reason") or "final_emission_gate"),
+                        )
                     return
                 self._record_final_gameplay_comment(final_event_id, text, event_type=event_type, payload=payload)
                 self._update_policy_trace_response(

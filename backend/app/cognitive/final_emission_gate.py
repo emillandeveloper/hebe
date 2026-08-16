@@ -283,7 +283,27 @@ class FinalEmissionGate:
             if emit_ui is not None and "local_ui" in targets:
                 emit_ui({"text": text, "source": source, "output_target": "local_ui", **debug})
             if send_twitch is not None and "twitch_chat" in targets:
-                send_twitch(text)
+                try:
+                    twitch_result = send_twitch(text)
+                except Exception as exc:
+                    twitch_result = False
+                    debug["twitch_delivery_exception"] = repr(exc)
+                if twitch_result is False:
+                    reason = "twitch_delivery_failed"
+                    if emit_debug is not None:
+                        emit_debug({**debug, "suppress_reason": reason, "delivery_failed": True})
+                    log(
+                        "[HEBE][FINAL_EMISSION_GATE] "
+                        f"emitted=false reason={reason} route={route.value} event_id={event_key}"
+                    )
+                    return FinalEmissionResult(
+                        False,
+                        route.value,
+                        targets,
+                        event_key,
+                        suppressed=False,
+                        reason=reason,
+                    )
             if speak is not None and any(target in targets for target in ("local_tts", "stream_tts")):
                 speak(text)
 

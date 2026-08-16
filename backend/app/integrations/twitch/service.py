@@ -6,6 +6,12 @@ import os
 import re
 from typing import Any
 
+from app.integrations.twitch.message_transport import (
+    TWITCH_CHAT_MESSAGE_LIMIT,
+    TwitchDeliveryOutcome,
+    split_twitch_message,
+)
+
 
 class TwitchService:
     def __init__(
@@ -19,6 +25,7 @@ class TwitchService:
         channel_name: str = "",
         bot_username: str = "JotunBot",
         shoutout_command_template: str | None = None,
+        message_max_chars: int | None = None,
     ) -> None:
         self.chat_client = chat_client
         self.target_resolver = target_resolver
@@ -27,6 +34,11 @@ class TwitchService:
         self.helix_client = helix_client
         self.channel_name = channel_name
         self.bot_username = bot_username
+        configured_limit = message_max_chars or int(
+            os.getenv("HEBE_TWITCH_MESSAGE_MAX_CHARS", str(TWITCH_CHAT_MESSAGE_LIMIT))
+        )
+        self.message_max_chars = max(1, min(int(configured_limit), TWITCH_CHAT_MESSAGE_LIMIT))
+        self.last_delivery_outcome: dict[str, Any] | None = None
         self.shoutout_command_template = (
             shoutout_command_template
             or os.getenv("HEBE_SHOUTOUT_COMMAND_TEMPLATE", "!so {username}")
@@ -48,7 +60,63 @@ class TwitchService:
         if not callable(send_fn):
             raise RuntimeError("Twitch chat client does not implement send_message")
 
-        send_fn(message)
+        plan = split_twitch_message(message, max_chars=self.message_max_chars)
+        for index, chunk in enumerate(plan.chunks, start=1):
+            try:
+                result = send_fn(chunk)
+            except Exception as exc:
+                outcome = TwitchDeliveryOutcome(
+                    success=False,
+                    total_chunks=len(plan.chunks),
+                    sent_chunks=index - 1,
+                    failed_chunk=index,
+                    reason=f"send_exception:{type(exc).__name__}",
+                    chunks=plan.chunks,
+                    separators=plan.separators,
+                    max_chars=plan.max_chars,
+                )
+                self.last_delivery_outcome = outcome.to_dict()
+                print(
+                    "[HEBE][TWITCH_DELIVERY] "
+                    f"success=false sent_chunks={index - 1} total_chunks={len(plan.chunks)} "
+                    f"failed_chunk={index} reason={outcome.reason}",
+                    flush=True,
+                )
+                return False
+            if result is False:
+                outcome = TwitchDeliveryOutcome(
+                    success=False,
+                    total_chunks=len(plan.chunks),
+                    sent_chunks=index - 1,
+                    failed_chunk=index,
+                    reason="chunk_send_failed",
+                    chunks=plan.chunks,
+                    separators=plan.separators,
+                    max_chars=plan.max_chars,
+                )
+                self.last_delivery_outcome = outcome.to_dict()
+                print(
+                    "[HEBE][TWITCH_DELIVERY] "
+                    f"success=false sent_chunks={index - 1} total_chunks={len(plan.chunks)} "
+                    f"failed_chunk={index} reason=chunk_send_failed",
+                    flush=True,
+                )
+                return False
+
+        outcome = TwitchDeliveryOutcome(
+            success=True,
+            total_chunks=len(plan.chunks),
+            sent_chunks=len(plan.chunks),
+            chunks=plan.chunks,
+            separators=plan.separators,
+            max_chars=plan.max_chars,
+        )
+        self.last_delivery_outcome = outcome.to_dict()
+        print(
+            "[HEBE][TWITCH_DELIVERY] "
+            f"success=true sent_chunks={len(plan.chunks)} total_chunks={len(plan.chunks)}",
+            flush=True,
+        )
         return True
 
     def get_current_stream(self) -> dict | None:

@@ -5,6 +5,7 @@ import random
 import re
 import unicodedata
 import uuid
+from dataclasses import replace
 from typing import Any
 
 from app.cognitive.context_builder import BuiltContext
@@ -1765,7 +1766,7 @@ class ResponseSynthesizer:
         )
         self.last_response_debug_contract = response.debug_contract
         self.last_response_source = response.response_source
-        reply = response.text[:220]
+        reply = response.text
         return self._safe_spontaneous_stream_reply(reply, fallback, payload=payload)
 
     def generate_twitch_idle_prompt_preview(self, payload: dict) -> str:
@@ -2177,16 +2178,25 @@ class ResponseSynthesizer:
         trace_id = payload.get("trace_id") or uuid.uuid4().hex[:8]
 
         bundle = build_twitch_speech_act_bundle(payload, context, is_broadcaster=is_broadcaster)
+        deterministic_fallback = self._fallback_twitch_chat_react(
+            chatter=chatter_clean,
+            message=message,
+            is_broadcaster=is_broadcaster,
+        )
         pipeline_response = self._universal_pipeline().render(
             bundle,
             include_examples=f"{self._build_stream_style_block()}\n\n{build_chat_react_examples()}",
             cleaner=lambda value: clean_twitch_reply(value, source_message=message),
-            fallback=self._fallback_twitch_chat_react(
-                chatter=chatter_clean,
-                message=message,
-                is_broadcaster=is_broadcaster,
-            ),
+            fallback=deterministic_fallback,
             route="twitch_chat_react",
+        )
+        pipeline_response = self._recover_directed_viewer_fallback(
+            payload=payload,
+            bundle=bundle,
+            response=pipeline_response,
+            message=message,
+            original_route="twitch_chat_react",
+            deterministic_fallback=deterministic_fallback,
         )
         final_reply = self._guard_twitch_reply(
             pipeline_response.text,
@@ -2457,6 +2467,107 @@ class ResponseSynthesizer:
 
         return final_reply
 
+    def _recover_directed_viewer_fallback(
+        self,
+        *,
+        payload: dict,
+        bundle,
+        response: PipelineResponse,
+        message: str,
+        original_route: str,
+        deterministic_fallback: str,
+    ) -> PipelineResponse:
+        """Regenerate authorized directed viewer replies before a generic fallback can leak."""
+        if (
+            response.response_source != "local_safe_fallback"
+            or bool(deterministic_fallback)
+            or bundle.policy_decision.result != "allow"
+            or not bundle.cognitive_decision.should_reply
+            or not self._viewer_interaction_is_directed(payload, message)
+        ):
+            return response
+
+        recovery_bundle = replace(
+            bundle,
+            speech_act=replace(
+                bundle.speech_act,
+                speech_act_type="direct_answer",
+                goal="answer the directed viewer question contextually as Hebe",
+                must_do=list(bundle.speech_act.must_do) + [
+                    "answer the current viewer message specifically",
+                    "use a concrete idea from the current message",
+                ],
+                must_not_do=list(bundle.speech_act.must_not_do) + [
+                    "do not emit a generic acknowledgement",
+                ],
+            ),
+        )
+        recovered = self._universal_pipeline().render(
+            recovery_bundle,
+            include_examples=f"{self._build_stream_style_block()}\n\n{build_chat_react_examples()}",
+            cleaner=lambda value: clean_twitch_reply(value, source_message=message),
+            fallback="",
+            route=f"{original_route}_directed_recovery",
+        )
+        recovery_debug = {
+            "attempted": True,
+            "original_response_source": response.response_source,
+            "outcome": "regenerated" if recovered.text and recovered.response_source != "local_safe_fallback" else "generation_failed",
+        }
+        if recovery_debug["outcome"] == "regenerated":
+            print("[HEBE][DIRECTED_VIEWER_RESPONSE_OUTCOME] outcome=regenerated", flush=True)
+            return replace(
+                recovered,
+                repair_attempts=list(response.repair_attempts) + list(recovered.repair_attempts),
+                debug_contract={**recovered.debug_contract, "directed_viewer_recovery": recovery_debug},
+            )
+
+        terminal_text = self._directed_viewer_terminal_fallback(recovery_bundle)
+        terminal_guard = final_response_guard(
+            terminal_text,
+            recovery_bundle,
+            game_advice_gate=self.game_advice_gate,
+        )
+        recovery_debug["outcome"] = "terminal_fallback"
+        recovery_debug["generation_outcome"] = "failed"
+        print(
+            "[HEBE][DIRECTED_VIEWER_RESPONSE_OUTCOME] "
+            "generation=failed outcome=terminal_fallback",
+            flush=True,
+        )
+        return PipelineResponse(
+            text=terminal_text,
+            raw_response=recovered.raw_response,
+            response_source="directed_viewer_terminal_fallback",
+            guard_result=terminal_guard,
+            repair_attempts=list(response.repair_attempts) + list(recovered.repair_attempts),
+            debug_contract={
+                **recovered.debug_contract,
+                "response_source": "directed_viewer_terminal_fallback",
+                "final_response": terminal_text,
+                "guard_result": terminal_guard.to_dict(),
+                "directed_viewer_recovery": recovery_debug,
+            },
+        )
+
+    @staticmethod
+    def _directed_viewer_terminal_fallback(bundle) -> str:
+        viewer = str(bundle.speech_act.target_speaker or bundle.envelope.speaker or "alguien").strip()
+        viewer = re.sub(r"[\r\n,;:]+", " ", viewer).strip() or "alguien"
+        return f"{viewer}, no tengo una buena respuesta para eso; prefiero no improvisarte humo."
+
+    @staticmethod
+    def _viewer_interaction_is_directed(payload: dict, message: str) -> bool:
+        if any(bool(payload.get(key)) for key in (
+            "direct_address_to_hebe",
+            "mentions_hebe",
+            "reply_to_hebe_message",
+            "direct_priority_reason",
+        )):
+            return True
+        normalized = unicodedata.normalize("NFKD", str(message or "")).encode("ascii", "ignore").decode("ascii").casefold()
+        return bool(re.match(r"^\s*@?(?:hebe(?:nifelheim)?|ebe|eve|jebe|heve)\b", normalized))
+
     def _repair_speech_act_response(
         self,
         bundle,
@@ -2604,9 +2715,6 @@ class ResponseSynthesizer:
         if any(item in lowered for item in blocked) or any(item in lowered for item in _ASSISTANT_OFFER_PHRASES):
             print("[HEBE][STYLE_GUARD] blocked_phrase='twitch_escalation_or_helper' action=fallback", flush=True)
             return fallback
-        words = text.split()
-        if len(words) > 24:
-            return " ".join(words[:24]).rstrip(" ,.;:") + "."
         return text
 
     def _fallback_twitch_chat_react(

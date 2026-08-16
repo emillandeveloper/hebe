@@ -184,6 +184,16 @@ class FixedResponseSynth:
         return f"modelo:{result.action_type}:{result.state_changes.get('target', result.state_changes.get('app_id', ''))}"
 
 
+class SequentialResponseModel:
+    def __init__(self, replies):
+        self.replies = list(replies)
+        self.calls = []
+
+    def chat(self, messages, **kwargs):
+        self.calls.append((messages, kwargs))
+        return self.replies.pop(0) if self.replies else ""
+
+
 def make_engine(chatters=None, *, live=True):
     stream = StreamSessionState(enabled=True, presence_mode="reactive")
     stream.is_live = live
@@ -2149,7 +2159,7 @@ class VoiceCommandPipelineTests(unittest.TestCase):
         self.assertEqual(engine.runtime.twitch.sent, ["Te vi."])
         self.assertIn("[HEBE][FOLLOWUP_QUESTION_GUARD] allowed=false action=repair", "\n".join(logs))
 
-    def test_twitch_recipe_not_full_tutorial(self):
+    def test_twitch_depth_guard_suppresses_instead_of_truncating_unrepaired_content(self):
         engine = make_engine(["nuria"])
         engine.runtime.state.stream.is_live = True
         long_reply = "Primero corta todo. Segundo mezcla ingredientes. Tercero hornea media hora. Cuarto deja reposar."
@@ -2162,8 +2172,7 @@ class VoiceCommandPipelineTests(unittest.TestCase):
                 payload={"user_login": "viewer", "display_name": "Viewer", "message_text": "Hebe, receta rapida para cocinar algo?"},
             )
 
-        self.assertEqual(len(engine.runtime.twitch.sent), 1)
-        self.assertLess(len(engine.runtime.twitch.sent[0]), len(long_reply))
+        self.assertEqual(engine.runtime.twitch.sent, [])
         self.assertIn("[HEBE][TWITCH_ANSWER_DEPTH] action=repair", "\n".join(logs))
 
     def test_candidate_not_broadcast_before_route(self):
@@ -2460,6 +2469,82 @@ class VoiceCommandPipelineTests(unittest.TestCase):
         self.assertIn("[HEBE][POST_ROUTER_DISPATCH]", joined)
         self.assertIn("[HEBE][PRESENCE_ENGINE] source=twitch_chat", joined)
         self.assertIn("[HEBE][OUTPUT_ROUTE_DECISION] route=twitch_text_reply", joined)
+
+    def test_directed_casual_question_recovers_after_generic_fallback_and_is_public(self):
+        engine = make_engine(["viewer"])
+        engine.runtime.state.stream.is_live = True
+        engine.context_builder = FakeContextBuilder()
+        engine.deliberation_service = FakeDeliberationService()
+        engine.plan_executor = FakePlanExecutor()
+        model = SequentialResponseModel([
+            "",
+            "",
+            "",
+            "La creatividad suele volver cuando cambias una rutina pequeña y pruebas sin exigirte perfección.",
+        ])
+        engine.response_synthesizer = ResponseSynthesizer(conversation_model=model)
+        engine.response_synthesizer._dataset_logger.log_twitch_chat_react = lambda **kwargs: None
+        logs = []
+        event = SimpleNamespace(
+            event_type="twitch_chat_react",
+            payload={
+                "event_id": "evt-directed-recovery",
+                "user_login": "viewer",
+                "display_name": "Viewer",
+                "message_text": "Hebe, ¿cómo puedo recuperar la creatividad?",
+            },
+        )
+
+        with patch("builtins.print", lambda *args, **kwargs: logs.append(" ".join(str(arg) for arg in args))), \
+             patch("app.hebe_engine.emit"), \
+             patch("app.hebe_engine.log_chat"):
+            engine.process_internal_event(event)
+
+        firewall = engine._firewall_payload()
+        joined = "\n".join(logs)
+        self.assertEqual(firewall["firewall_decision"], "allow")
+        self.assertTrue(firewall["addressed_to_hebe"])
+        self.assertEqual(len(model.calls), 4)
+        self.assertEqual(len(engine.runtime.twitch.sent), 1)
+        self.assertIn("creatividad", engine.runtime.twitch.sent[0].casefold())
+        self.assertIn("[HEBE][POST_ROUTER_DISPATCH]", joined)
+        self.assertIn("[HEBE][DIRECTED_VIEWER_RESPONSE_OUTCOME] outcome=regenerated", joined)
+        self.assertNotIn("generic_ack_twitch_fallback", joined)
+
+    def test_directed_generation_failure_sends_one_terminal_fallback_publicly(self):
+        engine = make_engine(["viewer"])
+        engine.runtime.state.stream.is_live = True
+        engine.context_builder = FakeContextBuilder()
+        engine.deliberation_service = FakeDeliberationService()
+        engine.plan_executor = FakePlanExecutor()
+        model = SequentialResponseModel(["", "", "", "", "", ""])
+        engine.response_synthesizer = ResponseSynthesizer(conversation_model=model)
+        engine.response_synthesizer._dataset_logger.log_twitch_chat_react = lambda **kwargs: None
+        logs = []
+        event = SimpleNamespace(
+            event_type="twitch_chat_react",
+            payload={
+                "event_id": "evt-directed-terminal-fallback",
+                "user_login": "viewer",
+                "display_name": "Viewer",
+                "message_text": "Hebe, ¿qué harías para salir de un bloqueo creativo?",
+            },
+        )
+
+        with patch("builtins.print", lambda *args, **kwargs: logs.append(" ".join(str(arg) for arg in args))), \
+             patch("app.hebe_engine.emit"), \
+             patch("app.hebe_engine.log_chat"):
+            engine.process_internal_event(event)
+
+        joined = "\n".join(logs)
+        self.assertEqual(len(model.calls), 6)
+        self.assertEqual(
+            engine.runtime.twitch.sent,
+            ["Viewer, no tengo una buena respuesta para eso; prefiero no improvisarte humo."],
+        )
+        self.assertIn("generation=failed outcome=terminal_fallback", joined)
+        self.assertIn("[HEBE][TWITCH_PIPELINE_FINAL] route=twitch_text_reply emitted=true", joined)
+        self.assertNotIn("generic_ack_twitch_fallback", joined)
 
     def test_input_firewall_twitch_preserves_raw_text_and_addressing(self):
         engine = make_engine(["nuria"])
