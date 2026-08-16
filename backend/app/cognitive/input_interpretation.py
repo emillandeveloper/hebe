@@ -84,13 +84,19 @@ _NEGATIVE_FEEDBACK = (
     r"\bno\s+me\s+vuelvas\s+a\b",
     r"\bno\s+hace\s+falta\s+que\s+me\b",
     r"\bte\s+quieres\s+callar\b",
-    r"\botra\s+vez\s+con\s+(?:lo\s+de|la|el)\b",
+    r"\botra\s+vez\s+con\s+(?:lo\s+de(?:l)?|la|el)\b",
     r"\b(?:todo\s+el\s+rato|todo\s+el\s+(?:puto\s+)?stream)\b.*\b(?:diciendome|recordandome|recomendandome)\b",
+    r"\bno\s+vuelvas\s+a\b",
+    r"\bno\s+quiero\s+que\s+vuelvas\s+a\b",
+    r"\bdeja\s+(?:ese|esa)\s+(?:tema|broma)\b",
 )
 _POSITIVE_FEEDBACK = (
     r"\beso\s+si\s+me\s+ha\s+hecho\s+gracia\b",
     r"\b(?:esa|esta|tu)\s+respuesta\s+(?:estuvo|ha\s+estado|esta)\s+bien\b",
     r"\bme\s+ha\s+gustado\s+(?:eso|esa|tu\s+respuesta)\b",
+    r"\b(?:puedes|puede)\s+(?:volver|seguir)\b",
+    r"\bya\s+puedes\b.*\b(?:seguir|volver|hacer)\b",
+    r"\b(?:esa|eso)\s+vuelve\s+a\s+tener\s+gracia\b",
 )
 _CONTEXT_CLAUSE = re.compile(
     r"\b(?:\d+\s*hp|hp|vida|mana|jefe|boss|enemig[oa]|combate|"
@@ -321,9 +327,13 @@ class InputInterpreter:
     @staticmethod
     def _extract_referent(normalized: str) -> str:
         patterns = (
-            r"\botra vez con lo de\s+(.+?)(?:[;.]|$)",
+            r"\botra vez con lo de(?:l)?\s+(.+?)(?:[;.]|$)",
             r"\bdeja(?: ya)? de\s+(.+?)(?:[;.]|$)",
             r"\bno me vuelvas a\s+(.+?)(?:[;.]|$)",
+            r"\bno vuelvas a\s+(.+?)(?:[;.]|$)",
+            r"\bno quiero que vuelvas a\s+(.+?)(?:[;.]|$)",
+            r"\bdeja\s+(?:ese|esa)\s+(?:tema|broma)\s*(.*?)(?:[;.]|$)",
+            r"\b(?:puedes|puede)\s+(?:volver|seguir)(?:\s+a)?\s*(.*?)(?:[;.]|$)",
             r"\b(?:esa|esta|tu) respuesta\b",
         )
         for pattern in patterns:

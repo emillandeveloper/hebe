@@ -47,6 +47,9 @@ VOLATILE_STREAM_DEFAULTS: dict[str, Any] = {
     "last_spontaneous_message": None,
     "last_stream_spontaneity_blocked_reason": None,
     "last_proactive_decision": None,
+    "behavior_adaptation_state": {"entries": []},
+    "last_feedback_application": None,
+    "last_behavior_adaptation_decision": None,
     "proposed_discourse_contribution": None,
     "current_stream_turn": None,
     "last_discourse_contribution": None,
@@ -100,6 +103,11 @@ class LiveSessionStateManager:
         for name, default in VOLATILE_STREAM_DEFAULTS.items():
             setattr(stream, name, copy.deepcopy(default))
             reset.append(name)
+        blocks = list(getattr(stream, "active_behavior_blocks", []) or [])
+        stream.active_behavior_blocks = [
+            item for item in blocks
+            if isinstance(item, dict) and str(item.get("scope") or "current_stream") == "durable"
+        ]
         self.current_session_id = key
         self.logger(
             "[HEBE][LIVE_SESSION_STATE] "

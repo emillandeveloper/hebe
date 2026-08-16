@@ -142,6 +142,7 @@ from app.stream.behavior_constraints import (
     BehaviorConstraintOutputGuard,
     constraint_matches,
 )
+from app.stream.behavior_adaptation import AdaptationAction, BehaviorAdaptationService
 from app.stream.viewer_profiles import (
     GrammaticalAgreementGuard,
     ViewerLinguisticProfileStore,
@@ -356,6 +357,7 @@ class HebeEngine:
             ),
         )
         self.stream_preparation = StreamPreparationRoutine()
+        self.behavior_adaptation = BehaviorAdaptationService()
         self.stream_spontaneity.start_grace_period(getattr(self.runtime.state, "stream", None))
         self.stream_companion_loop = StreamCompanionLoop(
             spontaneity=self.stream_spontaneity,
@@ -364,6 +366,7 @@ class HebeEngine:
             opportunities=self.spontaneous_opportunities,
             owner_voice_active_fn=self._owner_audio_active,
             tts_active_fn=lambda: bool(getattr(self, "_tts_active", False)),
+            behavior_adaptation=self.behavior_adaptation,
         )
         self.stream_context_sync = StreamContextSyncService(
             twitch_api=getattr(self.runtime, "twitch", None),
@@ -4515,6 +4518,28 @@ class HebeEngine:
                 flush=True,
             )
             if service is not None:
+                adaptation_service = getattr(self, "behavior_adaptation", None)
+                if adaptation_service is None:
+                    adaptation_service = BehaviorAdaptationService()
+                    self.behavior_adaptation = adaptation_service
+                adaptation = adaptation_service.evaluate_candidate(
+                    stream,
+                    reply_text,
+                    topic=str((getattr(event, "payload", {}) or {}).get("idle_topic") or ""),
+                    mode="proactive",
+                )
+                if adaptation.action in {AdaptationAction.COOLDOWN, AdaptationAction.SUPPRESS}:
+                    service.consume_semantic_opportunity(
+                        stream,
+                        getattr(event, "payload", {}) or {},
+                        reason=f"behavior_adaptation_{adaptation.action.value}",
+                    )
+                    print(
+                        f"[HEBE][SPONTANEITY] skipped reason=behavior_adaptation_{adaptation.action.value} "
+                        f"motif={adaptation.motif_id} fatigue={adaptation.fatigue:.3f}",
+                        flush=True,
+                    )
+                    return
                 if service.is_too_similar_to_recent(stream, reply_text):
                     service.consume_semantic_opportunity(stream, getattr(event, "payload", {}) or {}, reason="too_similar_to_recent")
                     print("[HEBE][SPONTANEITY] skipped reason=too_similar_to_recent", flush=True)
@@ -8290,6 +8315,25 @@ class HebeEngine:
         interpretation = getattr(current_event, "interpretation", None)
         if interpretation is not None and interpretation.speech_act == InputSpeechAct.OWNER_FEEDBACK:
             stream.last_owner_feedback = interpretation.as_dict()
+            metadata = getattr(current_event, "stt_metadata", None)
+            already_applied = bool(isinstance(metadata, dict) and metadata.get("behavior_feedback_applied"))
+            if not already_applied:
+                recent_utterance = None
+                try:
+                    recent_utterance = self._get_live_session_brain().state.last_hebe_utterance
+                except Exception:
+                    recent_utterance = str(getattr(self, "_last_assistant_text", "") or "")
+                adaptation_service = getattr(self, "behavior_adaptation", None)
+                if adaptation_service is None:
+                    adaptation_service = BehaviorAdaptationService()
+                    self.behavior_adaptation = adaptation_service
+                adaptation_service.apply_feedback(
+                    stream,
+                    interpretation,
+                    recent_hebe_utterance=recent_utterance,
+                )
+                if isinstance(metadata, dict):
+                    metadata["behavior_feedback_applied"] = True
             if not interpretation.context_text:
                 stream.last_voice_event = "owner_feedback"
                 stream.last_voice_event_ts = time.time()

@@ -2,6 +2,8 @@ import unittest
 from unittest.mock import patch
 
 from app.stream.companion_loop import StreamCompanionLoop
+from app.cognitive.input_interpretation import InputInterpreter
+from app.stream.behavior_adaptation import BehaviorAdaptationService
 from app.stream.spontaneity import StreamSpontaneityConfig, StreamSpontaneityService
 from app.stream.state import StreamSessionState
 
@@ -127,6 +129,43 @@ class StreamCompanionLoopTests(unittest.TestCase):
         self.assertEqual(stream.last_proactive_decision["final_response"], "short final line")
         self.assertEqual(stream.last_proactive_decision["selected_route"], "stream_tts_reply")
         self.assertEqual(loop.emitted_count, 1)
+
+    def test_proactive_hot_path_consults_behavior_adaptation_before_event(self):
+        now = 1_000_000.0
+        stream = self.make_stream(now=now)
+        stream.run_context_updated_ts = now
+        stream.recent_idle_messages = [{
+            "text": "Otra reacción sobre failure death.",
+            "topic": "failure_or_death",
+            "timestamp": now - 90,
+        }]
+        stream.recent_run_context_facts = [{
+            "id": "ambient:failure_or_death:feedback",
+            "kind": "failure_or_death",
+            "category": "failure_or_death",
+            "text": "Leo mentioned a failure or death.",
+            "confidence": 0.9,
+            "timestamp": now - 30,
+            "expires_at": now + 600,
+        }]
+        interpretation = InputInterpreter().interpret(
+            raw_text="Otra vez con lo de failure death, ya cansa.",
+            source="stt_voice",
+            authority="owner",
+            addressed_to_hebe=True,
+        )
+        adaptation = BehaviorAdaptationService()
+        adaptation.apply_feedback(stream, interpretation, now=now)
+        loop = self.make_loop(now=now)
+        loop.behavior_adaptation = adaptation
+
+        with patch("app.stream.companion_loop.log_proactive_decision", lambda decision: None):
+            tick = loop.evaluate(stream, stream_tts_enabled=True, output_mode="tts_enabled")
+
+        self.assertIsNotNone(tick)
+        self.assertFalse(tick.should_speak)
+        self.assertEqual(tick.blocked_reason, "behavior_adaptation_suppress")
+        self.assertEqual(tick.readiness["behavior_adaptation"]["action"], "suppress")
 
     def test_companion_health_summary_logged(self):
         now = 1_000_000.0

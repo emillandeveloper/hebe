@@ -11,7 +11,7 @@ from typing import Any, Callable
 
 BEHAVIOR_FAMILIES = {
     "compliment", "flirtation", "affectionate_message", "relay_message",
-    "promotion", "mention", "topic_engagement",
+    "promotion", "mention", "topic_engagement", "semantic_motif",
 }
 
 
@@ -198,7 +198,20 @@ class BehaviorConstraintCompiler:
 
 def persist_constraint(stream: Any, constraint: BehaviorConstraint) -> dict[str, Any]:
     values = [BehaviorConstraint.from_value(item) for item in list(getattr(stream, "active_behavior_blocks", []) or []) if isinstance(item, (dict, BehaviorConstraint))]
-    values = [item for item in values if not (item.behavior_family == constraint.behavior_family and item.recipient_scope == constraint.recipient_scope and item.recipient_login.casefold() == constraint.recipient_login.casefold() and item.requester_login.casefold() == constraint.requester_login.casefold())]
+    motif_keys = {item for item in constraint.behavior_variants if item.startswith("motif:")}
+    values = [
+        item for item in values
+        if not (
+            item.behavior_family == constraint.behavior_family
+            and item.recipient_scope == constraint.recipient_scope
+            and item.recipient_login.casefold() == constraint.recipient_login.casefold()
+            and item.requester_login.casefold() == constraint.requester_login.casefold()
+            and (
+                constraint.behavior_family != "semantic_motif"
+                or bool(motif_keys & {value for value in item.behavior_variants if value.startswith("motif:")})
+            )
+        )
+    ]
     values.append(constraint)
     setattr(stream, "active_behavior_blocks", [item.to_dict() for item in values])
     return constraint.to_dict()

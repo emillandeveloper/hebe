@@ -9,6 +9,7 @@ from typing import Any, Callable
 from app.cognitive.core_loop import PerceivedEvent, PolicyContract, PresenceEngine, UnderstandingResult
 from app.cognitive.scheduler import InternalEvent
 from app.stream.proactive import ProactiveDecision, log_proactive_decision, semantic_cooldown_key
+from app.stream.behavior_adaptation import AdaptationAction, BehaviorAdaptationService
 from app.stream.speech_intents import (
     SpeechIntent,
     SpeechIntentManager,
@@ -99,6 +100,7 @@ class StreamCompanionLoop:
         owner_voice_active_fn: Callable[[], bool] | None = None,
         tts_active_fn: Callable[[], bool] | None = None,
         intent_manager: SpeechIntentManager | None = None,
+        behavior_adaptation: BehaviorAdaptationService | None = None,
     ):
         self.spontaneity = spontaneity or StreamSpontaneityService()
         self.presence_engine = presence_engine or PresenceEngine()
@@ -108,6 +110,7 @@ class StreamCompanionLoop:
         self.owner_voice_active_fn = owner_voice_active_fn or (lambda: False)
         self.tts_active_fn = tts_active_fn or (lambda: False)
         self.intent_manager = intent_manager or SpeechIntentManager(now_fn=now_fn or time.time)
+        self.behavior_adaptation = behavior_adaptation or BehaviorAdaptationService()
         self.last_tick_ts = 0.0
         self.last_summary_ts = 0.0
         self._used_anchor_ids: set[str] = set()
@@ -214,7 +217,27 @@ class StreamCompanionLoop:
                 "channel_cost": 0.0,
             }
         else:
+            candidate_ref = " ".join(
+                value for value in (
+                    selected_intent.subject_ref,
+                    selected_intent.topic,
+                    str(readiness.get("candidate_topic") or ""),
+                ) if value
+            )
+            adaptation = self.behavior_adaptation.evaluate_candidate(
+                stream,
+                candidate_ref,
+                topic=selected_intent.topic,
+                mode="proactive",
+                now=now,
+            )
+            readiness["behavior_adaptation"] = adaptation.to_dict()
+            if adaptation.action == AdaptationAction.DOWNRANK:
+                selected_intent.value *= 0.55
             presence = self._presence_decision(stream, readiness, anchor, selected_intent, now=now)
+            if adaptation.action in {AdaptationAction.COOLDOWN, AdaptationAction.SUPPRESS}:
+                presence["should_intervene"] = False
+                presence["reason"] = f"behavior_adaptation_{adaptation.action.value}"
             if not presence.get("should_intervene"):
                 self.intent_manager.release(selected_intent.id, str(presence.get("reason") or "presence_rejected"))
                 stream.speech_intent_state = self.intent_manager.snapshot()
