@@ -49,6 +49,7 @@ VOLATILE_STREAM_DEFAULTS: dict[str, Any] = {
     "behavior_adaptation_state": {"entries": []},
     "last_feedback_application": None,
     "last_behavior_adaptation_decision": None,
+    "last_behavior_correlation_id": "",
     "proposed_discourse_contribution": None,
     "current_stream_turn": None,
     "last_discourse_contribution": None,

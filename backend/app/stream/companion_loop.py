@@ -193,6 +193,11 @@ class StreamCompanionLoop:
             or 0.0
         )
         behavior_evaluations: dict[str, Any] = {}
+        stream_session_id = str(
+            getattr(stream, "active_stream_session_id", "")
+            or getattr(stream, "stream_session_id", "")
+            or ""
+        )
 
         def rank_policy(intent: SpeechIntent) -> dict[str, Any]:
             candidate_ref = " ".join(
@@ -208,6 +213,13 @@ class StreamCompanionLoop:
                 topic=intent.topic,
                 mode="proactive",
                 now=now,
+                observation={
+                    "trace_id": f"behavior:{stream_session_id or 'stream'}:{intent.id}",
+                    "stream_session_id": stream_session_id,
+                    "candidate_id": intent.id,
+                    "speech_intent_id": intent.id,
+                    "speech_intent": intent.type.value,
+                },
             )
             behavior_evaluations[intent.id] = evaluation
             return evaluation.to_dict()
@@ -247,6 +259,13 @@ class StreamCompanionLoop:
                 stream.speech_intent_state = self.intent_manager.snapshot()
         route = self._route_for_presence(stream, presence, stream_tts_enabled=stream_tts_enabled, output_mode=output_mode)
         should_speak = bool(selected_intent and presence.get("should_intervene") and route != "observe_only")
+        self.behavior_adaptation.record_ranking(
+            stream,
+            list(arbitration.ranked_candidates),
+            selected_intent_id=selected_intent.id if selected_intent else "",
+            generation_attempted=should_speak,
+            timestamp=now,
+        )
         blocked_reason = "" if should_speak else str(presence.get("reason") or arbitration.reason or "observe_only")
         reason = "presence_value" if should_speak else blocked_reason
         if should_speak:
@@ -268,6 +287,7 @@ class StreamCompanionLoop:
                 event.payload["speech_intent_id"] = selected_intent.id
                 event.payload["speech_intent_type"] = selected_intent.type.value
                 event.payload["speech_intent"] = selected_intent.to_dict()
+                event.payload["behavior_correlation_id"] = behavior_evaluations[selected_intent.id].trace_id
                 scene_guard = dict(anchor.get("scene_guard") or self.scene_timeline.snapshot())
                 event.payload["scene_guard"] = scene_guard
                 opportunity = self.opportunities.open(

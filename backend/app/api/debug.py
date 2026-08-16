@@ -40,6 +40,10 @@ class ViewerProfileUpdate(BaseModel):
     pronouns: dict[str, str] = Field(default_factory=dict)
 
 
+class BehaviorCalibrationLabelRequest(BaseModel):
+    label: str
+
+
 @router.get("/viewer-profiles")
 def get_viewer_profiles():
     return {"ok": True, "profiles": ViewerLinguisticProfileStore().list_profiles()}
@@ -363,6 +367,43 @@ def get_policy_behavior_blocks(request: Request):
         return {"ok": True, "behavior_blocks": engine.get_active_behavior_blocks()}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Behavior block debug failed: {type(exc).__name__}: {exc}")
+
+
+@router.get("/behavior-calibration")
+def get_behavior_calibration(
+    request: Request,
+    minutes: int = Query(default=180, ge=1, le=24 * 60),
+    limit: int = Query(default=500, ge=1, le=2000),
+):
+    adapter = getattr(request.app.state, "adapter", None)
+    engine = getattr(adapter, "_engine", None) if adapter is not None else None
+    if engine is None:
+        return {"ok": False, "reason": "engine not running"}
+    try:
+        return {
+            "ok": True,
+            **engine.get_behavior_calibration_snapshot(),
+            "persisted_recent_events": read_jsonl_recent(
+                "behavior_calibration", minutes=minutes, limit=limit,
+            ),
+            "persisted_recent_labels": read_jsonl_recent(
+                "behavior_calibration_labels", minutes=minutes, limit=limit,
+            ),
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Behavior calibration debug failed: {type(exc).__name__}: {exc}")
+
+
+@router.post("/behavior-calibration/{trace_id}/label")
+def label_behavior_calibration(trace_id: str, body: BehaviorCalibrationLabelRequest, request: Request):
+    adapter = getattr(request.app.state, "adapter", None)
+    engine = getattr(adapter, "_engine", None) if adapter is not None else None
+    if engine is None:
+        raise HTTPException(status_code=503, detail="engine not running")
+    try:
+        return {"ok": True, "calibration_label": engine.label_behavior_calibration_trace(trace_id, body.label)}
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
 
 
 @router.get("/db/tables/{table_name}/schema")

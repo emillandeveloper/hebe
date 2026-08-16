@@ -364,7 +364,9 @@ class HebeEngine:
             self.behavior_constraint_migrations = []
             self.behavior_constraint_repository = None
             print(
-                f"[HEBE][BEHAVIOR_CONSTRAINT_STORE] status=failed_closed reason={type(exc).__name__}",
+                "[HEBE][BEHAVIOR_CONSTRAINT_STORE] status=unavailable "
+                "reason_code=behavior_constraint_store_unavailable "
+                f"error_type={type(exc).__name__}",
                 flush=True,
             )
         self.behavior_adaptation = BehaviorAdaptationService(
@@ -1572,6 +1574,23 @@ class HebeEngine:
         if stream is None:
             return []
         return list(active_behavior_blocks(stream))
+
+    def get_behavior_calibration_snapshot(self) -> dict:
+        stream = self._get_stream_state()
+        if stream is None:
+            return {
+                "stream_session_id": "",
+                "store_status": "unavailable",
+                "active_current_stream": [],
+                "active_durable": [],
+                "retired_durable_recent": [],
+                "episodic_fatigue": [],
+                "telemetry": self.behavior_adaptation.observability.snapshot(),
+            }
+        return self.behavior_adaptation.inspection_snapshot(stream)
+
+    def label_behavior_calibration_trace(self, trace_id: str, label: str) -> dict:
+        return self.behavior_adaptation.observability.label(trace_id, label)
 
     def get_stream_readiness_status(self, *, error_count_last_10m: int = 0, vts_status: dict | None = None) -> dict:
         stream = self._get_stream_state()
@@ -4536,6 +4555,12 @@ class HebeEngine:
                 flush=True,
             )
             if service is not None:
+                behavior_correlation_id = str(
+                    (getattr(event, "payload", {}) or {}).get("behavior_correlation_id") or ""
+                )
+                speech_intent_id = str(
+                    (getattr(event, "payload", {}) or {}).get("speech_intent_id") or ""
+                )
                 adaptation_service = getattr(self, "behavior_adaptation", None)
                 if adaptation_service is None:
                     adaptation_service = BehaviorAdaptationService()
@@ -4545,6 +4570,14 @@ class HebeEngine:
                     reply_text,
                     topic=str((getattr(event, "payload", {}) or {}).get("idle_topic") or ""),
                     mode="proactive",
+                    observation={
+                        "trace_id": behavior_correlation_id,
+                        "candidate_id": speech_intent_id,
+                        "speech_intent_id": speech_intent_id,
+                        "speech_intent": str(
+                            (getattr(event, "payload", {}) or {}).get("speech_intent_type") or ""
+                        ),
+                    },
                 )
                 if adaptation.action == AdaptationAction.SUPPRESS:
                     service.consume_opportunity(
@@ -4557,7 +4590,15 @@ class HebeEngine:
                         f"motif={adaptation.motif_id} fatigue={adaptation.fatigue:.3f}",
                         flush=True,
                     )
+                    adaptation_service.record_emission(
+                        trace_id=adaptation.trace_id,
+                        stream=stream,
+                        event_id=speech_intent_id,
+                        emitted=False,
+                        reason_code=adaptation.reason,
+                    )
                     return
+                stream.last_behavior_correlation_id = adaptation.trace_id
                 print("[HEBE][SPONTANEITY] spoken reason=canonical_behavior_policy_validated", flush=True)
 
         if event.event_type.startswith("twitch_"):
@@ -7806,6 +7847,28 @@ class HebeEngine:
             speak=speak_fn,
         )
         result_dict = result.to_dict()
+        stream = self._get_stream_state()
+        behavior_trace_id = str(
+            debug_payload.get("behavior_correlation_id")
+            or (
+                getattr(stream, "last_behavior_correlation_id", "")
+                if source == "spontaneity" and stream is not None
+                else ""
+            )
+            or ""
+        )
+        if behavior_trace_id:
+            adaptation_service = getattr(self, "behavior_adaptation", None)
+            if adaptation_service is not None:
+                adaptation_service.record_emission(
+                    trace_id=behavior_trace_id,
+                    stream=stream,
+                    event_id=event_id,
+                    emitted=bool(result_dict.get("emitted")),
+                    reason_code=str(result_dict.get("reason") or ""),
+                )
+            if stream is not None and getattr(stream, "last_behavior_correlation_id", "") == behavior_trace_id:
+                stream.last_behavior_correlation_id = ""
         if source in {"twitch", "spontaneity"}:
             self._get_twitch_interaction_coordinator().record_emission(
                 event_id,
@@ -8339,8 +8402,8 @@ class HebeEngine:
                     interpretation,
                     recent_hebe_utterance=recent_utterance,
                     source_event_id=str(
-                        getattr(current_event, "timestamp", "")
-                        or (metadata or {}).get("event_id")
+                        (metadata or {}).get("event_id")
+                        or getattr(current_event, "timestamp", "")
                         or ""
                     ),
                 )

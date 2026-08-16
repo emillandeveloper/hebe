@@ -39,6 +39,8 @@ JSONL_LOGS = {
     "game_guidance": "game_guidance.jsonl",
     "plan_executor": "plan_executor.jsonl",
     "proactive_decisions": "proactive_decisions.jsonl",
+    "behavior_calibration": "behavior_calibration.jsonl",
+    "behavior_calibration_labels": "behavior_calibration_labels.jsonl",
     "tts": "tts.jsonl",
     "ui_events": "ui_events.jsonl",
 }

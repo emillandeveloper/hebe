@@ -108,6 +108,7 @@ class StreamSessionState:
     behavior_adaptation_state: dict = field(default_factory=lambda: {"entries": []})
     last_feedback_application: Optional[dict] = None
     last_behavior_adaptation_decision: Optional[dict] = None
+    last_behavior_correlation_id: str = ""
     last_policy_trace: Optional[dict] = None
     viewer_policy_cooldowns: dict[str, dict] = field(default_factory=dict)
     last_invalidated_run_context_facts: list[dict] = field(default_factory=list)
