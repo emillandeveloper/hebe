@@ -352,7 +352,10 @@ class TwitchChatBot:
             return
 
         if self.ambient_message_callback is not None:
-            self.ambient_message_callback(username, username, message, channel)
+            try:
+                self.ambient_message_callback(username, username, message, channel, tags)
+            except TypeError:
+                self.ambient_message_callback(username, username, message, channel)
 
         self._cleanup_pending_replies()
 

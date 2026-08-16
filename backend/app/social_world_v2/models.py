@@ -28,5 +28,5 @@ class SocialOpportunity:
 
 @dataclass(frozen=True,slots=True)
 class SocialContext:
-    person:dict[str,Any];familiarity:dict[str,Any];recent_episodes:tuple[dict[str,Any],...];active_threads:tuple[dict[str,Any],...];relevant_hypotheses:tuple[dict[str,Any],...];shared_culture_candidates:tuple[dict[str,Any],...];domain_authority_refs:tuple[dict[str,Any],...];selected:tuple[dict[str,Any],...];rejected:tuple[dict[str,Any],...];reasons:dict[str,int];provenance_manifest:tuple[dict[str,Any],...];manifest_size_bytes:int;latency_ms:float
+    person:dict[str,Any];familiarity:dict[str,Any];recent_episodes:tuple[dict[str,Any],...];recent_summaries:tuple[dict[str,Any],...];active_threads:tuple[dict[str,Any],...];relevant_hypotheses:tuple[dict[str,Any],...];shared_culture_candidates:tuple[dict[str,Any],...];domain_authority_refs:tuple[dict[str,Any],...];selected:tuple[dict[str,Any],...];rejected:tuple[dict[str,Any],...];reasons:dict[str,int];provenance_manifest:tuple[dict[str,Any],...];manifest_size_bytes:int;latency_ms:float
     def to_dict(self):return asdict(self)

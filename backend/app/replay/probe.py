@@ -66,7 +66,8 @@ class CognitiveStateProbe:
         "conversations", "open_threads", "beliefs", "belief_evidence", "scene_assertions",
         "game_identities", "game_runs", "game_run_sessions", "game_run_events",
         "game_knowledge_facts", "game_knowledge_v2_gaps",
-        "people", "person_identities", "person_sessions", "social_episodes",
+        "people", "person_identities", "person_sessions", "social_presence_events",
+        "social_episodes", "social_summaries",
         "shared_culture_items", "shared_culture_evidence",
         "consolidation_runs", "consolidation_deltas", "action_ledger",
         "temporal_maintenance_audit", "learning_observations", "scene_transitions",
@@ -162,7 +163,7 @@ class CognitiveStateProbe:
             "recent_chat_count": len(list(getattr(stream, "recent_chat_messages", []) or [])),
             "last_raid": _plain(getattr(stream, "last_raid_event", None) or {}),
             "last_cheer": _plain(getattr(stream, "last_cheer_event", None) or {}),
-            "people":rows["people"],"identities":rows["person_identities"],"recent_episodes":rows["social_episodes"],
+            "people":rows["people"],"identities":rows["person_identities"],"presence_events":rows["social_presence_events"],"recent_episodes":rows["social_episodes"],"recent_summaries":rows["social_summaries"],
             "active_hypotheses":[item for item in rows["beliefs"] if item["namespace"]=="social" and item["epistemic_status"] in {"KNOWN","INFERRED","SUSPECTED"} and not item["superseded_by"]],
             "historical_hypotheses":[item for item in rows["beliefs"] if item["namespace"]=="social" and item["epistemic_status"] in {"HISTORICAL","SUPERSEDED"}],
             "open_threads":[item for item in rows["open_threads"] if item["scope_kind"]=="person"],
@@ -331,6 +332,9 @@ class CognitiveStateProbe:
             social_episodes=[dict(row) for row in conn.execute("SELECT * FROM social_episodes ORDER BY created_at,id")] if "social_episodes" in existing else []
             for item in social_episodes:
                 item["participant_ids"]=json.loads(item.pop("participant_ids_json") or "[]");item["related_event_ids"]=json.loads(item.pop("related_event_ids_json") or "[]");item["tone_observations"]=json.loads(item.pop("tone_observations_json") or "[]")
+            social_presence_events=[dict(row) for row in conn.execute("SELECT * FROM social_presence_events ORDER BY observed_at,id")] if "social_presence_events" in existing else []
+            social_summaries=[dict(row) for row in conn.execute("SELECT * FROM social_summaries ORDER BY created_at,id")] if "social_summaries" in existing else []
+            for item in social_summaries:item["topics"]=json.loads(item.pop("topics_json") or "[]")
             shared_culture_items=[dict(row) for row in conn.execute("SELECT * FROM shared_culture_items ORDER BY created_at,id")] if "shared_culture_items" in existing else []
             for item in shared_culture_items:item["participant_ids"]=json.loads(item.pop("participant_ids_json") or "[]")
             shared_culture_evidence=[dict(row) for row in conn.execute("SELECT * FROM shared_culture_evidence ORDER BY observed_at,id")] if "shared_culture_evidence" in existing else []
@@ -343,7 +347,7 @@ class CognitiveStateProbe:
                 "beliefs":beliefs,"belief_evidence":belief_evidence,"game_runs":game_runs,
                 "game_run_sessions":game_run_sessions,"game_run_events":game_run_events,
                 "game_knowledge_facts":game_knowledge_facts,"game_knowledge_gaps":game_knowledge_gaps,
-                "people":people,"person_identities":person_identities,"social_episodes":social_episodes,"shared_culture_items":shared_culture_items,"shared_culture_evidence":shared_culture_evidence,
+                "people":people,"person_identities":person_identities,"social_presence_events":social_presence_events,"social_episodes":social_episodes,"social_summaries":social_summaries,"shared_culture_items":shared_culture_items,"shared_culture_evidence":shared_culture_evidence,
                 "schedule_observations":schedule_observations,"schedule_hypotheses":schedule_hypotheses,
             }
         finally:

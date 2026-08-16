@@ -4,6 +4,7 @@ import time
 import threading
 import unicodedata
 import hashlib
+import json
 import uuid
 from dataclasses import asdict, dataclass, replace
 from types import SimpleNamespace
@@ -185,6 +186,10 @@ from app.game_context_v2.migration import (
 from app.game_context_v2.repository import GameV2Repository
 from app.game_context_v2.service import GameKnowledgeService as GameKnowledgeV2Service, GameRunService
 from app.social_world_v2 import SocialWorldRepository, SocialWorldService
+from app.social_world_v2.migration import (
+    social_identity_canonicalization_migrations,
+    social_summary_canonicalization_migrations,
+)
 from app.learning_v2 import (
     ContinuityContextBuilder, HebeSelfModel, HistoricalActionLedger, LeoLanguageModel,
     OwnerProceduralPreferences, SceneConsequenceReducer, SessionConsolidator,
@@ -250,8 +255,8 @@ class HebeEngine:
             self.runtime.twitch_events.push_event_callback = lambda event_type, payload: self.scheduler.push_event(event_type, payload)
 
         if hasattr(self.runtime, 'twitch_chat_bot') and self.runtime.twitch_chat_bot:
-            def _twitch_ambient_callback(username, display_name, text, channel):
-                self.observe_twitch_chat_message(username, display_name, text, channel)
+            def _twitch_ambient_callback(username, display_name, text, channel, tags=None):
+                self.observe_twitch_chat_message(username, display_name, text, channel, irc_tags=tags or {})
 
             def _twitch_social_event_callback(event_type, payload):
                 self.process_internal_event(InternalEvent(
@@ -527,12 +532,6 @@ class HebeEngine:
         self._initialize_conversation_continuity()
         self._initialize_belief_v2()
         self._initialize_game_context_v2()
-        self.social_world_v2 = cognitive_flag("HEBE_SOCIAL_WORLD_V2")
-        self.social_identity_v2 = cognitive_flag("HEBE_SOCIAL_IDENTITY_V2")
-        self.social_episode_writes_v2 = cognitive_flag("HEBE_SOCIAL_EPISODE_WRITES_V2")
-        self.social_retrieval_v2 = cognitive_flag("HEBE_SOCIAL_RETRIEVAL_V2")
-        self.shared_culture_v2 = cognitive_flag("HEBE_SHARED_CULTURE_V2")
-        self.social_thread_opportunities_v2 = cognitive_flag("HEBE_SOCIAL_THREAD_OPPORTUNITIES_V2")
         self._initialize_social_world_v2()
         self.consolidation_v2 = cognitive_flag("HEBE_CONSOLIDATION_V2")
         self.consolidation_commits_v2 = cognitive_flag("HEBE_CONSOLIDATION_COMMITS_V2")
@@ -583,10 +582,12 @@ class HebeEngine:
         try:
             if self.belief_lifecycle is None or self.conversation_continuity is None:raise RuntimeError("phase1_or_phase2_unavailable")
             runner=MigrationRunner(db_sqlite.get_db_connection);self.social_world_v2_migrations=runner.migrate(social_world_v2_migrations())
+            self.social_identity_canonicalization=runner.migrate(social_identity_canonicalization_migrations())
+            self.social_summary_canonicalization=runner.migrate(social_summary_canonicalization_migrations())
             repository=SocialWorldRepository(db_sqlite.get_db_connection);self.social_world_repository=repository
             self.social_world=SocialWorldService(repository,self.belief_lifecycle,self.conversation_continuity.threads,getattr(self,"memory_retrieval",None),now_fn=lambda:time.time())
         except Exception as exc:
-            self.social_world_repository=None;self.social_world=None;self.social_world_v2_migrations=[]
+            self.social_world_repository=None;self.social_world=None;self.social_world_v2_migrations=[];self.social_identity_canonicalization=[];self.social_summary_canonicalization=[]
             print(f"[HEBE][SOCIAL_WORLD_V2_INIT] status=failed_closed reason={type(exc).__name__}",flush=True)
 
     def _initialize_game_context_v2(self) -> None:
@@ -2535,7 +2536,7 @@ class HebeEngine:
             self._increment_twitch_pipeline_counter("twitch_messages_early_skipped", reason="bot_or_self_ignored")
             return
         if self._is_owner_twitch_user(username) and self._is_raw_twitch_command(text):
-            self.observe_twitch_chat_message(username, display_name, text, channel)
+            self.observe_twitch_chat_message(username, display_name, text, channel, irc_tags=irc_tags or {})
             print(
                 "[HEBE][TWITCH][CHATBOT] owner command observed without reaction "
                 f"user={username!r} message={text!r}",
@@ -2626,11 +2627,6 @@ class HebeEngine:
             f"[HEBE][TWITCH_PIPELINE_START] event_id={event_id} username={username} raw={message!r}",
             flush=True,
         )
-        if getattr(self,"social_world_v2",False) and getattr(self,"social_identity_v2",False) and getattr(self,"social_world",None) is not None:
-            stream=self._get_stream_state();stable_id=str(tags.get("user-id") or tags.get("user_id") or "")
-            try:
-                person,_identity=self.social_world.resolve_person(platform="twitch",platform_user_id=stable_id,login=username,display_name=display_name or username,source="twitch_chat",stream_session_id=str(getattr(stream,"active_stream_session_id","") or ""));fields["person_id"]=person.person_id
-            except Exception as exc:print(f"[HEBE][SOCIAL_PERSON_RESOLVE] decision=failed reason={type(exc).__name__}",flush=True)
         self._observe_automatic_promotion(
             username=username,
             display_name=display_name,
@@ -2638,13 +2634,16 @@ class HebeEngine:
             irc_tags=irc_tags or {},
             fallback_message_id=event_id,
         )
-        self.observe_twitch_chat_message(
+        person_id = self.observe_twitch_chat_message(
             username,
             display_name,
             message,
             channel,
             firewall_decision=firewall_decision,
+            irc_tags=tags,
         )
+        if person_id:
+            fields["person_id"] = person_id
         stream = self._get_stream_state()
         recent_chat = list(getattr(stream, "recent_chat_messages", []) or [])[-10:] if stream is not None else []
         reply_metadata = self._twitch_reply_metadata(irc_tags or {})
@@ -2753,16 +2752,17 @@ class HebeEngine:
         channel: str = "",
         *,
         firewall_decision: InputFirewallDecision | None = None,
-    ) -> None:
+        irc_tags: dict | None = None,
+    ) -> str:
         if not getattr(self, "stream_observe_chat", True):
-            return
+            return ""
         stream = self._get_stream_state()
         if not stream:
-            return
+            return ""
 
         message = str(text or "").strip()
         if not message:
-            return
+            return ""
 
         firewall = firewall_decision or self._input_firewall_decision(
             source="twitch_viewer",
@@ -2772,7 +2772,7 @@ class HebeEngine:
             addressed_to_hebe=self._message_mentions_hebe(message),
         )
         if not self._firewall_allows_pipeline(firewall):
-            return
+            return ""
 
         print(f"[HEBE][TWITCH][CHAT] observed username={username} message={message!r}", flush=True)
         twitch = getattr(self.runtime, "twitch", None)
@@ -2792,7 +2792,11 @@ class HebeEngine:
                 and str(last.get("text") or "") == message[:180]
                 and now - float(last.get("ts", 0.0) or 0.0) < 1.0
             ):
-                return
+                try:
+                    identity=self.social_world_repository.find_identity(platform="twitch",platform_user_id=str((irc_tags or {}).get("user-id") or (irc_tags or {}).get("user_id") or ""),login=username)
+                    return identity.person_id if identity else ""
+                except Exception:
+                    return ""
         stream.last_chat_activity_ts = now
         stream.human_messages_since_last_public_reply = int(getattr(stream, "human_messages_since_last_public_reply", 0) or 0) + 1
         if int(getattr(stream, "consecutive_public_replies", 0) or 0) > 0:
@@ -2800,6 +2804,13 @@ class HebeEngine:
         session_id = self._ensure_stream_memory_session_if_live(stream)
         topic = self._classify_chat_topic(message)
         linked_context = self._linked_run_context_for_chat_topic(stream, topic)
+        person_id=""
+        social=getattr(self,"social_world",None);tags=dict(irc_tags or {})
+        if social is not None:
+            try:
+                observation_id=str(tags.get("id") or tags.get("message-id") or f"social_chat_{uuid.uuid4().hex}")
+                person,_identity,_inserted=social.observe_presence(observation_id=observation_id,platform="twitch",platform_user_id=str(tags.get("user-id") or tags.get("user_id") or ""),login=username,display_name=display_name or username,stream_session_id=str(session_id or ""),source="twitch_chat",message_seen=True,direct_interaction=self._message_mentions_hebe(message));person_id=person.person_id
+            except Exception as exc:print(f"[HEBE][SOCIAL_PERSON_RESOLVE] decision=failed reason={type(exc).__name__}",flush=True)
         try:
             stream_memory.record_chat_message(
                 username=username,
@@ -2862,6 +2873,7 @@ class HebeEngine:
                 f"summary={entry['summary']!r}",
                 flush=True,
             )
+        return person_id
 
     def _is_chat_bot_user(self, username: str) -> bool:
         user = (username or "").strip().lower().lstrip("@")
@@ -3322,30 +3334,26 @@ class HebeEngine:
         except Exception as exc:
             print(f"[HEBE][STREAM_MEMORY] record event failed event_type={event_type!r}: {exc!r}", flush=True)
 
-    def _observe_stream_presence_safe(
-        self,
-        username: str,
-        display_name: str,
-        *,
-        stream_session_id: int | None = None,
-        source: str = "event",
-    ) -> None:
-        try:
-            stream_memory.observe_presence(
-                username,
-                display_name,
-                stream_session_id=stream_session_id,
-                source=source,
-            )
-        except Exception as exc:
-            print(f"[HEBE][STREAM_MEMORY] observe presence failed source={source!r}: {exc!r}", flush=True)
-
     def _close_stream_memory_session_safe(self, stream, *, reason: str) -> object | None:
         try:
-            return stream_memory.close_active_stream_session(stream, reason=reason)
+            summary=stream_memory.close_active_stream_session(stream, reason=reason)
+            self._persist_canonical_chatter_summaries(summary)
+            return summary
         except Exception as exc:
             print(f"[HEBE][STREAM_MEMORY] close session failed reason={reason!r}: {exc!r}", flush=True)
             return None
+
+    def _persist_canonical_chatter_summaries(self, summary) -> None:
+        if not isinstance(summary,dict) or getattr(self,"social_world",None) is None:return
+        highlights=summary.get("social_summary_candidates") or []
+        for item in highlights if isinstance(highlights,list) else []:
+            if not isinstance(item,dict):continue
+            login=str(item.get("username") or "").strip()
+            if not login:continue
+            try:
+                login_key=hashlib.sha256(login.casefold().encode("utf-8")).hexdigest()[:20]
+                self.social_world.record_summary_for_login(login=login,stream_session_id=str(summary.get("stream_session_id") or ""),source_record_id=f"stream_summary:{summary.get('id')}:{login_key}",summary_text=str(item.get("summary") or ""),topics=tuple(item.get("topics") or ()),message_count=int(item.get("message_count") or 0),direct_interaction_count=int(item.get("direct_interaction_count") or 0))
+            except Exception as exc:print(f"[HEBE][SOCIAL_SUMMARY] login={login} status=skipped reason={type(exc).__name__}",flush=True)
 
     def _chat_activity_snapshot(self, stream=None, *, now: float | None = None) -> dict:
         stream = stream or self._get_stream_state()
@@ -4022,16 +4030,15 @@ class HebeEngine:
         self._process_internal_event_now(event)
 
     def _observe_social_world_event(self,event_type:str,payload:dict) -> None:
-        if not (getattr(self,"social_world_v2",False) and getattr(self,"social_identity_v2",False) and getattr(self,"social_world",None) is not None):return
+        if getattr(self,"social_world",None) is None:return
         if event_type not in {"twitch_follow","twitch_sub","twitch_raid"}:return
         login=str(payload.get("user_login") or payload.get("username") or payload.get("login") or "");user_id=str(payload.get("user_id") or payload.get("twitch_user_id") or "")
         if not login and not user_id:return
         stream=self._get_stream_state();session_id=str(getattr(stream,"active_stream_session_id","") or "");event_id=str(payload.get("event_id") or payload.get("message_id") or f"social:{event_type}:{user_id or login}")
         try:
-            person,_=self.social_world.resolve_person(platform="twitch",platform_user_id=user_id,login=login,display_name=str(payload.get("display_name") or login),source=event_type,stream_session_id=session_id)
-            if getattr(self,"social_episode_writes_v2",False):
-                episode_type="resub" if event_type=="twitch_sub" and bool(payload.get("is_resub")) else "sub" if event_type=="twitch_sub" else "follow" if event_type=="twitch_follow" else "raid_arrival"
-                self.social_world.record_episode(episode_type=episode_type,participant_ids=(person.person_id,),origin_event_id=event_id,summary=episode_type,salience_reason="platform_social_event",relevance_seconds=604800,retention_seconds=7776000,sensitivity="normal",retention_class="bounded",retrieval_scope="stream_public")
+            person,_,_=self.social_world.observe_presence(observation_id=event_id,platform="twitch",platform_user_id=user_id,login=login,display_name=str(payload.get("display_name") or login),stream_session_id=session_id,source=event_type,message_seen=False,direct_interaction=False)
+            episode_type="resub" if event_type=="twitch_sub" and bool(payload.get("is_resub")) else "sub" if event_type=="twitch_sub" else "follow" if event_type=="twitch_follow" else "raid_arrival"
+            self.social_world.record_episode(episode_type=episode_type,participant_ids=(person.person_id,),origin_event_id=event_id,summary=episode_type,salience_reason="platform_social_event",relevance_seconds=604800,retention_seconds=7776000,sensitivity="normal",retention_class="bounded",retrieval_scope="stream_public")
         except Exception as exc:print(f"[HEBE][SOCIAL_EPISODE] origin={event_id} admitted=false reason={type(exc).__name__}",flush=True)
 
     def _process_internal_event_now(self, event) -> None:
@@ -4827,12 +4834,6 @@ class HebeEngine:
             else:
                 self._ensure_stream_memory_session_if_live(stream)
                 self._record_stream_event_safe("twitch_raid", payload, stream=stream)
-                self._observe_stream_presence_safe(
-                    payload.get("user_login") or username,
-                    username,
-                    stream_session_id=getattr(stream, "active_stream_session_id", None),
-                    source="raid",
-                )
 
         if not stream:
             print("[HEBE][TWITCH][RAID] blocked reason=no_stream_state", flush=True)
@@ -5711,7 +5712,7 @@ class HebeEngine:
                 add(value)
 
         try:
-            for name in stream_memory.list_recent_chatter_names(limit=80):
+            for name in self.social_world.recent_identity_names(limit=80) if getattr(self,"social_world",None) is not None else []:
                 add(name)
         except Exception:
             pass
@@ -8652,7 +8653,7 @@ class HebeEngine:
             return f"Memoria de stream iniciada. Sesion activa: {session_id}."
 
         if normalized in {"finaliza stream", "termina stream", "cierra stream"}:
-            summary = stream_memory.close_active_stream_session(stream, reason="manual_command")
+            summary = self._close_stream_memory_session_safe(stream, reason="manual_command")
             stream.enabled = False
             return self._format_stream_summary_reply(summary) if summary else "No habia una sesion de stream activa que finalizar."
 
@@ -8661,6 +8662,7 @@ class HebeEngine:
             if not session_id:
                 return "No tengo una sesion de stream activa para resumir."
             summary = stream_memory.summarize_stream_session(int(session_id), reason="manual_summary")
+            self._persist_canonical_chatter_summaries(summary)
             return self._format_stream_summary_reply(summary)
 
         if normalized in {"que paso en el ultimo stream", "qué pasó en el último stream"}:
@@ -8670,22 +8672,22 @@ class HebeEngine:
         chatter_match = re.match(r"^(?:que dijo|qué dijo)\s+(.+?)\s+en el ultimo stream$", normalized)
         if chatter_match:
             target = chatter_match.group(1).strip()
-            summary = stream_memory.get_last_chatter_summary(target)
+            summary = self.social_world.latest_summary_for_login(target) if getattr(self,"social_world",None) is not None else {}
             if not summary:
                 return f"No tengo resumen del ultimo stream para {target}."
             return f"En el ultimo stream, {target}: {summary.get('summary_text') or 'sin resumen suficiente'}"
 
         chatter_match = re.match(r"^(?:que sabes de|qué sabes de)\s+(.+)$", normalized)
         if chatter_match and "este juego" not in normalized and not self._looks_like_game_knowledge_target(chatter_match.group(1)):
-            return stream_memory.format_chatter_profile_reply(chatter_match.group(1).strip())
+            return self.social_world.format_profile_reply(chatter_match.group(1).strip()) if getattr(self,"social_world",None) is not None else "SocialWorld no está disponible."
 
         chatter_match = re.match(r"^(?:cuando fue la ultima vez que hablo|cuándo fue la última vez que habló)\s+(.+)$", normalized)
         if chatter_match:
-            return stream_memory.format_last_seen_reply(chatter_match.group(1).strip(), kind="message")
+            return self.social_world.format_last_seen_reply(chatter_match.group(1).strip(),kind="message") if getattr(self,"social_world",None) is not None else "SocialWorld no está disponible."
 
         chatter_match = re.match(r"^(?:cuando fue la ultima vez que vimos a|cuándo fue la última vez que vimos a)\s+(.+)$", normalized)
         if chatter_match:
-            return stream_memory.format_last_seen_reply(chatter_match.group(1).strip(), kind="seen")
+            return self.social_world.format_last_seen_reply(chatter_match.group(1).strip(),kind="seen") if getattr(self,"social_world",None) is not None else "SocialWorld no está disponible."
 
         if normalized in {"hoy no hay stream", "no hay stream hoy", "today no stream"}:
             stream.no_stream_today_date = datetime.now(ZoneInfo("Europe/Madrid")).date().isoformat()

@@ -17,6 +17,8 @@ class CognitiveFeatureFlags:
     game_knowledge_v2_reads: bool = False
     game_knowledge_v2_writes: bool = False
     game_research_memory_first: bool = False
+    # Historical fixture metadata only. Social runtime no longer branches on
+    # these values after the Phase 1D ownership cutover.
     social_world_v2: bool = False
     social_identity_v2: bool = False
     social_episode_writes_v2: bool = False

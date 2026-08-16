@@ -272,90 +272,6 @@ def init_stream_memory_schema() -> None:
             FOREIGN KEY(stream_session_id) REFERENCES stream_sessions(id)
         );
 
-        CREATE TABLE IF NOT EXISTS chatter_profiles (
-            username TEXT PRIMARY KEY,
-            display_name TEXT,
-            aliases_json TEXT,
-            first_seen_at TEXT,
-            last_seen_at TEXT,
-            last_message_at TEXT,
-            last_direct_interaction_at TEXT,
-            last_lurk_seen_at TEXT,
-            last_raid_at TEXT,
-            last_follow_at TEXT,
-            last_sub_at TEXT,
-            streams_seen_count INTEGER NOT NULL DEFAULT 0,
-            streams_chatted_count INTEGER NOT NULL DEFAULT 0,
-            total_messages INTEGER NOT NULL DEFAULT 0,
-            total_direct_interactions INTEGER NOT NULL DEFAULT 0,
-            total_lurk_sessions INTEGER NOT NULL DEFAULT 0,
-            viewer_status TEXT,
-            preferred_language TEXT,
-            relationship_level TEXT,
-            notes_summary TEXT,
-            updated_at TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS chatter_presence (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            stream_session_id INTEGER,
-            username TEXT NOT NULL,
-            display_name TEXT,
-            first_seen_at TEXT NOT NULL,
-            last_seen_at TEXT NOT NULL,
-            first_message_at TEXT,
-            last_message_at TEXT,
-            first_direct_interaction_at TEXT,
-            last_direct_interaction_at TEXT,
-            message_count INTEGER NOT NULL DEFAULT 0,
-            direct_interaction_count INTEGER NOT NULL DEFAULT 0,
-            was_present INTEGER NOT NULL DEFAULT 1,
-            was_active_chatter INTEGER NOT NULL DEFAULT 0,
-            was_passive_viewer INTEGER NOT NULL DEFAULT 0,
-            was_raider INTEGER NOT NULL DEFAULT 0,
-            was_new_chatter INTEGER NOT NULL DEFAULT 0,
-            was_returning_after_absence INTEGER NOT NULL DEFAULT 0,
-            presence_source_json TEXT,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            FOREIGN KEY(stream_session_id) REFERENCES stream_sessions(id)
-        );
-
-        CREATE TABLE IF NOT EXISTS chatter_facts (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT NOT NULL,
-            fact_text TEXT NOT NULL,
-            fact_type TEXT,
-            confidence TEXT NOT NULL DEFAULT 'low',
-            source_message_id INTEGER,
-            source_stream_session_id INTEGER,
-            evidence_count INTEGER NOT NULL DEFAULT 1,
-            first_observed_at TEXT NOT NULL,
-            last_confirmed_at TEXT NOT NULL,
-            expires_at TEXT,
-            public_reference_allowed INTEGER NOT NULL DEFAULT 1,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            FOREIGN KEY(source_message_id) REFERENCES stream_chat_messages(id),
-            FOREIGN KEY(source_stream_session_id) REFERENCES stream_sessions(id)
-        );
-
-        CREATE TABLE IF NOT EXISTS stream_chatter_summaries (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            stream_session_id INTEGER NOT NULL,
-            username TEXT NOT NULL,
-            display_name TEXT,
-            message_count INTEGER NOT NULL DEFAULT 0,
-            direct_interaction_count INTEGER NOT NULL DEFAULT 0,
-            summary_text TEXT,
-            topics_json TEXT,
-            notable_quotes_json TEXT,
-            mood_tone TEXT,
-            inferred_facts_json TEXT,
-            created_at TEXT NOT NULL,
-            FOREIGN KEY(stream_session_id) REFERENCES stream_sessions(id)
-        );
-
         CREATE TABLE IF NOT EXISTS stream_summaries (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             stream_session_id INTEGER NOT NULL,
@@ -388,18 +304,6 @@ def init_stream_memory_schema() -> None:
         CREATE INDEX IF NOT EXISTS idx_stream_chat_messages_observed_at ON stream_chat_messages(observed_at);
         CREATE INDEX IF NOT EXISTS idx_stream_chat_messages_username_observed_at ON stream_chat_messages(username, observed_at);
         CREATE INDEX IF NOT EXISTS idx_stream_chat_messages_session_username ON stream_chat_messages(stream_session_id, username);
-        CREATE INDEX IF NOT EXISTS idx_chatter_profiles_last_seen ON chatter_profiles(last_seen_at);
-        CREATE INDEX IF NOT EXISTS idx_chatter_profiles_last_message ON chatter_profiles(last_message_at);
-        CREATE INDEX IF NOT EXISTS idx_chatter_profiles_status ON chatter_profiles(viewer_status);
-        CREATE INDEX IF NOT EXISTS idx_chatter_presence_session ON chatter_presence(stream_session_id);
-        CREATE INDEX IF NOT EXISTS idx_chatter_presence_username ON chatter_presence(username);
-        CREATE INDEX IF NOT EXISTS idx_chatter_presence_last_seen ON chatter_presence(last_seen_at);
-        CREATE INDEX IF NOT EXISTS idx_chatter_presence_last_message ON chatter_presence(last_message_at);
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_chatter_presence_session_username ON chatter_presence(stream_session_id, username);
-        CREATE INDEX IF NOT EXISTS idx_chatter_facts_username ON chatter_facts(username);
-        CREATE INDEX IF NOT EXISTS idx_chatter_facts_type ON chatter_facts(fact_type);
-        CREATE INDEX IF NOT EXISTS idx_chatter_facts_confidence ON chatter_facts(confidence);
-        CREATE INDEX IF NOT EXISTS idx_chatter_facts_last_confirmed ON chatter_facts(last_confirmed_at);
         CREATE INDEX IF NOT EXISTS idx_stream_sessions_status ON stream_sessions(status);
         CREATE INDEX IF NOT EXISTS idx_stream_sessions_started_at ON stream_sessions(started_at);
         CREATE INDEX IF NOT EXISTS idx_stream_sessions_game_category ON stream_sessions(game, category);
@@ -424,10 +328,6 @@ def init_stream_memory_schema() -> None:
             for name in (
                 "stream_sessions",
                 "stream_chat_messages",
-                "chatter_profiles",
-                "chatter_presence",
-                "chatter_facts",
-                "stream_chatter_summaries",
                 "stream_summaries",
                 "stream_events",
             )
@@ -725,201 +625,6 @@ def record_stream_event(event_type: str, payload: dict | None = None, *, stream:
     return event_id
 
 
-def observe_presence(
-    username: str,
-    display_name: str | None = None,
-    *,
-    stream_session_id: int | None = None,
-    source: str = "chat",
-    message_seen: bool = False,
-    direct_interaction: bool = False,
-    passive: bool = False,
-) -> None:
-    ensure_stream_memory_ready()
-    user = _norm_user(username)
-    if not user:
-        return
-    now = _now_iso()
-    display = _display_name(user, display_name)
-    conn = db_sqlite.get_db_connection()
-    profile = conn.execute("SELECT * FROM chatter_profiles WHERE username = ?", (user,)).fetchone()
-    was_new = profile is None
-    returning = False
-    if profile is not None:
-        last_seen = _parse_iso(profile["last_seen_at"])
-        if last_seen:
-            days = (datetime.now(timezone.utc) - last_seen).days
-            returning = days >= int(os.getenv("HEBE_RETURNING_AFTER_DAYS", "60") or 60)
-
-    if profile is None:
-        conn.execute(
-            """
-            INSERT INTO chatter_profiles (
-                username, display_name, aliases_json, first_seen_at, last_seen_at,
-                last_message_at, last_direct_interaction_at, last_lurk_seen_at,
-                streams_seen_count, streams_chatted_count, total_messages,
-                total_direct_interactions, total_lurk_sessions, viewer_status, updated_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                user,
-                display,
-                _json([display]) if display and display.lower() != user else _json([]),
-                now,
-                now,
-                now if message_seen else None,
-                now if direct_interaction else None,
-                now if passive and not message_seen else None,
-                1 if message_seen else 0,
-                1 if message_seen else 0,
-                1 if direct_interaction else 0,
-                1 if passive and not message_seen else 0,
-                "new" if not _is_bot(user) else "bot",
-                now,
-            ),
-        )
-    else:
-        aliases = _loads(profile["aliases_json"], [])
-        if display and display not in aliases and display.lower() != user:
-            aliases.append(display)
-        conn.execute(
-            """
-            UPDATE chatter_profiles
-            SET display_name = ?,
-                aliases_json = ?,
-                last_seen_at = ?,
-                last_message_at = CASE WHEN ? THEN ? ELSE last_message_at END,
-                last_direct_interaction_at = CASE WHEN ? THEN ? ELSE last_direct_interaction_at END,
-                last_lurk_seen_at = CASE WHEN ? THEN ? ELSE last_lurk_seen_at END,
-                total_messages = total_messages + ?,
-                total_direct_interactions = total_direct_interactions + ?,
-                total_lurk_sessions = total_lurk_sessions + ?,
-                viewer_status = ?,
-                updated_at = ?
-            WHERE username = ?
-            """,
-            (
-                display,
-                _json(aliases),
-                now,
-                1 if message_seen else 0,
-                now,
-                1 if direct_interaction else 0,
-                now,
-                1 if passive and not message_seen else 0,
-                now,
-                1 if message_seen else 0,
-                1 if direct_interaction else 0,
-                1 if passive and not message_seen else 0,
-                _viewer_status(profile, returning=returning, message_seen=message_seen, direct_interaction=direct_interaction),
-                now,
-                user,
-            ),
-        )
-
-    if stream_session_id:
-        current = conn.execute(
-            "SELECT * FROM chatter_presence WHERE stream_session_id = ? AND username = ?",
-            (stream_session_id, user),
-        ).fetchone()
-        if current is None:
-            conn.execute(
-                """
-                INSERT INTO chatter_presence (
-                    stream_session_id, username, display_name, first_seen_at, last_seen_at,
-                    first_message_at, last_message_at, first_direct_interaction_at,
-                    last_direct_interaction_at, message_count, direct_interaction_count,
-                    was_present, was_active_chatter, was_passive_viewer, was_new_chatter,
-                    was_returning_after_absence, presence_source_json, created_at, updated_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    stream_session_id,
-                    user,
-                    display,
-                    now,
-                    now,
-                    now if message_seen else None,
-                    now if message_seen else None,
-                    now if direct_interaction else None,
-                    now if direct_interaction else None,
-                    1 if message_seen else 0,
-                    1 if direct_interaction else 0,
-                    1 if message_seen else 0,
-                    1 if passive and not message_seen else 0,
-                    1 if was_new else 0,
-                    1 if returning else 0,
-                    _json([source]),
-                    now,
-                    now,
-                ),
-            )
-        else:
-            sources = _loads(current["presence_source_json"], [])
-            if source not in sources:
-                sources.append(source)
-            conn.execute(
-                """
-                UPDATE chatter_presence
-                SET display_name = ?,
-                    last_seen_at = ?,
-                    first_message_at = COALESCE(first_message_at, CASE WHEN ? THEN ? ELSE NULL END),
-                    last_message_at = CASE WHEN ? THEN ? ELSE last_message_at END,
-                    first_direct_interaction_at = COALESCE(first_direct_interaction_at, CASE WHEN ? THEN ? ELSE NULL END),
-                    last_direct_interaction_at = CASE WHEN ? THEN ? ELSE last_direct_interaction_at END,
-                    message_count = message_count + ?,
-                    direct_interaction_count = direct_interaction_count + ?,
-                    was_active_chatter = CASE WHEN ? THEN 1 ELSE was_active_chatter END,
-                    was_passive_viewer = CASE WHEN ? THEN 1 ELSE was_passive_viewer END,
-                    was_returning_after_absence = CASE WHEN ? THEN 1 ELSE was_returning_after_absence END,
-                    presence_source_json = ?,
-                    updated_at = ?
-                WHERE id = ?
-                """,
-                (
-                    display,
-                    now,
-                    1 if message_seen else 0,
-                    now,
-                    1 if message_seen else 0,
-                    now,
-                    1 if direct_interaction else 0,
-                    now,
-                    1 if direct_interaction else 0,
-                    now,
-                    1 if message_seen else 0,
-                    1 if direct_interaction else 0,
-                    1 if message_seen else 0,
-                    1 if passive and not message_seen else 0,
-                    1 if returning else 0,
-                    _json(sources),
-                    now,
-                    current["id"],
-                ),
-            )
-    conn.commit()
-    conn.close()
-
-
-def _viewer_status(profile: sqlite3.Row, *, returning: bool, message_seen: bool, direct_interaction: bool) -> str:
-    if returning:
-        return "returning_after_long_absence"
-    total = int(profile["total_messages"] or 0) + (1 if message_seen else 0)
-    interactions = int(profile["total_direct_interactions"] or 0) + (1 if direct_interaction else 0)
-    streams_seen = int(profile["streams_seen_count"] or 0)
-    if interactions >= 20 or total >= 120:
-        return "core_regular"
-    if streams_seen >= int(os.getenv("HEBE_REGULAR_MIN_STREAMS_30D", "3") or 3) or total >= 25:
-        return "regular"
-    if message_seen:
-        return "active_chatter"
-    if streams_seen >= int(os.getenv("HEBE_PASSIVE_VIEWER_MIN_SEEN_STREAMS", "3") or 3):
-        return "passive_viewer"
-    return profile["viewer_status"] or "occasional"
-
-
 def record_chat_message(
     *,
     username: str,
@@ -977,87 +682,7 @@ def record_chat_message(
     conn.commit()
     conn.close()
 
-    observe_presence(
-        user,
-        display_name,
-        stream_session_id=stream_session_id,
-        source=source,
-        message_seen=not bot,
-        direct_interaction=is_mention_to_hebe or is_direct_reply_to_hebe,
-    )
-    if not bot:
-        maybe_record_chatter_fact_from_message(
-            username=user,
-            message_text=message_text,
-            source_message_id=message_id,
-            stream_session_id=stream_session_id,
-        )
     return message_id
-
-
-def maybe_record_chatter_fact_from_message(
-    *,
-    username: str,
-    message_text: str,
-    source_message_id: int | None = None,
-    stream_session_id: int | None = None,
-) -> int | None:
-    ensure_stream_memory_ready()
-    user = _norm_user(username)
-    text = str(message_text or "").strip()
-    normalized = text.lower()
-    if not user or not text:
-        return None
-
-    fact_text = None
-    fact_type = None
-    confidence = "low"
-    if "linux" in normalized and ("windows 11" in normalized or "win11" in normalized):
-        fact_text = f"{user} comentó que usa Linux porque su PC no acepta Windows 11."
-        fact_type = "setup_pc"
-        confidence = "medium"
-
-    if not fact_text:
-        return None
-
-    now = _now_iso()
-    conn = db_sqlite.get_db_connection()
-    existing = conn.execute(
-        """
-        SELECT * FROM chatter_facts
-        WHERE username = ? AND fact_type = ? AND fact_text = ?
-        ORDER BY id DESC LIMIT 1
-        """,
-        (user, fact_type, fact_text),
-    ).fetchone()
-    if existing:
-        evidence_count = int(existing["evidence_count"] or 1) + 1
-        next_conf = "high" if evidence_count >= 3 else confidence
-        conn.execute(
-            """
-            UPDATE chatter_facts
-            SET evidence_count = ?, confidence = ?, last_confirmed_at = ?, updated_at = ?
-            WHERE id = ?
-            """,
-            (evidence_count, next_conf, now, now, existing["id"]),
-        )
-        fact_id = int(existing["id"])
-    else:
-        cur = conn.execute(
-            """
-            INSERT INTO chatter_facts (
-                username, fact_text, fact_type, confidence, source_message_id,
-                source_stream_session_id, evidence_count, first_observed_at,
-                last_confirmed_at, public_reference_allowed, created_at, updated_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, 1, ?, ?)
-            """,
-            (user, fact_text, fact_type, confidence, source_message_id, stream_session_id, now, now, now, now),
-        )
-        fact_id = int(cur.lastrowid)
-    conn.commit()
-    conn.close()
-    return fact_id
 
 
 def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
@@ -1194,35 +819,21 @@ def summarize_stream_session(stream_session_id: int, *, reason: str = "manual") 
 
     chatter_highlights = []
     now = _now_iso()
-    conn.execute("DELETE FROM stream_chatter_summaries WHERE stream_session_id = ?", (stream_session_id,))
     for user, user_msgs in sorted(by_user.items(), key=lambda item: len(item[1]), reverse=True):
         if len(user_msgs) < 2:
             continue
-        sample = [m["message_text"] for m in user_msgs[:3]]
         summary = f"{user} participó con {len(user_msgs)} mensajes. Temas: {', '.join(sorted({m['topic_hint'] for m in user_msgs if m['topic_hint']}) or ['general'])}."
-        conn.execute(
-            """
-            INSERT INTO stream_chatter_summaries (
-                stream_session_id, username, display_name, message_count,
-                direct_interaction_count, summary_text, topics_json,
-                notable_quotes_json, inferred_facts_json, created_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                stream_session_id,
-                user,
-                user_msgs[-1]["display_name"],
-                len(user_msgs),
-                sum(int(m["is_mention_to_hebe"] or 0) + int(m["is_direct_reply_to_hebe"] or 0) for m in user_msgs),
-                summary,
-                _json(sorted({m["topic_hint"] for m in user_msgs if m["topic_hint"]})),
-                _json(sample),
-                _json([]),
-                now,
+        chatter_highlights.append({
+            "username": user,
+            "display_name": user_msgs[-1]["display_name"],
+            "message_count": len(user_msgs),
+            "direct_interaction_count": sum(
+                int(m["is_mention_to_hebe"] or 0) + int(m["is_direct_reply_to_hebe"] or 0)
+                for m in user_msgs
             ),
-        )
-        chatter_highlights.append({"username": user, "message_count": len(user_msgs), "summary": summary})
+            "summary": summary,
+            "topics": sorted({m["topic_hint"] for m in user_msgs if m["topic_hint"]}),
+        })
 
     metadata, missing = _session_metadata_for_summary(conn, session)
     title = metadata.get("title") or "unknown title"
@@ -1252,7 +863,9 @@ def summarize_stream_session(stream_session_id: int, *, reason: str = "manual") 
             "metadata_missing": missing,
         }),
         "chat_topics_json": _json(topics),
-        "chatter_highlights_json": _json(chatter_highlights[:10]),
+        # Historical stream summaries retain this column for rollback/audit, but
+        # new per-viewer summaries belong exclusively to SocialWorld.
+        "chatter_highlights_json": _json([]),
         "raids_json": _json(raids),
         "shoutouts_json": _json(shoutouts),
         "next_stream_context": "",
@@ -1313,7 +926,12 @@ def summarize_stream_session(stream_session_id: int, *, reason: str = "manual") 
         print(f"[HEBE][STREAM_SUMMARY] regenerated session_id={stream_session_id}", flush=True)
     else:
         print(f"[HEBE][STREAM_SUMMARY] generated session_id={stream_session_id}", flush=True)
-    return {"id": summary_id, "stream_session_id": stream_session_id, **payload}
+    return {
+        "id": summary_id,
+        "stream_session_id": stream_session_id,
+        **payload,
+        "social_summary_candidates": chatter_highlights[:10],
+    }
 
 
 def get_latest_stream_summary() -> dict | None:
@@ -1321,7 +939,7 @@ def get_latest_stream_summary() -> dict | None:
     conn = db_sqlite.get_db_connection()
     row = conn.execute(
         """
-        SELECT ss.*, s.summary_text, s.chat_topics_json, s.chatter_highlights_json, s.created_at AS summary_created_at
+        SELECT ss.*, s.summary_text, s.chat_topics_json, s.created_at AS summary_created_at
         FROM stream_summaries s
         JOIN stream_sessions ss ON ss.id = s.stream_session_id
         ORDER BY s.id DESC
@@ -1463,7 +1081,6 @@ def _session_evidence_counts(conn: sqlite3.Connection, session_id: int) -> dict[
     return {
         "chat_messages": _count(conn, "SELECT COUNT(*) FROM stream_chat_messages WHERE stream_session_id = ?", (session_id,)),
         "events": _count(conn, "SELECT COUNT(*) FROM stream_events WHERE stream_session_id = ?", (session_id,)),
-        "chatter_summaries": _count(conn, "SELECT COUNT(*) FROM stream_chatter_summaries WHERE stream_session_id = ?", (session_id,)),
     }
 
 
@@ -1578,109 +1195,3 @@ def repair_stream_data(*, dry_run: bool = True, regenerate_summaries: bool = Tru
         flush=True,
     )
     return result
-
-
-def get_chatter_profile(username: str) -> dict | None:
-    ensure_stream_memory_ready()
-    user = _norm_user(username)
-    if not user:
-        return None
-    conn = db_sqlite.get_db_connection()
-    profile = _row(conn.execute("SELECT * FROM chatter_profiles WHERE username = ?", (user,)).fetchone())
-    if profile:
-        profile["facts"] = [
-            _row(row)
-            for row in conn.execute(
-                """
-                SELECT * FROM chatter_facts
-                WHERE username = ?
-                ORDER BY last_confirmed_at DESC, id DESC
-                LIMIT 10
-                """,
-                (user,),
-            ).fetchall()
-        ]
-    conn.close()
-    return profile
-
-
-def list_recent_chatter_names(limit: int = 80) -> list[str]:
-    ensure_stream_memory_ready()
-    conn = db_sqlite.get_db_connection()
-    try:
-        rows = conn.execute(
-            """
-            SELECT username, display_name
-            FROM chatter_profiles
-            ORDER BY COALESCE(last_message_at, last_seen_at, updated_at, first_seen_at) DESC
-            LIMIT ?
-            """,
-            (max(1, min(int(limit or 80), 250)),),
-        ).fetchall()
-    except Exception:
-        conn.close()
-        return []
-    conn.close()
-
-    names: list[str] = []
-    for row in rows:
-        for key in ("username", "display_name"):
-            value = str(row[key] or "").strip()
-            if value and value.lower() not in {item.lower() for item in names}:
-                names.append(value)
-    return names
-
-
-def get_last_chatter_summary(username: str) -> dict | None:
-    ensure_stream_memory_ready()
-    user = _norm_user(username)
-    if not user:
-        return None
-    conn = db_sqlite.get_db_connection()
-    row = conn.execute(
-        """
-        SELECT scs.*, ss.title, ss.game, ss.category, ss.started_at
-        FROM stream_chatter_summaries scs
-        JOIN stream_sessions ss ON ss.id = scs.stream_session_id
-        WHERE scs.username = ?
-        ORDER BY scs.id DESC
-        LIMIT 1
-        """,
-        (user,),
-    ).fetchone()
-    conn.close()
-    return _row(row)
-
-
-def format_chatter_profile_reply(username: str) -> str:
-    profile = get_chatter_profile(username)
-    user = _norm_user(username)
-    if not profile:
-        return f"No tengo memoria de {username} todavia."
-    facts = profile.get("facts") or []
-    fact_lines = [
-        f"- {fact['fact_text']} (confianza: {fact['confidence']}, evidencias: {fact['evidence_count']})"
-        for fact in facts
-        if fact and int(fact.get("public_reference_allowed") or 0)
-    ]
-    return (
-        f"Esto se de {profile.get('display_name') or user}:\n\n"
-        f"* Estado: {profile.get('viewer_status') or 'sin clasificar'}.\n"
-        f"* Ultima vez visto: {profile.get('last_seen_at') or 'nunca'}.\n"
-        f"* Ultima vez que hablo: {profile.get('last_message_at') or 'nunca'}.\n"
-        f"* Ultima interaccion conmigo: {profile.get('last_direct_interaction_at') or 'nunca'}.\n"
-        f"* Mensajes totales: {profile.get('total_messages') or 0}.\n"
-        f"* Hechos recordables:\n{chr(10).join(fact_lines) if fact_lines else '- ninguno con evidencia suficiente'}"
-    )
-
-
-def format_last_seen_reply(username: str, *, kind: str) -> str:
-    profile = get_chatter_profile(username)
-    if not profile:
-        return f"No tengo registro de {username} todavia."
-    field = "last_message_at" if kind == "message" else "last_seen_at"
-    label = "hablo" if kind == "message" else "lo vi por aqui"
-    value = profile.get(field)
-    if not value:
-        return f"Tengo a {username} en memoria, pero no tengo fecha de cuando {label}."
-    return f"La ultima vez que {label} {username} fue: {value}."

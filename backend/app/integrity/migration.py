@@ -15,6 +15,10 @@ from app.game_context_v2.migration import (
     game_knowledge_canonicalization_migrations,
     game_run_state_canonicalization_migrations,
 )
+from app.social_world_v2.migration import (
+    social_identity_canonicalization_migrations,
+    social_summary_canonicalization_migrations,
+)
 
 from .hygiene import HygienePlanner
 from .scanner import IntegrityScanner
@@ -28,6 +32,8 @@ ALL_MIGRATIONS = (
     game_run_state_canonicalization_migrations,
     game_knowledge_canonicalization_migrations,
     social_world_v2_migrations,
+    social_identity_canonicalization_migrations,
+    social_summary_canonicalization_migrations,
     learning_v2_migrations,
     architecture_consolidation_migrations,
 )

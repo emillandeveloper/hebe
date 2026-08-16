@@ -1,5 +1,5 @@
 from __future__ import annotations
-import json,time,uuid
+import hashlib,json,time,uuid
 from typing import Any,Callable
 from app.continuity.models import OpenThread,OpenThreadStatus
 from app.epistemics.models import BeliefStatus,EvidenceRef,EvidenceRelation
@@ -12,6 +12,50 @@ class SocialWorldService:
         person,identity,decision=self.repository.resolve_person(platform=platform,platform_user_id=platform_user_id,login=login,display_name=display_name,now=self.now_fn(),source=source)
         if stream_session_id:self.repository.record_session(person.person_id,stream_session_id,self.now_fn())
         self.last_resolution={"person":person.to_dict(),"identity":identity.to_dict(),"decision":decision};print(f"[HEBE][SOCIAL_PERSON_RESOLVE] platform={platform} platform_user_id={platform_user_id} person_id={person.person_id} decision={decision}",flush=True);return person,identity
+    def observe_presence(self,*,observation_id,platform="twitch",platform_user_id="",login="",display_name="",stream_session_id="",source="twitch",message_seen=False,direct_interaction=False):
+        person,identity,decision=self.repository.resolve_person(platform=platform,platform_user_id=platform_user_id,login=login,display_name=display_name,now=self.now_fn(),source=source)
+        inserted=self.repository.record_presence(observation_id=str(observation_id),person_id=person.person_id,stream_session_id=str(stream_session_id or ""),observed_at=self.now_fn(),source=source,message_seen=bool(message_seen),direct_interaction=bool(direct_interaction))
+        self.last_resolution={"person":person.to_dict(),"identity":identity.to_dict(),"decision":decision,"presence_inserted":inserted};print(f"[HEBE][SOCIAL_PRESENCE] person_id={person.person_id} source={source} inserted={str(inserted).lower()}",flush=True);return person,identity,inserted
+    def find_person(self,*,platform="twitch",platform_user_id="",login=""):
+        identity=self.repository.find_identity(platform=platform,platform_user_id=platform_user_id,login=login)
+        return (self.repository.person(identity.person_id),identity) if identity else ({},None)
+    def record_summary_for_login(self,*,login,stream_session_id,source_record_id,summary_text,topics=(),message_count=0,direct_interaction_count=0,created_at=None):
+        identity=self.repository.find_identity(platform="twitch",login=login)
+        if identity is None:
+            self.rejections.append({"source_record_id":source_record_id,"reason":"summary_identity_unresolved"});return None
+        summary_id="social_summary_"+hashlib.sha256(f"runtime|{source_record_id}".encode()).hexdigest()[:32]
+        return self.repository.save_summary(summary_id=summary_id,person_id=identity.person_id,stream_session_id=str(stream_session_id),source_type="stream_summary",source_record_id=str(source_record_id),summary_text=summary_text,topics=[str(x) for x in topics],message_count=message_count,direct_interaction_count=direct_interaction_count,created_at=float(self.now_fn() if created_at is None else created_at))
+    def profile_for_login(self,login):
+        identity=self.repository.find_identity(platform="twitch",login=login)
+        if identity is None:return {}
+        stats=self.repository.profile_stats(identity.person_id);familiarity=self.repository.familiarity(identity.person_id)
+        beliefs=[item.to_dict() for item in self.beliefs.repository.list(namespace="social",scope_kind="person",scope_id=identity.person_id)]
+        return {"person_id":identity.person_id,"login":identity.login,"display_name":identity.display_name,"aliases":list(identity.aliases),"verified":bool(identity.platform_user_id),"first_seen_at":identity.first_seen_at,"last_seen_at":stats.get("last_seen_at") or identity.last_seen_at,"last_message_at":stats.get("last_message_at") or 0,"last_direct_interaction_at":stats.get("last_direct_interaction_at") or 0,"streams_seen_count":stats.get("streams_seen_count") or 0,"total_messages":stats.get("total_messages") or 0,"total_direct_interactions":stats.get("total_direct_interactions") or 0,"viewer_status":familiarity.get("band") or "new","familiarity":familiarity,"facts":beliefs}
+    def latest_summary_for_login(self,login):
+        identity=self.repository.find_identity(platform="twitch",login=login)
+        return self.repository.latest_summary(identity.person_id) if identity else {}
+    def recent_identity_names(self,limit=80):
+        identities=sorted(self.repository.identities(),key=lambda item:(float(item.get("last_seen_at") or 0),str(item.get("id") or "")),reverse=True);names=[]
+        for identity in identities[:max(1,min(int(limit or 80),250))]:
+            for value in (identity.get("login"),identity.get("display_name"),*(identity.get("aliases") or [])):
+                text=str(value or "").strip()
+                if text and text.casefold() not in {item.casefold() for item in names}:names.append(text)
+        return names
+    def format_profile_reply(self,login):
+        profile=self.profile_for_login(login)
+        if not profile:return f"No tengo memoria canónica de {login} todavía."
+        facts=[f"- {item.get('predicate')}: {item.get('object')}" for item in profile.get("facts") or [] if item.get("sensitivity")=="normal"]
+        return (f"Esto sé de {profile.get('display_name') or profile.get('login')}:\n\n"
+                f"* Estado: {profile.get('viewer_status')}.\n"
+                f"* Última vez visto: {profile.get('last_seen_at') or 'sin fecha'}.\n"
+                f"* Última vez que habló: {profile.get('last_message_at') or 'sin fecha'}.\n"
+                f"* Mensajes observados: {profile.get('total_messages') or 0}.\n"
+                f"* Hechos recordables:\n{chr(10).join(facts) if facts else '- ninguno con evidencia suficiente'}")
+    def format_last_seen_reply(self,login,*,kind):
+        profile=self.profile_for_login(login)
+        if not profile:return f"No tengo registro canónico de {login} todavía."
+        field="last_message_at" if kind=="message" else "last_seen_at";label="habló" if kind=="message" else "lo vi por aquí";value=profile.get(field)
+        return f"La última vez que {label} {profile.get('display_name') or login} fue: {value}." if value else f"Tengo a {login} en memoria, pero no tengo fecha de cuándo {label}."
     def record_episode(self,*,episode_type,participant_ids,origin_event_id,summary,salience_reason="",relevance_seconds=86400,retention_seconds=2592000,sensitivity="normal",retention_class="bounded",retrieval_scope="stream_public",related_event_ids=(),tone_observations=()):
         normalized=" ".join(str(summary or "").casefold().split())
         if not salience_reason or normalized in self.LOW_VALUE or sensitivity in self.HIGH_SENSITIVITY:
@@ -64,7 +108,7 @@ class SocialWorldService:
             (rejected if reason else selected).append({**item,**({"rejection_reason":reason} if reason else {})})
         self.repository.latencies["culture_select"].append((time.perf_counter()-start)*1000);self.last_culture_selection={"selected":selected,"rejected":rejected};return selected,rejected
     def retrieve_social_context(self,person_id,*,purpose="social_greeting",retrieval_scope="stream_public",topic="",scene_tone="casual"):
-        start=time.perf_counter();now=self.now_fn();selected=[];rejected=[];reasons={};episodes=[]
+        start=time.perf_counter();now=self.now_fn();selected=[];rejected=[];reasons={};episodes=[];summaries=[]
         for e in self.repository.episodes(person_id):
             reason=""
             if e["retention_until"] and e["retention_until"]<=now:reason="retention_expired"
@@ -72,6 +116,8 @@ class SocialWorldService:
             elif retrieval_scope=="stream_public" and (e["retrieval_scope"]!="stream_public" or e["sensitivity"] not in {"normal","low"}):reason="privacy_scope"
             if reason:e["rejection_reason"]=reason;rejected.append(e);reasons[reason]=reasons.get(reason,0)+1
             else:episodes.append(e);selected.append(e)
+        for summary in self.repository.summaries(person_id)[:5]:
+            item={**summary,"source_class":"social_summary","sensitivity":"normal"};summaries.append(item);selected.append(item)
         beliefs=[]
         for b in self.beliefs.repository.list(namespace="social",scope_kind="person",scope_id=person_id):
             item=b.to_dict();reason=""
@@ -82,5 +128,5 @@ class SocialWorldService:
         threads=[t.to_dict() for t in self._active_threads(scope_kind="person",scope_id=person_id,now=now) if t.relevance_until>now]
         culture,culture_rejected=self.select_culture(person_id,topic=topic,scene_tone=scene_tone);rejected.extend(culture_rejected)
         for x in culture_rejected:reasons[x["rejection_reason"]]=reasons.get(x["rejection_reason"],0)+1
-        selected.extend(culture);manifest=[{"id":x.get("id"),"source_class":"episode" if str(x.get("id","")).startswith("social_episode") else "social_belief" if str(x.get("id","")).startswith("belief") else "shared_culture","status":x.get("epistemic_status") or x.get("status"),"confidence":x.get("confidence"),"sensitivity":x.get("sensitivity","normal"),"evidence_ids":x.get("evidence_ids") or [x.get("origin_event_id")]} for x in selected]
-        latency=(time.perf_counter()-start)*1000;self.repository.latencies["context"].append(latency);context=SocialContext(self.repository.person(person_id),self.repository.familiarity(person_id),tuple(episodes[:5]),tuple(threads[:5]),tuple(beliefs[:5]),tuple(culture[:3]),(),tuple(selected[:10]),tuple(rejected[:20]),reasons,tuple(manifest),len(json.dumps(manifest,ensure_ascii=False).encode()),latency);self.last_context=context.to_dict();print(f"[HEBE][SOCIAL_RETRIEVE] purpose={purpose} selected={len(selected)} rejected={reasons}",flush=True);return context
+        selected.extend(culture);manifest=[{"id":x.get("id"),"source_class":x.get("source_class") or ("episode" if str(x.get("id","")).startswith("social_episode") else "social_belief" if str(x.get("id","")).startswith("belief") else "shared_culture"),"status":x.get("epistemic_status") or x.get("status"),"confidence":x.get("confidence"),"sensitivity":x.get("sensitivity","normal"),"evidence_ids":x.get("evidence_ids") or [x.get("origin_event_id") or x.get("source_record_id")]} for x in selected]
+        latency=(time.perf_counter()-start)*1000;self.repository.latencies["context"].append(latency);context=SocialContext(self.repository.person(person_id),self.repository.familiarity(person_id),tuple(episodes[:5]),tuple(summaries[:5]),tuple(threads[:5]),tuple(beliefs[:5]),tuple(culture[:3]),(),tuple(selected[:10]),tuple(rejected[:20]),reasons,tuple(manifest),len(json.dumps(manifest,ensure_ascii=False).encode()),latency);self.last_context=context.to_dict();print(f"[HEBE][SOCIAL_RETRIEVE] purpose={purpose} selected={len(selected)} rejected={reasons}",flush=True);return context
