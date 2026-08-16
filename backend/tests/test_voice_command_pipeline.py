@@ -24,6 +24,7 @@ from app.integrations.twitch.chat_cache import TwitchChatCache
 from app.integrations.twitch.target_resolver import TwitchTargetResolver
 from app.services.voice_command_recovery import normalize_stt_transcript
 from app.services.direct_stt_command import parse_direct_stt_command
+from app.services.local_capability import ApplicationCandidate, LocalCapabilityResolver
 from app.stream.action_planner import StreamActionPlanner
 from app.stream.state import StreamSessionState
 from app.continuity import ConversationContinuityService, ConversationRepository, OpenThreadRepository
@@ -336,43 +337,51 @@ class VoiceCommandPipelineTests(unittest.TestCase):
         self.assertEqual(engine.runtime.win.opened[0]["app_id"], "obs")
         self.assertEqual(delivered, [("stt_voice", "modelo:open_application:obs")])
 
-    def test_stt_canonical_melonds_command_executes_once(self):
-        variants = (
-            "Hebe, abre melonDS",
-            "Ebe, abre Melón DS",
-            "Eve, abre Melón de Ese",
-        )
-        for index, transcript in enumerate(variants):
-            with self.subTest(transcript=transcript):
-                engine = wire_canonical_app_pipeline(make_engine())
-                emitted = []
-                engine._deliver_manual_reply = lambda text, *, source: None
-                direct = parse_direct_stt_command(transcript, event_id=f"melon-{index}")
-                metadata = {
-                    "command_hypothesis": {
-                        "wake_detected": True,
-                        "wake_score": 1.0,
-                        "hypothesis_agreement": 1.0,
-                        "action_structure_score": 1.0,
-                    },
-                    "direct_stt_command": direct.to_dict(),
-                    "command_mode": True,
-                    "action_eligible": True,
-                    "detected_language": "es",
-                }
-                with patch.dict(os.environ, {"HEBE_APP_MELONDS_PATH": sys.executable}), \
-                     patch("app.hebe_engine.emit", lambda event_type, data=None: emitted.append((event_type, data or {}))):
-                    result = engine._process_stt_voice_transcript(transcript, stt_metadata=metadata)
+    def test_stt_portable_app_discovery_executes_once(self):
+        transcript = "Hebe, abre melonDS"
+        engine = wire_canonical_app_pipeline(make_engine())
+        emitted = []
+        engine._deliver_manual_reply = lambda text, *, source: None
+        direct = parse_direct_stt_command(transcript, event_id="portable-app-regression")
+        metadata = {
+            "command_hypothesis": {
+                "wake_detected": True,
+                "wake_score": 1.0,
+                "hypothesis_agreement": 1.0,
+                "action_structure_score": 1.0,
+            },
+            "direct_stt_command": direct.to_dict(),
+            "command_mode": True,
+            "action_eligible": True,
+            "detected_language": "es",
+        }
+        discovery = Mock()
+        discovery.search.return_value = [ApplicationCandidate(
+            canonical_name="melonds",
+            display_name="melonDS",
+            executable_path=sys.executable,
+            source_type="windows_search_index",
+            source_location="file:C:/portable/melonDS.exe",
+            executable_name_match="melonDS.exe",
+            confidence=0.95,
+            exists=True,
+            executable=True,
+        )]
+        engine.action_runtime.local_capability = LocalCapabilityResolver(discovery)
+        with patch("app.services.local_capability.resolve_whitelisted_app", return_value=None), \
+             patch("app.services.local_capability.persist_learned_app", return_value=None), \
+             patch("app.hebe_engine.emit", lambda event_type, data=None: emitted.append((event_type, data or {}))):
+            result = engine._process_stt_voice_transcript(transcript, stt_metadata=metadata)
 
-                self.assertEqual(result, "continue")
-                self.assertEqual(len(engine.runtime.win.opened), 1)
-                self.assertEqual(engine.runtime.win.opened[0]["app_id"], "melonds")
-                outcomes = [
-                    data for event_type, data in emitted
-                    if event_type == "voice.command" and data.get("status") == "outcome"
-                ]
-                self.assertEqual(len(outcomes), 1)
-                self.assertEqual(outcomes[0]["outcome"], "action_executed")
+        self.assertEqual(result, "continue")
+        self.assertEqual(len(engine.runtime.win.opened), 1)
+        self.assertEqual(engine.runtime.win.opened[0]["app_id"], "melonds")
+        outcomes = [
+            data for event_type, data in emitted
+            if event_type == "voice.command" and data.get("status") == "outcome"
+        ]
+        self.assertEqual(len(outcomes), 1)
+        self.assertEqual(outcomes[0]["outcome"], "action_executed")
 
     def test_addressed_question_bypasses_app_resolver_and_replies(self):
         engine = make_engine()

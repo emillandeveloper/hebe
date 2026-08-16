@@ -24,7 +24,7 @@ DEFAULT_FAILURE_METHODS = (
     "backend.tests.test_voice_command_pipeline.VoiceCommandPipelineTests.test_unrelated_action_during_pending_conversation_still_uses_action_flow",
     "backend.tests.test_voice_command_pipeline.VoiceCommandPipelineTests.test_high_value_game_tip_can_reply_without_hebe_mention",
     "backend.tests.test_voice_command_pipeline.VoiceCommandPipelineTests.test_obs_path_missing_returns_structured_action_result_not_generic_advice",
-    "backend.tests.test_voice_command_pipeline.VoiceCommandPipelineTests.test_stt_canonical_melonds_command_executes_once",
+    "backend.tests.test_voice_command_pipeline.VoiceCommandPipelineTests.test_stt_portable_app_discovery_executes_once",
     "backend.tests.test_voice_command_pipeline.VoiceCommandPipelineTests.test_twitch_normal_no_mention_chat_reaches_presence_observe",
     "backend.tests.test_voice_command_pipeline.VoiceCommandPipelineTests.test_twitch_pipeline_health_counts_messages",
     "backend.tests.test_game_knowledge.GameKnowledgeTests.test_response_synthesizer_handles_game_knowledge_command_result",

@@ -79,7 +79,7 @@ class STTLanguageForcingTests(unittest.TestCase):
         self.assertGreater(model.calls[-1]["beam_size"], 1)
         self.assertIn("Hebe", model.calls[-1]["initial_prompt"])
         self.assertIn("OBS", model.calls[-1]["initial_prompt"])
-        self.assertIn("melonDS", model.calls[-1]["initial_prompt"])
+        self.assertIn("abre", model.calls[-1]["initial_prompt"])
         self.assertNotIn("Persona", model.calls[-1]["initial_prompt"])
         self.assertEqual(metadata["task"], "transcribe")
 

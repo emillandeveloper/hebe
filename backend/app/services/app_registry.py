@@ -93,12 +93,6 @@ def _safe_builtin_registry() -> list[AppRegistryEntry]:
     obs_env = (os.getenv("HEBE_APP_OBS_PATH") or "").strip()
     default_obs = r"C:\Program Files\obs-studio\bin\64bit\obs64.exe"
     obs_path = obs_env or (default_obs if Path(default_obs).exists() else "")
-    melonds_env = (os.getenv("HEBE_APP_MELONDS_PATH") or "").strip()
-    melonds_candidates = [
-        Path(r"C:\Program Files\melonDS\melonDS.exe"),
-        Path(os.getenv("LOCALAPPDATA", "")) / "melonDS" / "melonDS.exe",
-    ]
-    melonds_path = melonds_env or next((str(path) for path in melonds_candidates if path.exists()), "")
     now = datetime.now(timezone.utc).isoformat()
     return [
         AppRegistryEntry(
@@ -111,20 +105,6 @@ def _safe_builtin_registry() -> list[AppRegistryEntry]:
             created_at=now,
             updated_at=now,
             source="env" if obs_env else "builtin",
-        ),
-        AppRegistryEntry(
-            app_id="melonds",
-            display_name="melonDS",
-            aliases=(
-                "melonds", "melon ds", "melón ds", "melon de ese",
-                "melón de ese", "melon deese",
-            ),
-            executable_path=melonds_path,
-            enabled=True,
-            requires_confirmation=False,
-            created_at=now,
-            updated_at=now,
-            source="env" if melonds_env else "builtin",
         ),
     ]
 

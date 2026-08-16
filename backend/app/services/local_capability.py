@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 import time
+from urllib.parse import unquote
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -67,6 +68,7 @@ class ApplicationDiscoveryService:
     def __init__(self) -> None:
         self._cache: dict[tuple[str, Optional[str]], dict[str, Any]] = {}
         self._cache_ttl_s = 300.0
+        self.last_diagnostics: dict[str, Any] = {}
 
     def search(self, target: str, canonical_app_id: Optional[str] = None, aliases: Sequence[str] | None = None) -> list[ApplicationCandidate]:
         normalized_target = self._normalize_target(target)
@@ -75,20 +77,61 @@ class ApplicationDiscoveryService:
         key = (normalized_target, primary_id)
         cached = self._cache.get(key)
         if cached and now - cached["timestamp"] < self._cache_ttl_s:
+            self.last_diagnostics = dict(cached.get("diagnostics") or {})
             return cached["candidates"]
 
-        candidates: list[ApplicationCandidate] = []
-        candidates.extend(self._search_registry_app_paths(normalized_target))
-        candidates.extend(self._search_installed_registry(normalized_target))
-        candidates.extend(self._search_shortcuts(normalized_target))
-        candidates.extend(self._search_executables(normalized_target))
-        candidates.extend(self._search_persisted_db_entries(primary_id))
+        candidates_by_source = {
+            "learned_db": self._search_persisted_db_entries(primary_id),
+            "app_paths_registry": self._search_registry_app_paths(normalized_target),
+            "installed_registry": self._search_installed_registry(normalized_target),
+            "start_menu_shortcuts": self._search_shortcuts(normalized_target),
+            "windows_search_index": self._search_windows_index(target),
+            "exe_scan": self._search_executables(normalized_target),
+        }
+        candidates = [
+            candidate
+            for source_candidates in candidates_by_source.values()
+            for candidate in source_candidates
+        ]
         candidates = self._deduplicate_candidates(candidates)
         candidates = self._validate_candidates(candidates, target, aliases)
         candidates.sort(key=lambda candidate: candidate.confidence, reverse=True)
 
-        self._cache[key] = {"timestamp": now, "candidates": candidates}
+        diagnostics = {
+            "target": target,
+            "normalized_target": normalized_target,
+            "sources": {
+                source: [self._candidate_diagnostic(candidate) for candidate in source_candidates]
+                for source, source_candidates in candidates_by_source.items()
+            },
+            "candidates": [self._candidate_diagnostic(candidate) for candidate in candidates],
+            "discarded": [
+                self._candidate_diagnostic(candidate)
+                for candidate in candidates
+                if not candidate.executable
+            ],
+        }
+        self.last_diagnostics = diagnostics
+        self._cache[key] = {
+            "timestamp": now,
+            "candidates": candidates,
+            "diagnostics": diagnostics,
+        }
         return candidates
+
+    @staticmethod
+    def _candidate_diagnostic(candidate: ApplicationCandidate) -> dict[str, Any]:
+        return {
+            "display_name": candidate.display_name,
+            "executable_path": candidate.executable_path,
+            "arguments": candidate.arguments,
+            "source_type": candidate.source_type,
+            "source_location": candidate.source_location,
+            "confidence": candidate.confidence,
+            "exists": candidate.exists,
+            "executable": candidate.executable,
+            "validation_notes": list(candidate.validation_notes),
+        }
 
     def _normalize_target(self, target: str) -> str:
         return re.sub(r"[^a-z0-9]+", "", str(target or "").strip().casefold())
@@ -225,18 +268,111 @@ class ApplicationDiscoveryService:
                 for path in root.rglob("*.lnk"):
                     normalized = re.sub(r"[^a-z0-9]+", "", path.stem.casefold())
                     if target in normalized:
+                        resolved = self._resolve_windows_shortcut(path)
+                        if resolved is None:
+                            candidates.append(ApplicationCandidate(
+                                canonical_name=path.stem,
+                                display_name=path.stem,
+                                executable_path="",
+                                source_type="shortcut",
+                                source_location=str(path),
+                                alias_matches=[path.stem],
+                                executable_name_match="",
+                                validation_notes=["shortcut_unresolvable"],
+                            ))
+                            continue
+                        executable_path, arguments = resolved
                         candidates.append(ApplicationCandidate(
                             canonical_name=path.stem,
                             display_name=path.stem,
-                            executable_path=str(path),
+                            executable_path=executable_path,
+                            arguments=arguments,
                             source_type="shortcut",
                             source_location=str(path),
-                            alias_matches=[target],
-                            executable_name_match=path.name,
+                            alias_matches=[path.stem],
+                            executable_name_match=Path(executable_path).name,
                         ))
             except Exception:
                 continue
         return candidates
+
+    def _resolve_windows_shortcut(self, shortcut_path: Path) -> Optional[tuple[str, str]]:
+        try:
+            import win32com.client
+
+            shortcut = win32com.client.Dispatch("WScript.Shell").CreateShortcut(str(shortcut_path))
+            target = os.path.expandvars(str(getattr(shortcut, "TargetPath", "") or "").strip())
+            arguments = str(getattr(shortcut, "Arguments", "") or "").strip()
+            if not target:
+                return None
+            return target, arguments
+        except Exception:
+            return None
+
+    def _search_windows_index(self, target: str) -> list[ApplicationCandidate]:
+        if os.name != "nt" or not target:
+            return []
+
+        candidates: list[ApplicationCandidate] = []
+        for item_name, item_url, file_name in self._iter_windows_index_rows(target):
+            executable_path = self._file_url_to_path(item_url)
+            if Path(file_name).suffix.casefold() == ".exe" and executable_path:
+                candidates.append(ApplicationCandidate(
+                    canonical_name=Path(file_name).stem,
+                    display_name=Path(file_name).stem,
+                    executable_path=executable_path,
+                    source_type="windows_search_index",
+                    source_location=item_url,
+                    alias_matches=[Path(file_name).stem],
+                    executable_name_match=file_name,
+                ))
+        return candidates
+
+    def _iter_windows_index_rows(self, target: str) -> Iterable[tuple[str, str, str]]:
+        connection = None
+        recordset = None
+        try:
+            import win32com.client
+
+            safe_target = target.replace("'", "''")
+            connection = win32com.client.Dispatch("ADODB.Connection")
+            connection.Open('Provider=Search.CollatorDSO;Extended Properties="Application=Windows"')
+            query = (
+                "SELECT TOP 50 System.ItemName, System.ItemUrl, System.FileName "
+                "FROM SystemIndex "
+                f"WHERE System.FileName LIKE '%{safe_target}%' "
+                f"OR System.ItemName LIKE '%{safe_target}%'"
+            )
+            recordset = connection.Execute(query)[0]
+            while not recordset.EOF:
+                item_name = str(recordset.Fields.Item(0).Value or "")
+                item_url = str(recordset.Fields.Item(1).Value or "")
+                file_name = str(recordset.Fields.Item(2).Value or item_name)
+                yield item_name, item_url, file_name
+                recordset.MoveNext()
+        except Exception:
+            return
+        finally:
+            try:
+                if recordset is not None:
+                    recordset.Close()
+            except Exception:
+                pass
+            try:
+                if connection is not None:
+                    connection.Close()
+            except Exception:
+                pass
+
+    @staticmethod
+    def _file_url_to_path(item_url: str) -> str:
+        value = unquote(str(item_url or "").strip())
+        if not value.casefold().startswith("file:"):
+            return ""
+        path = value[5:]
+        if path.startswith("///"):
+            path = path[3:]
+        return path.replace("/", os.sep)
 
     def _search_executables(self, target: str) -> list[ApplicationCandidate]:
         candidates: list[ApplicationCandidate] = []
@@ -274,7 +410,8 @@ class ApplicationDiscoveryService:
                 if path.suffix.lower() != ".exe":
                     continue
                 lower = path.name.casefold()
-                if target not in lower:
+                normalized_name = self._normalize_target(path.stem)
+                if target not in normalized_name:
                     continue
                 if any(bad in lower for bad in reject_terms):
                     continue
@@ -319,23 +456,36 @@ class ApplicationDiscoveryService:
 
         for candidate in candidates:
             candidate.exists = bool(candidate.executable_path and Path(candidate.executable_path).exists())
-            candidate.executable = candidate.exists and Path(candidate.executable_path).is_file()
-            candidate.validation_notes = []
+            candidate.executable = (
+                candidate.exists
+                and Path(candidate.executable_path).is_file()
+                and Path(candidate.executable_path).suffix.casefold() == ".exe"
+            )
+            existing_notes = list(candidate.validation_notes)
+            candidate.validation_notes = existing_notes
             if not candidate.executable:
-                candidate.validation_notes.append("path_missing_or_invalid")
-            candidate_name = self._normalize_target(candidate.executable_name_match)
-            if normalized_target and candidate_name == f"{normalized_target}.exe":
+                if "path_missing_or_invalid" not in candidate.validation_notes:
+                    candidate.validation_notes.append("path_missing_or_invalid")
+            candidate_name = self._normalize_target(Path(candidate.executable_name_match).stem)
+            display_name = self._normalize_target(candidate.display_name)
+            if normalized_target and display_name == normalized_target:
+                candidate.confidence += 0.45
+            elif normalized_target and normalized_target in display_name:
+                candidate.confidence += 0.20
+            if normalized_target and candidate_name == normalized_target:
                 candidate.confidence += 0.25
             if normalized_target and candidate_name.startswith(normalized_target):
                 candidate.confidence += 0.10
-            if target and target in candidate.source_location.casefold():
+            if normalized_target and normalized_target in self._normalize_target(candidate.source_location):
                 candidate.confidence += 0.10
             if candidate.source_type == "learned_db":
                 candidate.confidence += 0.40
             if candidate.source_type == "app_paths_registry":
                 candidate.confidence += 0.30
             if candidate.source_type == "shortcut":
-                candidate.confidence += 0.10
+                candidate.confidence += 0.20
+            if candidate.source_type == "windows_search_index":
+                candidate.confidence += 0.15
             if candidate.executable and candidate.exists:
                 candidate.confidence = min(candidate.confidence + 0.05, 1.0)
             candidate.confidence = max(0.0, min(candidate.confidence, 1.0))

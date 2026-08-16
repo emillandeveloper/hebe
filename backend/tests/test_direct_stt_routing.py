@@ -81,15 +81,14 @@ class DirectSTTRoutingTests(unittest.TestCase):
         self.assertEqual(plan.slots["application_target"], "Melon DS")
         self.assertEqual(set(plan.slots), {"application_target"})
 
-    def test_melonds_known_aliases_resolve_but_unknown_does_not(self):
-        for alias in ("melonds", "melon ds", "melón ds", "melón de ese", "melon de ese", "melon deese"):
-            self.assertEqual(resolve_whitelisted_app(alias)["app_id"], "melonds")
-        self.assertIsNone(resolve_whitelisted_app("melon display random"))
+    def test_portable_app_regression_is_not_a_builtin_or_special_alias(self):
+        for target in ("melonds", "melon ds", "melón de ese"):
+            self.assertIsNone(resolve_whitelisted_app(target))
 
     def test_app_prompt_is_focused(self):
         prompt = build_stt_prompt_profile("app_command", max_chars=300)
         self.assertIn("OBS", prompt)
-        self.assertIn("melonDS", prompt)
+        self.assertIn("abre", prompt)
         for excluded in ("Nuria", "Totodile", "Persona", "Final Fantasy", "Twitch"):
             self.assertNotIn(excluded, prompt)
 

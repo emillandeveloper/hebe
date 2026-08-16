@@ -84,9 +84,6 @@ DEFAULT_COMMAND_PROMPT_WORDS = [
     "pon",
     "OBS",
     "OBS Studio",
-    "melonDS",
-    "Melon DS",
-    "Melon de ese",
 ]
 
 _PROMPT_LOOP_WORDS = {
@@ -95,8 +92,6 @@ _PROMPT_LOOP_WORDS = {
     "eve",
     "leo",
     "obs",
-    "melonds",
-    "melon",
     "abre",
     "abrir",
     "inicia",

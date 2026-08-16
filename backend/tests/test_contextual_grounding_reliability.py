@@ -130,8 +130,7 @@ class ContextualGroundingReliabilityTests(unittest.TestCase):
             ))
         self.assertEqual(result.final_outcome, "action_executed")
 
-    def test_melonds_variants_resolve_canonically(self):
-        from app.services.app_registry import resolve_whitelisted_app
+    def test_app_variants_preserve_the_target_for_canonical_discovery(self):
         for raw in (
             "Hebe, abre melonDS",
             "Ebe, abre Melón DS",
@@ -140,7 +139,6 @@ class ContextualGroundingReliabilityTests(unittest.TestCase):
             parsed = parse_direct_stt_command(raw)
             self.assertEqual(parsed.action_verb, "open")
             self.assertTrue(parsed.raw_target)
-            self.assertEqual(resolve_whitelisted_app(parsed.raw_target)["app_id"], "melonds")
 
     def test_command_candidate_requires_wake_or_known_actionable_target(self):
         stt = object.__new__(STTService)

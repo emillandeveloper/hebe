@@ -2,3 +2,4 @@ fastapi
 uvicorn[standard]
 pydantic
 websockets
+pywin32; sys_platform == "win32"
