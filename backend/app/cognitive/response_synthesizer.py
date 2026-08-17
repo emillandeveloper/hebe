@@ -97,6 +97,26 @@ _STYLE_GUARD_PERSONALITY_FALLBACKS = (
 
 _STYLE_GUARD_MINIMAL_FALLBACK = "No te he entendido bien."
 
+_WINDOWS_ABSOLUTE_PATH_RE = re.compile(
+    r"(?i)(?:\b[a-z]:[\\/]|\\\\[^\\/\s]+[\\/])[^\r\n]*"
+)
+_EXECUTABLE_DETAIL_RE = re.compile(r"(?i)\b[^\s\\/]+\.exe\b")
+_TECHNICAL_EXECUTION_TEXT_RE = re.compile(
+    r"(?i)(?:\b(?:argv|command[ _-]?line|cwd|executable[ _-]?path|"
+    r"working[ _-]?directory|launch[ _-]?arguments?)\b|(?<!\w)--[a-z0-9][\w-]*)"
+)
+_TECHNICAL_EXECUTION_KEYS = {
+    "args", "arguments", "argv", "command", "command_line", "cwd",
+    "diagnostics", "directory", "executable", "executable_path",
+    "executed_command", "implementation", "launch_source", "path",
+    "receipt", "source_path", "working_directory", "workdir",
+}
+_PUBLIC_ACTION_FIELDS = {
+    "app_id", "app_name", "candidate_count", "clarification_question",
+    "closed_target", "display_name", "error_code", "message", "name",
+    "status", "success", "target", "title",
+}
+
 
 class ResponseSynthesizer:
     """
@@ -530,26 +550,46 @@ class ResponseSynthesizer:
             if result_obj is not None:
                 action_payload = getattr(result_obj, "data", {}) or {}
 
+        technical_details_allowed = self._technical_details_requested(
+            context.input_text,
+            getattr(context, "state_snapshot", None),
+        )
+        public_action_payload = (
+            action_payload
+            if technical_details_allowed
+            else self._public_action_payload(action_payload)
+        )
+        fallback = self._fallback_action_text(
+            action_name=action_name,
+            action_success=action_success,
+            action_payload=public_action_payload,
+        )
+        raw_error = getattr(action_result, "error", None) if action_result else "missing_action_result"
+        public_error = raw_error
+        if not technical_details_allowed and self._contains_local_execution_detail(raw_error):
+            public_error = public_action_payload.get("error_code") or "action_failed"
+
         response = self._run_universal_response(
             route="confirm_action",
             speech_act_type="action_confirmation" if action_success else "action_failure",
             context=context,
             goal="report the completed action result without inventing success",
-            required_facts=[f"action_name={action_name or 'unknown'}", f"success={action_success}", f"payload={action_payload}"],
-            allowed_content=[f"Action: {action_name or 'unknown'}", f"Success: {action_success}", f"Payload: {action_payload}"],
+            required_facts=[f"action_name={action_name or 'unknown'}", f"success={action_success}", f"payload={public_action_payload}"],
+            allowed_content=[f"Action: {action_name or 'unknown'}", f"Success: {action_success}", f"Payload: {public_action_payload}"],
+            must_not_do=([] if technical_details_allowed else [
+                "reveal filesystem paths, executable names, commands, arguments, or working directories",
+            ]),
             execution_result={
                 "step_type": "action",
                 "action": action_name or "unknown",
                 "success": action_success,
-                "data": action_payload,
-                "error": getattr(action_result, "error", None) if action_result else "missing_action_result",
+                "data": public_action_payload,
+                "error": public_error,
             },
-            fallback=self._fallback_action_text(
-                action_name=action_name,
-                action_success=action_success,
-                action_payload=action_payload,
-            ),
+            fallback=fallback,
         )
+        if not technical_details_allowed and self._contains_local_execution_detail(response.text):
+            return fallback
         return response.text
 
         system, user = self._build_confirm_action_prompt(
@@ -1096,6 +1136,20 @@ class ResponseSynthesizer:
 
     def synthesize_command_result(self, result: CommandResult, *, input_text: str | None = None, state: Any | None = None) -> str:
         fallback = result.fallback_text or result.user_visible_summary or "Hecho."
+        technical_details_allowed = self._technical_details_requested(input_text or "", state)
+        public_state_changes = (
+            result.state_changes
+            if technical_details_allowed
+            else self._public_execution_data(result.state_changes)
+        )
+        public_summary = result.user_visible_summary
+        if not technical_details_allowed and self._contains_local_execution_detail(public_summary):
+            public_summary = "Action completed." if result.success else "Action failed."
+        public_error = result.metadata.get("error")
+        if not technical_details_allowed and self._contains_local_execution_detail(public_error):
+            public_error = "command_failed"
+        if not technical_details_allowed and self._contains_local_execution_detail(fallback):
+            fallback = "Hecho." if result.success else "No ha salido bien."
         if not result.requires_model_response:
             return fallback
         response = self._run_universal_response(
@@ -1108,21 +1162,27 @@ class ResponseSynthesizer:
             required_facts=[
                 f"action_type={result.action_type}",
                 f"success={result.success}",
-                f"user_visible_summary={result.user_visible_summary}",
-                f"state_changes={result.state_changes}",
+                f"user_visible_summary={public_summary}",
+                f"state_changes={public_state_changes}",
             ],
-            allowed_content=[result.user_visible_summary, str(result.state_changes), str(result.constraints)],
+            allowed_content=[public_summary, str(public_state_changes), str(result.constraints)],
             forbidden_content=list(result.constraints or []),
+            must_not_do=([] if technical_details_allowed else [
+                "reveal filesystem paths, executable names, commands, arguments, or working directories",
+            ]),
             execution_result={
                 "step_type": "command_result",
                 "action": result.action_type,
                 "success": bool(result.success),
-                "data": result.state_changes,
-                "error": result.metadata.get("error"),
+                "data": public_state_changes,
+                "error": public_error,
             },
             fallback=fallback,
         )
-        if self._valid_command_reply(response.text, result):
+        if (
+            self._valid_command_reply(response.text, result)
+            and (technical_details_allowed or not self._contains_local_execution_detail(response.text))
+        ):
             return response.text
         return fallback
         if not result.requires_model_response:
@@ -1555,13 +1615,82 @@ class ResponseSynthesizer:
         action_payload: dict,
     ) -> str:
         if action_success:
-            if action_name == "open_app":
+            if action_name in {"open_app", "open_application"}:
                 opened = action_payload.get("app_name")
                 if opened:
-                    return f"Abriendo {opened}."
+                    return f"Listo — {opened} abierto."
             return "Hecho."
 
         return "Lo he intentado, pero algo no ha ido bien."
+
+    @classmethod
+    def _public_action_payload(cls, payload: dict[str, Any]) -> dict[str, Any]:
+        """Return the facts a normal action confirmation is allowed to verbalize."""
+        safe = cls._public_execution_data(payload)
+        if not isinstance(safe, dict):
+            return {}
+        return {
+            key: value for key, value in safe.items()
+            if str(key).casefold() in _PUBLIC_ACTION_FIELDS
+        }
+
+    @classmethod
+    def _public_execution_data(cls, value: Any) -> Any:
+        if isinstance(value, dict):
+            public: dict[str, Any] = {}
+            for key, item in value.items():
+                normalized_key = str(key).casefold()
+                if normalized_key in _TECHNICAL_EXECUTION_KEYS:
+                    continue
+                cleaned = cls._public_execution_data(item)
+                if isinstance(cleaned, str) and cls._contains_local_execution_detail(cleaned):
+                    continue
+                public[str(key)] = cleaned
+            return public
+        if isinstance(value, (list, tuple)):
+            public_items: list[Any] = []
+            for item in value:
+                cleaned = cls._public_execution_data(item)
+                if isinstance(cleaned, str) and cls._contains_local_execution_detail(cleaned):
+                    continue
+                public_items.append(cleaned)
+            return public_items
+        return value
+
+    @staticmethod
+    def _contains_local_execution_detail(text: Any) -> bool:
+        value = str(text or "")
+        return bool(
+            _WINDOWS_ABSOLUTE_PATH_RE.search(value)
+            or _EXECUTABLE_DETAIL_RE.search(value)
+            or _TECHNICAL_EXECUTION_TEXT_RE.search(value)
+        )
+
+    def _technical_details_requested(self, input_text: str, state: Any | None = None) -> bool:
+        if isinstance(state, dict):
+            debug_enabled = bool(
+                state.get("debug_mode")
+                or state.get("dev_mode")
+                or state.get("diagnostics_enabled")
+            )
+        else:
+            debug_enabled = bool(
+                getattr(state, "debug_mode", False)
+                or getattr(state, "dev_mode", False)
+                or getattr(state, "diagnostics_enabled", False)
+            )
+        if debug_enabled:
+            return True
+        normalized = self._normalize_guard_text(input_text)
+        explicit_technical_noun = re.search(
+            r"\b(?:ruta|path|directorio|carpeta|ejecutable|executable)\b",
+            normalized,
+        )
+        install_location_question = (
+            re.search(r"\bdonde (?:esta|quedo|se encuentra|se instalo)\b", normalized)
+            and re.search(r"\b(?:instalad|instalo|ubicad|aplicacion|programa|app)\w*\b", normalized)
+        )
+        return bool(explicit_technical_noun or install_location_question)
 
     def _fallback_reminder_text(self, payload: dict) -> str:
         title = payload.get("title") or "algo pendiente"

@@ -1,6 +1,7 @@
 import unittest
 from types import SimpleNamespace
 
+from app.cognitive.command_result import CommandResult
 from app.cognitive.models import ExecutionResult, StepExecutionResult
 from app.cognitive.response_synthesizer import ResponseSynthesizer
 from app.cognitive.speech_act_pipeline import (
@@ -134,6 +135,118 @@ class UniversalResponsePipelineTests(unittest.TestCase):
         self.assertEqual(synth.last_response_source, "persona_generated")
         self.assertEqual(synth.last_response_debug_contract["speech_act_plan"]["speech_act_type"], "action_confirmation")
         self.assertTrue(synth.last_response_debug_contract["execution_result"]["success"])
+
+    def test_action_receipt_keeps_path_but_visible_confirmation_does_not(self):
+        path = r"C:\Users\Public\Portable\Example\Example.exe"
+        action_receipt = SimpleNamespace(data={
+            "app_name": "Example App",
+            "executable_path": path,
+            "executed_command": path,
+            "app_record": {"display_name": "Example App", "executable_path": path},
+        })
+        model = CapturingModel([f"Listo — Example App abierto ({path})."])
+        synth = ResponseSynthesizer(conversation_model=model)
+        execution = ExecutionResult([StepExecutionResult(
+            step_type="action",
+            success=True,
+            data={"action_name": "open_application", "action_result": action_receipt},
+        )])
+
+        reply = synth._generate_confirm_action(context("Hebe, abre Example App"), execution)
+
+        self.assertEqual(action_receipt.data["executable_path"], path)
+        self.assertEqual(reply, "Listo — Example App abierto.")
+        self.assertNotIn(path, reply)
+
+    def test_working_directory_and_args_never_enter_normal_action_prompt(self):
+        path = r"C:\Portable\Example\Example.exe"
+        workdir = r"C:\Portable\Example"
+        model = CapturingModel(["Listo — Example App abierto."])
+        synth = ResponseSynthesizer(conversation_model=model)
+        execution = ExecutionResult([StepExecutionResult(
+            step_type="action",
+            success=True,
+            data={
+                "action_name": "open_application",
+                "action_result": SimpleNamespace(data={
+                    "app_name": "Example App",
+                    "executable_path": path,
+                    "working_directory": workdir,
+                    "args": ["--profile", "private"],
+                }),
+            },
+        )])
+
+        reply = synth._generate_confirm_action(context("Hebe, abre Example App"), execution)
+        rendered_prompt = str(model.messages)
+
+        self.assertEqual(reply, "Listo — Example App abierto.")
+        self.assertNotIn(path, rendered_prompt)
+        self.assertNotIn(workdir, rendered_prompt)
+        self.assertNotIn("--profile", rendered_prompt)
+
+    def test_explicit_install_location_question_may_receive_path(self):
+        path = r"C:\Portable\Example\Example.exe"
+        model = CapturingModel([f"Está instalado en {path}."])
+        synth = ResponseSynthesizer(conversation_model=model)
+        result = CommandResult(
+            action_type="installation_location",
+            success=True,
+            user_visible_summary=f"Example App está en {path}.",
+            state_changes={"app_name": "Example App", "executable_path": path},
+        )
+
+        reply = synth.synthesize_command_result(
+            result,
+            input_text="¿Dónde está instalado Example App?",
+        )
+
+        self.assertIn(path, reply)
+
+    def test_failure_keeps_diagnostic_path_internal_without_chat_leak(self):
+        path = r"C:\Portable\Missing\Missing.exe"
+        action_receipt = SimpleNamespace(data={
+            "app_name": "Missing App",
+            "error_code": "launch_failed",
+            "diagnostics": {"executable_path": path, "working_directory": r"C:\Portable\Missing"},
+        })
+        model = CapturingModel([f"No he podido abrir {path}."])
+        synth = ResponseSynthesizer(conversation_model=model)
+        execution = ExecutionResult([StepExecutionResult(
+            step_type="action",
+            success=False,
+            data={"action_name": "open_application", "action_result": action_receipt},
+            error="launch_failed",
+        )])
+
+        reply = synth._generate_confirm_action(context("Hebe, abre Missing App"), execution)
+
+        self.assertEqual(action_receipt.data["diagnostics"]["executable_path"], path)
+        self.assertNotIn(path, reply)
+
+    def test_normal_local_action_confirmations_never_expose_windows_paths(self):
+        for action_name, payload in (
+            ("open_application", {"app_name": "Example", "executable_path": r"C:\Apps\Example.exe"}),
+            ("close_window", {"closed_target": "Example", "working_directory": r"D:\Apps"}),
+            ("local_action", {"target": "Example", "command": r"E:\Tools\run.exe --quiet"}),
+        ):
+            with self.subTest(action_name=action_name):
+                exposed_detail = next(
+                    iter(value for value in payload.values() if isinstance(value, str) and ":\\" in value),
+                    r"C:\Hidden",
+                )
+                synth = ResponseSynthesizer(
+                    conversation_model=CapturingModel([f"Hecho ({exposed_detail})."]),
+                )
+                execution = ExecutionResult([StepExecutionResult(
+                    step_type="action",
+                    success=True,
+                    data={"action_name": action_name, "action_result": SimpleNamespace(data=payload)},
+                )])
+
+                reply = synth._generate_confirm_action(context("Hebe, haz la acción local"), execution)
+
+                self.assertNotRegex(reply, r"(?i)\b[a-z]:[\\/]")
 
     def test_action_confirmation_requires_execution_success(self):
         bundle = build_universal_speech_act_bundle(

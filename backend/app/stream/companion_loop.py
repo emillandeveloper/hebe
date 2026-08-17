@@ -200,16 +200,9 @@ class StreamCompanionLoop:
         )
 
         def rank_policy(intent: SpeechIntent) -> dict[str, Any]:
-            candidate_ref = " ".join(
-                value for value in (
-                    intent.subject_ref,
-                    intent.topic,
-                    str((intent.contribution_material or {}).get("readiness_topic") or ""),
-                ) if value
-            )
             evaluation = self.behavior_adaptation.evaluate_candidate(
                 stream,
-                candidate_ref,
+                intent.semantic_material,
                 topic=intent.topic,
                 mode="proactive",
                 now=now,
@@ -516,6 +509,7 @@ class StreamCompanionLoop:
         anchor_id = str(anchor.get("id") or "")
         anchor_type = str(anchor.get("type") or "stream_silence")
         quality = float(anchor.get("quality") or 0.0)
+        evidence = dict(anchor.get("evidence") or {})
         if (
             quality >= 0.55
             and anchor_type != "stream_silence"
@@ -527,7 +521,15 @@ class StreamCompanionLoop:
                 source_event_ids=list((anchor.get("evidence") or {}).get("source_event_ids") or []),
                 anchor_ids=[anchor_id] if anchor_id else [],
                 topic=anchor_type,
-                subject_ref=str((anchor.get("evidence") or {}).get("extracted_subject") or ""),
+                subject_ref=str(evidence.get("extracted_subject") or ""),
+                semantic_material=self._semantic_material(
+                    evidence.get("extracted_subject"),
+                    evidence.get("extracted_object"),
+                    evidence.get("extracted_predicate"),
+                    evidence.get("supported_claims"),
+                    evidence.get("exact_supported_claims"),
+                    readiness.get("candidate_topic"),
+                ),
                 value=quality,
                 urgency=0.85 if intent_type in {SpeechIntentType.REACTION, SpeechIntentType.BANTER} else 0.55,
                 freshness=float((anchor.get("evidence") or {}).get("currentness", 1.0) or 1.0),
@@ -542,6 +544,7 @@ class StreamCompanionLoop:
                 created = self.intent_manager.create(
                     intent_type=SpeechIntentType.IDLE_CHATTER,
                     topic=str(topic),
+                    semantic_material=self._semantic_material(topic),
                     value=max(0.0, base_value - index * 0.015),
                     urgency=0.1,
                     scene_relevance=dict(getattr(stream, "current_scene_timeline", None) or {}),
@@ -558,6 +561,12 @@ class StreamCompanionLoop:
                     anchor_ids=list(candidate.get("anchor_ids") or []),
                     topic=str(candidate.get("topic") or "cognitive_candidate"),
                     subject_ref=str(candidate.get("subject_ref") or ""),
+                    semantic_material=self._semantic_material(
+                        candidate.get("subject_ref"),
+                        candidate.get("semantic_material"),
+                        (candidate.get("material") or {}).get("semantic_material")
+                        if isinstance(candidate.get("material"), dict) else "",
+                    ),
                     value=float(candidate.get("value") or 0.0),
                     urgency=float(candidate.get("urgency") or 0.3),
                     freshness=float(candidate.get("freshness") or 1.0),
@@ -571,6 +580,18 @@ class StreamCompanionLoop:
                 candidate["rejected_reason"] = "invalid_speech_intent_candidate"
         stream.speech_intent_candidates = candidates[-20:]
         return created
+
+    @staticmethod
+    def _semantic_material(*values: Any) -> str:
+        """Join only producer-declared linguistic evidence, never metadata keys."""
+        parts: list[str] = []
+        for value in values:
+            items = value if isinstance(value, (list, tuple)) else [value]
+            for item in items:
+                text = str(item or "").strip()
+                if text and text not in parts:
+                    parts.append(text)
+        return " ".join(parts)
 
     @staticmethod
     def _intent_type_for_anchor(anchor_type: str, anchor: dict[str, Any]) -> SpeechIntentType:

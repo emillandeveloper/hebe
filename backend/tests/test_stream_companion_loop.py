@@ -3,7 +3,7 @@ from unittest.mock import patch
 
 from app.stream.companion_loop import StreamCompanionLoop
 from app.cognitive.input_interpretation import InputInterpreter
-from app.stream.behavior_adaptation import BehaviorAdaptationService
+from app.stream.behavior_adaptation import BehaviorAdaptationService, motif_terms
 from app.stream.spontaneity import StreamSpontaneityConfig, StreamSpontaneityService
 from app.stream.state import StreamSessionState
 
@@ -168,6 +168,35 @@ class StreamCompanionLoopTests(unittest.TestCase):
         ranked = tick.readiness["behavior_ranked_candidates"]
         self.assertEqual(ranked[0]["policy"]["action"], "suppress")
         self.assertFalse(ranked[0]["eligible"])
+
+    def test_speech_intent_separates_semantic_material_from_structural_anchor_labels(self):
+        now = 1_000_000.0
+        stream = self.make_stream(now=now)
+        loop = self.make_loop(now=now)
+
+        intent = loop._create_speech_intent(
+            stream,
+            {"candidate_topic": "challenge_comment"},
+            {
+                "id": "anchor-semantic-contract",
+                "type": "game,title,playthrough_type,recent_voice_event",
+                "quality": 0.9,
+                "evidence": {
+                    "extracted_subject": "tensión",
+                    "extracted_object": "combate",
+                    "extracted_predicate": "aumenta",
+                },
+            },
+            now=now,
+        )
+
+        self.assertEqual(intent.topic, "game,title,playthrough_type,recent_voice_event")
+        self.assertEqual(intent.semantic_material, "tensión combate aumenta challenge_comment")
+        self.assertTrue(
+            {"game", "title", "playthrough", "type", "recent", "voice", "event"}.isdisjoint(
+                motif_terms(intent.semantic_material)
+            )
+        )
 
     def test_companion_health_summary_logged(self):
         now = 1_000_000.0

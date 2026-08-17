@@ -378,6 +378,96 @@ class BehaviorAdaptationTests(unittest.TestCase):
         self.assertEqual(generated.action, AdaptationAction.SUPPRESS)
         self.assertEqual(generated.stage, "generated_output")
 
+    def test_exact_proactive_output_is_not_emitted_twice(self):
+        stream = stream_with("Uf, qué tensión.")
+
+        generated = self.service.validate_generated_output(
+            stream, "Uf, qué tensión.", now=NOW + 1,
+        )
+
+        self.assertEqual(generated.action, AdaptationAction.SUPPRESS)
+        self.assertEqual(generated.reason, "generated_output_exact_recent_duplicate")
+        self.assertEqual(generated.stage, "generated_output")
+
+    def test_exact_proactive_output_is_blocked_again_after_ninety_seconds(self):
+        stream = stream_with("Uf, qué tensión.")
+
+        generated = self.service.validate_generated_output(
+            stream, "Uf, qué tensión.", now=NOW + 90,
+        )
+
+        self.assertEqual(generated.action, AdaptationAction.SUPPRESS)
+        self.assertGreaterEqual(generated.recent_uses, 1)
+
+    def test_near_duplicate_generated_output_uses_existing_similarity(self):
+        stream = stream_with("Uf, qué tensión.")
+
+        generated = self.service.validate_generated_output(
+            stream, "Menuda tensión.", now=NOW + 1,
+        )
+
+        self.assertEqual(generated.action, AdaptationAction.SUPPRESS)
+        self.assertEqual(generated.reason, "generated_output_near_recent_duplicate")
+        self.assertGreaterEqual(generated.fatigue, 0.8)
+
+    def test_candidate_metadata_does_not_define_motif_identity(self):
+        stream = stream_with()
+
+        first = self.service.evaluate_candidate(
+            stream, "tensión en el combate", topic="game,title,recent_event", now=NOW,
+        )
+        same_semantics = self.service.evaluate_candidate(
+            stream, "tensión en el combate", topic="chat,voice,type", now=NOW,
+        )
+        different_semantics = self.service.evaluate_candidate(
+            stream, "la música de esta zona", topic="game,title,recent_event", now=NOW,
+        )
+        metadata_only = self.service.evaluate_candidate(
+            stream, "", topic="game,title,playthrough_type,recent_voice_event", now=NOW,
+        )
+
+        self.assertEqual(first.motif_id, same_semantics.motif_id)
+        self.assertNotEqual(first.motif_id, different_semantics.motif_id)
+        self.assertEqual(metadata_only.motif_id, "motif_unresolved")
+
+    def test_direct_required_response_bypasses_recent_output_duplicate_guard(self):
+        stream = stream_with("Esa puerta no se abre porque requiere una llave.")
+
+        generated = self.service.validate_generated_output(
+            stream,
+            "Esa puerta no se abre porque requiere una llave.",
+            mode="direct_response",
+            now=NOW + 1,
+        )
+
+        self.assertEqual(generated.action, AdaptationAction.ALLOW)
+        self.assertEqual(generated.reason, "direct_required_response")
+
+    def test_positive_feedback_does_not_override_exact_output_deduplication(self):
+        utterance = "Uf, qué tensión."
+        stream = stream_with(utterance)
+        feedback = self.service.apply_feedback(
+            stream,
+            self.owner_feedback("Buenísima esa.", recent=utterance),
+            recent_hebe_utterance=utterance,
+            now=NOW,
+        )
+
+        generated = self.service.validate_generated_output(stream, utterance, now=NOW + 1)
+
+        self.assertEqual(feedback.kind, FeedbackKind.EPISODIC_POSITIVE)
+        self.assertEqual(generated.action, AdaptationAction.SUPPRESS)
+        self.assertEqual(generated.reason, "generated_output_exact_recent_duplicate")
+
+    def test_distinct_generated_topic_remains_allowed(self):
+        stream = stream_with("Uf, qué tensión.")
+
+        generated = self.service.validate_generated_output(
+            stream, "La música de esta zona es preciosa.", now=NOW + 1,
+        )
+
+        self.assertEqual(generated.action, AdaptationAction.ALLOW)
+
     def test_old_semantic_cooldown_classifier_is_absent(self):
         self.assertFalse(hasattr(proactive, "semantic_cooldown_key"))
         self.assertFalse(hasattr(proactive, "cooldown_active"))

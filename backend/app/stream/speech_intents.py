@@ -81,6 +81,7 @@ class SpeechIntent:
     anchor_ids: list[str]
     topic: str
     subject_ref: str
+    semantic_material: str
     value: float
     urgency: float
     freshness: float
@@ -158,6 +159,7 @@ class SpeechIntentManager:
         anchor_ids: list[str] | None = None,
         topic: str = "",
         subject_ref: str = "",
+        semantic_material: str = "",
         value: float,
         urgency: float = 0.5,
         freshness: float = 1.0,
@@ -184,6 +186,7 @@ class SpeechIntentManager:
             id=f"intent_{uuid.uuid4().hex}", type=kind,
             source_event_ids=[str(item) for item in (source_event_ids or []) if str(item)],
             anchor_ids=anchor_ids, topic=topic, subject_ref=str(subject_ref or ""),
+            semantic_material=str(semantic_material or ""),
             value=max(0.0, min(1.0, float(value))),
             urgency=max(0.0, min(1.0, float(urgency))),
             freshness=max(0.0, min(1.0, float(freshness))),

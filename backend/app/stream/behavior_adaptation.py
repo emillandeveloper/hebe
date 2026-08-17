@@ -179,6 +179,8 @@ class BehaviorAdaptationService:
     NEGATIVE_HALF_LIFE_SEC = 30 * 60
     POSITIVE_HALF_LIFE_SEC = 20 * 60
     USE_WINDOW_SEC = 45 * 60
+    GENERATED_DUPLICATE_WINDOW_SEC = 5 * 60
+    GENERATED_NEAR_DUPLICATE_SIMILARITY = 0.80
 
     def __init__(
         self,
@@ -477,7 +479,9 @@ class BehaviorAdaptationService:
         observation: dict[str, Any] | None = None,
     ) -> CandidateEvaluation:
         now = time.time() if now is None else float(now)
-        terms = motif_terms(f"{text} {topic}")
+        # ``text`` is the producer-declared semantic material. ``topic`` is
+        # structural observation context and must not become motif vocabulary.
+        terms = motif_terms(text)
         candidate_id = motif_id(terms) if terms else "motif_unresolved"
 
         def finish(result: CandidateEvaluation, *, record_runtime: bool = True) -> CandidateEvaluation:
@@ -511,7 +515,7 @@ class BehaviorAdaptationService:
             age = max(0.0, now - float(item.get("timestamp", 0.0) or 0.0))
             if age > self.USE_WINDOW_SEC:
                 continue
-            similarity = semantic_similarity(terms, motif_terms(f"{item.get('text', '')} {item.get('topic', '')}"))
+            similarity = semantic_similarity(terms, motif_terms(str(item.get("text") or "")))
             if similarity < 0.25:
                 continue
             recent_uses += 1
@@ -564,14 +568,14 @@ class BehaviorAdaptationService:
         now: float | None = None,
         observation: dict[str, Any] | None = None,
     ) -> CandidateEvaluation:
-        """Validate final text against canonical active suppression only.
+        """Validate final text against canonical suppression and recent output.
 
         Candidate ranking owns fatigue and recent-use scoring. This safety check
         does not rank again; it catches a generated text that drifted into an
-        explicitly constrained or currently suppressed motif.
+        explicitly constrained, currently suppressed, or just-emitted motif.
         """
         now = time.time() if now is None else float(now)
-        terms = motif_terms(f"{text} {topic}")
+        terms = motif_terms(text)
         candidate_id = motif_id(terms) if terms else "motif_unresolved"
 
         def finish(result: CandidateEvaluation, *, record_runtime: bool = True) -> CandidateEvaluation:
@@ -600,6 +604,39 @@ class BehaviorAdaptationService:
                 "generated_output",
             )
             return finish(result)
+
+        normalized_output = _normalize(text)
+        recent_uses = 0
+        nearest_similarity = 0.0
+        exact_recent_duplicate = False
+        for item in list(getattr(stream, "recent_idle_messages", []) or [])[-30:]:
+            age = max(0.0, now - float(item.get("timestamp", 0.0) or 0.0))
+            if age > self.GENERATED_DUPLICATE_WINDOW_SEC:
+                continue
+            previous_text = str(item.get("text") or "")
+            previous_terms = motif_terms(previous_text)
+            similarity = semantic_similarity(terms, previous_terms)
+            nearest_similarity = max(nearest_similarity, similarity)
+            if similarity >= 0.25:
+                recent_uses += 1
+            previous_normalized = str(item.get("normalized_text") or _normalize(previous_text))
+            if normalized_output and normalized_output == previous_normalized:
+                exact_recent_duplicate = True
+
+        if exact_recent_duplicate:
+            return finish(CandidateEvaluation(
+                AdaptationAction.SUPPRESS, 1.0,
+                "generated_output_exact_recent_duplicate",
+                candidate_id, max(1, recent_uses), 0.0, 0.0,
+                score_multiplier=0.0, stage="generated_output",
+            ))
+        if nearest_similarity >= self.GENERATED_NEAR_DUPLICATE_SIMILARITY:
+            return finish(CandidateEvaluation(
+                AdaptationAction.SUPPRESS, nearest_similarity,
+                "generated_output_near_recent_duplicate",
+                candidate_id, max(1, recent_uses), 0.0, 0.0,
+                score_multiplier=0.0, stage="generated_output",
+            ))
         for entry in list(self._state(stream).get("entries") or []):
             similarity = semantic_similarity(terms, tuple(entry.get("motif_terms") or ()))
             if similarity < 0.25:
@@ -980,8 +1017,14 @@ class BehaviorAdaptationService:
             "reason_code": result.reason,
         }
         if event == "post_generation":
+            payload["generated_semantic_material"] = list(terms)
+            payload["post_generation_motif"] = result.motif_id
+            payload["comparison_decision"] = result.action.value.upper()
+            payload["comparison_reason"] = result.reason
             payload["post_generation_decision"] = result.action.value.upper()
         else:
+            payload["candidate_semantic_material"] = list(terms)
+            payload["pre_generation_motif"] = result.motif_id
             payload["policy_decision"] = result.action.value.upper()
         self.observability.record(event, trace_id=result.trace_id, timestamp=now, **payload)
 
@@ -1013,7 +1056,7 @@ class BehaviorAdaptationService:
     def _comparison_rows(self, stream: Any, terms: tuple[str, ...], *, now: float) -> list[dict[str, Any]]:
         comparable: list[tuple[str, tuple[str, ...], str, float, str]] = []
         for item in list(getattr(stream, "recent_idle_messages", []) or [])[-30:]:
-            other = motif_terms(f"{item.get('text', '')} {item.get('topic', '')}")
+            other = motif_terms(str(item.get("text") or ""))
             if other:
                 comparable.append((
                     motif_id(other), other, "recent_usage",

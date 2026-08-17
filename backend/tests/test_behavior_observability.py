@@ -163,7 +163,32 @@ class BehaviorObservabilityTests(unittest.TestCase):
         )
         self.assertTrue(events[1]["candidate_selected"])
         self.assertTrue(events[1]["generation_attempted"])
+        self.assertEqual(events[0]["candidate_semantic_material"], ["musica", "acompana", "bien", "zona"])
+        self.assertEqual(events[0]["pre_generation_motif"], decision.motif_id)
+        self.assertEqual(events[2]["generated_semantic_material"], ["musica", "acompana", "bien", "zona"])
+        self.assertEqual(events[2]["post_generation_motif"], post.motif_id)
+        self.assertEqual(events[2]["comparison_decision"], "ALLOW")
+        self.assertEqual(events[2]["comparison_reason"], post.reason)
         self.assertTrue(events[-1]["emitted"])
+
+    def test_structural_topic_is_observable_but_not_semantic_material(self):
+        stream = make_stream()
+
+        self.service.evaluate_candidate(
+            stream,
+            "tensión en el combate",
+            topic="game,title,playthrough_type,recent_voice_event",
+            now=NOW,
+            observation={"trace_id": "clean-semantic-material"},
+        )
+
+        event = next(
+            item for item in self.observability.snapshot()["recent_events"]
+            if item["trace_id"] == "clean-semantic-material"
+        )
+        self.assertEqual(event["topic"], "game,title,playthrough_type,recent_voice_event")
+        self.assertEqual(event["candidate_semantic_material"], ["tension", "combate"])
+        self.assertTrue({"game", "title", "playthrough", "type", "recent", "voice", "event"}.isdisjoint(event["semantic_terms"]))
 
     def test_feedback_trace_is_minimal_and_metrics_are_observational(self):
         stream = make_stream()
