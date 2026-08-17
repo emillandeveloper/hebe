@@ -754,11 +754,19 @@ class ResponseSynthesizer:
                 "do not change the topic into stream planning",
             ])
         state_snapshot = getattr(context, "state_snapshot", {}) or {}
+        response_frame = getattr(context, "response_frame", {}) or {}
+        current_game = str(response_frame.get("current_game") or "") if isinstance(response_frame, dict) else ""
+        session_context = dict(response_frame.get("current_session_context") or {}) if isinstance(response_frame, dict) else {}
+        game_intelligence = dict(session_context.get("game_intelligence") or {})
+        grounded_game_claims = list(game_intelligence.get("allowed_claims") or [])
         game_guidance_query = self._game_guidance_classifier.looks_like_query(msg, state_snapshot)
         has_game_guidance_source = bool(
             getattr(context, "relevant_chunks", [])
-            or ((getattr(context, "response_frame", {}) or {}).get("current_session_context") if isinstance(getattr(context, "response_frame", {}), dict) else None)
+            or session_context
         )
+        game_facts = ([f"current_game={current_game}"] if current_game else []) + [
+            f"grounded_game_claim={claim}" for claim in grounded_game_claims
+        ]
         response = self._run_universal_response(
             route="owner_private_chat",
             speech_act_type=speech_act,
@@ -767,8 +775,8 @@ class ResponseSynthesizer:
             source=str(getattr(context, "source", "") or "ui_text"),
             output_target="local_ui" if str(getattr(context, "source", "") or "") == "ui" else "local_tts",
             goal="answer Leo in private mode from the scene contract",
-            allowed_content=[f"Message type: {message_type}", f"Leo message: {msg}"] + entity_facts,
-            required_facts=entity_facts,
+            allowed_content=[f"Message type: {message_type}", f"Leo message: {msg}"] + entity_facts + game_facts,
+            required_facts=entity_facts + game_facts,
             must_not_do=[
                 "do not offer to save, publish, configure, remember, or use a line unless execution_result exists",
                 "do not end with a service-style follow-up question",
@@ -776,6 +784,12 @@ class ResponseSynthesizer:
             technical_state={
                 "game_guidance_query": bool(game_guidance_query),
                 "has_game_guidance_source": bool(has_game_guidance_source),
+            },
+            current_game=current_game,
+            memory={
+                **self._scene_memory_for_context(context),
+                "current_stream_state": session_context,
+                "game_knowledge": game_intelligence,
             },
             fallback="Te leo, Leo. Dame un poco mas de contexto y lo aterrizo.",
             max_length_chars=360,
@@ -1244,7 +1258,8 @@ class ResponseSynthesizer:
         blocked_behavior = requested_behavior or behavior_family or reason
         style_profile = self._boundary_style_profile(blocked_behavior, reason)
         is_twitch = source.startswith("twitch")
-        fallback = self._policy_boundary_fallback(reason)
+        repeat_count = int(policy.get("boundary_repeat_count") or 0)
+        fallback = self._policy_boundary_fallback(reason, repeat_count=repeat_count)
         base = {
             "text": "",
             "response_source": "fallback_template",
@@ -1252,10 +1267,11 @@ class ResponseSynthesizer:
             "was_generic_refusal_rewritten": False,
             "style_profile": style_profile,
             "blocked_behavior": blocked_behavior,
+            "generation_outcome": "not_attempted",
         }
         if self.conversation_model is None:
             print("[HEBE][PERSONA_RESPONSE] source=fallback_template intent=%s" % response_intent, flush=True)
-            return {**base, "text": fallback}
+            return {**base, "text": fallback, "generation_outcome": "fallback_template"}
         response = self._run_universal_response(
             route=f"policy_boundary:{reason or response_intent}",
             speech_act_type="policy_boundary",
@@ -1292,6 +1308,10 @@ class ResponseSynthesizer:
             "debug_contract": response.debug_contract,
             "style_guard_triggered": style_guard_triggered,
             "was_generic_refusal_rewritten": style_guard_triggered,
+            "generation_outcome": (
+                "fallback_template" if response.response_source == "local_safe_fallback"
+                else "generated"
+            ),
         }
         if self.conversation_model is None:
             print("[HEBE][PERSONA_RESPONSE] source=fallback_template intent=%s" % response_intent, flush=True)
@@ -1458,7 +1478,7 @@ class ResponseSynthesizer:
             return "generic_resource_language"
         return ""
 
-    def _policy_boundary_fallback(self, reason: str) -> str:
+    def _policy_boundary_fallback(self, reason: str, *, repeat_count: int = 0) -> str:
         reason_key = str(reason or "")
         if reason_key == "sexual_topic_stream_mode":
             return "Ese tema no se convierte en clase de directo. Lo aparco y seguimos."
@@ -1467,7 +1487,12 @@ class ResponseSynthesizer:
         if reason_key == "owner_behavior_block":
             return "Leo ya marco ese limite. Yo no voy a hacer el rodeo por el chat."
         if reason_key == "viewer_repeat_to_leo_request":
-            return "Si quieres decirselo a Leo, el chat esta ahi. Yo no hago de recadera."
+            variants = (
+                "Si quieres decirselo a Leo, el chat esta ahi. Yo no hago de recadera.",
+                "El mensaje es tuyo y el chat tambien. Mi voz con Leo no se alquila.",
+                "Puedes pedirselo tu desde el chat; yo no convierto encargos de viewers en ordenes para Leo.",
+            )
+            return variants[max(0, repeat_count - 1) % len(variants)]
         if reason_key == "viewer_behavior_request":
             return "Puedes hablar conmigo; dirigir mi tono con Leo ya es otro negociado."
         if reason_key == "viewer_not_authority":

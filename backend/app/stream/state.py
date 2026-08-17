@@ -111,6 +111,8 @@ class StreamSessionState:
     last_behavior_adaptation_decision: Optional[dict] = None
     last_behavior_correlation_id: str = ""
     last_policy_trace: Optional[dict] = None
+    recent_interaction_decisions: list[dict] = field(default_factory=list)
+    last_self_explanation: Optional[dict] = None
     viewer_policy_cooldowns: dict[str, dict] = field(default_factory=dict)
     last_invalidated_run_context_facts: list[dict] = field(default_factory=list)
     title_context_markers: list[str] = field(default_factory=list)

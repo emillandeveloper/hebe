@@ -165,6 +165,7 @@ class PolicyDecision:
     target: str = ""
     matched_by: list[str] = field(default_factory=list)
     execute_as_command: bool = False
+    boundary_repeat_count: int = 0
 
     def __post_init__(self) -> None:
         if self.allow_free_llm is None:
@@ -802,6 +803,8 @@ def policy_trace(
     requested_behavior: str | None = None,
 ) -> dict[str, Any]:
     behavior = str(requested_behavior or decision.requested_behavior or requested_behavior_for_text(text) or UNKNOWN_BEHAVIOR)
+    policy_name = policy_decision_name(decision)
+    effect_authorized = policy_name == "allowed"
     return {
         "source": source,
         "speaker": str(speaker or "").strip() or "unknown",
@@ -813,7 +816,15 @@ def policy_trace(
         "behavior_family": decision.behavior_family or behavior,
         "target": decision.target or "",
         "matched_by": list(decision.matched_by or []),
-        "policy_decision": policy_decision_name(decision),
+        "policy_decision": policy_name,
+        "interaction_decision": (
+            "deny_action_reply" if not effect_authorized and decision.allow_reply
+            else "deny_interaction" if not effect_authorized and not decision.allow_reply
+            else "allow_effect_and_reply"
+        ),
+        "requested_effect": behavior,
+        "effect_authorized": effect_authorized,
+        "reply_authorized": bool(decision.allow_reply),
         "reason": decision.reason or "none",
         "response_mode": policy_response_mode(decision),
         "response_intent": decision.response_intent or "",
@@ -831,6 +842,9 @@ def policy_trace(
         "was_generic_refusal_rewritten": False,
         "final_response": "",
         "cooldown_key": decision.cooldown_key,
+        "boundary_repeat_count": int(decision.boundary_repeat_count or 0),
+        "generation_outcome": "not_attempted",
+        "emission_outcome": "pending" if decision.allow_reply else "not_authorized",
     }
 
 
@@ -1008,7 +1022,10 @@ class ViewerIntentPolicy:
         state["count"] = count
         state["last_ts"] = now
         cooldowns[key] = state
-        allow_reply = count <= 3
+        # Policy decides whether the requested effect is authorized. Repetition
+        # budgets may still prevent public spam, but they do not silently turn
+        # an explicit boundary decision into a denial of interaction.
+        allow_reply = True
         behavior = semantic.requested_behavior if semantic is not None else ""
         if reason == "owner_behavior_block":
             behavior = behavior or COMPLIMENTS_TO_LEO
@@ -1041,6 +1058,7 @@ class ViewerIntentPolicy:
             target=(semantic.target if semantic is not None else ""),
             matched_by=(semantic.matched_by if semantic is not None else ["semantic_classifier"]),
             execute_as_command=False,
+            boundary_repeat_count=count,
         )
 
 

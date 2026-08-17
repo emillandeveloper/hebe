@@ -55,6 +55,11 @@ from app.cognitive.scheduler import InternalEvent
 from app.cognitive.command_result import CommandResult
 from app.cognitive.input_event import InputEnvelope, InputEvent
 from app.cognitive.input_interpretation import InputInterpretation, InputInterpreter, InputSpeechAct
+from app.cognitive.interaction_history import (
+    RecentInteractionDecisionHistory,
+    detect_self_explanation_query,
+    render_grounded_self_explanation,
+)
 from app.cognitive.models import ExecutionResult, Plan
 from app.cognitive.core_loop import (
     HebeCoreLoop,
@@ -1387,6 +1392,7 @@ class HebeEngine:
                 stream.last_policy_trace = clean
             except Exception:
                 pass
+        self._record_policy_interaction_decision(clean)
         print(
             f"[HEBE][AUTHORITY] speaker={clean.get('speaker')} authority={clean.get('authority')}",
             flush=True,
@@ -1439,6 +1445,10 @@ class HebeEngine:
         thread_result: dict | None = None,
         answer_depth_result: dict | None = None,
         followup_question_guard_result: dict | None = None,
+        generation_outcome: str | None = None,
+        emission_outcome: str | None = None,
+        explanation_source_trace: str | None = None,
+        explanation_reason_code: str | None = None,
     ) -> None:
         trace = self.get_last_policy_trace()
         if not trace:
@@ -1482,6 +1492,14 @@ class HebeEngine:
             updated["answer_depth_result"] = answer_depth_result
         if isinstance(followup_question_guard_result, dict):
             updated["followup_question_guard_result"] = followup_question_guard_result
+        if generation_outcome is not None:
+            updated["generation_outcome"] = str(generation_outcome or "")
+        if emission_outcome is not None:
+            updated["emission_outcome"] = str(emission_outcome or "")
+        if explanation_source_trace is not None:
+            updated["explanation_source_trace"] = str(explanation_source_trace or "")
+        if explanation_reason_code is not None:
+            updated["explanation_reason_code"] = str(explanation_reason_code or "")
         if style_profile:
             updated["style_profile"] = style_profile
         if blocked_behavior:
@@ -1501,6 +1519,7 @@ class HebeEngine:
                 stream.last_policy_trace = updated
             except Exception:
                 pass
+        self._record_policy_interaction_decision(updated)
         print(f"[HEBE][RESPONSE_SOURCE] source={response_source}", flush=True)
 
     def _enrich_stream_payload(self, payload: dict | None) -> dict:
@@ -1542,7 +1561,7 @@ class HebeEngine:
         if deterministic:
             return {"text": deterministic, "response_source": "structured_constraint_confirmation"}
         directive = str(getattr(decision, "response_directive", "") or "").strip()
-        if not directive:
+        if not directive and not str(getattr(decision, "response_intent", "") or "").endswith("boundary"):
             return {"text": "", "response_source": "silent"}
         policy_payload = {
             "policy_decision": "blocked",
@@ -1556,30 +1575,214 @@ class HebeEngine:
             "response_tone": decision.response_tone or "sarcastic_playful_stream_safe",
             "must_include": list(getattr(decision, "must_include", []) or []),
             "must_not_include": list(getattr(decision, "must_not_include", []) or []),
+            "boundary_repeat_count": int(getattr(decision, "boundary_repeat_count", 0) or 0),
         }
         synthesizer = getattr(self, "response_synthesizer", None)
-        if synthesizer is not None and hasattr(synthesizer, "synthesize_policy_boundary_response"):
-            stream_payload = self._enrich_stream_payload({})
-            return synthesizer.synthesize_policy_boundary_response(
-                policy=policy_payload,
-                input_text=input_text,
-                speaker=speaker,
-                source=source,
-                current_game=str(stream_payload.get("current_game") or ""),
-                current_activity=str(stream_payload.get("current_activity") or ""),
-                stream_live=bool(stream_payload.get("stream_live")),
-                output_mode=str(stream_payload.get("stream_output_mode") or ""),
-            )
-        print(
-            f"[HEBE][POLICY] reply_generation_failed reason={decision.reason} source=no_persona_response_layer",
-            flush=True,
+        if synthesizer is None or not hasattr(synthesizer, "synthesize_policy_boundary_response"):
+            synthesizer = ResponseSynthesizer(conversation_model=None)
+        stream_payload = self._enrich_stream_payload({})
+        return synthesizer.synthesize_policy_boundary_response(
+            policy=policy_payload,
+            input_text=input_text,
+            speaker=speaker,
+            source=source,
+            current_game=str(stream_payload.get("current_game") or ""),
+            current_activity=str(stream_payload.get("current_activity") or ""),
+            stream_live=bool(stream_payload.get("stream_live")),
+            output_mode=str(stream_payload.get("stream_output_mode") or ""),
         )
-        return {"text": "", "response_source": "silent"}
 
     def get_last_policy_trace(self) -> dict:
         stream = self._get_stream_state()
         stream_trace = getattr(stream, "last_policy_trace", None) if stream is not None else None
         return dict(stream_trace or getattr(self, "_last_policy_trace", {}) or {})
+
+    def _get_interaction_decision_history(self) -> RecentInteractionDecisionHistory:
+        history = getattr(self, "interaction_decision_history", None)
+        if history is None:
+            history = RecentInteractionDecisionHistory()
+            self.interaction_decision_history = history
+        return history
+
+    def get_recent_interaction_decisions(self) -> list[dict]:
+        return self._get_interaction_decision_history().all(self._get_stream_state())
+
+    def _record_interaction_decision(self, record: dict) -> dict:
+        stream = self._get_stream_state()
+        if stream is None:
+            return dict(record or {})
+        saved = self._get_interaction_decision_history().upsert(stream, record)
+        print(
+            "[HEBE][INTERACTION_DECISION] "
+            f"trace={saved.get('trace_id')} actor={saved.get('actor')} authority={saved.get('authority')} "
+            f"decision={saved.get('interaction_decision')} requested_effect={saved.get('requested_effect')} "
+            f"effect_authorized={str(bool(saved.get('effect_authorized'))).lower()} "
+            f"reply_authorized={str(bool(saved.get('reply_authorized'))).lower()} "
+            f"reason={saved.get('reason_code')}",
+            flush=True,
+        )
+        return saved
+
+    def _record_policy_interaction_decision(self, trace: dict) -> dict:
+        event_id = str(trace.get("event_id") or f"policy_{uuid.uuid4().hex}")
+        actor = str(trace.get("speaker") or "unknown")
+        identities = [actor, str(trace.get("actor_login") or "")]
+        existing = next((
+            item for item in reversed(self.get_recent_interaction_decisions())
+            if str(item.get("trace_id") or "") == event_id
+        ), {})
+        emission_outcome = str(trace.get("emission_outcome") or "pending")
+        if emission_outcome == "pending" and str(existing.get("emission_outcome") or "pending") != "pending":
+            emission_outcome = str(existing.get("emission_outcome"))
+        return self._record_interaction_decision({
+            "trace_id": event_id,
+            "event_id": event_id,
+            "source": str(trace.get("source") or ""),
+            "actor": actor,
+            "actor_identities": [item for item in identities if item],
+            "target": str(trace.get("target") or "Hebe"),
+            "interaction_decision": str(trace.get("interaction_decision") or "observed"),
+            "authority": str(trace.get("authority") or "unknown"),
+            "requested_effect": str(trace.get("requested_effect") or trace.get("requested_behavior") or ""),
+            "effect_authorized": bool(trace.get("effect_authorized")),
+            "reply_authorized": bool(trace.get("reply_authorized", trace.get("allow_reply"))),
+            "reason_code": str(trace.get("reason") or "none"),
+            "response_intent": str(trace.get("response_intent") or ""),
+            "generation_outcome": str(trace.get("generation_outcome") or "not_attempted"),
+            "emission_outcome": emission_outcome,
+            "boundary_repeat_count": int(trace.get("boundary_repeat_count") or 0),
+        })
+
+    def _record_response_generation_outcome(self, event_id: str, *, reply_text: str) -> None:
+        trace_id = str(event_id or "").strip()
+        if not trace_id:
+            return
+        synthesizer = getattr(self, "response_synthesizer", None)
+        source = str(getattr(synthesizer, "last_response_source", "") or "")
+        debug = dict(getattr(synthesizer, "last_response_debug_contract", {}) or {})
+        recovery = dict(debug.get("directed_viewer_recovery") or {})
+        generation_outcome = "generated" if reply_text else "failed"
+        reason_code = None
+        if recovery.get("generation_outcome") == "failed" or source == "directed_viewer_terminal_fallback":
+            generation_outcome = "failed_terminal_fallback"
+            reason_code = "directed_viewer_generation_failed"
+        elif source in {"local_safe_fallback", "fallback_template"}:
+            generation_outcome = "fallback_template"
+        updated = self._get_interaction_decision_history().update(
+            self._get_stream_state(),
+            trace_id,
+            generation_outcome=generation_outcome,
+            reason_code=reason_code,
+            response_intent=str((debug.get("speech_act_plan") or {}).get("speech_act_type") or "direct_answer"),
+        )
+        policy_trace_value = self.get_last_policy_trace()
+        if str(policy_trace_value.get("event_id") or "") == trace_id:
+            policy_trace_value["generation_outcome"] = generation_outcome
+            if reason_code:
+                policy_trace_value["reason"] = reason_code
+            self._last_policy_trace = policy_trace_value
+            stream = self._get_stream_state()
+            if stream is not None:
+                stream.last_policy_trace = policy_trace_value
+        if updated is not None:
+            print(
+                f"[HEBE][INTERACTION_GENERATION] trace={trace_id} outcome={generation_outcome} "
+                f"reason={updated.get('reason_code')}",
+                flush=True,
+            )
+
+    def _grounded_self_explanation(
+        self,
+        text: str,
+        *,
+        requester: str,
+        current_trace_id: str,
+    ):
+        stream = self._get_stream_state()
+        history = self._get_interaction_decision_history()
+        known = {
+            str(item.get("actor") or "")
+            for item in history.all(stream)
+            if str(item.get("actor") or "")
+        }
+        social_world = getattr(self, "social_world", None)
+        if social_world is not None and hasattr(social_world, "recent_identity_names"):
+            try:
+                known.update(str(item) for item in social_world.recent_identity_names(limit=80) if str(item))
+            except Exception as exc:
+                print(f"[HEBE][SELF_EXPLANATION] identity_lookup_failed={type(exc).__name__}", flush=True)
+        query = detect_self_explanation_query(text, requester=requester, known_identities=known)
+        if not query.detected:
+            return render_grounded_self_explanation(query, None, requester=requester)
+        matched = history.resolve(stream, query, exclude_trace_id=current_trace_id)
+        result = render_grounded_self_explanation(query, matched, requester=requester)
+        explanation_trace = {
+            **result.to_dict(),
+            "trace_id": current_trace_id,
+            "requester": requester,
+            "explanation_source_trace": result.source_trace_id,
+            "explanation_reason_code": result.reason_code,
+            "timestamp": time.time(),
+        }
+        if stream is not None:
+            stream.last_self_explanation = explanation_trace
+        current_record = self._record_interaction_decision({
+            "trace_id": current_trace_id,
+            "event_id": current_trace_id,
+            "source": "self_explanation",
+            "actor": requester or "Leo",
+            "actor_identities": [requester or "Leo"],
+            "target": "Hebe",
+            "interaction_decision": "grounded_self_explanation",
+            "authority": "owner" if str(requester or "").casefold() == "leo" else "viewer",
+            "requested_effect": "self_explanation",
+            "effect_authorized": False,
+            "reply_authorized": True,
+            "reason_code": result.reason_code,
+            "response_intent": "grounded_self_explanation",
+            "generation_outcome": "deterministic_grounded_renderer",
+            "emission_outcome": "pending",
+            "explanation_source_trace": result.source_trace_id,
+            "explanation_reason_code": result.reason_code,
+        })
+        self._last_policy_trace = {
+            "event_id": current_trace_id,
+            "source": "self_explanation",
+            "speaker": requester or "Leo",
+            "actor_login": requester or "Leo",
+            "authority": current_record.get("authority"),
+            "addressed_to_hebe": True,
+            "text": text,
+            "intent": "grounded_self_explanation",
+            "requested_behavior": "self_explanation",
+            "requested_effect": "self_explanation",
+            "target": "Hebe",
+            "policy_decision": "allowed",
+            "interaction_decision": "grounded_self_explanation",
+            "effect_authorized": False,
+            "reply_authorized": True,
+            "allow_reply": True,
+            "allow_llm": False,
+            "allow_free_llm": False,
+            "reason": result.reason_code,
+            "response_intent": "grounded_self_explanation",
+            "response_source": "deterministic_grounded_renderer",
+            "generation_outcome": "deterministic_grounded_renderer",
+            "emission_outcome": "pending",
+            "explanation_source_trace": result.source_trace_id,
+            "explanation_reason_code": result.reason_code,
+            "hebe_response": "",
+            "final_response": "",
+        }
+        if stream is not None:
+            stream.last_policy_trace = dict(self._last_policy_trace)
+        print(
+            "[HEBE][SELF_EXPLANATION] "
+            f"source_trace={result.source_trace_id or 'none'} reason={result.reason_code} "
+            f"matched={str(result.matched).lower()}",
+            flush=True,
+        )
+        return result
 
     def get_active_behavior_blocks(self) -> list[dict]:
         stream = self._get_stream_state()
@@ -2188,6 +2391,9 @@ class HebeEngine:
         stream = self._get_stream_state()
         if stream is None:
             return None
+        cached = (payload or {}).get("_viewer_policy_decision")
+        if isinstance(cached, PolicyDecision):
+            return cached
         username = str((payload or {}).get("user_login") or (payload or {}).get("username") or "")
         display_name = str((payload or {}).get("display_name") or "")
         text = str((payload or {}).get("message_text") or (payload or {}).get("text") or "")
@@ -2212,10 +2418,16 @@ class HebeEngine:
                     requested_behavior="compliment", behavior_family="compliment",
                     target=username or display_name, matched_by=["owner_behavior_constraint"],
                 )
-                self._record_policy_trace(policy_trace(
+                trace = policy_trace(
                     source="twitch_chat", speaker=display_name or username or "viewer", text=text,
                     decision=decision, addressed_to_hebe=self._message_mentions_hebe(text), authority="viewer",
-                ))
+                )
+                trace.update({
+                    "event_id": str((payload or {}).get("event_id") or (payload or {}).get("message_id") or f"policy_{uuid.uuid4().hex}"),
+                    "actor_login": username,
+                })
+                payload["_viewer_policy_decision"] = decision
+                self._record_policy_trace(trace)
                 return decision
         print("[HEBE][OWNER_CONSTRAINT_GATE] matched=false action=allow", flush=True)
         if re.search(r"\b(?:shoutout|promo|so)\b", normalized):
@@ -2247,10 +2459,16 @@ class HebeEngine:
                 flush=True,
             )
             print("[HEBE][PROMOTION_EXECUTION_DECISION] allowed=false reason=viewer_not_authorized", flush=True)
-            self._record_policy_trace(policy_trace(
+            trace = policy_trace(
                 source="twitch_chat", speaker=display_name or username or "viewer", text=text,
                 decision=decision, addressed_to_hebe=self._message_mentions_hebe(text), authority="viewer",
-            ))
+            )
+            trace.update({
+                "event_id": str((payload or {}).get("event_id") or (payload or {}).get("message_id") or f"policy_{uuid.uuid4().hex}"),
+                "actor_login": username,
+            })
+            payload["_viewer_policy_decision"] = decision
+            self._record_policy_trace(trace)
             return decision
         decision = self._get_viewer_intent_policy().decide(
             stream,
@@ -2258,14 +2476,20 @@ class HebeEngine:
             display_name=display_name,
             text=text,
         )
-        self._record_policy_trace(policy_trace(
+        trace = policy_trace(
             source="twitch_chat",
             speaker=display_name or username or "viewer",
             text=text,
             decision=decision,
             addressed_to_hebe=True,
             authority="viewer",
-        ))
+        )
+        trace.update({
+            "event_id": str((payload or {}).get("event_id") or (payload or {}).get("message_id") or f"policy_{uuid.uuid4().hex}"),
+            "actor_login": username,
+        })
+        payload["_viewer_policy_decision"] = decision
+        self._record_policy_trace(trace)
         return decision
 
     def _live_session_debug_snapshot(self) -> dict:
@@ -3787,6 +4011,28 @@ class HebeEngine:
         self._last_cognitive_trace = context.cognitive_decision.to_dict()
         decision = context.cognitive_decision
 
+        input_trace_id = str(
+            (getattr(current_event, "stt_metadata", {}) or {}).get("interaction_trace_id")
+            or f"input_{uuid.uuid4().hex}"
+        )
+        explanation = self._grounded_self_explanation(
+            command,
+            requester="Leo",
+            current_trace_id=input_trace_id,
+        )
+        if explanation.detected:
+            self._last_cognitive_trace.update({
+                "selected_route": "grounded_self_explanation",
+                "explanation_source_trace": explanation.source_trace_id,
+                "explanation_reason_code": explanation.reason_code,
+                "final_response": explanation.text,
+            })
+            self._deliver_manual_reply(explanation.text, source=source)
+            self._get_interaction_decision_history().update(
+                self._get_stream_state(), input_trace_id, emission_outcome="emitted"
+            )
+            return "continue"
+
         if decision.intent in {"wake_control", "sleep_control"} and decision.allows_capability("hebe.wake_control"):
             wake_result = self._handle_wake_sleep_command(command, cognitive_decision=decision, source=route_source)
             if wake_result is not None:
@@ -3931,6 +4177,15 @@ class HebeEngine:
             execution=execution,
         )
         self._last_cognitive_trace["final_response"] = reply_text
+        current_interaction_trace_id = str(
+            (getattr(input_event, "stt_metadata", {}) or {}).get("interaction_trace_id") or ""
+        )
+        if decision.intent == "command_open_app" and current_interaction_trace_id:
+            self._get_interaction_decision_history().update(
+                self._get_stream_state(),
+                current_interaction_trace_id,
+                generation_outcome=("generated" if reply_text else "failed"),
+            )
 
         reply_step = execution.first_result_of_type("reply")
 
@@ -4002,6 +4257,10 @@ class HebeEngine:
                 else:
                     self._deliver_voice_reply(reply_text)
                     self._record_assistant_reply_for_conversation(reply_text, source=source, synthesizer=getattr(self, "response_synthesizer", None))
+                if decision.intent == "command_open_app" and current_interaction_trace_id:
+                    self._get_interaction_decision_history().update(
+                        self._get_stream_state(), current_interaction_trace_id, emission_outcome="emitted"
+                    )
             except Exception as e:
                 print(f"[HEBE][COG] speak failed: {e!r}", flush=True)
 
@@ -4399,6 +4658,16 @@ class HebeEngine:
                 return
 
         if event_type == "twitch_chat_react":
+            explanation_trace_id = str((payload or {}).get("event_id") or (payload or {}).get("message_id") or f"evt_{uuid.uuid4().hex}")
+            explanation = self._grounded_self_explanation(
+                str((payload or {}).get("message_text") or (payload or {}).get("text") or ""),
+                requester=str((payload or {}).get("display_name") or (payload or {}).get("user_login") or "viewer"),
+                current_trace_id=explanation_trace_id,
+            )
+            if explanation.detected:
+                self._get_twitch_interaction_coordinator().record_candidate(explanation_trace_id, explanation.text)
+                self._deliver_twitch_reply(explanation.text, event_type=event_type, payload=payload)
+                return
             policy_decision = self._viewer_policy_decision(payload)
             if policy_decision is not None and not policy_decision.allow_llm:
                 if policy_decision.allow_reply:
@@ -4423,6 +4692,7 @@ class HebeEngine:
                             was_generic_refusal_rewritten=bool(policy_reply_result.get("was_generic_refusal_rewritten")),
                             style_profile=str(policy_reply_result.get("style_profile") or ""),
                             blocked_behavior=str(policy_reply_result.get("blocked_behavior") or ""),
+                            generation_outcome=str(policy_reply_result.get("generation_outcome") or "generated"),
                         )
                         self._deliver_twitch_reply(
                             policy_reply,
@@ -4602,6 +4872,10 @@ class HebeEngine:
             execution=execution,
         )
         if event_type == "twitch_chat_react":
+            self._record_response_generation_outcome(
+                str((payload or {}).get("event_id") or (payload or {}).get("message_id") or ""),
+                reply_text=reply_text,
+            )
             self._increment_twitch_pipeline_counter("twitch_messages_generated")
             self._get_twitch_interaction_coordinator().record_candidate(
                 str((payload or {}).get("event_id") or (payload or {}).get("message_id") or ""),
@@ -4701,6 +4975,23 @@ class HebeEngine:
                         emitted=False,
                         reason_code=adaptation.reason,
                     )
+                    self._record_interaction_decision({
+                        "trace_id": str(adaptation.trace_id or behavior_correlation_id or speech_intent_id or f"behavior_{uuid.uuid4().hex}"),
+                        "event_id": str(speech_intent_id or adaptation.trace_id or ""),
+                        "source": "behavior_adaptation",
+                        "actor": "Hebe",
+                        "actor_identities": ["Hebe"],
+                        "target": "stream",
+                        "interaction_decision": "behavior_candidate_suppressed",
+                        "authority": "system",
+                        "requested_effect": "behavior_expression",
+                        "effect_authorized": False,
+                        "reply_authorized": False,
+                        "reason_code": f"behavior_{adaptation.reason}",
+                        "response_intent": str((getattr(event, "payload", {}) or {}).get("speech_intent_type") or "proactive_gag"),
+                        "generation_outcome": "generated",
+                        "emission_outcome": "suppressed",
+                    })
                     return
                 stream.last_behavior_correlation_id = adaptation.trace_id
                 print("[HEBE][SPONTANEITY] spoken reason=canonical_behavior_policy_validated", flush=True)
@@ -7225,6 +7516,7 @@ class HebeEngine:
         stt_metadata: dict | None = None,
     ) -> InputEvent:
         semantic_metadata = dict(stt_metadata or {})
+        semantic_metadata.setdefault("interaction_trace_id", f"input_{uuid.uuid4().hex}")
         if re.search(r"(?i)\b(?:deja|deje)\s+de\b|@|,", str(raw_text or "")):
             social_world = getattr(self, "social_world", None)
             if social_world is not None and hasattr(social_world, "recent_identity_names"):
@@ -7734,6 +8026,27 @@ class HebeEngine:
             flush=True,
         )
         event = getattr(self, "_current_input_event", None)
+        interaction_trace_id = str(
+            ((getattr(event, "stt_metadata", {}) or {}).get("interaction_trace_id") if event is not None else "")
+            or f"action_{uuid.uuid4().hex}"
+        )
+        self._record_interaction_decision({
+            "trace_id": interaction_trace_id,
+            "event_id": interaction_trace_id,
+            "source": str(getattr(event, "source", "") or "owner_input"),
+            "actor": "Leo",
+            "actor_identities": ["Leo"],
+            "target": str(target or ""),
+            "interaction_decision": "effect_executed" if success else "effect_failed",
+            "authority": "owner",
+            "requested_effect": "open_application",
+            "effect_authorized": True,
+            "reply_authorized": True,
+            "reason_code": str(error_code or "application_launch_succeeded"),
+            "response_intent": "action_confirmation" if success else "action_failure",
+            "generation_outcome": "pending",
+            "emission_outcome": "pending",
+        })
         if event is not None and isinstance(getattr(event, "stt_metadata", None), dict):
             event.stt_metadata["direct_stt_execution"] = {
                 "success": success,
@@ -7983,6 +8296,19 @@ class HebeEngine:
         )
         result_dict = result.to_dict()
         stream = self._get_stream_state()
+        emission_outcome = "emitted" if result_dict.get("emitted") else str(result_dict.get("reason") or "suppressed")
+        interaction_update = self._get_interaction_decision_history().update(
+            stream,
+            str(event_id or ""),
+            emission_outcome=emission_outcome,
+            emission_route=str(result_dict.get("route") or ""),
+        )
+        if interaction_update is not None:
+            print(
+                f"[HEBE][INTERACTION_EMISSION] trace={event_id} outcome={emission_outcome} "
+                f"route={result_dict.get('route')}",
+                flush=True,
+            )
         behavior_trace_id = str(
             debug_payload.get("behavior_correlation_id")
             or (
@@ -11586,10 +11912,9 @@ class HebeEngine:
         elif self._viewer_direct_open_prompt_to_hebe(text):
             category, priority = "direct_open_prompt_to_hebe", 6
         elif mentions_hebe and not self._viewer_talks_about_hebe(text):
-            if self._viewer_policy_decision(payload or {"message_text": text}) is not None:
-                policy = self._viewer_policy_decision(payload or {"message_text": text})
-                if policy is not None and policy.allow_reply and not policy.allow_llm:
-                    category, priority = "viewer_boundary_needed", 3
+            policy = payload.get("_viewer_policy_decision")
+            if isinstance(policy, PolicyDecision) and policy.allow_reply and not policy.allow_llm:
+                category, priority = "viewer_boundary_needed", 3
             if not category:
                 if len(words) <= 3 and any(token in {"xd", "lol", "lmao", "kekw", "jaja", "haha"} for token in words):
                     category = "direct_hebe_banter"
@@ -11612,10 +11937,9 @@ class HebeEngine:
             return "meme_or_emote"
         if len(words) <= 5 and len(set(words)) <= 2 and len(words) >= 3:
             return "repeated_spam"
-        if self._viewer_policy_decision(payload or {"message_text": text}) is not None:
-            policy = self._viewer_policy_decision(payload or {"message_text": text})
-            if policy is not None and policy.allow_reply and not policy.allow_llm:
-                return "viewer_boundary_needed"
+        policy = payload.get("_viewer_policy_decision")
+        if isinstance(policy, PolicyDecision) and policy.allow_reply and not policy.allow_llm:
+            return "viewer_boundary_needed"
         if re.search(r"\b(?:pista|tip|consejo|ruta|camino|templo|cueva|mazmorra|boss|jefe|npc|objeto|cofre|mision|quest|zona|build|arma|habilidad)\b", normalized):
             return "high_value_game_tip"
         if "?" in str(text or "") or re.search(r"\b(?:que|quien|cuando|donde|como|por que|porque|cuanto|opinas|sabes|eres|estas)\b", normalized):
