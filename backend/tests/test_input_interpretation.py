@@ -11,6 +11,7 @@ from app.cognitive.input_interpretation import InputInterpreter, InputSpeechAct
 from app.cognitive.local_app_planner import LocalAppActionPlanner
 from app.hebe_engine import HebeEngine
 from app.stream.ambient_context import AmbientContextExtractor
+from app.stream.behavior_adaptation import BehaviorAdaptationService
 from tests.test_voice_command_pipeline import make_engine, wire_canonical_app_pipeline
 
 
@@ -25,13 +26,21 @@ class CanonicalInputInterpretationTests(unittest.TestCase):
     def setUp(self) -> None:
         self.interpreter = InputInterpreter()
 
-    def owner(self, text: str, *, addressed: bool = False, recent: str = ""):
+    def owner(
+        self,
+        text: str,
+        *,
+        addressed: bool = False,
+        recent: str = "",
+        social_identities: list[str] | None = None,
+    ):
         return self.interpreter.interpret(
             raw_text=text,
             source="stt_voice",
             authority="owner",
             addressed_to_hebe=addressed,
             recent_hebe_utterance=recent,
+            social_identities=social_identities,
         )
 
     @staticmethod
@@ -226,6 +235,249 @@ class CanonicalInputInterpretationTests(unittest.TestCase):
         self.assertTrue(result.context_eligible)
         self.assertNotEqual(extraction.reason, "canonical_feedback_scope_excluded")
         self.assertTrue(all("deja de decirme" not in fact.get("raw_text", "").lower() for fact in extraction.facts))
+
+    def test_negated_completed_death_is_not_promoted_to_failure(self):
+        text = "Pero si no he muerto todavía."
+        result = self.owner(text)
+        engine = HebeEngine.__new__(HebeEngine)
+
+        event_type, _ = engine._classify_voice_event(text, interpretation=result)
+        extraction = AmbientContextExtractor().extract(
+            text, event_type=event_type, input_interpretation=result,
+        )
+
+        predicate = result.semantic_clauses[0].predicates[0]
+        self.assertEqual(predicate.predicate, "completed_death")
+        self.assertEqual(predicate.polarity, "negative")
+        self.assertIn("completed_death", result.negated_predicates)
+        self.assertNotEqual(event_type, "gameplay_failure")
+        self.assertNotIn("failure_or_death", {fact["category"] for fact in extraction.facts})
+        self.assertEqual(extraction.reason, "negated_gameplay_predicate")
+
+    def test_asserted_completed_death_remains_failure(self):
+        text = "Me han matado otra vez."
+        result = self.owner(text)
+        engine = HebeEngine.__new__(HebeEngine)
+
+        event_type, _ = engine._classify_voice_event(text, interpretation=result)
+        extraction = AmbientContextExtractor().extract(
+            text, event_type=event_type, input_interpretation=result,
+        )
+
+        self.assertEqual(result.semantic_clauses[0].predicates[0].polarity, "positive")
+        self.assertEqual(event_type, "gameplay_failure")
+        self.assertIn("failure_or_death", {fact["category"] for fact in extraction.facts})
+
+    def test_near_death_is_risk_not_completed_failure(self):
+        text = "Estoy a punto de morir."
+        result = self.owner(text)
+        engine = HebeEngine.__new__(HebeEngine)
+
+        event_type, _ = engine._classify_voice_event(text, interpretation=result)
+        extraction = AmbientContextExtractor().extract(
+            text, event_type=event_type, input_interpretation=result,
+        )
+
+        predicate = result.semantic_clauses[0].predicates[0]
+        self.assertEqual((predicate.predicate, predicate.polarity), ("death_risk", "uncertain"))
+        self.assertEqual(event_type, "combat_risk")
+        self.assertIn("combat_risk", {fact["category"] for fact in extraction.facts})
+        self.assertNotIn("failure_or_death", {fact["category"] for fact in extraction.facts})
+
+    def test_aspectual_no_deja_de_is_not_owner_feedback(self):
+        result = self.owner("No deja de ser un capricho.")
+
+        self.assertEqual(result.speech_act, InputSpeechAct.OWNER_COMMENTARY)
+        self.assertIsNone(result.feedback)
+        self.assertEqual(result.semantic_clauses[0].semantic_role, "descriptive_clause")
+        self.assertIn("behavior_feedback", result.semantic_clauses[0].excluded_domains)
+
+    def test_weather_stop_surface_is_not_assistant_feedback_or_command(self):
+        result = self.owner("Deja de llover.", recent="Respuesta reciente de Hebe")
+
+        self.assertEqual(result.speech_act, InputSpeechAct.OWNER_COMMENTARY)
+        self.assertIsNone(result.feedback)
+        self.assertFalse(result.possible_command_syntax)
+        self.assertEqual(result.semantic_clauses[0].subject, "weather")
+        self.assertIn("behavior_feedback", result.semantic_clauses[0].excluded_domains)
+
+    def test_death_predicate_polarity_is_clause_bounded(self):
+        cases = (
+            ("Me he muerto.", "completed_death", "positive"),
+            ("No me he muerto.", "completed_death", "negative"),
+            ("Casi me muero.", "death_risk", "uncertain"),
+            ("Pensé que había muerto.", "completed_death", "uncertain"),
+        )
+        for text, predicate_name, polarity in cases:
+            with self.subTest(text=text):
+                result = self.owner(text)
+                predicate = next(
+                    item for item in result.semantic_clauses[0].predicates
+                    if item.predicate == predicate_name
+                )
+                self.assertEqual(predicate.polarity, polarity)
+
+        reported = self.owner("Pensé que había muerto.")
+        extraction = AmbientContextExtractor().extract(
+            "Pensé que había muerto.", input_interpretation=reported,
+        )
+        self.assertNotIn("failure_or_death", {fact["category"] for fact in extraction.facts})
+        self.assertEqual(extraction.reason, "uncertain_gameplay_predicate")
+
+    def test_resolved_other_vocative_prevents_hebe_feedback(self):
+        result = self.owner(
+            "Natti, deja de liarla.",
+            social_identities=["Natti"],
+        )
+
+        self.assertEqual(result.speech_act, InputSpeechAct.OWNER_COMMENTARY)
+        self.assertIsNone(result.feedback)
+        self.assertEqual(result.resolved_addressee, "Natti")
+        self.assertEqual(
+            result.semantic_clauses[0].addressee_provenance,
+            "resolved_social_identity_vocative",
+        )
+        self.assertIn("behavior_feedback", result.semantic_clauses[0].excluded_domains)
+
+    def test_real_long_social_address_stays_out_of_hebe_feedback(self):
+        result = self.owner(
+            "Como siempre liándola en el chat... Natti, eres la hostia, deja de liarla.",
+            social_identities=["Natti"],
+        )
+
+        self.assertEqual(result.speech_act, InputSpeechAct.OWNER_COMMENTARY)
+        self.assertIsNone(result.feedback)
+        social_clause = next(
+            clause for clause in result.semantic_clauses
+            if clause.resolved_addressee == "Natti"
+        )
+        self.assertEqual(social_clause.semantic_role, "social_addressed_clause")
+        self.assertIn("behavior_feedback", social_clause.excluded_domains)
+
+    def test_engine_supplies_recent_canonical_social_identities_to_interpreter(self):
+        engine = make_engine()
+        engine.social_world = SimpleNamespace(
+            recent_identity_names=Mock(return_value=["Natti"]),
+        )
+
+        event = engine._build_input_event(
+            source="stt_voice",
+            raw_text="Natti, deja de liarla.",
+            normalized_text="natti deja de liarla",
+        )
+
+        self.assertEqual(event.interpretation.resolved_addressee, "Natti")
+        self.assertEqual(event.interpretation.speech_act, InputSpeechAct.OWNER_COMMENTARY)
+        engine.social_world.recent_identity_names.assert_called_once_with(limit=80)
+
+    def test_proxy_stop_request_targets_third_party_not_hebe_behavior(self):
+        result = self.owner(
+            "Hebe, dile a Natti que deje de liarla.",
+            addressed=True,
+            social_identities=["Natti"],
+        )
+
+        self.assertEqual(result.speech_act, InputSpeechAct.OWNER_COMMAND)
+        self.assertIsNone(result.feedback)
+        self.assertEqual(result.semantic_clauses[0].subject, "Natti")
+        self.assertEqual(result.semantic_clauses[0].semantic_role, "owner_command")
+        self.assertIn("behavior_feedback", result.semantic_clauses[0].excluded_domains)
+
+    def test_game_subject_aspectual_stop_is_gameplay_not_feedback(self):
+        text = "El jefe no deja de atacar."
+        result = self.owner(text)
+        engine = HebeEngine.__new__(HebeEngine)
+        event_type, _ = engine._classify_voice_event(text, interpretation=result)
+        extraction = AmbientContextExtractor().extract(
+            text, event_type=event_type, input_interpretation=result,
+        )
+
+        self.assertEqual(result.speech_act, InputSpeechAct.OWNER_COMMENTARY)
+        self.assertIsNone(result.feedback)
+        self.assertEqual(result.semantic_clauses[0].subject, "game_entity")
+        self.assertIn("enemy_attack_pattern", {fact["category"] for fact in extraction.facts})
+
+    def test_medial_hebe_vocative_resolves_explicit_recent_behavior_feedback(self):
+        result = self.owner("Eso que acabas de decir, Hebe, deja de hacerlo.")
+
+        self.assertEqual(result.speech_act, InputSpeechAct.OWNER_FEEDBACK)
+        self.assertEqual(result.feedback_target, "Hebe")
+        self.assertEqual(result.feedback_target_provenance, "explicit_hebe_vocative")
+        self.assertEqual(result.feedback.referent, "hacerlo")
+
+    def test_third_party_subject_request_does_not_create_hebe_feedback_state(self):
+        result = self.owner(
+            "Eso que acaba de hacer Natti, que deje de hacerlo.",
+            social_identities=["Natti"],
+        )
+        stream = SimpleNamespace(
+            active_behavior_blocks=[], behavior_adaptation_state={"entries": []},
+            recent_idle_messages=[], current_discourse_topic="",
+        )
+
+        application = BehaviorAdaptationService().apply_feedback(stream, result, now=1000.0)
+
+        self.assertEqual(result.speech_act, InputSpeechAct.OWNER_COMMENTARY)
+        self.assertIsNone(result.feedback)
+        self.assertEqual(result.semantic_clauses[0].subject, "Natti")
+        self.assertIn("behavior_feedback", result.semantic_clauses[0].excluded_domains)
+        self.assertFalse(application.applied)
+        self.assertEqual(stream.behavior_adaptation_state["entries"], [])
+
+    def test_mixed_feedback_excludes_feedback_clause_and_keeps_negated_death_plus_hp(self):
+        text = "Hebe, deja de decirme que cure; no me he muerto, estoy a 1 HP."
+        result = self.owner(text, addressed=True)
+        extraction = AmbientContextExtractor().extract(text, input_interpretation=result)
+        categories = {fact["category"] for fact in extraction.facts}
+
+        self.assertEqual(result.speech_act, InputSpeechAct.OWNER_FEEDBACK)
+        self.assertEqual(result.context_text, "no me he muerto, estoy a 1 HP.")
+        self.assertIn("completed_death", result.negated_predicates)
+        self.assertIn("combat_risk", categories)
+        self.assertNotIn("failure_or_death", categories)
+        self.assertTrue(all("deja de decirme" not in fact.get("raw_text", "").lower() for fact in extraction.facts))
+
+    def test_viewer_social_target_never_acquires_owner_feedback_authority(self):
+        result = self.interpreter.interpret(
+            raw_text="@Natti deja de liarla",
+            source="twitch_viewer",
+            authority="viewer",
+            addressed_to_hebe=False,
+            social_identities=["Natti"],
+        )
+        stream = SimpleNamespace(
+            active_behavior_blocks=[], behavior_adaptation_state={"entries": []},
+            recent_idle_messages=[], current_discourse_topic="",
+        )
+        application = BehaviorAdaptationService().apply_feedback(stream, result, now=1000.0)
+
+        self.assertEqual(result.speech_act, InputSpeechAct.VIEWER_CONTEXT)
+        self.assertIsNone(result.feedback)
+        self.assertFalse(result.meta_about_hebe)
+        self.assertEqual(result.resolved_addressee, "Natti")
+        self.assertFalse(application.applied)
+        self.assertEqual(stream.behavior_adaptation_state["entries"], [])
+
+    def test_semantic_scope_observability_explains_negation_and_target(self):
+        logged = []
+        with patch(
+            "app.cognitive.input_interpretation.log_jsonl_event",
+            lambda kind, payload: logged.append((kind, payload)),
+        ):
+            negated = self.owner("No me he muerto.")
+            social = self.owner(
+                "Natti, deja de liarla.", social_identities=["Natti"],
+            )
+
+        negated_payload = logged[0][1]
+        social_payload = logged[1][1]
+        self.assertIn("completed_death", negated_payload["negated_predicates"])
+        self.assertEqual(
+            negated_payload["semantic_clauses"][0]["predicates"][0]["reason"],
+            "clause_local_negation",
+        )
+        self.assertEqual(social_payload["resolved_addressee"], "Natti")
+        self.assertIn("behavior_feedback", social_payload["semantic_clauses"][0]["excluded_domains"])
 
 
 if __name__ == "__main__":

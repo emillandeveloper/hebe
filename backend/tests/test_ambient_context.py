@@ -92,6 +92,13 @@ class AmbientContextExtractorTests(unittest.TestCase):
         result = self.extractor.extract("otra vez", now=self.now)
         self.assertFalse(result.useful)
 
+    def test_direct_extractor_uses_canonical_clause_negation(self):
+        result = self.extractor.extract("No me he muerto todavía", now=self.now)
+
+        self.assertFalse(result.useful)
+        self.assertEqual(result.reason, "negated_gameplay_predicate")
+        self.assertIn("completed_death", result.diagnostics["negated_predicates"])
+
 
 if __name__ == "__main__":
     unittest.main()

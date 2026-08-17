@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 import re
 import time
 
-from app.cognitive.input_interpretation import InputInterpretation, InputSpeechAct
+from app.cognitive.input_interpretation import InputInterpretation, InputInterpreter, InputSpeechAct
 import unicodedata
 from typing import Any
 
@@ -132,6 +132,7 @@ class AmbientContextExtraction:
     facts: list[dict] = field(default_factory=list)
     mood: str | None = None
     reason: str = ""
+    diagnostics: dict[str, Any] = field(default_factory=dict)
 
 
 class AmbientContextExtractor:
@@ -152,6 +153,7 @@ class AmbientContextExtractor:
         scene_id: str | None = None,
         input_interpretation: InputInterpretation | None = None,
     ) -> AmbientContextExtraction:
+        semantic_clauses = tuple(getattr(input_interpretation, "semantic_clauses", ()) or ())
         if input_interpretation is not None:
             if input_interpretation.speech_act == InputSpeechAct.OWNER_FEEDBACK:
                 if not input_interpretation.context_text:
@@ -166,6 +168,35 @@ class AmbientContextExtractor:
                     reason="canonical_context_not_eligible",
                 )
         raw = str(text or "").strip()
+        if not semantic_clauses:
+            semantic_clauses = InputInterpreter.analyze_semantic_clauses(
+                raw,
+                speaker=str(getattr(input_interpretation, "authority", "owner") or "owner"),
+                addressed_to_hebe=bool(getattr(input_interpretation, "addressed_to_hebe", False)),
+            )
+        gameplay_clauses = tuple(
+            clause for clause in semantic_clauses
+            if "gameplay_context" in clause.eligible_domains
+        )
+        scoped_clauses = gameplay_clauses or semantic_clauses
+        semantic_predicates = tuple(
+            predicate for clause in scoped_clauses for predicate in clause.predicates
+        )
+        diagnostics = {
+            "clauses": [clause.as_dict() for clause in scoped_clauses],
+            "negated_predicates": [
+                predicate.predicate for predicate in semantic_predicates
+                if predicate.polarity == "negative"
+            ],
+            "uncertain_predicates": [
+                predicate.predicate for predicate in semantic_predicates
+                if predicate.polarity == "uncertain"
+            ],
+            "excluded_domain_scopes": [
+                domain for clause in semantic_clauses for domain in clause.excluded_domains
+            ],
+            "reason": "canonical_clause_semantics",
+        }
         normalized = self._normalize(raw)
         if not normalized:
             return AmbientContextExtraction(useful=False, reason="empty")
@@ -191,7 +222,10 @@ class AmbientContextExtractor:
         mood: str | None = None
         referent = self.referent_resolver.resolve(raw, normalized)
 
-        gameplay_facts = self._extract_gameplay_facts(raw, normalized, now, referent=referent)
+        gameplay_facts = self._extract_gameplay_facts(
+            raw, normalized, now, referent=referent,
+            semantic_predicates=semantic_predicates,
+        )
         if gameplay_facts:
             facts.extend(gameplay_facts)
             mood = next((fact.get("data", {}).get("mood") for fact in gameplay_facts if fact.get("data", {}).get("mood")), mood)
@@ -226,7 +260,31 @@ class AmbientContextExtractor:
                 if isinstance(fact.get("data"), dict):
                     fact["data"]["scene_id"] = fact["scene_id"]
                     fact["data"]["inferred_claims"] = list(fact.get("inferred_claims") or [])
-            return AmbientContextExtraction(useful=True, facts=facts, mood=mood, reason="facts_extracted")
+                fact["semantic_scope"] = diagnostics
+            return AmbientContextExtraction(
+                useful=True, facts=facts, mood=mood, reason="facts_extracted",
+                diagnostics=diagnostics,
+            )
+
+        negated = set(diagnostics["negated_predicates"])
+        if negated:
+            diagnostics["reason"] = "negated_predicate_not_promoted"
+            return AmbientContextExtraction(
+                useful=False,
+                reason="negated_gameplay_predicate",
+                diagnostics=diagnostics,
+            )
+        uncertain_completed = any(
+            predicate.predicate == "completed_death" and predicate.polarity == "uncertain"
+            for predicate in semantic_predicates
+        )
+        if uncertain_completed:
+            diagnostics["reason"] = "reported_or_uncertain_event_not_promoted"
+            return AmbientContextExtraction(
+                useful=False,
+                reason="uncertain_gameplay_predicate",
+                diagnostics=diagnostics,
+            )
 
         if event_type in {"gameplay_failure", "victory", "boss_attempt", "grinding", "confusion/lost"}:
             return AmbientContextExtraction(
@@ -247,16 +305,26 @@ class AmbientContextExtractor:
                 reason="topic_hint",
             )
 
-        return AmbientContextExtraction(useful=False, reason="low_value")
+        return AmbientContextExtraction(useful=False, reason="low_value", diagnostics=diagnostics)
 
     def _extract_gameplay_facts(
         self, raw: str, normalized: str, now: float, *,
         referent: GameplayReferentResolution,
+        semantic_predicates: tuple[Any, ...] = (),
     ) -> list[dict]:
         tokens = set(normalized.split())
         if not tokens:
             return []
         facts: list[dict] = []
+        completed_death = next((
+            item for item in semantic_predicates if item.predicate == "completed_death"
+        ), None)
+        death_risk = next((
+            item for item in semantic_predicates if item.predicate == "death_risk"
+        ), None)
+        ongoing_enemy_attack = next((
+            item for item in semantic_predicates if item.predicate == "ongoing_enemy_attack"
+        ), None)
         healing_terms = {
             "cura", "curan", "curar", "curarse", "heal", "healing", "hp", "vida",
             "pocion", "pociones", "autopocion", "autopotion", "limon", "limones",
@@ -299,6 +367,31 @@ class AmbientContextExtractor:
                 mood="combat tension",
                 referent=referent,
                 supported_claims=["owner health is at risk"],
+            ))
+        if death_risk is not None:
+            facts.append(self._category_fact(
+                "combat_risk",
+                "Leo described a near-death risk, not a completed death.",
+                raw,
+                normalized,
+                0.84,
+                now,
+                mood="combat tension",
+                referent=referent,
+                supported_claims=["owner character is at risk of dying"],
+                unsupported_claims=["owner character died", "game over", "completed failure"],
+            ))
+        if ongoing_enemy_attack is not None:
+            facts.append(self._category_fact(
+                "enemy_attack_pattern",
+                "Leo said the enemy keeps attacking.",
+                raw,
+                normalized,
+                0.82,
+                now,
+                mood="combat tension",
+                referent=referent,
+                supported_claims=["enemy attack is ongoing"],
             ))
         if ground_counter:
             facts.append(self._category_fact(
@@ -442,7 +535,7 @@ class AmbientContextExtractor:
                 supported_claims=["the referenced enemies are low level"],
                 unsupported_claims=["Leo is low level", "Level 1 challenge", "no EXP run"],
             ))
-        if ("game" in tokens and "over" in tokens) or tokens & {"muerto", "matado", "mataron", "wipe"}:
+        if completed_death is not None and completed_death.polarity == "positive":
             facts.append(self._category_fact(
                 "failure_or_death",
                 "Leo mentioned death, game over, a wipe, or a failed attempt.",

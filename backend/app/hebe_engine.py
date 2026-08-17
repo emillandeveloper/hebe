@@ -7224,13 +7224,26 @@ class HebeEngine:
         normalized_text: str,
         stt_metadata: dict | None = None,
     ) -> InputEvent:
+        semantic_metadata = dict(stt_metadata or {})
+        if re.search(r"(?i)\b(?:deja|deje)\s+de\b|@|,", str(raw_text or "")):
+            social_world = getattr(self, "social_world", None)
+            if social_world is not None and hasattr(social_world, "recent_identity_names"):
+                try:
+                    semantic_metadata["semantic_social_identities"] = list(
+                        social_world.recent_identity_names(limit=80)
+                    )
+                except Exception as exc:
+                    print(
+                        f"[HEBE][SEMANTIC_SCOPE] social_identity_lookup_failed={type(exc).__name__}",
+                        flush=True,
+                    )
         event = InputEvent(
             source=source,
             raw_text=str(raw_text or ""),
             normalized_text=str(normalized_text or ""),
             is_voice=source == "stt_voice",
             is_stream_context=self._is_stream_enabled(),
-            stt_metadata=stt_metadata or {},
+            stt_metadata=semantic_metadata,
         )
         direct = DirectSTTCommandResult.from_dict(event.stt_metadata.get("direct_stt_command"))
         if not direct.command_text:
@@ -8447,6 +8460,26 @@ class HebeEngine:
             if not interpretation.context_text:
                 return "owner_feedback", None
             text = interpretation.context_text
+        semantic_clauses = tuple(getattr(interpretation, "semantic_clauses", ()) or ())
+        if not semantic_clauses:
+            semantic_clauses = InputInterpreter.analyze_semantic_clauses(
+                text,
+                speaker=str(getattr(interpretation, "authority", "owner") or "owner"),
+                addressed_to_hebe=bool(getattr(interpretation, "addressed_to_hebe", False)),
+            )
+        semantic_predicates = [
+            predicate
+            for clause in semantic_clauses
+            for predicate in clause.predicates
+        ]
+        completed_death = next((
+            predicate for predicate in semantic_predicates
+            if predicate.predicate == "completed_death"
+        ), None)
+        death_risk = next((
+            predicate for predicate in semantic_predicates
+            if predicate.predicate == "death_risk"
+        ), None)
         normalized = self._normalize_text(text)
         if not normalized:
             return "unknown", None
@@ -8465,8 +8498,10 @@ class HebeEngine:
             return "objective_update", None
         if any(marker in normalized for marker in ("estamos en", "estoy en", "hemos llegado a", "salir de")):
             return "location_update", None
-        if any(marker in normalized for marker in ("me han matado", "me ha matado", "he muerto", "wipe", "game over")):
+        if completed_death is not None and completed_death.polarity == "positive":
             return "gameplay_failure", "frustrated"
+        if death_risk is not None:
+            return "combat_risk", "focused"
         if any(marker in normalized for marker in ("bien", "toma", "vamos", "victoria", "victory", "por fin", "ha caido")):
             return "victory", "excited"
         if any(marker in normalized for marker in ("boss", "jefe", "intento", "try", "pull")):
@@ -8630,6 +8665,7 @@ class HebeEngine:
             facts=filtered_facts,
             mood=extraction.mood,
             reason=extraction.reason,
+            diagnostics=dict(getattr(extraction, "diagnostics", {}) or {}),
         )
         facts = list(getattr(stream, "recent_run_context_facts", []) or [])
         now = time.time()
