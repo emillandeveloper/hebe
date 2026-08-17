@@ -189,6 +189,19 @@ class GameProfileStore:
             current_game=current_game,
         ).game_slug != "generic_jrpg_rpg"
 
+    def matching_profiles(self, title: str | None) -> list[GameProfile]:
+        target = _normalize(title)
+        if not target:
+            return []
+        matches: list[GameProfile] = []
+        for profile in self.profiles:
+            if profile.game_slug == "generic_jrpg_rpg":
+                continue
+            names = [_normalize(profile.canonical_title), *(_normalize(alias) for alias in profile.aliases)]
+            if any(name and (target == name or _contains_name(target, name) or _contains_name(name, target)) for name in names):
+                matches.append(profile)
+        return matches
+
     def upsert_profile(self, profile: GameProfile) -> None:
         profiles = [item for item in self.profiles if item.game_slug != profile.game_slug]
         profiles.append(profile)

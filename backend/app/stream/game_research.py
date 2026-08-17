@@ -214,7 +214,13 @@ class GameKnowledgeResearchService:
         try:
             self.search_count += 1
             results = self.search_provider.search(query)
-            profile = self._profile_from_results(title, results, existing=existing)
+            supported = [
+                row for row in results
+                if self._supported_result(row) and not self._looks_spoilery(row)
+            ]
+            if not supported:
+                return False, existing, "research_no_supported_evidence"
+            profile = self._profile_from_results(title, supported, existing=existing)
             self.store.upsert_profile(profile)
             return True, profile, "researched"
         except Exception as exc:
@@ -275,7 +281,10 @@ class GameKnowledgeResearchService:
     def _profile_from_results(self, title: str, results: list[dict[str, Any]], *, existing: GameProfile) -> GameProfile:
         safe_rows = [row for row in results if not self._looks_spoilery(row)]
         snippets = " ".join(
-            str(row.get("snippet") or row.get("content") or row.get("description") or "")[:400]
+            str(
+                row.get("claim") or row.get("excerpt") or row.get("snippet")
+                or row.get("content") or row.get("description") or ""
+            )[:400]
             for row in safe_rows[:5]
         )
         sources = [
@@ -285,7 +294,7 @@ class GameKnowledgeResearchService:
         ]
         now = self._now()
         now_iso = datetime.fromtimestamp(now, timezone.utc).isoformat()
-        genres = existing.genres if existing.game_slug != "generic_jrpg_rpg" else self._infer_genres(title, snippets)
+        genres = existing.genres if existing.game_slug != "generic_jrpg_rpg" else self._infer_genres(snippets)
         systems = self._infer_systems(snippets)
         safe_topics = self._safe_topics(existing, systems, snippets)
         unsafe = sorted(set(existing.unsafe_comment_topics + [
@@ -325,11 +334,14 @@ class GameKnowledgeResearchService:
         )
 
     def _looks_spoilery(self, row: dict[str, Any]) -> bool:
-        text = " ".join(str(row.get(key) or "") for key in ("title", "snippet", "content", "description")).lower()
+        text = " ".join(
+            str(row.get(key) or "")
+            for key in ("title", "claim", "excerpt", "snippet", "content", "description")
+        ).lower()
         return any(term in text for term in FORBIDDEN_RESEARCH_TERMS if term != "spoiler")
 
-    def _infer_genres(self, title: str, text: str) -> list[str]:
-        lowered = f"{title} {text}".lower()
+    def _infer_genres(self, text: str) -> list[str]:
+        lowered = text.lower()
         genres = []
         if "jrpg" in lowered or "final fantasy" in lowered or "persona" in lowered or "tales of" in lowered:
             genres.append("JRPG")
@@ -339,7 +351,7 @@ class GameKnowledgeResearchService:
             genres.append("action RPG")
         if "rpg" in lowered and "RPG" not in genres:
             genres.append("RPG")
-        return genres or ["RPG"]
+        return genres
 
     def _infer_systems(self, text: str) -> list[str]:
         lowered = text.lower()
@@ -355,7 +367,7 @@ class GameKnowledgeResearchService:
         for label, needles in checks.items():
             if any(needle in lowered for needle in needles):
                 systems.append(label)
-        return systems or ["broad gameplay systems", "resource awareness", "exploration"]
+        return systems
 
     def _safe_topics(self, existing: GameProfile, systems: list[str], text: str) -> list[str]:
         topics = set(existing.safe_comment_topics)
@@ -386,9 +398,18 @@ class GameKnowledgeResearchService:
 
     def _safe_summary(self, title: str, text: str) -> str:
         clean = re.sub(r"\s+", " ", text).strip()
-        if not clean:
-            return f"Spoiler-safe high-level profile for {title}."
         return clean[:500]
+
+    @staticmethod
+    def _supported_result(row: dict[str, Any]) -> bool:
+        if not isinstance(row, dict):
+            return False
+        source = str(row.get("url") or row.get("link") or row.get("source") or "").strip()
+        supporting_text = str(
+            row.get("claim") or row.get("excerpt") or row.get("snippet")
+            or row.get("content") or row.get("description") or ""
+        ).strip()
+        return bool(source and supporting_text)
 
     def _now(self) -> float:
         if self._now_fn is not None:

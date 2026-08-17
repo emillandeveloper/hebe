@@ -10,6 +10,7 @@ from typing import Any
 
 from app.cognitive.persona.chatter_names import normalize_chatter_name
 from app.continuity.models import CurrentConversation
+from app.stream.game_knowledge import validate_game_factual_grounding
 
 
 HEBE_PERSONA_CONSTITUTION_V1 = """HEBE_PERSONA_CONSTITUTION_V1
@@ -361,6 +362,7 @@ class FinalResponseGuardResult:
     recommended_action: str = "emit"
     response_source: str = "persona_generated"
     game_advice_validation: dict[str, Any] | None = None
+    game_knowledge_validation: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -465,6 +467,14 @@ def build_twitch_speech_act_bundle(payload: dict, context: Any | None, *, is_bro
     recent = _compact_recent_chat(payload.get("recent_chat") or [])
     viewer_profile = _compact_viewer_profile(payload, context, speaker=speaker, authority=authority)
     proxy_request = authority == "viewer" and contains_viewer_proxy_request(raw_message)
+    response_frame = getattr(context, "response_frame", {}) or {} if context is not None else {}
+    session_context = dict(response_frame.get("current_session_context") or {}) if isinstance(response_frame, dict) else {}
+    game_knowledge = dict(
+        payload.get("game_knowledge_contract")
+        or session_context.get("game_intelligence")
+        or {}
+    )
+    queried_game = str(game_knowledge.get("queried_game") or "").strip()
 
     envelope = SpeechActInputEnvelope(
         source=source,
@@ -488,7 +498,7 @@ def build_twitch_speech_act_bundle(payload: dict, context: Any | None, *, is_bro
         raw_user_message="" if proxy_request else raw_message,
         sanitized_topic="viewer_proxy_request" if proxy_request else "",
         recent_chat_context=recent,
-        entity_references=[current_game] if current_game else [],
+        entity_references=list(dict.fromkeys(item for item in (current_game, queried_game) if item)),
         active_boundary_context={"viewer_proxy_request": proxy_request},
         technical_state=_compact_technical_state(payload),
     )
@@ -514,6 +524,7 @@ def build_twitch_speech_act_bundle(payload: dict, context: Any | None, *, is_bro
             "source": "current_message",
             "allowed_use": "boundary",
         },
+        game_knowledge=game_knowledge,
     )
     cognitive = CognitiveDecision(
         intent="viewer_proxy_request" if proxy_request else "viewer_chat_react",
@@ -584,12 +595,23 @@ def build_twitch_speech_act_bundle(payload: dict, context: Any | None, *, is_bro
             target_speaker=speaker,
             tone=["short", "in_character", "calibrated", "stream_safe"],
             max_length_chars=220,
-            must_do=["reply to the speaker directly", "stay within the scene decision"],
+            must_do=[
+                "reply to the speaker directly",
+                "stay within the scene decision",
+                *(
+                    ["use only factual game claims present in game_knowledge.allowed_claims"]
+                    if game_knowledge.get("query_detected") else []
+                ),
+            ],
             must_not_do=[
                 "do not reinterpret authority",
                 "do not offer generic assistant help",
                 "do not claim actions without execution",
                 "do not expose memory as a database",
+                *(
+                    ["do not invent game genre, mechanics, dates, platforms, developer, plot, reception, availability, or difficulty"]
+                    if game_knowledge.get("query_detected") else []
+                ),
             ],
             memory_usage_rule=memory.usage_rule,
             avoid_phrases=["como IA", "en que puedo ayudarte", "estoy aqui para ayudarte"],
@@ -898,11 +920,19 @@ def final_response_guard(
     game_validation = None
     if game_advice_gate is not None:
         validation = game_advice_gate.validate(
-            current_game=bundle.scene.current_game or bundle.memory.current_stream_state.get("current_game"),
+            current_game=(
+                (bundle.memory.game_knowledge or {}).get("queried_game")
+                or bundle.scene.current_game
+                or bundle.memory.current_stream_state.get("current_game")
+            ),
             proposed_advice=response,
             game_run_state=bundle.memory.current_stream_state,
             known_game_mechanics=list((bundle.memory.game_knowledge or {}).get("known_mechanics") or []),
-            source_evidence=list((bundle.memory.game_knowledge or {}).get("source_evidence") or []),
+            source_evidence=list(
+                (bundle.memory.game_knowledge or {}).get("source_evidence")
+                or (bundle.memory.game_knowledge or {}).get("evidence")
+                or []
+            ),
             entity_spans=list(bundle.scene.entity_references or []),
         )
         game_validation = validation.to_dict()
@@ -914,12 +944,23 @@ def final_response_guard(
                 )
             )
 
+    game_knowledge_validation = validate_game_factual_grounding(response, bundle.memory.game_knowledge)
+    if not game_knowledge_validation.passed:
+        violations.append(
+            GuardViolation(
+                "ungrounded_game_factual_claim",
+                f"status={game_knowledge_validation.game_knowledge_status} "
+                f"claims={game_knowledge_validation.claims_ungrounded}",
+            )
+        )
+
     passed = not violations
     return FinalResponseGuardResult(
         passed=passed,
         violations=violations,
         recommended_action="emit" if passed else "repair",
         game_advice_validation=game_validation,
+        game_knowledge_validation=game_knowledge_validation.to_dict(),
     )
 
 
@@ -1324,6 +1365,15 @@ def _fallback_for_guard(
         return "La respuesta pertenece a la aclaración de partida pendiente; no la voy a tratar como charla genérica."
     if "ungrounded_game_walkthrough" in violations:
         return "No voy a darte una ruta concreta sin contexto de partida y una fuente fiable; primero necesito ubicar tu progreso."
+    if "ungrounded_game_factual_claim" in violations:
+        knowledge = dict(bundle.memory.game_knowledge or {})
+        status = str(knowledge.get("game_knowledge_status") or "UNKNOWN").upper()
+        title = str(knowledge.get("queried_game") or "ese juego").strip()
+        if status == "AMBIGUOUS":
+            return "Ese título puede referirse a más de un juego; dime cuál tienes en mente."
+        if status == "LOOKUP_FAILED":
+            return f"He intentado consultar {title}, pero no he obtenido datos fiables suficientes."
+        return f"No tengo datos fiables de {title} ahora mismo; prefiero no describirlo ni recomendarlo a ciegas."
     if "action_claim_without_execution_success" in violations:
         return "La respuesta parece corresponder a la tarea pendiente, pero no se ejecutó ninguna operación."
     return requested_fallback or safe_local_fallback(bundle)

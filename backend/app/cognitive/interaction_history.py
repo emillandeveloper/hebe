@@ -60,17 +60,19 @@ def detect_self_explanation_query(
         return SelfExplanationQuery(False)
     self_action = bool(re.search(
         r"\b(?:ignor(?:aste|abas|as)|contest(?:aste|abas|as)|respond(?:iste|ias|es)|"
-        r"hiciste|haces|dijiste|dices|abriste|abres|callaste|callas|salio|salio)\b",
+        r"hiciste|haces|dijiste|dices|abriste|abres|recomendaste|recomiendas|callaste|callas|salio|salio)\b",
         normalized,
     ))
     omitted_action = bool(re.search(
-        r"\bno\s+(?:le\s+)?(?:hiciste|contestaste|respondiste|dijiste|abriste|salio|salio)\b",
+        r"\bno\s+(?:me\s+|le\s+)?(?:hiciste|contestaste|respondiste|dijiste|abriste|recomendaste|salio|salio)\b",
         normalized,
     ))
     if not (self_action or omitted_action):
         return SelfExplanationQuery(False)
 
-    if re.search(r"\b(?:abriste|abres)\b", normalized):
+    if re.search(r"\b(?:recomendaste|recomiendas)\b", normalized):
+        requested_kind = "game_recommendation"
+    elif re.search(r"\b(?:abriste|abres)\b", normalized):
         requested_kind = "open_application"
     elif re.search(r"\b(?:dijiste|dices|no\s+dijiste)\b", normalized):
         requested_kind = "behavior_or_reply"
@@ -208,6 +210,10 @@ class RecentInteractionDecisionHistory:
             elif query.requested_kind == "behavior_or_reply":
                 if any(marker in " ".join((effect, reason, intent)) for marker in ("behavior", "motif", "repeat", "reply", "boundary", "generation")):
                     score += 3.0
+            elif query.requested_kind == "game_recommendation":
+                if "game recommendation" not in effect and "game_recommendation" not in effect:
+                    continue
+                score += 6.0
             elif query.requested_kind == "action_or_policy":
                 if not item.get("effect_authorized") or "policy" in str(item.get("interaction_decision") or ""):
                     score += 2.0
@@ -250,6 +256,12 @@ def render_grounded_self_explanation(
         text = "No la abrí porque no encontré una instalación válida de esa aplicación."
     elif reason in {"ambiguous_app_selection"}:
         text = "No la abrí porque encontré más de una opción válida y faltaba saber cuál querías."
+    elif reason in {"game_knowledge_unknown", "game_knowledge_partial"}:
+        text = "No lo recomendé porque no tenía datos fiables suficientes para valorarlo sin inventar."
+    elif reason == "game_knowledge_lookup_failed":
+        text = "No lo recomendé porque la consulta no devolvió información fiable suficiente."
+    elif reason == "game_knowledge_ambiguous":
+        text = "No lo recomendé porque el título podía referirse a más de un juego y faltaba concretar cuál."
     elif "behavior" in reason and any(marker in reason for marker in ("repeat", "similar", "fatigue", "suppress")):
         text = "No lo dije porque se estaba pareciendo demasiado a algo ya repetido y preferí no quemar el mismo gag."
     elif "generation" in reason or generation in {"failed", "failed_terminal_fallback", "terminal_fallback"}:

@@ -92,7 +92,12 @@ from app.cognitive.action_runtime import ActionRuntime
 from app.cognitive.memory.memory_extractor import MemoryExtractor
 from app.stream.context_sync import StreamContextSyncService
 from app.stream.companion_loop import StreamCompanionLoop
-from app.stream.game_knowledge import GameKnowledgeConfig, GameKnowledgeResolver
+from app.stream.game_knowledge import (
+    GameKnowledgeConfig,
+    GameKnowledgeResolver,
+    GameKnowledgeStatus,
+    classify_game_knowledge_query,
+)
 from app.stream.game_profiles import GameProfileStore
 from app.stream.game_research import GameKnowledgeResearchConfig, GameKnowledgeResearchService
 from app.stream.game_intelligence import (
@@ -1634,20 +1639,41 @@ class HebeEngine:
         emission_outcome = str(trace.get("emission_outcome") or "pending")
         if emission_outcome == "pending" and str(existing.get("emission_outcome") or "pending") != "pending":
             emission_outcome = str(existing.get("emission_outcome"))
+        preserve_game_knowledge = bool(existing.get("game_knowledge_status"))
         return self._record_interaction_decision({
             "trace_id": event_id,
             "event_id": event_id,
             "source": str(trace.get("source") or ""),
             "actor": actor,
             "actor_identities": [item for item in identities if item],
-            "target": str(trace.get("target") or "Hebe"),
-            "interaction_decision": str(trace.get("interaction_decision") or "observed"),
+            "target": str(
+                existing.get("target")
+                if preserve_game_knowledge
+                else trace.get("target") or "Hebe"
+            ),
+            "interaction_decision": str(
+                existing.get("interaction_decision")
+                if preserve_game_knowledge
+                else trace.get("interaction_decision") or "observed"
+            ),
             "authority": str(trace.get("authority") or "unknown"),
-            "requested_effect": str(trace.get("requested_effect") or trace.get("requested_behavior") or ""),
+            "requested_effect": str(
+                existing.get("requested_effect")
+                if preserve_game_knowledge
+                else trace.get("requested_effect") or trace.get("requested_behavior") or ""
+            ),
             "effect_authorized": bool(trace.get("effect_authorized")),
             "reply_authorized": bool(trace.get("reply_authorized", trace.get("allow_reply"))),
-            "reason_code": str(trace.get("reason") or "none"),
-            "response_intent": str(trace.get("response_intent") or ""),
+            "reason_code": str(
+                existing.get("reason_code")
+                if preserve_game_knowledge
+                else trace.get("reason") or "none"
+            ),
+            "response_intent": str(
+                existing.get("response_intent")
+                if preserve_game_knowledge
+                else trace.get("response_intent") or ""
+            ),
             "generation_outcome": str(trace.get("generation_outcome") or "not_attempted"),
             "emission_outcome": emission_outcome,
             "boundary_repeat_count": int(trace.get("boundary_repeat_count") or 0),
@@ -1688,6 +1714,49 @@ class HebeEngine:
             print(
                 f"[HEBE][INTERACTION_GENERATION] trace={trace_id} outcome={generation_outcome} "
                 f"reason={updated.get('reason_code')}",
+                flush=True,
+            )
+
+    def _record_game_knowledge_response_outcome(self, trace_id: str, *, reply_text: str) -> None:
+        trace_key = str(trace_id or "").strip()
+        if not trace_key:
+            return
+        debug = dict(getattr(getattr(self, "response_synthesizer", None), "last_response_debug_contract", {}) or {})
+        knowledge = dict(debug.get("game_knowledge") or debug.get("scene_memory", {}).get("game_knowledge") or {})
+        guard = dict(debug.get("guard_result") or {})
+        validation = dict(guard.get("game_knowledge_validation") or {})
+        if not knowledge and not validation:
+            return
+        blocked = bool(
+            validation.get("ungrounded_claim_blocked")
+            or debug.get("ungrounded_claim_blocked")
+        )
+        updated = self._get_interaction_decision_history().update(
+            self._get_stream_state(),
+            trace_key,
+            generation_outcome=("generated" if reply_text else "failed"),
+            game_knowledge_status=str(
+                knowledge.get("game_knowledge_status")
+                or validation.get("game_knowledge_status")
+                or ""
+            ),
+            evidence_count=int(knowledge.get("evidence_count") or 0),
+            lookup_used=bool(knowledge.get("lookup_used")),
+            claim_count=int(knowledge.get("claim_count") or 0),
+            ungrounded_claim_blocked=blocked,
+            claims_grounded=list(validation.get("claims_grounded") or []),
+            claims_ungrounded=list(validation.get("claims_ungrounded") or []),
+        )
+        stream = self._get_stream_state()
+        if updated is not None and stream is not None:
+            stream.last_game_knowledge_outcome = dict(updated)
+        if updated is not None:
+            print(
+                "[HEBE][GAME_KNOWLEDGE_RESPONSE] "
+                f"status={updated.get('game_knowledge_status')} evidence_count={updated.get('evidence_count')} "
+                f"lookup_used={str(bool(updated.get('lookup_used'))).lower()} "
+                f"claim_count={updated.get('claim_count')} "
+                f"ungrounded_claim_blocked={str(blocked).lower()}",
                 flush=True,
             )
 
@@ -4180,6 +4249,10 @@ class HebeEngine:
         current_interaction_trace_id = str(
             (getattr(input_event, "stt_metadata", {}) or {}).get("interaction_trace_id") or ""
         )
+        self._record_game_knowledge_response_outcome(
+            current_interaction_trace_id,
+            reply_text=reply_text,
+        )
         if decision.intent == "command_open_app" and current_interaction_trace_id:
             self._get_interaction_decision_history().update(
                 self._get_stream_state(),
@@ -4257,7 +4330,7 @@ class HebeEngine:
                 else:
                     self._deliver_voice_reply(reply_text)
                     self._record_assistant_reply_for_conversation(reply_text, source=source, synthesizer=getattr(self, "response_synthesizer", None))
-                if decision.intent == "command_open_app" and current_interaction_trace_id:
+                if current_interaction_trace_id:
                     self._get_interaction_decision_history().update(
                         self._get_stream_state(), current_interaction_trace_id, emission_outcome="emitted"
                     )
@@ -4835,6 +4908,11 @@ class HebeEngine:
             raw_text=raw_text,
             normalized_text=self._normalize_text(raw_text),
             is_stream_context=event_type.startswith("twitch_"),
+            stt_metadata={
+                "interaction_trace_id": str((payload or {}).get("event_id") or (payload or {}).get("message_id") or f"evt_{uuid.uuid4().hex}"),
+                "actor_login": str((payload or {}).get("user_login") or (payload or {}).get("username") or ""),
+                "actor_display_name": str((payload or {}).get("display_name") or (payload or {}).get("user_login") or "viewer"),
+            } if event_type == "twitch_chat_react" else {},
         )
         classification = self._get_input_classifier().classify(
             input_event,
@@ -4873,6 +4951,10 @@ class HebeEngine:
         )
         if event_type == "twitch_chat_react":
             self._record_response_generation_outcome(
+                str((payload or {}).get("event_id") or (payload or {}).get("message_id") or ""),
+                reply_text=reply_text,
+            )
+            self._record_game_knowledge_response_outcome(
                 str((payload or {}).get("event_id") or (payload or {}).get("message_id") or ""),
                 reply_text=reply_text,
             )
@@ -8309,6 +8391,8 @@ class HebeEngine:
                 f"route={result_dict.get('route')}",
                 flush=True,
             )
+            if interaction_update.get("game_knowledge_status") and stream is not None:
+                stream.last_game_knowledge_outcome = dict(interaction_update)
         behavior_trace_id = str(
             debug_payload.get("behavior_correlation_id")
             or (
@@ -8394,6 +8478,7 @@ class HebeEngine:
         intelligence_context = self._game_intelligence_context_for_event(event, classification)
         if intelligence_context:
             session_context["game_intelligence"] = intelligence_context
+            self._record_game_knowledge_interaction(event, intelligence_context)
         frame = ResponseFrame(
             input_type=classification.input_type,
             source=classification.source,
@@ -8422,36 +8507,162 @@ class HebeEngine:
         resolver = getattr(self, "game_context_resolver", None)
         stream = self._get_stream_state()
         game = str(getattr(stream, "current_game", None) or getattr(stream, "current_category", None) or "").strip() if stream else ""
-        if resolver is None or not game:
+        raw = str(getattr(event, "raw_text", "") or "") if event is not None else ""
+        query = classify_game_knowledge_query(raw, current_game=game)
+        queried_game = str(query.game_title if query.detected else game or "").strip()
+        if not queried_game and not query.detected:
             return {}
+        claims: list[Any] = []
+        provenance: list[Any] = []
+        candidate_fact_ids: list[str] = []
         try:
-            run_id=str(getattr(stream,"active_game_run_id","") or "")
-            raw=str(getattr(event,"raw_text","") or "") if event is not None else ""
+            run_id = str(getattr(stream, "active_game_run_id", "") or "") if queried_game == game else ""
             normalized=self._normalize_text(raw)
             game_question=bool(re.search(r"\b(?:juego|game|mecanica|combate|boss|jefe|vida|hp|damage|como funciona)\b",normalized))
-            context=resolver.build(
-                game=game,purpose="game_fact" if game_question else "stream_reaction",
-                stream_session_id=str(getattr(stream,"active_stream_session_id","") or ""),
-                run_id=run_id,event_id=str(getattr(event,"timestamp","") or "stream_context"),
-                spoiler_ceiling="strict",allow_research=False,
-            )
-            claims=list(context.knowledge_claims)[:12]
-            safe_claims=[item.get("object") for item in claims if item.get("object") is not None]
-            return {
-                "game_id":context.game_identity.get("game_id"),
-                "dossier_status":"canonical_knowledge" if claims else "missing",
-                "progress":self.game_run_service.state(run_id) if run_id else {},
-                "contribution_mode":"informed_observation" if safe_claims else "contextual_reaction",
-                "allowed_claims":safe_claims,
-                "source_provenance":list(context.provenance_manifest)[:12],
-                "candidate_fact_ids":[str(item.get("id") or "") for item in claims],
-                "forbidden_claims":["unverified mechanics","future story information","walkthrough solutions"],
-                "lookup_used":bool(claims),
-                "instruction":"Use only allowed claims; otherwise make a scene reaction. Never turn this into unsolicited walkthrough advice.",
-            }
+            if resolver is not None and queried_game:
+                context=resolver.build(
+                    game=queried_game,purpose="game_fact" if game_question or query.detected else "stream_reaction",
+                    stream_session_id=str(getattr(stream,"active_stream_session_id","") or ""),
+                    run_id=run_id,event_id=str(getattr(event,"timestamp","") or "stream_context"),
+                    spoiler_ceiling="strict",allow_research=False,
+                )
+                claims=list(context.knowledge_claims)[:12]
+                provenance=list(context.provenance_manifest)[:12]
+                candidate_fact_ids=[str(item.get("id") or "") for item in claims]
         except Exception as exc:
             print(f"[HEBE][GAME_INTELLIGENCE] context_failed={type(exc).__name__}",flush=True)
-            return {}
+        safe_claims = [
+            f"{item.get('predicate')}={item.get('object')}"
+            if str(item.get("predicate") or "").strip()
+            else str(item.get("object"))
+            for item in claims
+            if item.get("object") is not None
+        ]
+        evidence = [
+            {
+                "evidence_type": "confirmed_game_knowledge",
+                "evidence_id": str(item.get("id") or f"canonical:{index}"),
+                "exact_supporting_text": (
+                    f"{item.get('predicate')}={item.get('object')}"
+                    if str(item.get("predicate") or "").strip()
+                    else str(item.get("object") or "")
+                ),
+                "confidence": float(item.get("confidence", 0.0) or 0.0),
+                "provenance": provenance[index] if index < len(provenance) else {},
+            }
+            for index, item in enumerate(claims)
+            if item.get("object") is not None
+        ]
+        legacy_result = None
+        if query.detected and queried_game:
+            knowledge_resolver = getattr(self, "game_knowledge", None)
+            if knowledge_resolver is None:
+                knowledge_resolver = GameKnowledgeResolver(
+                    profile_store=getattr(self, "game_profiles", None),
+                    research_service=getattr(self, "game_research", None),
+                    config=GameKnowledgeConfig.from_env(),
+                    run_service=getattr(self, "game_run_service", None),
+                )
+                self.game_knowledge = knowledge_resolver
+            legacy_result = knowledge_resolver.resolve(game=queried_game, stream=stream)
+            safe_claims.extend(legacy_result.claims)
+            evidence.extend(legacy_result.evidence)
+        safe_claims = list(dict.fromkeys(str(item) for item in safe_claims if str(item).strip()))
+        if legacy_result is not None:
+            status = str(legacy_result.game_knowledge_status)
+            if safe_claims and status in {GameKnowledgeStatus.UNKNOWN.value, GameKnowledgeStatus.LOOKUP_FAILED.value}:
+                status = GameKnowledgeStatus.KNOWN.value if len(safe_claims) >= 3 else GameKnowledgeStatus.PARTIAL.value
+            lookup_used = bool(legacy_result.lookup_used)
+            lookup_attempted = bool(legacy_result.lookup_attempted)
+            lookup_reason = str(legacy_result.web_lookup_reason or "")
+            profile_found = bool(legacy_result.profile)
+            ambiguous_candidates = list(legacy_result.ambiguous_candidates)
+        else:
+            status = GameKnowledgeStatus.KNOWN.value if len(safe_claims) >= 3 else (
+                GameKnowledgeStatus.PARTIAL.value if safe_claims else GameKnowledgeStatus.UNKNOWN.value
+            )
+            lookup_used = False
+            lookup_attempted = False
+            lookup_reason = "not_requested"
+            profile_found = False
+            ambiguous_candidates = []
+        lookup_config = getattr(getattr(self, "game_knowledge", None), "config", None)
+        lookup_service = getattr(getattr(self, "game_knowledge", None), "research_service", None)
+        lookup_available = bool(
+            getattr(lookup_config, "effective_web_lookup_enabled", False)
+            and getattr(lookup_service, "search_provider", None) is not None
+        )
+        return {
+            "game_id": str((claims[0].get("scope_id") if claims else "") or ""),
+            "queried_game": queried_game,
+            "query_detected": bool(query.detected),
+            "query_intent": query.intent,
+            "recommendation_requested": bool(query.asks_for_recommendation),
+            "gameplay_requested": bool(query.asks_for_gameplay),
+            "game_knowledge_status": status,
+            "dossier_status":"canonical_knowledge" if safe_claims else "missing",
+            "progress":self.game_run_service.state(run_id) if run_id and getattr(self, "game_run_service", None) else {},
+            "contribution_mode":"informed_observation" if safe_claims else "contextual_reaction",
+            "allowed_claims":safe_claims,
+            "evidence": evidence,
+            "source_evidence": evidence,
+            "source_provenance": provenance,
+            "candidate_fact_ids":candidate_fact_ids,
+            "forbidden_claims":["unverified mechanics","future story information","walkthrough solutions"],
+            "profile_found": profile_found,
+            "evidence_count": len(evidence),
+            "lookup_used": lookup_used,
+            "lookup_attempted": lookup_attempted,
+            "lookup_available": lookup_available,
+            "lookup_reason": lookup_reason,
+            "claim_count": len(safe_claims),
+            "ungrounded_claim_blocked": False,
+            "ambiguous_candidates": ambiguous_candidates,
+            "instruction":"Use only allowed claims; otherwise acknowledge missing knowledge or clarify the title. Never use model memory as game evidence.",
+        }
+
+    def _record_game_knowledge_interaction(self, event: InputEvent | None, knowledge: dict) -> None:
+        if not knowledge.get("query_detected"):
+            return
+        metadata = dict(getattr(event, "stt_metadata", {}) or {}) if event is not None else {}
+        trace_id = str(metadata.get("interaction_trace_id") or f"game_knowledge_{uuid.uuid4().hex}")
+        status = str(knowledge.get("game_knowledge_status") or GameKnowledgeStatus.UNKNOWN.value).upper()
+        actor = str(metadata.get("actor_display_name") or metadata.get("actor_login") or "Leo")
+        source = str(getattr(event, "source", "") or "owner_input") if event is not None else "owner_input"
+        reason_code = f"game_knowledge_{status.casefold()}"
+        record = self._record_interaction_decision({
+            "trace_id": trace_id,
+            "event_id": trace_id,
+            "source": source,
+            "actor": actor,
+            "actor_identities": [item for item in (actor, metadata.get("actor_login")) if item],
+            "target": str(knowledge.get("queried_game") or "game"),
+            "interaction_decision": "grounded_game_knowledge_response",
+            "authority": "viewer" if source == "twitch_chat" else "owner",
+            "requested_effect": "game_recommendation" if knowledge.get("recommendation_requested") else "game_factual_answer",
+            "effect_authorized": True,
+            "reply_authorized": True,
+            "reason_code": reason_code,
+            "response_intent": "grounded_game_knowledge",
+            "generation_outcome": "pending",
+            "emission_outcome": "pending",
+            "game_knowledge_status": status,
+            "evidence_count": int(knowledge.get("evidence_count") or 0),
+            "lookup_used": bool(knowledge.get("lookup_used")),
+            "claim_count": int(knowledge.get("claim_count") or 0),
+            "ungrounded_claim_blocked": bool(knowledge.get("ungrounded_claim_blocked")),
+        })
+        stream = self._get_stream_state()
+        if stream is not None:
+            stream.last_game_knowledge_outcome = dict(record)
+        print(
+            "[HEBE][GAME_KNOWLEDGE_OUTCOME] "
+            f"status={status} evidence_count={record.get('evidence_count')} "
+            f"lookup_used={str(bool(record.get('lookup_used'))).lower()} "
+            f"claim_count={record.get('claim_count')} "
+            f"ungrounded_claim_blocked={str(bool(record.get('ungrounded_claim_blocked'))).lower()}",
+            flush=True,
+        )
 
     def _log_input_classification(self, classification) -> None:
         print(
@@ -9708,6 +9919,14 @@ class HebeEngine:
             )
             self.game_knowledge = resolver
         result = resolver.resolve(game=raw_target or target, stream=stream)
+        knowledge_state = result.to_state_changes()
+        knowledge_state.update({
+            "query_detected": True,
+            "query_intent": "factual",
+            "queried_game": result.game_title,
+            "recommendation_requested": False,
+            "gameplay_requested": False,
+        })
         print(
             "[HEBE][GAME_KNOWLEDGE] "
             f"game={result.game_title!r} mode={result.response_mode} "
@@ -9724,13 +9943,17 @@ class HebeEngine:
             action_type="game_knowledge_query",
             success=True,
             user_visible_summary=result.fallback_text,
-            state_changes=result.to_state_changes(),
+            state_changes=knowledge_state,
             constraints=[
                 "Answer in Spanish.",
                 "Separate personal stream memory from public spoiler-safe game knowledge.",
                 "Do not invent session progress, locations, characters, bosses, or future story facts.",
                 "Mention when personal run memory is missing.",
-                "Do not ask for clarification.",
+                (
+                    "Ask one title clarification and make no factual claim."
+                    if result.game_knowledge_status == GameKnowledgeStatus.AMBIGUOUS.value
+                    else "Do not ask for clarification."
+                ),
             ],
             suggested_tone="concise Hebe game-knowledge answer",
             fallback_text=result.fallback_text,
@@ -9741,7 +9964,7 @@ class HebeEngine:
                     f"Use response_mode={result.response_mode}; include spoiler-safe public profile if present, "
                     "and clearly say when personal stream memory is missing."
                 ),
-                "game_knowledge": result.to_state_changes(),
+                "game_knowledge": knowledge_state,
             },
         )
 

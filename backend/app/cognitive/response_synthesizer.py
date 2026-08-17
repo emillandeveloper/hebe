@@ -42,6 +42,7 @@ from app.cognitive.speech_act_pipeline import (
 )
 from app.core.ui_bridge import emit
 from app.stream.game_advice_gate import GameAdviceGate
+from app.stream.game_knowledge import GameKnowledgeStatus, classify_game_knowledge_query
 from app.stream.output_language import StreamOutputLanguagePolicy
 
 
@@ -260,6 +261,56 @@ class ResponseSynthesizer:
             "current_stream_state": game_context,
             "game_knowledge": game_context if game_context else {},
         }
+
+    def _game_knowledge_contract(self, context: BuiltContext | None, *, input_text: str = "") -> dict[str, Any]:
+        response_frame = getattr(context, "response_frame", {}) or {} if context is not None else {}
+        session_context = dict(response_frame.get("current_session_context") or {}) if isinstance(response_frame, dict) else {}
+        contract = dict(session_context.get("game_intelligence") or {})
+        current_game = str(response_frame.get("current_game") or "") if isinstance(response_frame, dict) else ""
+        query = classify_game_knowledge_query(input_text, current_game=current_game)
+        if query.detected:
+            contract.setdefault("query_detected", True)
+            contract.setdefault("query_intent", query.intent)
+            contract.setdefault("queried_game", query.game_title or current_game)
+            contract.setdefault("recommendation_requested", query.asks_for_recommendation)
+            contract.setdefault("gameplay_requested", query.asks_for_gameplay)
+        claims = list(contract.get("allowed_claims") or [])
+        if contract.get("query_detected") and not contract.get("game_knowledge_status"):
+            contract["game_knowledge_status"] = (
+                GameKnowledgeStatus.KNOWN.value if len(claims) >= 3
+                else GameKnowledgeStatus.PARTIAL.value if claims
+                else GameKnowledgeStatus.UNKNOWN.value
+            )
+        contract.setdefault("evidence_count", len(contract.get("evidence") or contract.get("source_evidence") or []))
+        contract.setdefault("claim_count", len(claims))
+        contract.setdefault("lookup_used", False)
+        contract.setdefault("ungrounded_claim_blocked", False)
+        return contract
+
+    @staticmethod
+    def _grounded_unknown_game_fallback(contract: dict[str, Any], *, speaker: str = "") -> str:
+        if not contract.get("query_detected"):
+            return ""
+        status = str(contract.get("game_knowledge_status") or GameKnowledgeStatus.UNKNOWN.value).upper()
+        recommendation = bool(contract.get("recommendation_requested"))
+        if status == GameKnowledgeStatus.PARTIAL.value and not recommendation and int(contract.get("claim_count") or 0) > 0:
+            return ""
+        if status not in {
+            GameKnowledgeStatus.UNKNOWN.value,
+            GameKnowledgeStatus.LOOKUP_FAILED.value,
+            GameKnowledgeStatus.AMBIGUOUS.value,
+            GameKnowledgeStatus.PARTIAL.value,
+        }:
+            return ""
+        prefix = f"{speaker}, " if speaker else ""
+        title = str(contract.get("queried_game") or "ese juego").strip()
+        if status == GameKnowledgeStatus.AMBIGUOUS.value:
+            return f"{prefix}ese título puede referirse a más de un juego; dime cuál tienes en mente."
+        if status == GameKnowledgeStatus.LOOKUP_FAILED.value:
+            return f"{prefix}he intentado consultar {title}, pero no he obtenido datos fiables suficientes."
+        if recommendation:
+            return f"{prefix}no tengo base fiable suficiente sobre {title} para recomendártelo sin inventar."
+        return f"{prefix}no tengo datos fiables de {title} ahora mismo; prefiero no rellenar el hueco con humo."
 
     # =========================
     # Entry point
@@ -742,6 +793,21 @@ class ResponseSynthesizer:
           current_user: mensaje de Leo PRIMERO, bloque de memoria al FINAL
         """
         msg = (context.input_text or "").strip()
+        game_knowledge_contract = self._game_knowledge_contract(context, input_text=msg)
+        grounded_fallback = self._grounded_unknown_game_fallback(game_knowledge_contract)
+        if grounded_fallback:
+            self.last_response_source = "game_knowledge_grounded_fallback"
+            self.last_response_debug_contract = {
+                "response_source": self.last_response_source,
+                "game_knowledge": game_knowledge_contract,
+                "game_knowledge_status": game_knowledge_contract.get("game_knowledge_status"),
+                "evidence_count": game_knowledge_contract.get("evidence_count", 0),
+                "lookup_used": bool(game_knowledge_contract.get("lookup_used")),
+                "claim_count": game_knowledge_contract.get("claim_count", 0),
+                "ungrounded_claim_blocked": False,
+                "final_response": grounded_fallback,
+            }
+            return grounded_fallback
         message_type = getattr(context, "message_type", "unknown")
         speech_act = "owner_supportive_reaction" if message_type in {"small_talk", "banter"} else "direct_answer"
         entity_facts = entity_prompt_lines(getattr(context, "resolved_entities", []) or [])
@@ -757,7 +823,7 @@ class ResponseSynthesizer:
         response_frame = getattr(context, "response_frame", {}) or {}
         current_game = str(response_frame.get("current_game") or "") if isinstance(response_frame, dict) else ""
         session_context = dict(response_frame.get("current_session_context") or {}) if isinstance(response_frame, dict) else {}
-        game_intelligence = dict(session_context.get("game_intelligence") or {})
+        game_intelligence = game_knowledge_contract or dict(session_context.get("game_intelligence") or {})
         grounded_game_claims = list(game_intelligence.get("allowed_claims") or [])
         game_guidance_query = self._game_guidance_classifier.looks_like_query(msg, state_snapshot)
         has_game_guidance_source = bool(
@@ -1150,6 +1216,21 @@ class ResponseSynthesizer:
 
     def synthesize_command_result(self, result: CommandResult, *, input_text: str | None = None, state: Any | None = None) -> str:
         fallback = result.fallback_text or result.user_visible_summary or "Hecho."
+        game_knowledge_contract = dict(result.state_changes or {}) if result.action_type == "game_knowledge_query" else {}
+        grounded_fallback = self._grounded_unknown_game_fallback(game_knowledge_contract)
+        if grounded_fallback:
+            self.last_response_source = "game_knowledge_grounded_fallback"
+            self.last_response_debug_contract = {
+                "response_source": self.last_response_source,
+                "game_knowledge": game_knowledge_contract,
+                "game_knowledge_status": game_knowledge_contract.get("game_knowledge_status"),
+                "evidence_count": game_knowledge_contract.get("evidence_count", 0),
+                "lookup_used": bool(game_knowledge_contract.get("lookup_used")),
+                "claim_count": game_knowledge_contract.get("claim_count", 0),
+                "ungrounded_claim_blocked": False,
+                "final_response": grounded_fallback,
+            }
+            return grounded_fallback
         technical_details_allowed = self._technical_details_requested(input_text or "", state)
         public_state_changes = (
             result.state_changes
@@ -1191,6 +1272,7 @@ class ResponseSynthesizer:
                 "data": public_state_changes,
                 "error": public_error,
             },
+            memory={"game_knowledge": game_knowledge_contract} if game_knowledge_contract else None,
             fallback=fallback,
         )
         if (
@@ -2363,18 +2445,46 @@ class ResponseSynthesizer:
         trace_id = payload.get("trace_id") or uuid.uuid4().hex[:8]
 
         bundle = build_twitch_speech_act_bundle(payload, context, is_broadcaster=is_broadcaster)
+        grounded_game_fallback = self._grounded_unknown_game_fallback(
+            dict(bundle.memory.game_knowledge or {}),
+            speaker=chatter_clean,
+        )
         deterministic_fallback = self._fallback_twitch_chat_react(
             chatter=chatter_clean,
             message=message,
             is_broadcaster=is_broadcaster,
         )
-        pipeline_response = self._universal_pipeline().render(
-            bundle,
-            include_examples=f"{self._build_stream_style_block()}\n\n{build_chat_react_examples()}",
-            cleaner=lambda value: clean_twitch_reply(value, source_message=message),
-            fallback=deterministic_fallback,
-            route="twitch_chat_react",
-        )
+        if grounded_game_fallback:
+            grounded_guard = final_response_guard(
+                grounded_game_fallback,
+                bundle,
+                game_advice_gate=self.game_advice_gate,
+            )
+            pipeline_response = PipelineResponse(
+                text=grounded_game_fallback,
+                raw_response="",
+                response_source="game_knowledge_grounded_fallback",
+                guard_result=grounded_guard,
+                debug_contract={
+                    **bundle.to_dict(),
+                    "response_source": "game_knowledge_grounded_fallback",
+                    "game_knowledge_status": bundle.memory.game_knowledge.get("game_knowledge_status"),
+                    "evidence_count": bundle.memory.game_knowledge.get("evidence_count", 0),
+                    "lookup_used": bool(bundle.memory.game_knowledge.get("lookup_used")),
+                    "claim_count": bundle.memory.game_knowledge.get("claim_count", 0),
+                    "ungrounded_claim_blocked": False,
+                    "guard_result": grounded_guard.to_dict(),
+                    "final_response": grounded_game_fallback,
+                },
+            )
+        else:
+            pipeline_response = self._universal_pipeline().render(
+                bundle,
+                include_examples=f"{self._build_stream_style_block()}\n\n{build_chat_react_examples()}",
+                cleaner=lambda value: clean_twitch_reply(value, source_message=message),
+                fallback=deterministic_fallback,
+                route="twitch_chat_react",
+            )
         pipeline_response = self._recover_directed_viewer_fallback(
             payload=payload,
             bundle=bundle,

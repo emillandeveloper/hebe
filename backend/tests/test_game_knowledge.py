@@ -114,7 +114,7 @@ class GameKnowledgeTests(unittest.TestCase):
         self.assertIn("personal_session_memory", result.missing)
         self.assertIn("No tengo todavia memoria", result.fallback_text)
 
-    def test_missing_profile_with_web_disabled_offers_seed_or_lookup(self):
+    def test_missing_profile_with_web_disabled_is_epistemically_honest(self):
         resolver = GameKnowledgeResolver(
             profile_store=self._store(),
             config=GameKnowledgeConfig(web_lookup_enabled=False, game_profile_web_lookup_enabled=False),
@@ -124,7 +124,10 @@ class GameKnowledgeTests(unittest.TestCase):
 
         self.assertEqual(result.response_mode, "missing")
         self.assertIn("local_game_profile", result.missing)
-        self.assertIn("activar lookup web", result.fallback_text)
+        self.assertEqual(result.game_knowledge_status, "UNKNOWN")
+        self.assertFalse(result.lookup_used)
+        self.assertEqual(result.claims, [])
+        self.assertIn("No tengo datos fiables", result.fallback_text)
 
     def test_web_enabled_fetches_and_caches_safe_profile(self):
         store = self._store()
