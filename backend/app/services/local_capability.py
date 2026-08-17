@@ -69,6 +69,7 @@ class ApplicationDiscoveryService:
         self._cache: dict[tuple[str, Optional[str]], dict[str, Any]] = {}
         self._cache_ttl_s = 300.0
         self.last_diagnostics: dict[str, Any] = {}
+        self._source_errors: list[dict[str, str]] = []
 
     def search(self, target: str, canonical_app_id: Optional[str] = None, aliases: Sequence[str] | None = None) -> list[ApplicationCandidate]:
         normalized_target = self._normalize_target(target)
@@ -80,6 +81,7 @@ class ApplicationDiscoveryService:
             self.last_diagnostics = dict(cached.get("diagnostics") or {})
             return cached["candidates"]
 
+        self._source_errors = []
         candidates_by_source = {
             "learned_db": self._search_persisted_db_entries(primary_id),
             "app_paths_registry": self._search_registry_app_paths(normalized_target),
@@ -97,18 +99,37 @@ class ApplicationDiscoveryService:
         candidates = self._validate_candidates(candidates, target, aliases)
         candidates.sort(key=lambda candidate: candidate.confidence, reverse=True)
 
+        source_candidates = [
+            candidate
+            for candidates_for_source in candidates_by_source.values()
+            for candidate in candidates_for_source
+        ]
+        rejected_candidates = [
+            candidate for candidate in source_candidates if not candidate.executable
+        ]
+
         diagnostics = {
             "target": target,
             "normalized_target": normalized_target,
+            "checked_sources": list(candidates_by_source),
             "sources": {
                 source: [self._candidate_diagnostic(candidate) for candidate in source_candidates]
                 for source, source_candidates in candidates_by_source.items()
             },
+            "discovered_candidates": [
+                self._candidate_diagnostic(candidate)
+                for candidate in candidates
+                if candidate.executable
+            ],
+            "rejected_candidates": [
+                self._candidate_diagnostic(candidate)
+                for candidate in rejected_candidates
+            ],
+            "source_errors": list(self._source_errors),
             "candidates": [self._candidate_diagnostic(candidate) for candidate in candidates],
             "discarded": [
                 self._candidate_diagnostic(candidate)
-                for candidate in candidates
-                if not candidate.executable
+                for candidate in rejected_candidates
             ],
         }
         self.last_diagnostics = diagnostics
@@ -143,13 +164,21 @@ class ApplicationDiscoveryService:
         candidates: list[ApplicationCandidate] = []
         try:
             persisted = app_registry.lookup_learned_app_record(canonical_app_id)
-            if persisted and persisted.get("command"):
-                path = str(persisted["command"]).strip()
+            if persisted:
+                path = str(
+                    persisted.get("executable_path") or persisted.get("command") or ""
+                ).strip()
+                if not path:
+                    return candidates
                 candidate = ApplicationCandidate(
                     canonical_name=canonical_app_id,
-                    display_name=str(persisted.get("description") or canonical_app_id),
+                    display_name=str(
+                        persisted.get("canonical_name")
+                        or persisted.get("description")
+                        or canonical_app_id
+                    ),
                     executable_path=path,
-                    arguments="",
+                    arguments=str(persisted.get("launch_arguments") or "").strip(),
                     source_type="learned_db",
                     source_location=path,
                     alias_matches=[canonical_app_id],
@@ -314,18 +343,24 @@ class ApplicationDiscoveryService:
             return []
 
         candidates: list[ApplicationCandidate] = []
-        for item_name, item_url, file_name in self._iter_windows_index_rows(target):
-            executable_path = self._file_url_to_path(item_url)
-            if Path(file_name).suffix.casefold() == ".exe" and executable_path:
-                candidates.append(ApplicationCandidate(
-                    canonical_name=Path(file_name).stem,
-                    display_name=Path(file_name).stem,
-                    executable_path=executable_path,
-                    source_type="windows_search_index",
-                    source_location=item_url,
-                    alias_matches=[Path(file_name).stem],
-                    executable_name_match=file_name,
-                ))
+        raw_target = str(target).strip()
+        normalized_target = self._normalize_target(raw_target)
+        search_terms = list(dict.fromkeys(
+            term for term in (raw_target, normalized_target) if term
+        ))
+        for search_term in search_terms:
+            for item_name, item_url, file_name in self._iter_windows_index_rows(search_term):
+                executable_path = self._file_url_to_path(item_url)
+                if Path(file_name).suffix.casefold() == ".exe" and executable_path:
+                    candidates.append(ApplicationCandidate(
+                        canonical_name=Path(file_name).stem,
+                        display_name=Path(file_name).stem,
+                        executable_path=executable_path,
+                        source_type="windows_search_index",
+                        source_location=item_url,
+                        alias_matches=[Path(file_name).stem],
+                        executable_name_match=file_name,
+                    ))
         return candidates
 
     def _iter_windows_index_rows(self, target: str) -> Iterable[tuple[str, str, str]]:
@@ -350,7 +385,13 @@ class ApplicationDiscoveryService:
                 file_name = str(recordset.Fields.Item(2).Value or item_name)
                 yield item_name, item_url, file_name
                 recordset.MoveNext()
-        except Exception:
+        except Exception as exc:
+            self._source_errors.append({
+                "source": "windows_search_index",
+                "search_term": str(target),
+                "reason": "query_failed",
+                "error_type": type(exc).__name__,
+            })
             return
         finally:
             try:
@@ -528,6 +569,10 @@ class LocalCapabilityResolver:
 
         search_aliases = self._extract_aliases(app_record)
         candidates = self.discovery.search(display_name, canonical_app_id=app_id, aliases=search_aliases)
+        discovery_diagnostics = getattr(self.discovery, "last_diagnostics", {})
+        if not isinstance(discovery_diagnostics, dict):
+            discovery_diagnostics = {}
+        discovery_diagnostics = dict(discovery_diagnostics)
         if current_candidate and current_candidate.executable_path:
             invalid_reason = "invalid_existing_registration"
         else:
@@ -548,9 +593,9 @@ class LocalCapabilityResolver:
                 persisted=False,
                 clarification_question=question,
                 diagnostics={
+                    **discovery_diagnostics,
                     "reason": invalid_reason,
                     "registered": registered,
-                    "checked_sources": [c.source_type for c in candidates],
                 },
                 app_record=app_record if registered else None,
             )
@@ -568,6 +613,7 @@ class LocalCapabilityResolver:
                 confidence=selected.confidence,
                 provenance=selected.source_type,
                 persisted=persisted,
+                diagnostics=discovery_diagnostics,
                 app_record=self._record_for_candidate(app_id, display_name, search_aliases, selected),
             )
 
@@ -585,6 +631,7 @@ class LocalCapabilityResolver:
                 confidence=top.confidence,
                 provenance=top.source_type,
                 persisted=persisted,
+                diagnostics=discovery_diagnostics,
                 app_record=self._record_for_candidate(app_id, display_name, search_aliases, top),
             )
 
@@ -606,7 +653,10 @@ class LocalCapabilityResolver:
             provenance="multiple_candidates",
             persisted=False,
             clarification_question=question,
-            diagnostics={"candidate_paths": [c.source_location or c.executable_path for c in valid_candidates]},
+            diagnostics={
+                **discovery_diagnostics,
+                "candidate_paths": [c.source_location or c.executable_path for c in valid_candidates],
+            },
         )
 
     @staticmethod

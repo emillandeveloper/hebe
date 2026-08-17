@@ -24,7 +24,11 @@ from app.integrations.twitch.chat_cache import TwitchChatCache
 from app.integrations.twitch.target_resolver import TwitchTargetResolver
 from app.services.voice_command_recovery import normalize_stt_transcript
 from app.services.direct_stt_command import parse_direct_stt_command
-from app.services.local_capability import ApplicationCandidate, LocalCapabilityResolver
+from app.services.local_capability import (
+    ApplicationCandidate,
+    ApplicationDiscoveryService,
+    LocalCapabilityResolver,
+)
 from app.stream.action_planner import StreamActionPlanner
 from app.stream.state import StreamSessionState
 from app.continuity import ConversationContinuityService, ConversationRepository, OpenThreadRepository
@@ -348,7 +352,7 @@ class VoiceCommandPipelineTests(unittest.TestCase):
         self.assertEqual(delivered, [("stt_voice", "modelo:open_application:obs")])
 
     def test_stt_portable_app_discovery_executes_once(self):
-        transcript = "Hebe, abre melonDS"
+        transcript = "Hebe, abre Melón DS"
         engine = wire_canonical_app_pipeline(make_engine())
         emitted = []
         engine._deliver_manual_reply = lambda text, *, source: None
@@ -365,27 +369,33 @@ class VoiceCommandPipelineTests(unittest.TestCase):
             "action_eligible": True,
             "detected_language": "es",
         }
-        discovery = Mock()
-        discovery.search.return_value = [ApplicationCandidate(
-            canonical_name="melonds",
-            display_name="melonDS",
-            executable_path=sys.executable,
-            source_type="windows_search_index",
-            source_location="file:C:/portable/melonDS.exe",
-            executable_name_match="melonDS.exe",
-            confidence=0.95,
-            exists=True,
-            executable=True,
-        )]
-        engine.action_runtime.local_capability = LocalCapabilityResolver(discovery)
-        with patch("app.services.local_capability.resolve_whitelisted_app", return_value=None), \
-             patch("app.services.local_capability.persist_learned_app", return_value=None), \
-             patch("app.hebe_engine.emit", lambda event_type, data=None: emitted.append((event_type, data or {}))):
-            result = engine._process_stt_voice_transcript(transcript, stt_metadata=metadata)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            executable = (
+                Path(temp_dir)
+                / "Users/Public/Documents/WinDS PRO/emu/melonds/melonDS.exe"
+            )
+            executable.parent.mkdir(parents=True)
+            executable.touch()
+            item_url = "file:" + str(executable).replace(os.sep, "/")
+            discovery = ApplicationDiscoveryService()
+            discovery._iter_windows_index_rows = Mock(side_effect=lambda term: iter([
+                ("melonDS.exe", item_url, "melonDS.exe"),
+            ]) if term == "melonds" else iter([]))
+            discovery._search_registry_app_paths = Mock(return_value=[])
+            discovery._search_installed_registry = Mock(return_value=[])
+            discovery._search_shortcuts = Mock(return_value=[])
+            discovery._search_executables = Mock(return_value=[])
+            discovery._search_persisted_db_entries = Mock(return_value=[])
+            engine.action_runtime.local_capability = LocalCapabilityResolver(discovery)
+            with patch("app.services.local_capability.resolve_whitelisted_app", return_value=None), \
+                 patch("app.services.local_capability.persist_learned_app", return_value=None), \
+                 patch("app.hebe_engine.emit", lambda event_type, data=None: emitted.append((event_type, data or {}))):
+                result = engine._process_stt_voice_transcript(transcript, stt_metadata=metadata)
 
         self.assertEqual(result, "continue")
         self.assertEqual(len(engine.runtime.win.opened), 1)
         self.assertEqual(engine.runtime.win.opened[0]["app_id"], "melonds")
+        self.assertEqual(engine.runtime.win.opened[0]["executable_path"], str(executable))
         outcomes = [
             data for event_type, data in emitted
             if event_type == "voice.command" and data.get("status") == "outcome"

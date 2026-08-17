@@ -5,9 +5,10 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 from app.cognitive.action_runtime import ActionRuntime
+from app.core import runtime as runtime_module
 from app.services.local_capability import ApplicationDiscoveryService, LocalCapabilityResolver
 
 
@@ -120,6 +121,7 @@ class WindowsAppDiscoveryTests(unittest.TestCase):
         self.assertIn("path_missing_or_invalid", candidates[0].validation_notes)
         self.assertEqual(resolution.status, "not_found")
         self.assertTrue(discovery.last_diagnostics["discarded"])
+        self.assertTrue(discovery.last_diagnostics["rejected_candidates"])
 
     def test_two_distinct_shortcuts_with_equal_evidence_are_ambiguous(self):
         first_exe = self._exe("one/Ambiguous Tool.exe")
@@ -156,26 +158,124 @@ class WindowsAppDiscoveryTests(unittest.TestCase):
         runtime.win.open_app.assert_called_once()
         self.assertEqual(runtime.win.open_app.call_args.args[0]["executable_path"], str(executable))
 
-    def test_melonds_regression_fixture_matches_real_portable_installation_shape(self):
+    def test_spaced_display_name_finds_compact_indexed_portable_executable(self):
         executable = self._exe("Users/Public/Documents/WinDS PRO/emu/melonds/melonDS.exe")
         item_url = "file:" + str(executable).replace(os.sep, "/")
         discovery = ApplicationDiscoveryService()
-        discovery._iter_windows_index_rows = Mock(return_value=iter([
+        discovery._iter_windows_index_rows = Mock(side_effect=lambda term: iter([
             ("melonDS.exe", item_url, "melonDS.exe"),
-        ]))
+        ]) if term == "melonds" else iter([]))
         discovery._search_registry_app_paths = Mock(return_value=[])
         discovery._search_installed_registry = Mock(return_value=[])
         discovery._search_shortcuts = Mock(return_value=[])
         discovery._search_executables = Mock(return_value=[])
         discovery._search_persisted_db_entries = Mock(return_value=[])
 
-        candidates = discovery.search("melonDS")
-        resolution = self._resolve(discovery, "melonDS")
+        candidates = discovery.search("Melon DS")
+        resolution = self._resolve(discovery, "Melon DS")
 
         self.assertEqual(len(candidates), 1)
         self.assertEqual(candidates[0].source_type, "windows_search_index")
         self.assertEqual(candidates[0].executable_path, str(executable))
         self.assertEqual(resolution.status, "discovered")
+        self.assertEqual(
+            [call.args[0] for call in discovery._iter_windows_index_rows.call_args_list],
+            ["Melon DS", "melonds"],
+        )
+        self.assertEqual(
+            discovery.last_diagnostics["checked_sources"],
+            [
+                "learned_db",
+                "app_paths_registry",
+                "installed_registry",
+                "start_menu_shortcuts",
+                "windows_search_index",
+                "exe_scan",
+            ],
+        )
+        self.assertEqual(len(discovery.last_diagnostics["discovered_candidates"]), 1)
+        self.assertEqual(discovery.last_diagnostics["rejected_candidates"], [])
+
+    def test_learned_schema_executable_path_survives_restart(self):
+        executable = self._exe("portable-suite/bin/PortablePlayer.exe")
+        discovery = ApplicationDiscoveryService()
+        discovery._search_registry_app_paths = Mock(return_value=[])
+        discovery._search_installed_registry = Mock(return_value=[])
+        discovery._search_shortcuts = Mock(return_value=[])
+        discovery._search_windows_index = Mock(return_value=[])
+        discovery._search_executables = Mock(return_value=[])
+        learned_record = {
+            "app_id": "portableplayer",
+            "canonical_name": "Portable Player",
+            "executable_path": str(executable),
+            "launch_arguments": "--profile default",
+            "source": "windows_search_index",
+        }
+
+        with patch(
+            "app.services.local_capability.app_registry.lookup_learned_app_record",
+            return_value=learned_record,
+        ):
+            resolution = self._resolve(discovery, "Portable Player")
+
+        self.assertEqual(resolution.status, "discovered")
+        self.assertEqual(resolution.provenance, "learned_db")
+        self.assertEqual(resolution.implementation.executable_path, str(executable))
+        self.assertEqual(resolution.implementation.arguments, "--profile default")
+
+    def test_build_runtime_restart_discovers_and_executes_portable_app_once(self):
+        executable = self._exe("Users/Public/Documents/Portable Suite/PortablePlayer.exe")
+        item_url = "file:" + str(executable).replace(os.sep, "/")
+        win = Mock()
+        win.open_app.return_value = True
+        stt = Mock()
+        state = SimpleNamespace(tts_enabled=False)
+        with patch.multiple(
+            runtime_module,
+            HebeState=Mock(return_value=state),
+            STTService=Mock(return_value=stt),
+            build_speak=Mock(return_value=Mock()),
+            get_setting=Mock(return_value=""),
+            create_conversation_llm=Mock(return_value=Mock()),
+            OllamaIntentClient=Mock(return_value=Mock()),
+            WinAutomationService=Mock(return_value=win),
+            TwitchChatCache=Mock(return_value=Mock()),
+            TwitchEventMemory=Mock(return_value=Mock()),
+            TwitchTargetResolver=Mock(return_value=Mock()),
+            TwitchChatClient=Mock(return_value=Mock()),
+            TwitchHelixClient=Mock(return_value=Mock()),
+            TwitchService=Mock(return_value=Mock()),
+            TwitchEventAdapter=Mock(return_value=Mock()),
+            TwitchChatBot=Mock(return_value=Mock()),
+        ):
+            runtime = runtime_module.build_runtime()
+
+        discovery = ApplicationDiscoveryService()
+        discovery._iter_windows_index_rows = Mock(side_effect=lambda term: iter([
+            ("PortablePlayer.exe", item_url, "PortablePlayer.exe"),
+        ]) if term == "portableplayer" else iter([]))
+        discovery._search_registry_app_paths = Mock(return_value=[])
+        discovery._search_installed_registry = Mock(return_value=[])
+        discovery._search_shortcuts = Mock(return_value=[])
+        discovery._search_executables = Mock(return_value=[])
+        discovery._search_persisted_db_entries = Mock(return_value=[])
+        action_runtime = ActionRuntime(runtime)
+        resolver = LocalCapabilityResolver(discovery)
+        resolver.resolve_open_application = Mock(wraps=resolver.resolve_open_application)
+        action_runtime.local_capability = resolver
+
+        with patch("app.services.local_capability.resolve_whitelisted_app", return_value=None), \
+             patch("app.services.local_capability.persist_learned_app", return_value=None):
+            result = action_runtime.execute(
+                "open_application", {"requested_target": "Portable Player"}
+            )
+
+        self.assertTrue(result.success)
+        resolver.resolve_open_application.assert_called_once_with("Portable Player")
+        win.open_app.assert_called_once()
+        self.assertEqual(
+            win.open_app.call_args.args[0]["executable_path"], str(executable)
+        )
 
     @staticmethod
     def _resolve(discovery: ApplicationDiscoveryService, target: str):
