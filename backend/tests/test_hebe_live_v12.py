@@ -98,7 +98,7 @@ class HebeLiveV12SocialAndTTSTests(unittest.TestCase):
         self.assertFalse(result["scheduled"])
         speak.assert_not_called()
         self.assertIn("stream_tts_disabled", repr(printer.call_args_list))
-        manager._executor.shutdown(wait=True)
+        manager.shutdown()
 
 
 if __name__ == "__main__":

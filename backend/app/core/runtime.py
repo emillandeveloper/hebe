@@ -14,6 +14,7 @@ from app.core.state import HebeState
 from app.core.persistent_logs import log_jsonl_event
 from app.services.db_sqlite import get_setting, log_chat
 from app.services.llm_factory import create_conversation_llm
+from app.services.speech_output import controller as speech_output_controller
 from app.services.speech_output import speak as _speak
 from app.services.stt_whisper import STTConfig, STTService
 from app.services.win_automation import WinAutomationService
@@ -31,7 +32,13 @@ from app.integrations.twitch.helix_client import TwitchHelixClient
 
 
 def build_speak(state: HebeState, stt: STTService | None = None) -> Callable[..., None]:
-    def speak(text: str, language: str = "es", *, emit_chat: bool = True) -> None:
+    def speak(
+        text: str,
+        language: str = "es",
+        *,
+        emit_chat: bool = True,
+        trace_id: str = "",
+    ) -> dict | None:
         if not getattr(state, "tts_enabled", False):
             if emit_chat:
                 emit("debug.tts_candidate", {"text": text, "response_stage": "generated"})
@@ -40,18 +47,22 @@ def build_speak(state: HebeState, stt: STTService | None = None) -> Callable[...
                 "output_target": "local_tts",
                 "tts_started": False,
                 "tts_completed": False,
-                "text": text,
+                "text_length": len(text),
                 "reason": "global_disabled",
+                "trace_id": trace_id,
             })
-            return
+            return {"status": "tts_cancelled", "reason": "global_disabled", "trace_id": trace_id}
 
-        safe_text = str(text or "").replace('"', '\\"')
-        print(f"[HEBE][TTS] speaking text=\"{safe_text}\"", flush=True)
+        print(
+            f"[HEBE][TTS] speaking trace_id={trace_id or 'none'} text_length={len(text)}",
+            flush=True,
+        )
         log_jsonl_event("tts", {
             "output_target": "local_tts",
             "tts_started": True,
             "tts_completed": False,
-            "text": text,
+            "text_length": len(text),
+            "trace_id": trace_id,
         })
         try:
             if stt is not None:
@@ -62,12 +73,15 @@ def build_speak(state: HebeState, stt: STTService | None = None) -> Callable[...
                 emit=emit,
                 log_chat=log_chat,
                 emit_chat=emit_chat,
+                trace_id=trace_id,
             )
             log_jsonl_event("tts", {
                 "output_target": "local_tts",
                 "tts_started": True,
                 "tts_completed": True,
-                "text": text,
+                "text_length": len(text),
+                "trace_id": trace_id,
+                "latency_ms": float((result or {}).get("latency_ms") or 0.0),
             })
             return result
         except Exception as exc:
@@ -77,7 +91,8 @@ def build_speak(state: HebeState, stt: STTService | None = None) -> Callable[...
                 "output_target": "local_tts",
                 "tts_started": True,
                 "tts_completed": False,
-                "text": text,
+                "text_length": len(text),
+                "trace_id": trace_id,
                 "error": safe_error,
             })
             raise
@@ -95,6 +110,7 @@ class HebeRuntime:
     intent_llm: OllamaIntentClient
     win: WinAutomationService
     speak: Callable[..., None]
+    tts: Any
     state: HebeState
     twitch: TwitchService
     twitch_events: TwitchEventAdapter
@@ -256,6 +272,7 @@ def build_runtime() -> HebeRuntime:
         intent_llm=intent_llm,
         win=win,
         speak=speak,
+        tts=speech_output_controller,
         state=state,
         twitch=twitch,
         twitch_events=twitch_events,

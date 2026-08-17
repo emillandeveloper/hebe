@@ -60,7 +60,7 @@ class VTSClient:
 
     async def connect(self):
         uri = f"ws://{self.host}:{self.port}"
-        print(f"🔌 Conectando a VTube Studio en {uri}...")
+        print(f"[HEBE][VTS_BRIDGE] connecting uri={uri}", flush=True)
         self.ws = await websockets.connect(uri)
         await self.authenticate()
 
@@ -80,7 +80,7 @@ class VTSClient:
             },
         }
         await self.ws.send(json.dumps(msg))
-        print("📨 Enviado AuthenticationTokenRequest (acepta el plugin en VTS)")
+        print("[HEBE][VTS_BRIDGE] authentication_token_requested", flush=True)
 
         resp_raw = await self.ws.recv()
         resp = json.loads(resp_raw)
@@ -93,7 +93,7 @@ class VTSClient:
             self.auth_token = token
             with open(VTS_TOKEN_FILE, "w", encoding="utf-8") as f:
                 f.write(token)
-            print("✅ Token de VTS guardado en", VTS_TOKEN_FILE)
+            print(f"[HEBE][VTS_BRIDGE] authentication_token_saved path={VTS_TOKEN_FILE}", flush=True)
         else:
             raise RuntimeError(f"Respuesta inesperada al pedir token: {resp}")
 
@@ -122,7 +122,7 @@ class VTSClient:
 
         if resp.get("messageType") == "AuthenticationResponse" and resp.get("data", {}).get("authenticated"):
             self.authenticated = True
-            print("✅ Autenticado con VTube Studio.")
+            print("[HEBE][VTS_BRIDGE] authenticated", flush=True)
         else:
             raise RuntimeError(f"No se pudo autenticar con VTS: {resp}")
 
@@ -156,7 +156,7 @@ class VTSClient:
     async def trigger_hotkey(self, hotkey_name: str):
         hotkey_id = await self.get_hotkey_id_by_name(hotkey_name)
         if not hotkey_id:
-            print(f"❌ No se pudo obtener hotkeyID para '{hotkey_name}'.")
+            print(f"[HEBE][VTS_BRIDGE] hotkey_not_found name={hotkey_name}", flush=True)
             return None
         return await self._send_request(
             "HotkeyTriggerRequest",
@@ -169,7 +169,7 @@ class VTSClient:
             await self.ws.close()
         self.ws = None
         self.authenticated = False
-        print("🔌 Desconectado de VTS.")
+        print("[HEBE][VTS_BRIDGE] disconnected", flush=True)
 
 
 async def _vts_hotkey_async(nombre_hotkey: str):
@@ -197,4 +197,3 @@ def vts_hotkey(nombre_hotkey: str):
     except Exception as e:
         _mark_vts_unavailable(e)
         return False
-        print(f"❌ Error al disparar hotkey VTS '{nombre_hotkey}': {e}")

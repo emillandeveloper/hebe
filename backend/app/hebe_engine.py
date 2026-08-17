@@ -434,7 +434,10 @@ class HebeEngine:
         self._apply_stream_performance_profile()
         self.ambient_context_extractor = AmbientContextExtractor()
         self.utterance_role_classifier = UtteranceRoleClassifier()
-        self.stream_tts_safety = StreamTTSSafetyManager()
+        self.stream_tts_safety = StreamTTSSafetyManager(
+            cancel_active=getattr(getattr(self.runtime, "tts", None), "cancel_playback", None),
+            abort_active=getattr(getattr(self.runtime, "tts", None), "cancel", None),
+        )
         self.owner_discourse_buffer = OwnerDiscourseBuffer(
             tracker=None,
             session_gap_seconds=float(os.getenv("HEBE_DISCOURSE_SESSION_GAP_SECONDS", "90") or 90),
@@ -5321,7 +5324,7 @@ class HebeEngine:
 
         def speak(final_text: str) -> None:
             self._remember_tts_text(final_text)
-            self.runtime.speak(final_text, emit_chat=False)
+            return self.runtime.speak(final_text, emit_chat=False, trace_id=cheer.event_id)
 
         def send(final_text: str) -> None:
             if twitch is not None and twitch.is_available():
@@ -5473,12 +5476,30 @@ class HebeEngine:
         )
         tts_scheduled = False
         if not is_simulated:
+            raid_trace_id = str(payload.get("event_id") or payload.get("message_id") or f"raid_{uuid.uuid4().hex}")
+
+            def record_raid_tts(receipt: dict) -> None:
+                if stream is not None:
+                    current = dict(getattr(stream, "last_raid_ack_result", {}) or {})
+                    current.update({
+                        "tts_outcome": receipt.get("status"),
+                        "tts_receipt": dict(receipt),
+                        "delivery_outcome": (
+                            "delivered" if receipt.get("status") == "tts_delivered" else "partial_delivery"
+                        ),
+                    })
+                    stream.last_raid_ack_result = current
+
             scheduled = self._get_stream_tts_safety().schedule(
                 reply_text,
-                lambda value: self.runtime.speak(value, emit_chat=False),
+                lambda value: self.runtime.speak(value, emit_chat=False, trace_id=raid_trace_id),
                 event_type="raid",
                 output_enabled=raid_tts_enabled,
                 disabled_reason="stream_tts_disabled",
+                trace_id=raid_trace_id,
+                priority="farewell",
+                optional=True,
+                on_complete=record_raid_tts,
             )
             tts_scheduled = bool(scheduled.get("scheduled"))
         print(
@@ -5487,6 +5508,7 @@ class HebeEngine:
         )
         if stream is not None:
             self._remember_raid_context(stream, payload, thanked=True)
+            async_tts_result = dict(getattr(stream, "last_raid_ack_result", {}) or {})
             stream.last_raid_ack_result = {
                 "emitted": True,
                 "reason": "sent",
@@ -5495,6 +5517,11 @@ class HebeEngine:
                 "viewer_count": viewers,
                 "source": payload.get("source") or "",
                 "ts": time.time(),
+                **{
+                    key: async_tts_result[key]
+                    for key in ("tts_outcome", "tts_receipt", "delivery_outcome")
+                    if key in async_tts_result
+                },
             }
             if render_error:
                 stream.last_raid_ack_error = {"error": render_error, "fallback_used": fallback_used, "ts": time.time()}
@@ -5960,7 +5987,7 @@ class HebeEngine:
             output_route=OutputRoute.STREAM_TTS_REPLY,
             output_targets=[OUTPUT_TARGET_LOCAL_UI, OUTPUT_TARGET_STREAM_TTS], guard_result=guard,
             debug_payload={"speech_act": "stream_discourse_contribution", "topic_id": topic.topic_id, "open_pending": False},
-            speak_fn=lambda text: self.runtime.speak(text, emit_chat=False),
+            speak_fn=lambda text: self.runtime.speak(text, emit_chat=False, trace_id=perception.event_id),
         )
         if not result.get("emitted"):
             stream.last_discourse_blocked_reason = str(result.get("reason") or "final_emission_gate")
@@ -6202,6 +6229,11 @@ class HebeEngine:
                         "wake_loop_status": "starting",
                     },
                 )
+                if bool(getattr(self.runtime.state, "tts_enabled", False)):
+                    tts_controller = getattr(self.runtime, "tts", None)
+                    warmup = getattr(tts_controller, "warmup", None)
+                    if callable(warmup):
+                        self._get_stream_tts_safety().warmup(warmup, background=True)
 
                 target = self.wakeword_loop if self.use_wakeword else self.engine_loop
                 kwargs = {"say_hello": self.say_hello}
@@ -6257,6 +6289,18 @@ class HebeEngine:
                 f"[HEBE][STREAM_LIFECYCLE] session_finalize_failed reason={type(exc).__name__} source_signal=engine_stop",
                 flush=True,
             )
+        tts_manager = getattr(self, "stream_tts_safety", None)
+        if tts_manager is not None and hasattr(tts_manager, "shutdown"):
+            shutdown_result = tts_manager.shutdown(
+                timeout_seconds=float(os.getenv("HEBE_TTS_SHUTDOWN_SECONDS", "1.5") or 1.5)
+            )
+            print(f"[HEBE][TTS_SHUTDOWN] result={shutdown_result}", flush=True)
+        tts_controller = getattr(self.runtime, "tts", None)
+        if tts_controller is not None and hasattr(tts_controller, "shutdown"):
+            try:
+                tts_controller.shutdown(timeout_seconds=0.5)
+            except Exception as exc:
+                print(f"[HEBE][TTS_SHUTDOWN] controller_error={type(exc).__name__}", flush=True)
         self._stop_event.set()
 
         if hasattr(self.runtime, "twitch_events") and self.runtime.twitch_events:
@@ -8233,8 +8277,16 @@ class HebeEngine:
     def _get_stream_tts_safety(self) -> StreamTTSSafetyManager:
         manager = getattr(self, "stream_tts_safety", None)
         if manager is None:
-            manager = StreamTTSSafetyManager()
+            manager = StreamTTSSafetyManager(
+                cancel_active=getattr(getattr(self.runtime, "tts", None), "cancel_playback", None),
+                abort_active=getattr(getattr(self.runtime, "tts", None), "cancel", None),
+            )
             self.stream_tts_safety = manager
+        else:
+            manager.configure(
+                cancel_active=getattr(getattr(self.runtime, "tts", None), "cancel_playback", None),
+                abort_active=getattr(getattr(self.runtime, "tts", None), "cancel", None),
+            )
         return manager
 
     def _get_twitch_interaction_coordinator(self) -> TwitchInteractionCoordinator:
@@ -8360,6 +8412,69 @@ class HebeEngine:
         def emit_debug(payload: dict) -> None:
             emit("debug.emission", payload)
 
+        queued_speak_fn = None
+        delivery_result_holder: dict[str, dict] = {}
+        tts_completion_callback = None
+        if speak_fn is not None and any(
+            target in list(output_targets or [])
+            for target in (OUTPUT_TARGET_LOCAL_TTS, OUTPUT_TARGET_STREAM_TTS)
+        ):
+            event_type = str(debug_payload.get("event_type") or source or "speech")
+            if event_type == "twitch_outgoing_raid":
+                priority = "farewell"
+                optional_tts = False
+            elif source in {"ui", "stt_voice", "direct_stt", "direct_to_hebe"}:
+                priority = "direct"
+                optional_tts = False
+            elif source == "twitch" and event_type in {"twitch_chat_react", "twitch"}:
+                priority = "direct"
+                optional_tts = False
+            else:
+                priority = "optional"
+                optional_tts = True
+
+            def on_tts_complete(receipt: dict) -> None:
+                current_stream = self._get_stream_state()
+                gate_delivery = delivery_result_holder.get("result")
+                if isinstance(gate_delivery, dict):
+                    receipts = gate_delivery.get("target_receipts") or {}
+                    statuses = [str(item.get("status") or "") for item in receipts.values()]
+                    successful = [status for status in statuses if status in {"delivered", "tts_delivered"}]
+                    failed = [status for status in statuses if status not in {"delivered", "tts_delivered"}]
+                    if successful and failed:
+                        gate_delivery["outcome"] = "partial_delivery"
+                    elif successful:
+                        gate_delivery["outcome"] = "delivered"
+                    else:
+                        gate_delivery["outcome"] = "response_failed"
+                if current_stream is not None:
+                    current_stream.last_tts_delivery_outcome = dict(receipt)
+                    if isinstance(gate_delivery, dict):
+                        current_stream.last_multi_target_delivery = gate_delivery
+                print(
+                    "[HEBE][TARGET_DELIVERY] "
+                    f"trace_id={event_id} target=tts outcome={receipt.get('status')} "
+                    f"stage={receipt.get('stage')} latency_ms={float(receipt.get('latency_ms') or 0):.0f}",
+                    flush=True,
+                )
+
+            tts_completion_callback = on_tts_complete
+
+            def queued_speak(final_text: str) -> dict:
+                scheduled = self._get_stream_tts_safety().schedule(
+                    final_text,
+                    speak_fn,
+                    event_type=event_type,
+                    output_enabled=bool(getattr(self.runtime.state, "tts_enabled", False)),
+                    trace_id=str(event_id or f"tts_{uuid.uuid4().hex}"),
+                    priority=priority,
+                    optional=optional_tts,
+                    on_complete=on_tts_complete,
+                )
+                return scheduled.get("receipt") or {}
+
+            queued_speak_fn = queued_speak
+
         result = self._get_final_emission_gate().emit(
             event_id=event_id,
             source=source,
@@ -8374,9 +8489,17 @@ class HebeEngine:
             emit_ui=emit_ui,
             emit_debug=emit_debug,
             send_twitch=send_twitch_fn,
-            speak=speak_fn,
+            speak=queued_speak_fn,
         )
         result_dict = result.to_dict()
+        delivery_result_holder["result"] = result_dict
+        if tts_completion_callback is not None:
+            for target_name in (OUTPUT_TARGET_LOCAL_TTS, OUTPUT_TARGET_STREAM_TTS):
+                tts_receipt = (result_dict.get("target_receipts") or {}).get(target_name)
+                if isinstance(tts_receipt, dict) and str(tts_receipt.get("status") or "") in {
+                    "tts_delivered", "tts_timed_out", "tts_failed", "tts_cancelled", "tts_dropped_stale"
+                }:
+                    tts_completion_callback(tts_receipt)
         stream = self._get_stream_state()
         emission_outcome = "emitted" if result_dict.get("emitted") else str(result_dict.get("reason") or "suppressed")
         interaction_update = self._get_interaction_decision_history().update(
@@ -13702,11 +13825,15 @@ class HebeEngine:
             loop = getattr(self, "stream_companion_loop", None)
             if intent_id and loop is not None:
                 loop.mark_tts_committed(intent_id)
-            safe_text = str(final_text or "").replace('"', '\\"')
-            print(f"[HEBE][TTS] speaking output_target={OUTPUT_TARGET_STREAM_TTS} text=\"{safe_text}\"", flush=True)
+            print(
+                f"[HEBE][TTS] speaking output_target={OUTPUT_TARGET_STREAM_TTS} "
+                f"trace_id={final_event_id} text_length={len(final_text)}",
+                flush=True,
+            )
             self._remember_tts_text(final_text)
-            self.runtime.speak(final_text, emit_chat=False)
+            result = self.runtime.speak(final_text, emit_chat=False, trace_id=final_event_id)
             self._remember_assistant_text(final_text, source=gate_source)
+            return result
 
         def send_twitch_once(final_text: str) -> bool:
             if twitch is None or not twitch.is_available():
@@ -14051,11 +14178,15 @@ class HebeEngine:
             targets_for_gate.append(output_target)
 
         def speak_once(final_text: str) -> None:
-            safe_text = str(final_text or "").replace('"', '\\"')
-            print(f"[HEBE][TTS] speaking output_target={output_target} text=\"{safe_text}\"", flush=True)
+            print(
+                f"[HEBE][TTS] speaking output_target={output_target} "
+                f"trace_id={input_id or 'none'} text_length={len(final_text)}",
+                flush=True,
+            )
             self._remember_tts_text(final_text)
-            self.runtime.speak(final_text, emit_chat=False)
+            result = self.runtime.speak(final_text, emit_chat=False, trace_id=input_id)
             self._remember_assistant_text(final_text, source=input_type)
+            return result
 
         gate_result = self._emit_final_response(
             event_id=input_id,

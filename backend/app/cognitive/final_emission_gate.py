@@ -98,6 +98,8 @@ class FinalEmissionResult:
     suppressed: bool = False
     deduped: bool = False
     reason: str = ""
+    outcome: str = ""
+    target_receipts: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -108,6 +110,8 @@ class FinalEmissionResult:
             "suppressed": self.suppressed,
             "deduped": self.deduped,
             "reason": self.reason,
+            "outcome": self.outcome or ("delivered" if self.emitted else self.reason),
+            "target_receipts": self.target_receipts,
         }
 
 
@@ -280,8 +284,13 @@ class FinalEmissionGate:
                 reason = "duplicate_normalized_text"
                 log(f"[HEBE][FINAL_EMISSION_GATE] deduped=true reason={reason} route={route.value} event_id={event_key}")
                 return FinalEmissionResult(False, route.value, targets, event_key, suppressed=True, deduped=True, reason=reason)
-            if emit_ui is not None and "local_ui" in targets:
-                emit_ui({"text": text, "source": source, "output_target": "local_ui", **debug})
+            target_receipts: dict[str, dict[str, Any]] = {}
+            if "local_ui" in targets:
+                if emit_ui is not None:
+                    emit_ui({"text": text, "source": source, "output_target": "local_ui", **debug})
+                    target_receipts["local_ui"] = {"status": "delivered", "reason": ""}
+                else:
+                    target_receipts["local_ui"] = {"status": "failed", "reason": "ui_transport_unavailable"}
             if send_twitch is not None and "twitch_chat" in targets:
                 try:
                     twitch_result = send_twitch(text)
@@ -289,33 +298,71 @@ class FinalEmissionGate:
                     twitch_result = False
                     debug["twitch_delivery_exception"] = repr(exc)
                 if twitch_result is False:
-                    reason = "twitch_delivery_failed"
+                    target_receipts["twitch_chat"] = {"status": "failed", "reason": "twitch_delivery_failed"}
                     if emit_debug is not None:
-                        emit_debug({**debug, "suppress_reason": reason, "delivery_failed": True})
-                    log(
-                        "[HEBE][FINAL_EMISSION_GATE] "
-                        f"emitted=false reason={reason} route={route.value} event_id={event_key}"
-                    )
-                    return FinalEmissionResult(
-                        False,
-                        route.value,
-                        targets,
-                        event_key,
-                        suppressed=False,
-                        reason=reason,
-                    )
+                        emit_debug({**debug, "suppress_reason": "twitch_delivery_failed", "delivery_failed": True})
+                else:
+                    target_receipts["twitch_chat"] = {"status": "delivered", "reason": ""}
+            elif "twitch_chat" in targets:
+                target_receipts["twitch_chat"] = {"status": "failed", "reason": "twitch_transport_unavailable"}
             if speak is not None and any(target in targets for target in ("local_tts", "stream_tts")):
-                speak(text)
+                tts_target = "stream_tts" if "stream_tts" in targets else "local_tts"
+                try:
+                    speech_result = speak(text)
+                    if isinstance(speech_result, dict) and isinstance(speech_result.get("receipt"), dict):
+                        speech_result = speech_result["receipt"]
+                    if isinstance(speech_result, dict):
+                        target_receipts[tts_target] = speech_result
+                    else:
+                        target_receipts[tts_target] = {"status": "delivered", "reason": ""}
+                except Exception as exc:
+                    target_receipts[tts_target] = {"status": "failed", "reason": type(exc).__name__}
+            elif any(target in targets for target in ("local_tts", "stream_tts")):
+                tts_target = "stream_tts" if "stream_tts" in targets else "local_tts"
+                target_receipts[tts_target] = {"status": "failed", "reason": "tts_transport_unavailable"}
 
-            if event_key:
-                self._seen_event_ids.add(event_key)
-            elif text:
-                self._seen_message_keys.add(dedupe_key)
+            success_statuses = {
+                "delivered", "tts_delivered", "tts_queued", "tts_started",
+                "tts_synthesis_completed", "tts_playback_started",
+            }
+            statuses = [str(receipt.get("status") or "") for receipt in target_receipts.values()]
+            successes = [status for status in statuses if status in success_statuses]
+            failures = [status for status in statuses if status not in success_statuses]
+            pending = any(status in {"tts_queued", "tts_started", "tts_synthesis_completed", "tts_playback_started"} for status in statuses)
+            emitted = bool(successes)
+            if emitted:
+                if failures:
+                    outcome = "partial_delivery"
+                elif pending:
+                    outcome = "delivery_pending"
+                else:
+                    outcome = "delivered"
+                if event_key:
+                    self._seen_event_ids.add(event_key)
+                elif text:
+                    self._seen_message_keys.add(dedupe_key)
+            else:
+                outcome = "response_failed"
+            reason = "" if emitted else next(
+                (str(receipt.get("reason") or "delivery_failed") for receipt in target_receipts.values()),
+                "delivery_failed",
+            )
         log(
             f"[HEBE][FINAL_EMISSION_GATE] ui_allowed={str('local_ui' in targets).lower()} "
             f"twitch_allowed={str('twitch_chat' in targets).lower()} "
             f"tts_allowed={str(any(target in targets for target in ('local_tts', 'stream_tts'))).lower()} "
-            f"emitted=true route={route.value} targets={targets} event_id={event_key}"
+            f"emitted={str(emitted).lower()} route={route.value} outcome={outcome} targets={targets} event_id={event_key}"
         )
-        log(f"[HEBE][FINAL_EMISSION_GATE] emitted=true route={route.value} targets={targets} event_id={event_key}")
-        return FinalEmissionResult(True, route.value, targets, event_key)
+        log(
+            f"[HEBE][FINAL_EMISSION_GATE] emitted={str(emitted).lower()} route={route.value} "
+            f"outcome={outcome} targets={targets} event_id={event_key}"
+        )
+        return FinalEmissionResult(
+            emitted,
+            route.value,
+            targets,
+            event_key,
+            reason=reason,
+            outcome=outcome,
+            target_receipts=target_receipts,
+        )

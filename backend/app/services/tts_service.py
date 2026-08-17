@@ -4,12 +4,14 @@ import os
 import tempfile
 from typing import Callable, Optional
 
-from app.services.tts_piper import piper_to_wav
-from app.services.tts_xtts import xtts_to_wav
+from app.services.tts_worker import SynthesisReceipt, TTSSynthesisWorker
 
 
 HEBE_TTS_MODE = os.getenv("HEBE_TTS_MODE", "auto").lower()  # auto | piper | xtts
 HEBE_TTS_MIN_VRAM_GB = float(os.getenv("HEBE_TTS_MIN_VRAM_GB", "12"))
+HEBE_TTS_SYNTHESIS_TIMEOUT_SECONDS = float(os.getenv("HEBE_TTS_SYNTHESIS_TIMEOUT_SECONDS", "15") or 15)
+HEBE_TTS_WARMUP_TIMEOUT_SECONDS = float(os.getenv("HEBE_TTS_WARMUP_TIMEOUT_SECONDS", "60") or 60)
+_synthesis_worker = TTSSynthesisWorker()
 
 
 def _has_cuda_vram(min_gb: float) -> bool:
@@ -47,16 +49,16 @@ def speak(
     language: str = "es",
     emit: Optional[Callable[[str, dict], None]] = None,
     log_chat: Optional[Callable[[str, str, str], None]] = None,
-) -> str:
+) -> tuple[str, SynthesisReceipt]:
     """
     Genera un wav en audio_tmp/ y devuelve la ruta.
     El engine decide si reproducirlo o solo emitirlo a la UI.
     """
     if not text:
-        return ""
+        return "", SynthesisReceipt(backend="none", latency_ms=0.0)
 
     if emit:
-        emit("tts.start", {"text": text, "lang": language})
+        emit("tts.start", {"text_length": len(text), "lang": language, "stage": "synthesis"})
 
     if log_chat:
         log_chat("assistant", text, source="tts")
@@ -67,23 +69,35 @@ def speak(
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False, dir=tmp_dir) as tmp:
         wav_path = tmp.name
 
-    backend = pick_tts_backend()
-    print(f"🎛️ Backend TTS elegido: {backend}")
-
     try:
-        if backend == "piper":
-            piper_to_wav(text=text, wav_path=wav_path, language=language)
-        else:
-            xtts_to_wav(text=text, wav_path=wav_path, language=language)
-    except Exception as e:
-        # fallback: si piper falla, intenta xtts
-        if backend == "piper":
-            print(f"⚠️ Piper falló, fallback a XTTS: {e}")
-            xtts_to_wav(text=text, wav_path=wav_path, language=language)
-        else:
-            raise
+        receipt = _synthesis_worker.synthesize(
+            text=text,
+            wav_path=wav_path,
+            language=language,
+            timeout_seconds=HEBE_TTS_SYNTHESIS_TIMEOUT_SECONDS,
+        )
+    except Exception:
+        try:
+            os.remove(wav_path)
+        except OSError:
+            pass
+        raise
 
     if emit:
-        emit("tts.end", {"path": wav_path})
+        emit("tts.end", {"stage": "synthesis", "latency_ms": receipt.latency_ms})
 
-    return wav_path
+    return wav_path, receipt
+
+
+def warmup(*, timeout_seconds: float | None = None) -> SynthesisReceipt:
+    return _synthesis_worker.warmup(
+        timeout_seconds=float(timeout_seconds or HEBE_TTS_WARMUP_TIMEOUT_SECONDS)
+    )
+
+
+def cancel() -> None:
+    _synthesis_worker.cancel()
+
+
+def shutdown(*, timeout_seconds: float = 1.0) -> None:
+    _synthesis_worker.shutdown(timeout_seconds=timeout_seconds)

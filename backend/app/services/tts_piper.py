@@ -9,6 +9,7 @@ HEBE_PIPER_MODEL_ES = os.getenv("HEBE_PIPER_MODEL_ES", "")
 HEBE_PIPER_MODEL_EN = os.getenv("HEBE_PIPER_MODEL_EN", "")
 HEBE_PIPER_LENGTH_SCALE = float(os.getenv("HEBE_PIPER_LENGTH_SCALE", "1.0"))
 HEBE_PIPER_SPEAKER = os.getenv("HEBE_PIPER_SPEAKER", "0").strip()
+HEBE_PIPER_TIMEOUT_SECONDS = float(os.getenv("HEBE_PIPER_TIMEOUT_SECONDS", "9") or 9)
 
 
 def piper_to_wav(text: str, wav_path: str, language: str = "es") -> str:
@@ -31,5 +32,10 @@ def piper_to_wav(text: str, wav_path: str, language: str = "es") -> str:
     if HEBE_PIPER_LENGTH_SCALE and float(HEBE_PIPER_LENGTH_SCALE) != 1.0:
         cmd += ["--length_scale", str(HEBE_PIPER_LENGTH_SCALE)]
 
-    subprocess.run(cmd, input=text.encode("utf-8"), check=True)
+    subprocess.run(
+        cmd,
+        input=text.encode("utf-8"),
+        check=True,
+        timeout=max(0.1, HEBE_PIPER_TIMEOUT_SECONDS),
+    )
     return wav_path

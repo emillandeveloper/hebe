@@ -2,6 +2,7 @@ import json
 import os
 import tempfile
 import threading
+import time
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -12,6 +13,8 @@ from app.hebe_engine import HebeEngine
 from app.core import persistent_logs
 from app.integrations.twitch.event_adapter import TwitchEventAdapter
 from app.services import db_sqlite
+from app.services.stream_tts_guard import StreamTTSSafetyManager
+from app.services.tts_worker import TTSSynthesisTimeout
 from app.stream import memory as stream_memory
 from app.stream.context_sync import StreamContextSyncService
 from app.stream.behavior_observability import BehaviorObservability, GLOBAL_BEHAVIOR_OBSERVABILITY
@@ -185,6 +188,49 @@ class StreamSessionLifecycleTests(unittest.TestCase):
         self.assertEqual(row["farewell_status"], "skipped")
         self.assertEqual(row["farewell_reason"], "chunk_failed")
         self.assertEqual(row["finalize_count"], 1)
+
+    def test_raid_farewell_tts_timeout_never_delays_or_duplicates_finalization(self):
+        stream = self.live_stream()
+        session_id = stream_memory.ensure_active_stream_session(stream, source="engine")
+        engine = self.engine(stream)
+        manager = StreamTTSSafetyManager()
+        manager.min_free_vram_mb = 0
+        engine.stream_tts_safety = manager
+        started = threading.Event()
+        release = threading.Event()
+
+        def slow_timeout(_text):
+            started.set()
+            release.wait(1)
+            raise TTSSynthesisTimeout("farewell synthesis deadline")
+
+        def deliver(*_args, **_kwargs):
+            engine.runtime.twitch.last_delivery_outcome = {"success": True}
+            manager.schedule(
+                "farewell",
+                slow_timeout,
+                trace_id="farewell-timeout",
+                event_type="twitch_outgoing_raid",
+                priority="farewell",
+                optional=False,
+            )
+
+        engine._deliver_twitch_reply.side_effect = deliver
+        before = time.perf_counter()
+        engine.process_internal_event(SimpleNamespace(
+            event_type="twitch_outgoing_raid", payload={"source_signal": "eventsub_outgoing_raid"}
+        ))
+        elapsed = time.perf_counter() - before
+        row = self.row(session_id)
+        # DB checkpointing is intentionally synchronous; the assertion only
+        # proves finalization did not wait for the one-second TTS operation.
+        self.assertLess(elapsed, 0.8)
+        self.assertTrue(started.wait(0.5))
+        self.assertEqual(row["farewell_status"], "emitted")
+        self.assertEqual(row["finalize_count"], 1)
+        release.set()
+        self.assertEqual(manager.wait("farewell-timeout", timeout_seconds=1)["status"], "tts_timed_out")
+        self.assertTrue(manager.shutdown()["stopped"])
 
     def test_incremental_artifact_exists_and_contains_bounded_references(self):
         stream = self.live_stream()

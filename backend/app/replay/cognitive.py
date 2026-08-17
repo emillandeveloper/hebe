@@ -258,6 +258,7 @@ class CognitiveReplayRunner:
             intent_llm=self.intent_model,
             win=win,
             speak=speech,
+            tts=SimpleNamespace(),
             state=state,
             twitch=twitch,
             twitch_events=SimpleNamespace(push_event_callback=None, start=lambda: False, stop=lambda: None),

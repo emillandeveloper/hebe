@@ -1905,7 +1905,14 @@ class VoiceCommandPipelineTests(unittest.TestCase):
 
         joined = "\n".join(logs)
         self.assertEqual(engine.runtime.twitch.sent, [])
-        engine.runtime.speak.assert_called_once_with("Mira recursos antes de avanzar.", emit_chat=False)
+        deadline = time.time() + 0.5
+        while engine.runtime.speak.call_count == 0 and time.time() < deadline:
+            time.sleep(0.01)
+        engine.runtime.speak.assert_called_once()
+        self.assertEqual(engine.runtime.speak.call_args.args, ("Mira recursos antes de avanzar.",))
+        self.assertFalse(engine.runtime.speak.call_args.kwargs["emit_chat"])
+        self.assertTrue(engine.runtime.speak.call_args.kwargs["trace_id"])
+        engine.stream_tts_safety.shutdown()
         self.assertIn("input_type=spontaneity output_target=stream_tts", joined)
         self.assertIn("skipped reason=twitch_spontaneous_disabled", joined)
         self.assertTrue(any(

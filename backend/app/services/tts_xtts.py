@@ -35,7 +35,7 @@ def _apply_torch_xtts_compat() -> None:
 
 
 def ensure_xtts_loaded() -> None:
-    print("🔥 ensure_xtts_loaded() llamado")
+    print("[HEBE][XTTS] ensure_loaded called", flush=True)
     global _xtts
     if _xtts is not None:
         return
@@ -52,8 +52,8 @@ def ensure_xtts_loaded() -> None:
 
     # Nota: puede tardar bastante si corre en CPU
     _xtts = TTS("tts_models/multilingual/multi-dataset/xtts_v2", gpu=use_gpu)
-    print(f"✅ XTTS loaded (gpu={use_gpu})")
-    print("✅ XTTS inicializado")
+    print(f"[HEBE][XTTS] loaded gpu={str(use_gpu).lower()}", flush=True)
+    print("[HEBE][XTTS] initialized", flush=True)
 
 
 def xtts_to_wav(text: str, wav_path: str, language: str = "es") -> str:
