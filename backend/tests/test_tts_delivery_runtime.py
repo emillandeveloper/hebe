@@ -276,6 +276,28 @@ class TTSQueueTests(unittest.TestCase):
 
 
 class TTSDeadlineTests(unittest.TestCase):
+    def test_tts_delivery_is_independent_of_vts_hotkeys_and_connection_lifecycle(self):
+        controller = SpeechOutputController()
+        temp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+        temp.close()
+        music = Mock()
+        music.get_busy.return_value = False
+        mixer = Mock()
+        mixer.get_init.return_value = True
+        mixer.music = music
+        with (
+            patch.object(speech_output, "tts_to_wav", return_value=(temp.name, SynthesisReceipt("fake", 1))),
+            patch.object(speech_output, "pygame", SimplePygame(mixer)),
+            patch("app.services.vts_client.vts_hotkey", side_effect=RuntimeError("hotkey_not_found")) as hotkey,
+            patch("app.services.vts_client.start_vts", side_effect=AssertionError("TTS must not start VTS")) as start,
+        ):
+            receipt = controller.speak("Vale, eso ha estado mejor.")
+
+        self.assertEqual(receipt["status"], "tts_delivered")
+        hotkey.assert_not_called()
+        start.assert_not_called()
+        self.assertFalse(Path(temp.name).exists())
+
     def test_supported_text_lengths_use_benchmarked_fixed_deadline(self):
         samples = {
             "short": "Vale, eso ha estado bastante mejor.",

@@ -15,7 +15,6 @@ from app.services.tts_service import (
     warmup as warmup_synthesis,
 )
 from app.services.tts_worker import TTSSynthesisFailure, TTSSynthesisTimeout
-from app.services.vts_client import vts_hotkey
 
 HEBE_TTS_VOLUME = float(os.getenv("HEBE_TTS_VOLUME", "0.9"))
 HEBE_TTS_PLAYBACK_GRACE_SECONDS = float(os.getenv("HEBE_TTS_PLAYBACK_GRACE_SECONDS", "3") or 3)
@@ -84,11 +83,6 @@ class SpeechOutputController:
                     "latency_ms": synthesis.latency_ms,
                 })
 
-            try:
-                vts_hotkey("HebeTalking")
-            except Exception:
-                pass
-
             expected_duration = self._wav_duration(audio_path)
             playback_deadline = min(
                 HEBE_TTS_PLAYBACK_MAX_SECONDS,
@@ -151,10 +145,6 @@ class SpeechOutputController:
             raise
         finally:
             try:
-                vts_hotkey("HebeIdle")
-            except Exception:
-                pass
-            try:
                 pygame.mixer.music.unload()
             except Exception:
                 pass
@@ -204,8 +194,8 @@ def speak(
     High-level speech output:
     - Emits chat.assistant
     - Generates WAV via tts_service
-    - Triggers VTS talking/idle
     - Plays WAV via pygame
+    - Lets VTube Studio derive lip-sync directly from the routed audio
     - Cleans up temp file
     """
     return controller.speak(

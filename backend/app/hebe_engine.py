@@ -34,7 +34,7 @@ from app.services.db_sqlite import (
     log_chat,
     seed_default_apps,
 )
-from app.services.vts_client import vts_hotkey
+from app.services.vts_client import shutdown_vts, start_vts, vts_hotkey
 from app.services.voice_command_recovery import TranscriptNormalizationResult, normalize_stt_transcript
 from app.services.utterance_role import UtteranceRole, UtteranceRoleClassifier
 from app.services.stream_tts_guard import StreamTTSSafetyManager
@@ -6214,6 +6214,16 @@ class HebeEngine:
                     except Exception as e:
                         print(f"[HEBE][TWITCH][CHATBOT] start failed: {e!r}", flush=True)
 
+                # Optional and non-blocking: VTS owns its connection/retry thread.
+                try:
+                    start_vts()
+                except Exception as exc:
+                    print(
+                        f"[HEBE][VTS_LIFECYCLE] event=vts_unavailable reason=start_failed "
+                        f"error={type(exc).__name__}",
+                        flush=True,
+                    )
+
                 stream = getattr(self.runtime.state, "stream", None)
                 policies = getattr(stream, "policies", None) if stream else None
                 emit(
@@ -6287,6 +6297,16 @@ class HebeEngine:
         except Exception as exc:
             print(
                 f"[HEBE][STREAM_LIFECYCLE] session_finalize_failed reason={type(exc).__name__} source_signal=engine_stop",
+                flush=True,
+            )
+        try:
+            shutdown_vts(
+                timeout_seconds=float(os.getenv("HEBE_VTS_SHUTDOWN_TIMEOUT_SECONDS", "2") or 2)
+            )
+        except Exception as exc:
+            print(
+                f"[HEBE][VTS_LIFECYCLE] event=vts_shutdown reason=shutdown_failed "
+                f"error={type(exc).__name__}",
                 flush=True,
             )
         tts_manager = getattr(self, "stream_tts_safety", None)
@@ -9076,6 +9096,8 @@ class HebeEngine:
         for alias in STREAM_WAKE_MULTI_ALIASES:
             if normalized == alias:
                 self._arm_stream()
+                # Independent of TTS/lip-sync: arming selects VTS's configured
+                # stream idle animation as an explicit visual state.
                 try:
                     vts_hotkey("HebeIdle")
                 except Exception as e:
@@ -9089,6 +9111,8 @@ class HebeEngine:
         if first_word in STREAM_WAKE_ALIASES:
             if not rest:
                 self._arm_stream()
+                # Independent of TTS/lip-sync: arming selects VTS's configured
+                # stream idle animation as an explicit visual state.
                 try:
                     vts_hotkey("HebeIdle")
                 except Exception as e:
