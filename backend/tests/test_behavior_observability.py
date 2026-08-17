@@ -276,6 +276,111 @@ class BehaviorObservabilityTests(unittest.TestCase):
         self.assertEqual(metrics["durable_constraints_created"], 1)
         self.assertEqual(metrics["durable_constraints_reverted"], 1)
 
+    def test_identical_half_second_evaluations_are_coalesced_with_final_count(self):
+        written = []
+        observability = BehaviorObservability(
+            clock=lambda: NOW,
+            log_fn=lambda kind, payload: written.append(deepcopy(payload)),
+            coalesce_checkpoint_seconds=15,
+            coalesce_checkpoint_evaluations=25,
+        )
+        for index in range(55):
+            observability.record(
+                "candidate_policy", trace_id="trace-repeat", timestamp=NOW + index * 0.5,
+                stream_session_id="session-soak", candidate_id="intent-repeat",
+                normalized_motif_identity="motif-repeat", usage_count=11,
+                fatigue=0.598 - index * 0.0001, active_constraint="",
+                policy_decision="DOWNRANK", reason_code="motif_repetition_downrank",
+                similarity_score=0.89,
+            )
+        observability.flush_session("session-soak")
+
+        self.assertEqual(observability.snapshot()["metrics"]["candidates_evaluated"], 55)
+        self.assertLessEqual(len(written), 4)
+        self.assertEqual(written[-1]["evaluation_count"], 55)
+        self.assertEqual(written[-1]["first_seen"], NOW)
+        self.assertEqual(written[-1]["last_seen"], NOW + 27)
+
+    def test_policy_decision_changes_are_never_coalesced(self):
+        written = []
+        observability = BehaviorObservability(
+            log_fn=lambda kind, payload: written.append(deepcopy(payload)),
+            coalesce_checkpoint_seconds=999,
+            coalesce_checkpoint_evaluations=999,
+        )
+        for index, decision in enumerate(("ALLOW", "ALLOW", "DOWNRANK", "DOWNRANK", "SUPPRESS")):
+            observability.record(
+                "candidate_policy", trace_id="trace-transition", timestamp=NOW + index,
+                stream_session_id="session-transition", candidate_id="intent-transition",
+                normalized_motif_identity="motif-transition", usage_count=1,
+                policy_decision=decision, reason_code=decision.casefold(), similarity_score=0.5,
+            )
+        observability.flush_session("session-transition")
+
+        self.assertEqual([item["policy_decision"] for item in written], ["ALLOW", "DOWNRANK", "SUPPRESS"])
+        self.assertEqual([item["evaluation_count"] for item in written], [1, 3, 5])
+
+    def test_coalescing_never_skips_policy_execution(self):
+        stream = make_stream()
+        decisions = []
+        for index in range(20):
+            decisions.append(self.service.evaluate_candidate(
+                stream,
+                "La misma observacion sobre la puerta.",
+                topic="door",
+                now=NOW + index * 0.5,
+                observation={
+                    "trace_id": "trace-policy-rerun",
+                    "candidate_id": "intent-policy-rerun",
+                    "speech_intent_id": "intent-policy-rerun",
+                },
+            ))
+        policy_writes = [item for _, item in self.logged if item["event"] == "candidate_policy"]
+        self.assertEqual(len(decisions), 20)
+        self.assertEqual(self.observability.snapshot()["metrics"]["candidates_evaluated"], 20)
+        self.assertLess(len(policy_writes), len(decisions))
+
+    def _run_multihour_observability_soak(self, hours: int) -> tuple[int, int, dict]:
+        written = []
+        observability = BehaviorObservability(
+            max_recent=1000,
+            log_fn=lambda kind, payload: written.append(payload),
+            coalesce_checkpoint_seconds=999,
+            coalesce_checkpoint_evaluations=999,
+            max_coalesce_keys=20_000,
+        )
+        candidate_count = hours * 60 * 20  # at least the real ~20 candidates/minute
+        raw_evaluations = 0
+        for candidate_index in range(candidate_count):
+            candidate_id = f"soak-{hours}h-{candidate_index}"
+            first_seen = NOW + candidate_index * 3
+            for evaluation_index in range(3):
+                raw_evaluations += 1
+                observability.record(
+                    "candidate_policy", trace_id=f"trace-{candidate_id}",
+                    timestamp=first_seen + evaluation_index * 0.5,
+                    stream_session_id=f"soak-{hours}h", candidate_id=candidate_id,
+                    normalized_motif_identity=f"motif-{candidate_index % 31}",
+                    usage_count=candidate_index % 12, fatigue=0.4,
+                    policy_decision="ALLOW", reason_code="allowed", similarity_score=0.2,
+                )
+        observability.flush_session(f"soak-{hours}h")
+        return raw_evaluations, len(written), observability.snapshot()
+
+    def test_four_hour_soak_keeps_first_trace_and_bounds_memory(self):
+        raw, written, snapshot = self._run_multihour_observability_soak(4)
+        self.assertEqual(raw, 14_400)
+        self.assertEqual(written, 9_600)
+        self.assertEqual(snapshot["retention"]["coalesce_keys"], 0)
+        self.assertLessEqual(snapshot["retention"]["recent_events"], 1000)
+
+    def test_six_hour_soak_keeps_first_trace_and_bounds_memory(self):
+        raw, written, snapshot = self._run_multihour_observability_soak(6)
+        self.assertEqual(raw, 21_600)
+        self.assertEqual(written, 14_400)
+        self.assertEqual(snapshot["retention"]["coalesce_keys"], 0)
+        self.assertLessEqual(snapshot["retention"]["recent_events"], 1000)
+
     def test_trace_to_replay_requires_explicit_human_curation(self):
         trace = {"trace_id": "trace-curated", "topic": "rng", "reason_code": "motif_repetition_downrank"}
         case = BehaviorTraceReplayCurator.curate(

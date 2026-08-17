@@ -9,10 +9,12 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from app.hebe_engine import HebeEngine
+from app.core import persistent_logs
 from app.integrations.twitch.event_adapter import TwitchEventAdapter
 from app.services import db_sqlite
 from app.stream import memory as stream_memory
 from app.stream.context_sync import StreamContextSyncService
+from app.stream.behavior_observability import BehaviorObservability, GLOBAL_BEHAVIOR_OBSERVABILITY
 from app.stream.state import StreamSessionState
 
 
@@ -264,6 +266,112 @@ class StreamSessionLifecycleTests(unittest.TestCase):
             stream_memory.prune_session_artifacts(retention_days=1, now=datetime.now(timezone.utc)), 1
         )
         self.assertFalse(path.exists())
+
+    def test_behavior_historical_retention_is_configurable_independently(self):
+        stream = self.live_stream()
+        session_id = stream_memory.ensure_active_stream_session(stream, source="engine")
+        persistent_logs.log_behavior_session_event(session_id, {
+            "event": "candidate_policy", "trace_id": "retention-trace",
+            "timestamp": 1.0, "evaluation_count": 1, "evaluation_delta": 1,
+        })
+        stream_memory.finalize_stream_session(stream, reason="offline", source_signal="eventsub_offline")
+        artifact = Path(self.tmp.name) / "sessions" / f"stream-session-{session_id}.json"
+        behavior_path, behavior_index = persistent_logs.behavior_session_paths(session_id)
+        compressed = behavior_path.with_suffix(behavior_path.suffix + ".gz")
+        os.utime(behavior_index, (0, 0))
+        os.utime(compressed, (0, 0))
+        with patch.dict(os.environ, {
+            "HEBE_SESSION_ARTIFACT_RETENTION_DAYS": "365",
+            "HEBE_BEHAVIOR_SESSION_RETENTION_DAYS": "1",
+        }):
+            stream_memory.prune_session_artifacts(now=datetime.now(timezone.utc))
+        self.assertTrue(artifact.exists())
+        self.assertFalse(behavior_index.exists())
+        self.assertFalse(compressed.exists())
+
+    def test_session_artifact_references_complete_coalesced_behavior_telemetry(self):
+        stream = self.live_stream()
+        session_id = stream_memory.ensure_active_stream_session(stream, source="engine")
+        observability = BehaviorObservability(
+            log_fn=lambda *_args: None,
+            session_log_fn=persistent_logs.log_behavior_session_event,
+            coalesce_checkpoint_seconds=15,
+            coalesce_checkpoint_evaluations=25,
+        )
+        for index in range(55):
+            observability.record(
+                "candidate_policy", trace_id="trace-first", timestamp=10_000 + index * 0.5,
+                stream_session_id=str(session_id), candidate_id="intent-repeat",
+                normalized_motif_identity="motif-repeat", usage_count=8, fatigue=0.5,
+                policy_decision="DOWNRANK", reason_code="motif_repetition_downrank",
+            )
+        observability.flush_session(session_id)
+        stream_memory.checkpoint_stream_session(session_id)
+
+        artifact_path = Path(self.tmp.name) / "sessions" / f"stream-session-{session_id}.json"
+        artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+        reference = artifact["behavior_telemetry"]
+        telemetry_path = Path(reference["telemetry_file"])
+        lines = telemetry_path.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(reference["policy_evaluation_count"], 55)
+        self.assertLessEqual(reference["event_count"], 4)
+        self.assertEqual(json.loads(lines[0])["trace_id"], "trace-first")
+
+        stream_memory.finalize_stream_session(stream, reason="offline", source_signal="eventsub_offline")
+        finalized = json.loads(artifact_path.read_text(encoding="utf-8"))["behavior_telemetry"]
+        self.assertTrue(finalized["compressed"])
+        self.assertTrue(Path(finalized["telemetry_file"]).exists())
+        self.assertFalse(telemetry_path.exists())
+
+    def test_global_rotation_cannot_destroy_active_session_behavior_trace(self):
+        stream = self.live_stream()
+        session_id = stream_memory.ensure_active_stream_session(stream, source="engine")
+        global_dir = Path(self.tmp.name) / "global-logs"
+        with patch.object(persistent_logs, "LOG_DIR", global_dir), \
+             patch.object(persistent_logs, "MAX_BYTES", 500), \
+             patch.object(persistent_logs, "BACKUP_COUNT", 2):
+            observability = BehaviorObservability(
+                coalesce_checkpoint_seconds=999,
+                coalesce_checkpoint_evaluations=999,
+            )
+            for index in range(60):
+                observability.record(
+                    "candidate_policy", trace_id="trace-active", timestamp=20_000 + index,
+                    stream_session_id=str(session_id), candidate_id="intent-active",
+                    normalized_motif_identity="motif-active", usage_count=1,
+                    policy_decision="ALLOW", reason_code="allowed",
+                )
+            observability.flush_session(session_id)
+
+        global_variants = list(global_dir.glob("behavior_calibration.jsonl*"))
+        reference = persistent_logs.behavior_session_reference(session_id)
+        self.assertLessEqual(len(global_variants), 3)
+        self.assertEqual(reference["policy_evaluation_count"], 60)
+        self.assertEqual(reference["candidate_trace_count"], 1)
+        self.assertTrue(Path(reference["telemetry_file"]).exists())
+
+    def test_session_finalization_flushes_global_behavior_counters_before_artifact(self):
+        stream = self.live_stream()
+        session_id = stream_memory.ensure_active_stream_session(stream, source="engine")
+        with patch.object(GLOBAL_BEHAVIOR_OBSERVABILITY, "_log_fn", lambda *_args: None), \
+             patch.object(
+                 GLOBAL_BEHAVIOR_OBSERVABILITY,
+                 "_session_log_fn",
+                 persistent_logs.log_behavior_session_event,
+             ):
+            for index in range(7):
+                GLOBAL_BEHAVIOR_OBSERVABILITY.record(
+                    "candidate_policy", trace_id="trace-finalize", timestamp=30_000 + index,
+                    stream_session_id=str(session_id), candidate_id="intent-finalize",
+                    normalized_motif_identity="motif-finalize", usage_count=1,
+                    policy_decision="ALLOW", reason_code="allowed",
+                )
+            stream_memory.finalize_stream_session(stream, reason="offline", source_signal="eventsub_offline")
+
+        artifact_path = Path(self.tmp.name) / "sessions" / f"stream-session-{session_id}.json"
+        reference = json.loads(artifact_path.read_text(encoding="utf-8"))["behavior_telemetry"]
+        self.assertEqual(reference["policy_evaluation_count"], 7)
+        self.assertTrue(reference["compressed"])
 
 
 if __name__ == "__main__":

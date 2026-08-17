@@ -76,6 +76,17 @@ def _session_artifact_payload(conn: sqlite3.Connection, session_id: int) -> dict
             f"SELECT MIN(id), MAX(id) FROM {table} WHERE stream_session_id = ?", (session_id,)
         ).fetchone()
         ranges[name] = {"first_id": value[0], "last_id": value[1]}
+    behavior_reference = persistent_logs.behavior_session_reference(session_id)
+    if behavior_reference is None:
+        behavior_path, behavior_index = persistent_logs.behavior_session_paths(session_id)
+        behavior_reference = {
+            "stream_session_id": str(session_id),
+            "telemetry_file": str(behavior_path),
+            "index_file": str(behavior_index),
+            "event_count": 0,
+            "policy_evaluation_count": 0,
+            "candidate_trace_count": 0,
+        }
     return {
         "schema_version": 1,
         "session_id": int(session["id"]),
@@ -93,6 +104,7 @@ def _session_artifact_payload(conn: sqlite3.Connection, session_id: int) -> dict
         "farewell": {"status": session["farewell_status"], "reason": session["farewell_reason"]},
         "counts": counts,
         "correlation_ranges": ranges,
+        "behavior_telemetry": behavior_reference,
         "checkpointed_at": _now_iso(),
     }
 
@@ -706,6 +718,17 @@ def finalize_stream_session(
         return None
     if stream is not None:
         setattr(stream, "active_stream_session_id", None)
+    try:
+        from app.stream.behavior_observability import GLOBAL_BEHAVIOR_OBSERVABILITY
+
+        GLOBAL_BEHAVIOR_OBSERVABILITY.flush_session(int(active["id"]))
+        persistent_logs.finalize_behavior_session_telemetry(int(active["id"]))
+    except Exception as exc:
+        _lifecycle_log(
+            "session_finalize_failed", active,
+            reason=f"behavior_telemetry_flush_failed:{type(exc).__name__}",
+            source_signal=source_signal,
+        )
     summary = summarize_stream_session(int(active["id"]), reason=str(row.get("closure_reason") or reason))
     _checkpoint_safe(int(active["id"]), event="session_finalized")
     _lifecycle_log(
@@ -755,6 +778,8 @@ def prune_session_artifacts(*, retention_days: int | None = None, now: datetime 
     """Prune old finalized artifacts independently from ordinary log rotation."""
     days = retention_days if retention_days is not None else int(os.getenv("HEBE_SESSION_ARTIFACT_RETENTION_DAYS", "365"))
     cutoff = (now or datetime.now(timezone.utc)).timestamp() - max(1, days) * 86400
+    behavior_days = int(os.getenv("HEBE_BEHAVIOR_SESSION_RETENTION_DAYS", str(days)))
+    behavior_cutoff = (now or datetime.now(timezone.utc)).timestamp() - max(1, behavior_days) * 86400
     persistent_logs.ensure_log_dirs()
     removed = 0
     for path in Path(persistent_logs.SESSION_LOG_DIR).glob("stream-session-*.json"):
@@ -772,6 +797,26 @@ def prune_session_artifacts(*, retention_days: int | None = None, now: datetime 
         if path.stat().st_mtime < cutoff:
             path.unlink(missing_ok=True)
             removed += 1
+    for behavior_index in Path(persistent_logs.SESSION_LOG_DIR).glob("behavior-session-*.index.json"):
+        match = re.match(r"behavior-session-(.+)\.index\.json$", behavior_index.name)
+        if not match or behavior_index.stat().st_mtime >= behavior_cutoff:
+            continue
+        session_id_text = match.group(1)
+        try:
+            session_id = int(session_id_text)
+        except ValueError:
+            continue
+        conn = db_sqlite.get_db_connection()
+        try:
+            row = conn.execute("SELECT lifecycle_state FROM stream_sessions WHERE id = ?", (session_id,)).fetchone()
+        finally:
+            conn.close()
+        if row is not None and row["lifecycle_state"] != LIFECYCLE_FINALIZED:
+            continue
+        behavior_path, _ = persistent_logs.behavior_session_paths(session_id)
+        behavior_path.unlink(missing_ok=True)
+        behavior_path.with_suffix(behavior_path.suffix + ".gz").unlink(missing_ok=True)
+        behavior_index.unlink(missing_ok=True)
     return removed
 
 

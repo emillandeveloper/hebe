@@ -3398,6 +3398,10 @@ class HebeEngine:
             return None
 
     def _recover_stream_memory_session_on_startup(self) -> None:
+        try:
+            stream_memory.prune_session_artifacts()
+        except Exception as exc:
+            print(f"[HEBE][STREAM_LIFECYCLE] retention_prune_failed reason={type(exc).__name__}", flush=True)
         active = stream_memory.get_active_stream_session()
         if not active:
             return

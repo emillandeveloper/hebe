@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import gzip
 import os
 import re
 import shutil
@@ -163,6 +164,120 @@ def log_jsonl_event(kind: str, payload: dict | None = None) -> None:
     event.setdefault("ts", time.time())
     line = json.dumps(event, ensure_ascii=False, default=str, sort_keys=True)
     _append_line(LOG_DIR / filename, line)
+
+
+def behavior_session_paths(stream_session_id: str | int) -> tuple[Path, Path]:
+    safe_id = re.sub(r"[^A-Za-z0-9_.-]", "_", str(stream_session_id or "").strip())
+    if not safe_id:
+        raise ValueError("stream_session_id_required")
+    return (
+        SESSION_LOG_DIR / f"behavior-session-{safe_id}.jsonl",
+        SESSION_LOG_DIR / f"behavior-session-{safe_id}.index.json",
+    )
+
+
+def log_behavior_session_event(stream_session_id: str | int, payload: dict) -> None:
+    """Append canonical behavior telemetry without rotating an active session."""
+    telemetry_path, index_path = behavior_session_paths(stream_session_id)
+    event = redact_value(dict(payload or {}))
+    event.setdefault("event_kind", "behavior_calibration")
+    event.setdefault("ts", time.time())
+    line = json.dumps(event, ensure_ascii=False, default=str, sort_keys=True)
+    ensure_log_dirs()
+    with _lock:
+        index: dict[str, Any] = {}
+        if index_path.exists():
+            try:
+                index = json.loads(index_path.read_text(encoding="utf-8"))
+            except Exception:
+                index = {}
+        if bool(index.get("compressed")):
+            active_path = telemetry_path.with_suffix(telemetry_path.suffix + ".gz")
+            with gzip.open(active_path, "ab") as handle:
+                handle.write((line.rstrip("\r\n") + "\n").encode("utf-8", errors="replace"))
+        else:
+            active_path = telemetry_path
+            with active_path.open("a", encoding="utf-8", errors="replace") as handle:
+                handle.write(line.rstrip("\r\n") + "\n")
+        timestamp = float(event.get("timestamp") or event.get("ts") or time.time())
+        index.update({
+            "schema_version": 1,
+            "stream_session_id": str(stream_session_id),
+            "telemetry_file": str(active_path),
+            "event_count": int(index.get("event_count") or 0) + 1,
+            "policy_evaluation_count": int(index.get("policy_evaluation_count") or 0) + (
+                int(event.get("evaluation_delta") or 0) if event.get("event") == "candidate_policy" else 0
+            ),
+            "candidate_trace_count": int(index.get("candidate_trace_count") or 0) + (
+                1 if event.get("event") == "candidate_policy" and int(event.get("evaluation_count") or 1) == 1 else 0
+            ),
+            "first_seen": index.get("first_seen") or timestamp,
+            "last_seen": timestamp,
+            "first_trace_id": index.get("first_trace_id") or event.get("trace_id"),
+            "last_trace_id": event.get("trace_id"),
+            "bytes": active_path.stat().st_size,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        })
+        temporary = index_path.with_name(f".{index_path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+        try:
+            with temporary.open("w", encoding="utf-8") as handle:
+                json.dump(index, handle, ensure_ascii=False, indent=2, default=str, sort_keys=True)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, index_path)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+
+def behavior_session_reference(stream_session_id: str | int) -> dict[str, Any] | None:
+    try:
+        telemetry_path, index_path = behavior_session_paths(stream_session_id)
+    except ValueError:
+        return None
+    if not index_path.exists():
+        return None
+    try:
+        value = json.loads(index_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    value.setdefault("telemetry_file", str(telemetry_path))
+    value["index_file"] = str(index_path)
+    return value
+
+
+def finalize_behavior_session_telemetry(stream_session_id: str | int) -> dict[str, Any] | None:
+    """Compress a completed session trace without affecting active-session retention."""
+    telemetry_path, index_path = behavior_session_paths(stream_session_id)
+    if not telemetry_path.exists() or not index_path.exists():
+        return behavior_session_reference(stream_session_id)
+    compressed_path = telemetry_path.with_suffix(telemetry_path.suffix + ".gz")
+    temporary = compressed_path.with_name(f".{compressed_path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    with _lock:
+        try:
+            with telemetry_path.open("rb") as source, gzip.open(temporary, "wb", compresslevel=6) as target:
+                shutil.copyfileobj(source, target)
+            os.replace(temporary, compressed_path)
+            telemetry_path.unlink(missing_ok=True)
+            index = json.loads(index_path.read_text(encoding="utf-8"))
+            index.update({
+                "telemetry_file": str(compressed_path),
+                "compressed": True,
+                "bytes": compressed_path.stat().st_size,
+                "finalized_at": datetime.now(timezone.utc).isoformat(),
+            })
+            index_temporary = index_path.with_name(f".{index_path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+            try:
+                with index_temporary.open("w", encoding="utf-8") as handle:
+                    handle.write(json.dumps(index, ensure_ascii=False, indent=2, default=str, sort_keys=True) + "\n")
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(index_temporary, index_path)
+            finally:
+                index_temporary.unlink(missing_ok=True)
+        finally:
+            temporary.unlink(missing_ok=True)
+    return behavior_session_reference(stream_session_id)
 
 
 def _log_file_variants(filename: str) -> list[Path]:
