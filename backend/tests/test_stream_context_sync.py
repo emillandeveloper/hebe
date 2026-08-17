@@ -104,6 +104,7 @@ class StreamContextSyncTests(unittest.TestCase):
         api = FakeTwitchApi(
             channel={"title": "Old title", "game_name": "Old Game", "tags": []},
             stream={
+                "id": "stream-123",
                 "title": "First Playthrough [ENG/ESP]",
                 "game_name": "Final Fantasy X",
                 "tags": ["JRPG", "NoSpoilers"],
@@ -121,6 +122,7 @@ class StreamContextSyncTests(unittest.TestCase):
         self.assertEqual(state.current_game, "Final Fantasy X")
         self.assertEqual(state.current_tags, ["JRPG", "NoSpoilers"])
         self.assertEqual(state.stream_started_at, "2026-05-31T18:00:00Z")
+        self.assertEqual(state.twitch_stream_id, "stream-123")
         self.assertEqual(state.current_playthrough_type, "first_playthrough")
         self.assertEqual(state.language_mode, "ENG/ESP")
         self.assertTrue(state.bilingual_mode)
@@ -165,7 +167,9 @@ class StreamContextSyncTests(unittest.TestCase):
         ok = StreamContextSyncService(twitch_api=api, now_fn=lambda: now).sync(state)
 
         self.assertFalse(ok)
-        self.assertFalse(state.is_live)
+        # An API failure invalidates certainty, not the last confirmed live
+        # observation. Only positive offline evidence may end the session.
+        self.assertTrue(state.is_live)
         self.assertFalse(state.live_status_known)
         self.assertIn("boom", state.last_stream_context_error)
 

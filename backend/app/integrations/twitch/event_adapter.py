@@ -199,12 +199,20 @@ class TwitchEventAdapter:
             },
         )
 
-        # Raid
+        # Incoming and outgoing raids are distinct EventSub conditions. The
+        # outgoing event is the authoritative technical ending signal.
         self._create_subscription(
             sub_type="channel.raid",
             version="1",
             condition={
                 "to_broadcaster_user_id": self.broadcaster_user_id,
+            },
+        )
+        self._create_subscription(
+            sub_type="channel.raid",
+            version="1",
+            condition={
+                "from_broadcaster_user_id": self.broadcaster_user_id,
             },
         )
 
@@ -336,6 +344,19 @@ class TwitchEventAdapter:
             return
 
         if sub_type == "channel.raid":
+            from_id = str(event.get("from_broadcaster_user_id") or "").strip()
+            if from_id and from_id == str(self.broadcaster_user_id):
+                if self.push_event_callback:
+                    self.push_event_callback("twitch_outgoing_raid", {
+                        "target_channel": event.get("to_broadcaster_user_login") or event.get("to_broadcaster_user_name") or "",
+                        "target_user_id": event.get("to_broadcaster_user_id") or "",
+                        "viewer_count": int(event.get("viewers") or 0),
+                        "event_id": event.get("id") or event.get("event_id") or "",
+                        "source": "eventsub",
+                        "source_signal": "eventsub_outgoing_raid",
+                        "visible_public": False,
+                    })
+                return
             username = str(event.get("from_broadcaster_user_login") or "").strip()
             viewers = int(event.get("viewers") or 0)
             if username:
@@ -359,6 +380,7 @@ class TwitchEventAdapter:
             if self.push_event_callback:
                 self.push_event_callback("stream_online", {
                     "started_at": event.get("started_at"),
+                    "twitch_stream_id": event.get("id") or "",
                     "broadcaster_user_id": event.get("broadcaster_user_id") or self.broadcaster_user_id,
                 })
             return

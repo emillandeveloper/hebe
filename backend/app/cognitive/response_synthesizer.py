@@ -1626,6 +1626,8 @@ class ResponseSynthesizer:
             return self._generate_twitch_sub(payload)
         if event.event_type == "twitch_raid":
             return self._generate_twitch_raid(payload)
+        if event.event_type == "twitch_outgoing_raid":
+            return self._generate_twitch_outgoing_raid(payload)
         if event.event_type == "twitch_cheer":
             return self._generate_twitch_cheer(payload)
         if event.event_type == "twitch_follow_batch":
@@ -2059,6 +2061,35 @@ class ResponseSynthesizer:
             max_length_chars=160,
         )
         response = self._universal_pipeline().render(bundle, include_examples=self._build_stream_style_block(), cleaner=clean_twitch_reply, fallback=fallback, route="twitch_raid")
+        self.last_response_debug_contract = response.debug_contract
+        self.last_response_source = response.response_source
+        return response.text
+
+    def _generate_twitch_outgoing_raid(self, payload: dict) -> str:
+        target = str(payload.get("target_channel") or "").strip()
+        situation = "El canal termina con una raid saliente"
+        if target:
+            situation += f" hacia {target}"
+        fallback = "Gracias por acompañarme. Nos vamos de raid" + (f" con {target}." if target else ".")
+        bundle = build_universal_speech_act_bundle(
+            route="twitch_outgoing_raid",
+            speech_act_type="stream_banter",
+            input_text=situation,
+            source="twitch_event",
+            output_target="twitch_chat",
+            mode="stream",
+            goal="say a warm, brief farewell before the confirmed outgoing raid",
+            required_facts=[situation] + ([f"target_channel={target}"] if target else []),
+            allowed_content=[situation],
+            max_length_chars=140,
+        )
+        response = self._universal_pipeline().render(
+            bundle,
+            include_examples=self._build_stream_style_block(),
+            cleaner=clean_twitch_reply,
+            fallback=fallback,
+            route="twitch_outgoing_raid",
+        )
         self.last_response_debug_contract = response.debug_contract
         self.last_response_source = response.response_source
         return response.text

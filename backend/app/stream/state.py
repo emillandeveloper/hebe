@@ -75,6 +75,7 @@ class StreamSessionState:
     stream_output_language: str = "es"
     spoiler_policy: str = "no_spoilers"
     stream_started_at: Optional[str] = None
+    twitch_stream_id: Optional[str] = None
     stream_context_updated_ts: float = 0.0
     current_run_objective: Optional[str] = None
     current_run_location: Optional[str] = None

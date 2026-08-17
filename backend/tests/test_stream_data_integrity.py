@@ -4,6 +4,7 @@ import unittest
 from contextlib import closing
 
 from app.services import db_sqlite
+from app.core import persistent_logs
 from app.stream import memory as stream_memory
 from app.stream.live_session import init_live_session_schema
 from app.stream.state import StreamSessionState
@@ -13,11 +14,14 @@ class StreamDataIntegrityTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.old_db_path = db_sqlite.DB_PATH
+        self.old_session_log_dir = persistent_logs.SESSION_LOG_DIR
         db_sqlite.DB_PATH = os.path.join(self.tmp.name, "hebe_stream_test.sqlite3")
+        persistent_logs.SESSION_LOG_DIR = os.path.join(self.tmp.name, "sessions")
         stream_memory.init_stream_memory_schema()
 
     def tearDown(self):
         db_sqlite.DB_PATH = self.old_db_path
+        persistent_logs.SESSION_LOG_DIR = self.old_session_log_dir
         self.tmp.cleanup()
 
     def _conn(self):

@@ -109,6 +109,7 @@ class StreamContextSyncService:
         title = data.get("title")
         category = data.get("game_name")
         tags = data.get("tags")
+        stream.twitch_stream_id = str(data.get("id") or "").strip() or stream.twitch_stream_id
 
         if title is not None:
             stream.current_stream_title = str(title or "").strip() or None
@@ -188,7 +189,6 @@ class StreamContextSyncService:
         stream.last_stream_context_error = error
         if now - float(getattr(stream, "stream_context_updated_ts", 0.0) or 0.0) > self.config.max_safe_context_age_sec:
             stream.live_status_known = False
-            stream.is_live = False
         print(f"[HEBE][STREAM_CONTEXT] sync failed: {error}", flush=True)
 
     def _now(self) -> float:

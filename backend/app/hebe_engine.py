@@ -251,7 +251,19 @@ class HebeEngine:
 
         # Conectar Twitch events al scheduler
         if hasattr(self.runtime, 'twitch_events') and self.runtime.twitch_events:
-            self.runtime.twitch_events.push_event_callback = lambda event_type, payload: self.scheduler.push_event(event_type, payload)
+            def _twitch_event_callback(event_type, payload):
+                if str(event_type or "") == "twitch_outgoing_raid":
+                    # Ending signals must not depend on a later scheduler poll;
+                    # shutdown may follow the raid immediately.
+                    self.process_internal_event(InternalEvent(
+                        event_type="twitch_outgoing_raid",
+                        payload=dict(payload or {}),
+                        created_at=datetime.now(timezone.utc).isoformat(),
+                    ))
+                    return
+                self.scheduler.push_event(event_type, payload)
+
+            self.runtime.twitch_events.push_event_callback = _twitch_event_callback
 
         if hasattr(self.runtime, 'twitch_chat_bot') and self.runtime.twitch_chat_bot:
             def _twitch_ambient_callback(username, display_name, text, channel, tags=None):
@@ -3377,12 +3389,96 @@ class HebeEngine:
 
     def _close_stream_memory_session_safe(self, stream, *, reason: str) -> object | None:
         try:
+            stream_memory.mark_stream_session_ending(stream, reason=reason, source_signal=reason)
             summary=stream_memory.close_active_stream_session(stream, reason=reason)
             self._persist_canonical_chatter_summaries(summary)
             return summary
         except Exception as exc:
             print(f"[HEBE][STREAM_MEMORY] close session failed reason={reason!r}: {exc!r}", flush=True)
             return None
+
+    def _recover_stream_memory_session_on_startup(self) -> None:
+        active = stream_memory.get_active_stream_session()
+        if not active:
+            return
+        stream = self._get_stream_state()
+        service = getattr(self, "stream_context_sync", None)
+        ok = bool(stream is not None and service is not None and service.sync(stream))
+        evidence = bool(getattr(stream, "is_live", False)) if ok else None
+        current_stream_id = str(getattr(stream, "twitch_stream_id", "") or "") if stream is not None else ""
+        result = stream_memory.recover_incomplete_stream_session(
+            stream, live_evidence=evidence, current_stream_id=current_stream_id
+        )
+        if result.get("action") == "resumed":
+            self._ensure_stream_memory_session_if_live(stream)
+        elif result.get("action") == "finalized":
+            self._persist_canonical_chatter_summaries(result.get("summary"))
+            if evidence is True:
+                self._ensure_stream_memory_session_if_live(stream)
+        print(
+            f"[HEBE][STREAM_LIFECYCLE] startup_recovery action={result.get('action')} "
+            f"session_id={result.get('session_id')} evidence={evidence}",
+            flush=True,
+        )
+
+    def _offer_raid_farewell_once(self, stream, payload: dict, session_id: int) -> None:
+        if not stream_memory.mark_farewell_status(
+            session_id, status="attempted", reason="outgoing_raid", only_if_not_attempted=True
+        ):
+            return
+        try:
+            # The renderer owns its bounded deterministic fallback. Any failure
+            # here is observable and never delays technical finalization.
+            text = self.response_synthesizer._generate_twitch_outgoing_raid(payload)
+        except Exception as exc:
+            stream_memory.mark_farewell_status(
+                session_id, status="skipped", reason=f"generation_failed:{type(exc).__name__}"
+            )
+            return
+        twitch = getattr(self.runtime, "twitch", None)
+        delivery_before = getattr(twitch, "last_delivery_outcome", None)
+        try:
+            self._deliver_twitch_reply(
+                text,
+                event_type="twitch_outgoing_raid",
+                payload={**payload, "_force_skip_tts": False},
+            )
+            delivery_after = getattr(twitch, "last_delivery_outcome", None)
+            if delivery_after is not delivery_before and isinstance(delivery_after, dict) and delivery_after.get("success"):
+                stream_memory.mark_farewell_status(session_id, status="emitted", reason="outgoing_raid")
+            else:
+                detail = (
+                    str(delivery_after.get("reason") or "delivery_not_confirmed")
+                    if isinstance(delivery_after, dict) else "delivery_not_confirmed"
+                )
+                stream_memory.mark_farewell_status(session_id, status="skipped", reason=detail)
+        except Exception as exc:
+            stream_memory.mark_farewell_status(
+                session_id, status="skipped", reason=f"delivery_failed:{type(exc).__name__}"
+            )
+
+    def _handle_outgoing_raid(self, event) -> None:
+        stream = self._get_stream_state()
+        payload = dict(getattr(event, "payload", {}) or {})
+        active = stream_memory.mark_stream_session_ending(
+            stream, reason="raid", source_signal=str(payload.get("source_signal") or "eventsub_outgoing_raid")
+        )
+        if not active:
+            return
+        session_id = int(active["id"])
+        self._record_stream_event_safe("twitch_outgoing_raid", payload, stream=stream)
+        self._offer_raid_farewell_once(stream, payload, session_id)
+        try:
+            summary = stream_memory.finalize_stream_session(
+                stream, reason="raid", source_signal="eventsub_outgoing_raid"
+            )
+            self._persist_canonical_chatter_summaries(summary)
+        except Exception as exc:
+            print(
+                f"[HEBE][STREAM_LIFECYCLE] session_finalize_failed session_id={session_id} "
+                f"reason={type(exc).__name__} source_signal=eventsub_outgoing_raid",
+                flush=True,
+            )
 
     def _persist_canonical_chatter_summaries(self, summary) -> None:
         if not isinstance(summary,dict) or getattr(self,"social_world",None) is None:return
@@ -4075,6 +4171,9 @@ class HebeEngine:
     
     def process_internal_event(self, event) -> None:
         event_type = str(getattr(event, "event_type", "") or "")
+        if event_type == "twitch_outgoing_raid":
+            self._handle_outgoing_raid(event)
+            return
         if event_type == "twitch_raid":
             payload = getattr(event, "payload", {}) or {}
             stream = self._get_stream_state()
@@ -4619,6 +4718,7 @@ class HebeEngine:
             stream.last_stream_live_transition = "online"
             stream.last_stream_live_transition_ts = now
             stream.stream_started_at = payload.get("started_at") or payload.get("started_at_ts") or stream.stream_started_at
+            stream.twitch_stream_id = payload.get("twitch_stream_id") or payload.get("id") or stream.twitch_stream_id
             stream.idle_prompts_sent_stream = 0
             stream.recent_idle_messages = []
             loop = getattr(self, "stream_companion_loop", None)
@@ -5679,6 +5779,7 @@ class HebeEngine:
                     init_memory_chunks_schema()
                     init_live_session_schema()
                     cleanup_stt_prompt_injection_rows()
+                    self._recover_stream_memory_session_on_startup()
                 except Exception as _e:
                     print(f"[HEBE][MEMORY] init_memory_chunks_schema failed: {_e!r}", flush=True)
 
@@ -5763,6 +5864,22 @@ class HebeEngine:
         game_research = getattr(self,"game_intelligence",None)
         if game_research is not None and hasattr(game_research,"close"):
             game_research.close(wait=False)
+        stream = self._get_stream_state()
+        try:
+            active = stream_memory.get_active_stream_session()
+            if active:
+                existing_reason = str(active.get("closure_reason") or "")
+                reason = existing_reason or (
+                    "normal_shutdown" if bool(getattr(stream, "live_status_known", False)) else "interrupted_shutdown"
+                )
+                stream_memory.mark_stream_session_ending(stream, reason=reason, source_signal="engine_stop")
+                summary = stream_memory.finalize_stream_session(stream, reason=reason, source_signal="engine_stop")
+                self._persist_canonical_chatter_summaries(summary)
+        except Exception as exc:
+            print(
+                f"[HEBE][STREAM_LIFECYCLE] session_finalize_failed reason={type(exc).__name__} source_signal=engine_stop",
+                flush=True,
+            )
         self._stop_event.set()
 
         if hasattr(self.runtime, "twitch_events") and self.runtime.twitch_events:
@@ -13249,7 +13366,7 @@ class HebeEngine:
                 self._record_twitch_pipeline_final(route="suppress", emitted=False, reason="twitch_service_unavailable")
 
     def _gameplay_comment_advice_allowed(self, text: str, *, event_type: str | None) -> tuple[bool, str]:
-        if event_type in {"twitch_raid", "twitch_cheer", "twitch_follow", "twitch_follow_batch", "twitch_sub"}:
+        if event_type in {"twitch_raid", "twitch_outgoing_raid", "twitch_cheer", "twitch_follow", "twitch_follow_batch", "twitch_sub"}:
             return True, "not_gameplay_comment"
         stream = self._get_stream_state()
         service = getattr(self, "game_intelligence", None)
@@ -13260,7 +13377,7 @@ class HebeEngine:
         return service.advice_guard.allow(text, mode=default_assistance_mode(progress), explicit_owner_request=False)
 
     def _record_final_gameplay_comment(self, comment_id: str, text: str, *, event_type: str | None, payload: dict | None) -> None:
-        if event_type in {"twitch_raid", "twitch_cheer", "twitch_follow", "twitch_follow_batch", "twitch_sub"}:
+        if event_type in {"twitch_raid", "twitch_outgoing_raid", "twitch_cheer", "twitch_follow", "twitch_follow_batch", "twitch_sub"}:
             return
         stream = self._get_stream_state()
         service = getattr(self, "game_intelligence", None)

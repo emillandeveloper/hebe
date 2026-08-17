@@ -10,6 +10,7 @@ from app.hebe_engine import HebeEngine
 from app.integrations.twitch.chat_bot import TwitchChatBot
 from app.integrations.twitch.raid_events import parse_raid_usernotice
 from app.services import db_sqlite
+from app.core import persistent_logs
 from app.stream.context_sync import StreamContextSyncService
 from app.stream.game_research import GameKnowledgeResearchConfig, GameKnowledgeResearchService
 from app.stream.game_profiles import GameProfileStore
@@ -151,12 +152,15 @@ class StreamPresenceTests(unittest.TestCase):
     def setUp(self):
         self.tmp_db = tempfile.TemporaryDirectory()
         self.old_db_path = db_sqlite.DB_PATH
+        self.old_session_log_dir = persistent_logs.SESSION_LOG_DIR
         db_sqlite.DB_PATH = os.path.join(self.tmp_db.name, "hebe_stream_presence.sqlite3")
+        persistent_logs.SESSION_LOG_DIR = Path(self.tmp_db.name) / "sessions"
         stream_memory._READY_DB_PATH = None
         stream_memory.init_stream_memory_schema()
 
     def tearDown(self):
         db_sqlite.DB_PATH = self.old_db_path
+        persistent_logs.SESSION_LOG_DIR = self.old_session_log_dir
         stream_memory._READY_DB_PATH = None
         self.tmp_db.cleanup()
 

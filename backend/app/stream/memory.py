@@ -4,9 +4,12 @@ import json
 import os
 import re
 import sqlite3
+import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
+from app.core import persistent_logs
 from app.services import db_sqlite
 
 
@@ -23,6 +26,10 @@ BOT_USERNAMES = {
 _READY_DB_PATH: str | None = None
 _INITIALIZING_SCHEMA = False
 
+LIFECYCLE_LIVE = "LIVE"
+LIFECYCLE_ENDING = "ENDING"
+LIFECYCLE_FINALIZED = "FINALIZED"
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -30,6 +37,108 @@ def _now_iso() -> str:
 
 def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False)
+
+
+def _lifecycle_log(event: str, session: dict | None = None, **fields: Any) -> None:
+    row = session or {}
+    payload = {
+        "event": event,
+        "session_id": fields.pop("session_id", row.get("id")),
+        "stream_id": fields.pop("stream_id", row.get("twitch_stream_id")),
+        "timestamp": _now_iso(),
+        **fields,
+    }
+    print(f"[HEBE][STREAM_LIFECYCLE] {_json(payload)}", flush=True)
+
+
+def _artifact_path(session_id: int) -> Path:
+    return Path(persistent_logs.SESSION_LOG_DIR) / f"stream-session-{int(session_id)}.json"
+
+
+def _session_artifact_payload(conn: sqlite3.Connection, session_id: int) -> dict | None:
+    session = conn.execute("SELECT * FROM stream_sessions WHERE id = ?", (session_id,)).fetchone()
+    if session is None:
+        return None
+    counts = {
+        "inputs": int(conn.execute("SELECT COUNT(*) FROM stream_chat_messages WHERE stream_session_id = ?", (session_id,)).fetchone()[0]),
+        "events": int(conn.execute("SELECT COUNT(*) FROM stream_events WHERE stream_session_id = ?", (session_id,)).fetchone()[0]),
+        "emissions": int(conn.execute("SELECT COUNT(*) FROM stream_events WHERE stream_session_id = ? AND event_type LIKE '%emission%'", (session_id,)).fetchone()[0]),
+        "actions": int(conn.execute("SELECT COUNT(*) FROM stream_events WHERE stream_session_id = ? AND event_type LIKE '%action%'", (session_id,)).fetchone()[0]),
+        "errors": int(conn.execute("SELECT COUNT(*) FROM stream_events WHERE stream_session_id = ? AND event_type LIKE '%error%'", (session_id,)).fetchone()[0]),
+    }
+    if session["farewell_status"] == "emitted":
+        counts["emissions"] += 1
+    if session["farewell_status"] == "skipped":
+        counts["errors"] += 1
+    ranges: dict[str, dict[str, int | None]] = {}
+    for name, table in (("chat", "stream_chat_messages"), ("events", "stream_events")):
+        value = conn.execute(
+            f"SELECT MIN(id), MAX(id) FROM {table} WHERE stream_session_id = ?", (session_id,)
+        ).fetchone()
+        ranges[name] = {"first_id": value[0], "last_id": value[1]}
+    return {
+        "schema_version": 1,
+        "session_id": int(session["id"]),
+        "lifecycle_state": session["lifecycle_state"],
+        "finalization_status": session["finalization_status"],
+        "finalize_count": int(session["finalize_count"] or 0),
+        "started_at": session["started_at"],
+        "ending_at": session["ending_at"],
+        "ended_at": session["ended_at"],
+        "closure_reason": session["closure_reason"],
+        "source_signal": session["source_signal"],
+        "twitch_stream_id": session["twitch_stream_id"],
+        "title": session["title"],
+        "game": session["game"] or session["category"],
+        "farewell": {"status": session["farewell_status"], "reason": session["farewell_reason"]},
+        "counts": counts,
+        "correlation_ranges": ranges,
+        "checkpointed_at": _now_iso(),
+    }
+
+
+def checkpoint_stream_session(session_id: int, *, event: str = "session_updated") -> Path | None:
+    """Atomically refresh the bounded QA artifact for one canonical session."""
+    ensure_stream_memory_ready()
+    conn = db_sqlite.get_db_connection()
+    try:
+        payload = _session_artifact_payload(conn, int(session_id))
+    finally:
+        conn.close()
+    if payload is None:
+        return None
+    persistent_logs.ensure_log_dirs()
+    target = _artifact_path(session_id)
+    temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        with temporary.open("w", encoding="utf-8") as handle:
+            handle.write(_json(payload) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, target)
+    except Exception:
+        try:
+            temporary.unlink(missing_ok=True)
+        except Exception:
+            pass
+        raise
+    conn = db_sqlite.get_db_connection()
+    try:
+        conn.execute(
+            "UPDATE stream_sessions SET artifact_path = ?, last_checkpoint_at = ? WHERE id = ?",
+            (str(target), payload["checkpointed_at"], int(session_id)),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return target
+
+
+def _checkpoint_safe(session_id: int, *, event: str = "session_updated") -> None:
+    try:
+        checkpoint_stream_session(session_id, event=event)
+    except Exception as exc:
+        _lifecycle_log("session_checkpoint_failed", session_id=session_id, reason=type(exc).__name__)
 
 
 def _loads(value: str | None, fallback: Any = None) -> Any:
@@ -112,13 +221,16 @@ def _stream_references_active_session(stream: Any, active: dict | None) -> bool:
 def _stale_close_session(conn: sqlite3.Connection, active: dict, *, now: str, reason: str) -> None:
     max_age = int(float(os.getenv("HEBE_STREAM_SESSION_MAX_SECONDS", "64800") or 64800))
     duration = min(_seconds_between(active.get("started_at"), now) or 0, max_age)
-    conn.execute(
+    cur = conn.execute(
         """
         UPDATE stream_sessions
-        SET ended_at = ?, duration_seconds = ?, status = 'stale_closed', updated_at = ?
+        SET ending_at = COALESCE(ending_at, ?), ended_at = ?, duration_seconds = ?,
+            status = 'stale_closed', lifecycle_state = 'FINALIZED',
+            finalization_status = 'finalized', closure_reason = ?, source_signal = 'session_guard',
+            finalize_count = finalize_count + 1, updated_at = ?
         WHERE id = ?
         """,
-        (now, duration, now, active["id"]),
+        (now, now, duration, reason, now, active["id"]),
     )
     print(f"[HEBE][STREAM_SESSION] stale_closed id={active['id']} reason={reason}", flush=True)
 
@@ -201,6 +313,16 @@ def _ensure_stream_memory_columns(conn: sqlite3.Connection) -> None:
             "is_real_stream": "INTEGER NOT NULL DEFAULT 1",
             "created_at": "TEXT",
             "updated_at": "TEXT",
+            "lifecycle_state": "TEXT NOT NULL DEFAULT 'LIVE'",
+            "ending_at": "TEXT",
+            "closure_reason": "TEXT",
+            "source_signal": "TEXT",
+            "finalization_status": "TEXT NOT NULL DEFAULT 'open'",
+            "finalize_count": "INTEGER NOT NULL DEFAULT 0",
+            "farewell_status": "TEXT NOT NULL DEFAULT 'not_attempted'",
+            "farewell_reason": "TEXT",
+            "artifact_path": "TEXT",
+            "last_checkpoint_at": "TEXT",
         },
         "stream_events": {
             "dedupe_key": "TEXT",
@@ -315,6 +437,15 @@ def init_stream_memory_schema() -> None:
             """
         )
         _ensure_stream_memory_columns(conn)
+        conn.execute(
+            """
+            UPDATE stream_sessions
+            SET lifecycle_state = CASE WHEN status = 'live' THEN 'LIVE' ELSE 'FINALIZED' END,
+                finalization_status = CASE WHEN status = 'live' THEN 'open' ELSE 'finalized' END
+            WHERE lifecycle_state IS NULL OR lifecycle_state = '' OR
+                  (status != 'live' AND lifecycle_state = 'LIVE')
+            """
+        )
         cur.executescript(
             """
             CREATE INDEX IF NOT EXISTS idx_stream_sessions_real_status ON stream_sessions(is_real_stream, status);
@@ -361,13 +492,13 @@ def get_active_stream_session(conn: sqlite3.Connection | None = None, *, real_on
         row = conn.execute(
             """
             SELECT * FROM stream_sessions
-            WHERE status = 'live' AND COALESCE(is_real_stream, 1) = 1
+            WHERE status = 'live' AND lifecycle_state IN ('LIVE', 'ENDING') AND COALESCE(is_real_stream, 1) = 1
             ORDER BY started_at DESC, id DESC LIMIT 1
             """
         ).fetchone()
     else:
         row = conn.execute(
-            "SELECT * FROM stream_sessions WHERE status = 'live' ORDER BY started_at DESC, id DESC LIMIT 1"
+            "SELECT * FROM stream_sessions WHERE status = 'live' AND lifecycle_state IN ('LIVE', 'ENDING') ORDER BY started_at DESC, id DESC LIMIT 1"
         ).fetchone()
     if close:
         conn.close()
@@ -413,6 +544,8 @@ def ensure_active_stream_session(stream: Any = None, *, source: str = "unknown")
                 language_mode = COALESCE(?, language_mode),
                 spoiler_policy = COALESCE(?, spoiler_policy),
                 status = 'live',
+                lifecycle_state = 'LIVE',
+                finalization_status = 'open',
                 source = COALESCE(NULLIF(source, 'unknown'), ?),
                 is_real_stream = 1,
                 updated_at = ?
@@ -440,9 +573,10 @@ def ensure_active_stream_session(stream: Any = None, *, source: str = "unknown")
             INSERT INTO stream_sessions (
                 twitch_stream_id, title, category, game, started_at,
                 playthrough_type, challenge, language_mode, spoiler_policy,
-                status, source, is_real_stream, created_at, updated_at
+                status, source, is_real_stream, created_at, updated_at,
+                lifecycle_state, finalization_status
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'live', ?, 1, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'live', ?, 1, ?, ?, 'LIVE', 'open')
             """,
             (
                 metadata.get("twitch_stream_id"),
@@ -471,10 +605,72 @@ def ensure_active_stream_session(stream: Any = None, *, source: str = "unknown")
     conn.close()
     if stream is not None:
         setattr(stream, "active_stream_session_id", session_id)
+    lifecycle_event = "session_created" if not active else "session_updated"
+    _checkpoint_safe(session_id, event=lifecycle_event)
+    _lifecycle_log(
+        lifecycle_event,
+        session_id=session_id,
+        stream_id=metadata.get("twitch_stream_id") or (active or {}).get("twitch_stream_id"),
+        reason="new_live_stream" if not active else "metadata_refresh",
+        source_signal=source,
+    )
     return session_id
 
 
-def close_active_stream_session(stream: Any = None, *, reason: str = "offline") -> dict | None:
+def mark_stream_session_ending(
+    stream: Any = None, *, reason: str, source_signal: str
+) -> dict | None:
+    ensure_stream_memory_ready()
+    conn = db_sqlite.get_db_connection()
+    active = get_active_stream_session(conn)
+    if not active:
+        conn.close()
+        return None
+    now = _now_iso()
+    cur = conn.execute(
+        """
+        UPDATE stream_sessions
+        SET lifecycle_state = 'ENDING', ending_at = COALESCE(ending_at, ?),
+            closure_reason = COALESCE(closure_reason, ?), source_signal = COALESCE(source_signal, ?),
+            updated_at = ?
+        WHERE id = ? AND lifecycle_state = 'LIVE'
+        """,
+        (now, reason, source_signal, now, active["id"]),
+    )
+    conn.commit()
+    changed = cur.rowcount == 1
+    row = _row(conn.execute("SELECT * FROM stream_sessions WHERE id = ?", (active["id"],)).fetchone())
+    conn.close()
+    if not changed:
+        return row
+    _checkpoint_safe(int(active["id"]), event="session_ending")
+    _lifecycle_log("session_ending", row, reason=reason, source_signal=source_signal)
+    return row
+
+
+def mark_farewell_status(
+    session_id: int, *, status: str, reason: str, only_if_not_attempted: bool = False
+) -> bool:
+    ensure_stream_memory_ready()
+    conn = db_sqlite.get_db_connection()
+    condition = " AND farewell_status = 'not_attempted'" if only_if_not_attempted else ""
+    cur = conn.execute(
+        f"UPDATE stream_sessions SET farewell_status = ?, farewell_reason = ?, updated_at = ? WHERE id = ?{condition}",
+        (status, reason, _now_iso(), int(session_id)),
+    )
+    conn.commit()
+    changed = cur.rowcount == 1
+    conn.close()
+    if changed:
+        _checkpoint_safe(session_id, event=f"farewell_{status}")
+        _lifecycle_log(f"farewell_{status}", session_id=session_id, reason=reason)
+    return changed
+
+
+def finalize_stream_session(
+    stream: Any = None, *, reason: str, source_signal: str | None = None
+) -> dict | None:
+    """Transition the current session to FINALIZED exactly once."""
     ensure_stream_memory_ready()
     conn = db_sqlite.get_db_connection()
     active = get_active_stream_session(conn)
@@ -486,29 +682,101 @@ def close_active_stream_session(stream: Any = None, *, reason: str = "offline") 
     current_stream_id = str(metadata.get("twitch_stream_id") or "").strip()
     if current_stream_id and active_stream_id and current_stream_id != active_stream_id:
         conn.close()
-        print(
-            f"[HEBE][STREAM_SESSION] close_skipped id={active['id']} reason=stream_id_mismatch",
-            flush=True,
-        )
+        _lifecycle_log("session_finalize_failed", active, reason="stream_id_mismatch", source_signal=source_signal)
         return None
     now = _now_iso()
     max_age = int(float(os.getenv("HEBE_STREAM_SESSION_MAX_SECONDS", "64800") or 64800))
     duration = min(_seconds_between(active.get("started_at"), now) or 0, max_age)
-    conn.execute(
+    cur = conn.execute(
         """
         UPDATE stream_sessions
-        SET ended_at = ?, duration_seconds = ?, status = 'ended', updated_at = ?
-        WHERE id = ?
+        SET ending_at = COALESCE(ending_at, ?), ended_at = ?, duration_seconds = ?,
+            status = 'ended', lifecycle_state = 'FINALIZED', finalization_status = 'finalized',
+            closure_reason = COALESCE(closure_reason, ?), source_signal = COALESCE(source_signal, ?),
+            finalize_count = finalize_count + 1, updated_at = ?
+        WHERE id = ? AND lifecycle_state IN ('LIVE', 'ENDING')
         """,
-        (now, duration, now, active["id"]),
+        (now, now, duration, reason, source_signal or reason, now, active["id"]),
     )
     conn.commit()
+    finalized = cur.rowcount == 1
+    row = _row(conn.execute("SELECT * FROM stream_sessions WHERE id = ?", (active["id"],)).fetchone())
     conn.close()
+    if not finalized:
+        return None
     if stream is not None:
         setattr(stream, "active_stream_session_id", None)
-    summary = summarize_stream_session(int(active["id"]), reason=reason)
-    print(f"[HEBE][STREAM_SESSION] closed id={active['id']} duration={duration or 0}", flush=True)
+    summary = summarize_stream_session(int(active["id"]), reason=str(row.get("closure_reason") or reason))
+    _checkpoint_safe(int(active["id"]), event="session_finalized")
+    _lifecycle_log(
+        "session_finalized", row, reason=row.get("closure_reason") or reason,
+        source_signal=row.get("source_signal") or source_signal, finalize_count=row.get("finalize_count"),
+    )
     return summary
+
+
+def recover_incomplete_stream_session(
+    stream: Any = None,
+    *,
+    live_evidence: bool | None,
+    current_stream_id: str | None = None,
+) -> dict[str, Any]:
+    """Reconcile an unfinalized row after startup without treating API failure as offline."""
+    ensure_stream_memory_ready()
+    conn = db_sqlite.get_db_connection()
+    active = get_active_stream_session(conn)
+    conn.close()
+    if not active:
+        return {"action": "idle", "session_id": None}
+    session_id = int(active["id"])
+    stored_stream_id = str(active.get("twitch_stream_id") or "").strip()
+    observed_stream_id = str(current_stream_id or "").strip()
+    same_stream = bool(stored_stream_id and observed_stream_id and stored_stream_id == observed_stream_id)
+    if live_evidence is True and same_stream:
+        if stream is not None:
+            setattr(stream, "active_stream_session_id", session_id)
+        _checkpoint_safe(session_id, event="session_recovered")
+        _lifecycle_log("session_recovered", active, reason="same_stream_resumed", source_signal="startup_helix")
+        return {"action": "resumed", "session_id": session_id}
+    if live_evidence is None:
+        _checkpoint_safe(session_id, event="session_updated")
+        _lifecycle_log("session_recovered", active, reason="evidence_unknown_preserved", source_signal="startup_helix_error")
+        return {"action": "preserved", "session_id": session_id}
+    summary = finalize_stream_session(
+        stream if same_stream else None,
+        reason="recovered_after_restart",
+        source_signal="startup_offline" if live_evidence is False else "startup_stream_id_mismatch",
+    )
+    _lifecycle_log("session_recovered", active, reason="recovered_after_restart", source_signal="startup_reconciliation")
+    return {"action": "finalized", "session_id": session_id, "summary": summary}
+
+
+def prune_session_artifacts(*, retention_days: int | None = None, now: datetime | None = None) -> int:
+    """Prune old finalized artifacts independently from ordinary log rotation."""
+    days = retention_days if retention_days is not None else int(os.getenv("HEBE_SESSION_ARTIFACT_RETENTION_DAYS", "365"))
+    cutoff = (now or datetime.now(timezone.utc)).timestamp() - max(1, days) * 86400
+    persistent_logs.ensure_log_dirs()
+    removed = 0
+    for path in Path(persistent_logs.SESSION_LOG_DIR).glob("stream-session-*.json"):
+        try:
+            session_id = int(path.stem.rsplit("-", 1)[-1])
+        except ValueError:
+            continue
+        conn = db_sqlite.get_db_connection()
+        try:
+            row = conn.execute("SELECT lifecycle_state FROM stream_sessions WHERE id = ?", (session_id,)).fetchone()
+        finally:
+            conn.close()
+        if row is not None and row["lifecycle_state"] != LIFECYCLE_FINALIZED:
+            continue
+        if path.stat().st_mtime < cutoff:
+            path.unlink(missing_ok=True)
+            removed += 1
+    return removed
+
+
+def close_active_stream_session(stream: Any = None, *, reason: str = "offline") -> dict | None:
+    return finalize_stream_session(stream, reason=reason, source_signal=reason)
 
 
 def _event_identity_payload(payload: dict | None) -> dict[str, Any]:
@@ -622,6 +890,9 @@ def record_stream_event(event_type: str, payload: dict | None = None, *, stream:
     event_id = int(cur.lastrowid)
     conn.close()
     print(f"[HEBE][STREAM_EVENT] inserted id={event_id} type={event_type} session_id={session_id}", flush=True)
+    if session_id:
+        _checkpoint_safe(int(session_id))
+        _lifecycle_log("session_updated", session_id=int(session_id), reason="event_recorded", source_signal=event_type)
     return event_id
 
 
@@ -681,6 +952,10 @@ def record_chat_message(
     message_id = int(cur.lastrowid)
     conn.commit()
     conn.close()
+
+    if stream_session_id:
+        _checkpoint_safe(int(stream_session_id))
+        _lifecycle_log("session_updated", session_id=int(stream_session_id), reason="chat_recorded", source_signal=source)
 
     return message_id
 
