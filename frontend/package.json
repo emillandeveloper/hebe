@@ -7,7 +7,8 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "electron:dev": "set ELECTRON_DEV=1&&concurrently \"npm run dev\" \"wait-on http://localhost:5173&&electron .\"",
+    "test:supervisor": "node --test electron/*.test.cjs",
+    "electron:dev": "node electron/dev_launcher.cjs",
     "electron:build": "npm run build && electron-builder",
     "postinstall": "electron-builder install-app-deps"
   },

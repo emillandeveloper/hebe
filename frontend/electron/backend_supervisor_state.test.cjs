@@ -5,6 +5,7 @@ const {
   healthBelongsToManagedProcess,
   parseBackendHealth,
   reconcileBackendStatus,
+  shouldStopBackendOnQuit,
 } = require("./backend_supervisor_state.cjs");
 
 test("health requires a successful Hebe health payload with a real pid", () => {
@@ -71,4 +72,9 @@ test("a live launcher without healthy runtime is not reported running", () => {
   assert.equal(state.status, "starting");
   assert.equal(state.pid, null);
   assert.equal(state.supervisorPid, 77);
+});
+
+test("normal Electron shutdown preserves an adopted backend", () => {
+  assert.equal(shouldStopBackendOnQuit({ ownedByElectron: false }), false);
+  assert.equal(shouldStopBackendOnQuit({ ownedByElectron: true }), true);
 });

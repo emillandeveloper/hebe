@@ -3,13 +3,19 @@ const path = require("path");
 const { spawn, execFileSync } = require("child_process");
 const http = require("http");
 const fs = require("fs");
+const { DEV_SERVER_URL } = require("./dev_runtime_config.cjs");
+const { focusMainWindow } = require("./electron_window_lifecycle.cjs");
 const {
   healthBelongsToManagedProcess,
   parseBackendHealth,
   reconcileBackendStatus,
+  shouldStopBackendOnQuit,
 } = require("./backend_supervisor_state.cjs");
 
+const hasSingleInstanceLock = app.requestSingleInstanceLock();
+
 let backendProc = null;
+let backendOwnedByElectron = false;
 let mainWindow = null;
 let backendStartTime = 0;
 let backendLastRestartTime = null;
@@ -206,6 +212,7 @@ function startBackend() {
   });
 
   backendProc = proc;
+  backendOwnedByElectron = true;
   backendHealth = null;
   backendStartTime = Date.now();
   backendLastRestartTime = new Date().toISOString();
@@ -229,6 +236,7 @@ function startBackend() {
     const isCurrent = backendProc === proc;
     if (isCurrent) {
       backendProc = null;
+      backendOwnedByElectron = false;
       backendStartTime = 0;
     }
     void refreshBackendStatus({ emit: false }).then(() => {
@@ -306,6 +314,7 @@ async function stopBackendGracefully(timeoutMs = 7000) {
   if (backendProc === proc) {
     backendProc = null;
   }
+  backendOwnedByElectron = false;
   backendHealth = null;
   backendStartTime = 0;
   backendStatus = "stopped";
@@ -390,6 +399,7 @@ async function createWindow() {
   allowMediaPermissions();
   let health = await readBackendHealth();
   if (health) {
+    backendOwnedByElectron = false;
     backendHealth = health;
     backendStatus = "healthy";
     backendLastError = "";
@@ -424,28 +434,41 @@ async function createWindow() {
   });
   mainWindow = win;
 
+  win.webContents.once("did-finish-load", () => {
+    if (isDevMode) devLog(`renderer_url=${win.webContents.getURL()}`);
+  });
+
   healthReconcileTimer = setInterval(() => {
     void refreshBackendStatus();
   }, 2000);
 
   if (isDevMode) {
-    win.loadURL("http://localhost:5173");
+    win.loadURL(DEV_SERVER_URL);
   } else {
     win.loadFile(path.join(__dirname, "../dist/index.html"));
   }
 }
 
-app.whenReady().then(() => {
-  installDevIpc();
-  return createWindow();
-});
-
-app.on("before-quit", () => {
-  if (healthReconcileTimer) clearInterval(healthReconcileTimer);
-  killBackendTree(true);
-});
-
-app.on("window-all-closed", () => {
-  killBackendTree(true);
+if (!hasSingleInstanceLock) {
   app.quit();
-});
+} else {
+  app.on("second-instance", () => {
+    focusMainWindow(mainWindow);
+  });
+
+  app.whenReady().then(() => {
+    installDevIpc();
+    return createWindow();
+  });
+
+  app.on("before-quit", () => {
+    if (healthReconcileTimer) clearInterval(healthReconcileTimer);
+    if (shouldStopBackendOnQuit({ ownedByElectron: backendOwnedByElectron })) {
+      killBackendTree(true);
+    }
+  });
+
+  app.on("window-all-closed", () => {
+    app.quit();
+  });
+}

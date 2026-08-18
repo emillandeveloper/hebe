@@ -31,6 +31,10 @@ function healthBelongsToManagedProcess(health, managedPid) {
   return health.pid === ownerPid || health.parent_pid === ownerPid;
 }
 
+function shouldStopBackendOnQuit({ ownedByElectron = false } = {}) {
+  return ownedByElectron === true;
+}
+
 function reconcileBackendStatus({
   health,
   managedAlive = false,
@@ -79,4 +83,5 @@ module.exports = {
   healthBelongsToManagedProcess,
   parseBackendHealth,
   reconcileBackendStatus,
+  shouldStopBackendOnQuit,
 };
