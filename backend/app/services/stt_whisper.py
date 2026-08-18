@@ -445,6 +445,7 @@ class STTService:
         self.selected_input_device_name = self.cfg.input_device_name or ""
         self.selected_input_host_api = self.cfg.input_device_host_api or ""
         self.selected_input_signature = self.cfg.input_device_signature or ""
+        self.selected_input_endpoint_id = ""
         self.selected_input_sample_rate = self.cfg.input_device_sample_rate or self.cfg.rate
         self.selected_input_channels = self.cfg.input_device_channels or self.cfg.channels
         self.last_input_level = 0.0
@@ -460,6 +461,7 @@ class STTService:
         self._last_silence_warning_ts = 0.0
         self._input_device_generation = 0
         self._last_device_resolution_reason = "unresolved"
+        self._last_identity_repair: dict = {}
         self.last_audio_np: np.ndarray | None = None
         self.last_speech_detected = False
         self.last_transcription_language: str | None = None
@@ -1387,6 +1389,7 @@ class STTService:
             allow_default_fallback=self.cfg.allow_default_input_fallback,
         )
         if selected is None:
+            self._last_device_resolution_reason = reason
             configured = (
                 f"name={self.cfg.input_device_name or '(missing)'} "
                 f"host_api={self.cfg.input_device_host_api or '(missing)'} "
@@ -1410,6 +1413,23 @@ class STTService:
         device_index = int(selected["index"])
         self._remember_selected_device(selected)
         self._last_device_resolution_reason = reason
+        if selected.get("identity_repaired"):
+            self._last_identity_repair = {
+                "old_name": str(selected.get("configured_name") or self.cfg.input_device_name or ""),
+                "canonical_name": str(selected.get("name") or ""),
+                "resolved_device": str(selected.get("endpoint_id") or selected.get("signature") or ""),
+                "reason": str(selected.get("identity_repair_reason") or "legacy_encoding_repair"),
+            }
+            print(
+                "[HEBE][AUDIO_IDENTITY_REPAIRED] event=audio_identity_repaired "
+                f"old_name={self._last_identity_repair['old_name']!r} "
+                f"canonical_name={self._last_identity_repair['canonical_name']!r} "
+                f"resolved_device={self._last_identity_repair['resolved_device']!r} "
+                f"reason={self._last_identity_repair['reason']}",
+                flush=True,
+            )
+        else:
+            self._last_identity_repair = {}
         self.last_input_device_error = None
 
         if self.cfg.verbose_device_logs:
@@ -1427,6 +1447,7 @@ class STTService:
         self.selected_input_device_name = str(device.get("name") or "")
         self.selected_input_host_api = str(device.get("host_api") or "")
         self.selected_input_signature = str(device.get("signature") or "")
+        self.selected_input_endpoint_id = str(device.get("endpoint_id") or "")
         self.selected_input_sample_rate = int(device.get("default_sample_rate") or device.get("sample_rate") or self.cfg.rate)
         self.selected_input_channels = max(1, min(int(device.get("max_input_channels") or device.get("channels") or self.cfg.channels), 2))
         self.cfg.input_device_index = int(device.get("index"))
@@ -1516,6 +1537,7 @@ class STTService:
             "device_name": self.selected_input_device_name,
             "host_api": self.selected_input_host_api,
             "signature": self.selected_input_signature,
+            "endpoint_id": self.selected_input_endpoint_id,
             "sample_rate": self.selected_input_sample_rate,
             "channels": self.selected_input_channels,
             "last_level": self.last_input_level,
@@ -1527,6 +1549,7 @@ class STTService:
             "failed_signature": self.failed_input_signature,
             "failed_error": self.failed_input_error,
             "resolution_reason": self._last_device_resolution_reason,
+            "identity_repair": dict(self._last_identity_repair),
         }
 
     def _open_input_stream(self, p: pyaudio.PyAudio, device_index: int):
@@ -1926,8 +1949,118 @@ class STTService:
         return texto
 
 
-def _device_signature(name: str, host_api: str, sample_rate: int, max_input_channels: int) -> str:
-    return f"{name}|{host_api}|{sample_rate}|{max_input_channels}".lower()
+_WINDOWS_AUDIO_CAPTURE_REGISTRY = (
+    r"SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Capture"
+)
+_WINDOWS_ENDPOINT_DISPLAY_NAME = "{a45c254e-df1c-4efd-8020-67d146a850e0},2"
+_WINDOWS_ENDPOINT_INTERFACE_NAME = "{b3f8fa53-0004-438e-9003-51a46e139bfc},6"
+_MOJIBAKE_MARKERS = frozenset("ÃÂâð")
+
+
+def _canonical_audio_text(value: object) -> str:
+    return unicodedata.normalize("NFC", str(value or "").strip())
+
+
+def _audio_identity_key(value: object) -> str:
+    return _canonical_audio_text(value).casefold()
+
+
+def _legacy_unicode_repair_candidates(value: object) -> list[str]:
+    """Return conservative UTF-8 reinterpretations; matching decides safety."""
+    original = _canonical_audio_text(value)
+    if not original or not any(marker in original for marker in _MOJIBAKE_MARKERS):
+        return []
+    repaired: list[str] = []
+    for encoding in ("latin-1", "cp1252"):
+        try:
+            candidate = _canonical_audio_text(original.encode(encoding).decode("utf-8"))
+        except (UnicodeEncodeError, UnicodeDecodeError):
+            continue
+        if candidate and candidate != original and candidate not in repaired:
+            repaired.append(candidate)
+    return repaired
+
+
+def _windows_audio_capture_endpoints() -> list[dict]:
+    """Enumerate active Windows MMDevice capture endpoints when available."""
+    if os.name != "nt":
+        return []
+    try:
+        import winreg
+    except ImportError:
+        return []
+
+    endpoints: list[dict] = []
+    try:
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, _WINDOWS_AUDIO_CAPTURE_REGISTRY) as root:
+            endpoint_count = winreg.QueryInfoKey(root)[0]
+            for position in range(endpoint_count):
+                endpoint_id = winreg.EnumKey(root, position)
+                try:
+                    with winreg.OpenKey(root, endpoint_id) as endpoint_key:
+                        state = int(winreg.QueryValueEx(endpoint_key, "DeviceState")[0])
+                        if not state & 0x1:
+                            continue
+                        with winreg.OpenKey(endpoint_key, "Properties") as properties:
+                            display_name = _canonical_audio_text(
+                                winreg.QueryValueEx(properties, _WINDOWS_ENDPOINT_DISPLAY_NAME)[0]
+                            )
+                            try:
+                                interface_name = _canonical_audio_text(
+                                    winreg.QueryValueEx(properties, _WINDOWS_ENDPOINT_INTERFACE_NAME)[0]
+                                )
+                            except OSError:
+                                interface_name = ""
+                except OSError:
+                    continue
+
+                aliases = {name for name in (display_name, interface_name) if name}
+                if display_name and interface_name and display_name != interface_name:
+                    aliases.add(f"{display_name} ({interface_name})")
+                canonical_name = (
+                    f"{display_name} ({interface_name})"
+                    if display_name and interface_name and display_name != interface_name
+                    else display_name or interface_name
+                )
+                endpoints.append({
+                    "endpoint_id": endpoint_id.casefold(),
+                    "canonical_name": canonical_name,
+                    "aliases": tuple(sorted(aliases)),
+                })
+    except OSError:
+        return []
+    return endpoints
+
+
+def _match_windows_audio_endpoint(name: object, endpoints: list[dict]) -> tuple[dict | None, bool]:
+    raw_name = _canonical_audio_text(name)
+    candidate_names = [(raw_name, False)]
+    candidate_names.extend((candidate, True) for candidate in _legacy_unicode_repair_candidates(raw_name))
+    for candidate_name, repaired in candidate_names:
+        candidate_key = _audio_identity_key(candidate_name)
+        matches = [
+            endpoint for endpoint in endpoints
+            if candidate_key in {_audio_identity_key(alias) for alias in endpoint.get("aliases", ())}
+        ]
+        if len(matches) == 1:
+            return matches[0], repaired
+        if len(matches) > 1:
+            return None, False
+    return None, False
+
+
+def _device_signature(
+    name: str,
+    host_api: str,
+    sample_rate: int = 0,
+    max_input_channels: int = 0,
+    *,
+    endpoint_id: str | None = None,
+) -> str:
+    """Stable identity only; rates/channels are mutable capabilities."""
+    if endpoint_id:
+        return f"audio-input:v2|windows-endpoint|{_audio_identity_key(endpoint_id)}"
+    return f"audio-input:v2|portaudio|{_audio_identity_key(name)}|{_audio_identity_key(host_api)}"
 
 
 def _input_health_window_is_silent(max_rms: float, max_peak: float) -> bool:
@@ -1959,6 +2092,38 @@ def _sort_by_host_api_preference(devices: list[dict]) -> list[dict]:
     return sorted(devices, key=lambda d: (_host_api_score(str(d.get("host_api") or "")), int(d.get("index") or 0)))
 
 
+def _legacy_signature_identity(signature: object) -> tuple[str, str]:
+    value = _canonical_audio_text(signature)
+    if not value or value.startswith("audio-input:v2|"):
+        return "", ""
+    parts = value.split("|")
+    if len(parts) < 2:
+        return "", ""
+    return parts[0], parts[1]
+
+
+def _select_candidate_for_host(candidates: list[dict], host_api: str) -> dict | None:
+    if not candidates:
+        return None
+    host_key = _audio_identity_key(host_api)
+    if host_key:
+        same_host = [d for d in candidates if _audio_identity_key(d.get("host_api")) == host_key]
+        if len(same_host) == 1:
+            return same_host[0]
+        if len(same_host) > 1:
+            endpoint_ids = {_audio_identity_key(d.get("endpoint_id")) for d in same_host}
+            endpoint_ids.discard("")
+            return same_host[0] if len(endpoint_ids) == 1 else None
+
+    endpoint_ids = {_audio_identity_key(d.get("endpoint_id")) for d in candidates}
+    endpoint_ids.discard("")
+    if endpoint_ids and len(endpoint_ids) == 1:
+        return _sort_by_host_api_preference(candidates)[0]
+    if len(candidates) == 1:
+        return candidates[0]
+    return None
+
+
 def _select_audio_input_device(
     devices: list[dict],
     *,
@@ -1969,38 +2134,65 @@ def _select_audio_input_device(
     allow_default_fallback: bool = False,
 ) -> tuple[dict | None, str]:
     """Resolve the current PortAudio index from stable configured identity."""
-    name_key = str(device_name or "").strip().casefold()
-    host_key = str(host_api or "").strip().casefold()
-    signature_key = str(signature or "").strip().casefold()
+    configured_name = _canonical_audio_text(device_name)
+    configured_host = _canonical_audio_text(host_api)
+    legacy_name, legacy_host = _legacy_signature_identity(signature)
+    if not configured_name and legacy_name:
+        configured_name = legacy_name
+    if not configured_host and legacy_host:
+        configured_host = legacy_host
+    name_key = _audio_identity_key(configured_name)
+    host_key = _audio_identity_key(configured_host)
+    signature_key = _audio_identity_key(signature)
     has_stable_identity = bool(signature_key or name_key)
 
-    if signature_key:
-        match = next(
-            (d for d in devices if str(d.get("signature") or "").strip().casefold() == signature_key),
-            None,
-        )
+    if signature_key.startswith("audio-input:v2|"):
+        candidates = [d for d in devices if _audio_identity_key(d.get("signature")) == signature_key]
+        match = _select_candidate_for_host(candidates, configured_host)
         if match is not None:
-            return match, "stable_signature"
+            return match, "stable_endpoint" if match.get("endpoint_id") else "stable_signature"
+        if candidates:
+            return None, "configured_identity_ambiguous"
 
     if name_key and host_key:
-        match = next(
-            (
-                d for d in devices
-                if str(d.get("name") or "").strip().casefold() == name_key
-                and str(d.get("host_api") or "").strip().casefold() == host_key
-            ),
-            None,
-        )
+        candidates = [
+            d for d in devices
+            if _audio_identity_key(d.get("name")) == name_key
+            and _audio_identity_key(d.get("host_api")) == host_key
+        ]
+        match = _select_candidate_for_host(candidates, configured_host)
         if match is not None:
             return match, "stable_name_host_api"
+        if candidates:
+            return None, "configured_identity_ambiguous"
 
     if name_key:
         candidates = [
             d for d in devices
-            if str(d.get("name") or "").strip().casefold() == name_key
+            if _audio_identity_key(d.get("name")) == name_key
         ]
+        match = _select_candidate_for_host(candidates, configured_host)
+        if match is not None:
+            return match, "stable_name_rebound_host_api"
         if candidates:
-            return _sort_by_host_api_preference(candidates)[0], "stable_name_rebound_host_api"
+            return None, "configured_identity_ambiguous"
+
+        for repaired_name in _legacy_unicode_repair_candidates(configured_name):
+            repaired_key = _audio_identity_key(repaired_name)
+            repaired_candidates = [
+                d for d in devices if _audio_identity_key(d.get("name")) == repaired_key
+            ]
+            match = _select_candidate_for_host(repaired_candidates, configured_host)
+            if match is not None:
+                match = dict(match)
+                match.update({
+                    "identity_repaired": True,
+                    "identity_repair_reason": "legacy_encoding_repair",
+                    "configured_name": configured_name,
+                })
+                return match, "legacy_encoding_repair"
+            if repaired_candidates:
+                return None, "configured_identity_ambiguous"
 
     if not has_stable_identity and device_index is None:
         default = next((d for d in devices if d.get("is_default_input")), None)
@@ -2017,6 +2209,7 @@ def _select_audio_input_device(
 
 def _list_audio_devices_with_instance(p: pyaudio.PyAudio) -> list[dict]:
     devices = []
+    windows_endpoints = _windows_audio_capture_endpoints()
     default_index = None
     try:
         default_info = p.get_default_input_device_info()
@@ -2039,7 +2232,12 @@ def _list_audio_devices_with_instance(p: pyaudio.PyAudio) -> list[dict]:
             host_api_name = str(host_api.get("name") or "")
         except Exception:
             host_api_name = ""
-        name = str(info.get("name") or "")
+        raw_name = _canonical_audio_text(info.get("name"))
+        windows_endpoint, repaired_name = _match_windows_audio_endpoint(raw_name, windows_endpoints)
+        name = _canonical_audio_text(
+            windows_endpoint.get("canonical_name") if windows_endpoint else raw_name
+        )
+        endpoint_id = str((windows_endpoint or {}).get("endpoint_id") or "")
         sample_rate = int(float(info.get("defaultSampleRate") or 0))
         lower_name = name.lower()
         is_loopback = "loopback" in lower_name or ("wasapi" in host_api_name.lower() and max_input > 0 and max_output > 0 and "output" in lower_name)
@@ -2057,9 +2255,20 @@ def _list_audio_devices_with_instance(p: pyaudio.PyAudio) -> list[dict]:
             "max_input_channels": max_input,
             "max_output_channels": max_output,
             "default_sample_rate": sample_rate,
-            "signature": _device_signature(name, host_api_name, sample_rate, max_input),
+            "signature": _device_signature(
+                name, host_api_name, sample_rate, max_input, endpoint_id=endpoint_id or None,
+            ),
+            "endpoint_id": endpoint_id,
+            "identity_source": "windows_mmdevice" if endpoint_id else "portaudio_name_host_api",
             "host_api_warning": "Puede fallar en Windows; prueba WASAPI/MME si no hay señal." if _host_api_score(host_api_name) >= 9 else "",
         }
+        if repaired_name:
+            device.update({
+                "raw_name": raw_name,
+                "configured_name": raw_name,
+                "identity_repaired": True,
+                "identity_repair_reason": "legacy_encoding_repair",
+            })
         device["display_label"] = _device_display_label(device)
         devices.append(device)
     return devices

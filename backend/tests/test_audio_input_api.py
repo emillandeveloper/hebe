@@ -51,7 +51,7 @@ class AudioInputApiTests(unittest.TestCase):
             "max_input_channels": 2,
             "max_output_channels": 0,
             "default_sample_rate": 48000,
-            "signature": "mic test|wasapi|48000|2",
+            "signature": "audio-input:v2|portaudio|mic test|wasapi",
             "display_label": "Mic Test — WASAPI — id 2 — 48000Hz — 2ch",
         }]
         with patch("app.api.audio.list_audio_devices", return_value=devices):
@@ -65,7 +65,7 @@ class AudioInputApiTests(unittest.TestCase):
         device = {
             "id": "3", "index": 3, "name": "GoXLR Mic", "host_api": "WASAPI",
             "default_sample_rate": 48000, "max_input_channels": 1,
-            "signature": "goxlr mic|wasapi|48000|1", "is_default_input": False,
+            "signature": "audio-input:v2|portaudio|goxlr mic|wasapi", "is_default_input": False,
         }
         with patch("app.api.audio.list_audio_devices", return_value=[device]):
             res = self.client.post("/audio/input-device", json={
@@ -74,7 +74,7 @@ class AudioInputApiTests(unittest.TestCase):
                 "host_api": "WASAPI",
                 "sample_rate": 48000,
                 "channels": 1,
-                "signature": "goxlr mic|wasapi|48000|1",
+                "signature": "audio-input:v2|portaudio|goxlr mic|wasapi",
             })
 
         self.assertEqual(res.status_code, 200)
@@ -85,7 +85,7 @@ class AudioInputApiTests(unittest.TestCase):
             "host_api": "WASAPI",
             "sample_rate": 48000,
             "channels": 1,
-            "signature": "goxlr mic|wasapi|48000|1",
+            "signature": "audio-input:v2|portaudio|goxlr mic|wasapi",
         }])
 
         current = self.client.get("/audio/input-device")
@@ -101,18 +101,18 @@ class AudioInputApiTests(unittest.TestCase):
             {
                 "id": "8", "index": 8, "name": "Voicemeeter Out A4", "host_api": "MME",
                 "default_sample_rate": 44100, "max_input_channels": 8,
-                "signature": "voicemeeter out a4|mme|44100|8", "is_default_input": True,
+                "signature": "audio-input:v2|portaudio|voicemeeter out a4|mme", "is_default_input": True,
             },
             {
                 "id": "9", "index": 9, "name": "Yeti GX", "host_api": "MME",
                 "default_sample_rate": 44100, "max_input_channels": 1,
-                "signature": "yeti gx|mme|44100|1", "is_default_input": False,
+                "signature": "audio-input:v2|portaudio|yeti gx|mme", "is_default_input": False,
             },
         ]
         with patch("app.api.audio.list_audio_devices", return_value=devices):
             response = self.client.post("/audio/input-device", json={
                 "device_id": "8", "device_name": "Yeti GX", "host_api": "MME",
-                "sample_rate": 44100, "channels": 1, "signature": "yeti gx|mme|44100|1",
+                "sample_rate": 44100, "channels": 1, "signature": "audio-input:v2|portaudio|yeti gx|mme",
             })
 
         self.assertEqual(response.status_code, 200)

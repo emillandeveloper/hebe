@@ -128,6 +128,23 @@ async def set_audio_input_device(selection: InputDeviceSelection, request: Reque
     sample_rate = int(resolved.get("default_sample_rate") or resolved.get("sample_rate") or 0) or None
     channels = int(resolved.get("max_input_channels") or resolved.get("channels") or 0) or None
     signature = str(resolved.get("signature") or "")
+    endpoint_id = str(resolved.get("endpoint_id") or "")
+    identity_repair = {}
+    if resolved.get("identity_repaired"):
+        identity_repair = {
+            "old_name": str(resolved.get("configured_name") or selection.device_name or ""),
+            "canonical_name": device_name,
+            "resolved_device": endpoint_id or signature,
+            "reason": str(resolved.get("identity_repair_reason") or "legacy_encoding_repair"),
+        }
+        print(
+            "[HEBE][AUDIO_IDENTITY_REPAIRED] event=audio_identity_repaired "
+            f"old_name={identity_repair['old_name']!r} "
+            f"canonical_name={identity_repair['canonical_name']!r} "
+            f"resolved_device={identity_repair['resolved_device']!r} "
+            f"reason={identity_repair['reason']}",
+            flush=True,
+        )
 
     applied = False
     error = None
@@ -169,6 +186,8 @@ async def set_audio_input_device(selection: InputDeviceSelection, request: Reque
         "sample_rate": sample_rate,
         "channels": channels,
         "signature": signature,
+        "endpoint_id": endpoint_id,
+        "identity_repair": identity_repair,
         "resolution_reason": reason,
     }
 

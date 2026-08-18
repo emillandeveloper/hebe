@@ -8,6 +8,7 @@ from app.services.stt_whisper import (
     STTConfig,
     STTDeviceOpenFailure,
     STTService,
+    _device_signature,
     _input_health_window_is_silent,
     _select_audio_input_device,
     _sort_by_host_api_preference,
@@ -24,6 +25,108 @@ class FailingSTT:
 
 
 class STTDeviceFailureTests(unittest.TestCase):
+    @staticmethod
+    def _device(
+        *, index=9, name="Micrófono (Studio USB)", host="MME",
+        endpoint="{11111111-2222-3333-4444-555555555555}", rate=44100,
+    ):
+        return {
+            "id": str(index), "index": index, "name": name, "host_api": host,
+            "endpoint_id": endpoint, "default_sample_rate": rate,
+            "max_input_channels": 1, "is_default_input": False,
+            "signature": _device_signature(name, host, rate, 1, endpoint_id=endpoint),
+        }
+
+    def test_unicode_identity_matches_enumerated_device(self):
+        device = self._device()
+
+        selected, reason = _select_audio_input_device(
+            [device], device_name="Micrófono (Studio USB)", host_api="MME",
+        )
+
+        self.assertIs(selected, device)
+        self.assertEqual(reason, "stable_name_host_api")
+
+    def test_unique_legacy_mojibake_identity_is_repaired_against_real_device(self):
+        device = self._device()
+
+        selected, reason = _select_audio_input_device(
+            [device], device_name="MicrÃ³fono (Studio USB)", host_api="MME",
+            signature="micrã³fono (studio usb)|mme|44100|1",
+        )
+
+        self.assertEqual(selected["name"], "Micrófono (Studio USB)")
+        self.assertTrue(selected["identity_repaired"])
+        self.assertEqual(selected["identity_repair_reason"], "legacy_encoding_repair")
+        self.assertEqual(reason, "legacy_encoding_repair")
+
+    def test_ambiguous_legacy_mojibake_identity_is_not_guessed(self):
+        devices = [
+            self._device(index=9, endpoint="{aaaaaaaa-2222-3333-4444-555555555555}"),
+            self._device(index=10, endpoint="{bbbbbbbb-2222-3333-4444-555555555555}"),
+        ]
+
+        selected, reason = _select_audio_input_device(
+            devices, device_name="MicrÃ³fono (Studio USB)", host_api="MME",
+        )
+
+        self.assertIsNone(selected)
+        self.assertEqual(reason, "configured_identity_ambiguous")
+
+    def test_stable_endpoint_survives_default_sample_rate_change(self):
+        before = self._device(index=9, rate=44100)
+        after = self._device(index=37, rate=48000)
+        self.assertEqual(before["signature"], after["signature"])
+
+        selected, reason = _select_audio_input_device(
+            [after], device_index=9, device_name=before["name"], host_api="MME",
+            signature=before["signature"],
+        )
+
+        self.assertEqual(selected["index"], 37)
+        self.assertEqual(selected["default_sample_rate"], 48000)
+        self.assertEqual(reason, "stable_endpoint")
+
+    def test_repaired_identity_persists_as_v2_and_resolves_after_restart(self):
+        initial = self._device(index=9, rate=44100)
+        service = STTService(config=STTConfig())
+        port_audio = Mock()
+        with (
+            patch("app.services.stt_whisper.pyaudio.PyAudio", return_value=port_audio),
+            patch("app.services.stt_whisper._list_audio_devices_with_instance", return_value=[initial]),
+        ):
+            persisted = service.set_input_device(
+                device_id="8", device_name="MicrÃ³fono (Studio USB)", host_api="MME",
+                signature="micrã³fono (studio usb)|mme|44100|1",
+            )
+
+        restarted_device = self._device(index=41, rate=48000)
+        restarted = STTService(config=STTConfig())
+        restarted_port_audio = Mock()
+        with (
+            patch("app.services.stt_whisper.pyaudio.PyAudio", return_value=restarted_port_audio),
+            patch("app.services.stt_whisper._list_audio_devices_with_instance", return_value=[restarted_device]),
+        ):
+            selected = restarted.set_input_device(
+                device_id=persisted["device_id"], device_name=persisted["device_name"],
+                host_api=persisted["host_api"], sample_rate=persisted["sample_rate"],
+                channels=persisted["channels"], signature=persisted["signature"],
+            )
+
+        self.assertTrue(persisted["signature"].startswith("audio-input:v2|windows-endpoint|"))
+        self.assertEqual(persisted["identity_repair"]["reason"], "legacy_encoding_repair")
+        self.assertEqual(selected["device_id"], "41")
+        self.assertEqual(selected["resolution_reason"], "stable_endpoint")
+
+    def test_disappeared_stable_device_is_explicitly_unavailable(self):
+        selected, reason = _select_audio_input_device(
+            [], device_index=9, device_name="Micrófono (Studio USB)", host_api="MME",
+            signature=self._device()["signature"],
+        )
+
+        self.assertIsNone(selected)
+        self.assertEqual(reason, "configured_identity_unavailable")
+
     def test_health_window_requires_sustained_zero_not_one_quiet_chunk(self):
         self.assertTrue(_input_health_window_is_silent(0.0, 0.0))
         self.assertFalse(_input_health_window_is_silent(0.0001, 0.0002))
@@ -36,7 +139,9 @@ class STTDeviceFailureTests(unittest.TestCase):
             },
             {
                 "id": "9", "index": 9, "name": "Micrófono (Yeti GX)", "host_api": "MME",
-                "signature": "micrófono (yeti gx)|mme|44100|1", "is_default_input": False,
+                "endpoint_id": "{11111111-2222-3333-4444-555555555555}",
+                "signature": "audio-input:v2|windows-endpoint|{11111111-2222-3333-4444-555555555555}",
+                "is_default_input": False,
             },
         ]
 
@@ -45,16 +150,18 @@ class STTDeviceFailureTests(unittest.TestCase):
             device_index=8,
             device_name="Micrófono (Yeti GX)",
             host_api="MME",
-            signature="micrófono (yeti gx)|mme|44100|1",
+            signature="audio-input:v2|windows-endpoint|{11111111-2222-3333-4444-555555555555}",
         )
 
         self.assertEqual(selected["index"], 9)
-        self.assertEqual(reason, "stable_signature")
+        self.assertEqual(reason, "stable_endpoint")
 
     def test_applying_stable_identity_updates_current_index_and_stream_generation(self):
         devices = [{
             "id": "9", "index": 9, "name": "Micrófono (Yeti GX)", "host_api": "MME",
-            "signature": "micrófono (yeti gx)|mme|44100|1", "is_default_input": False,
+            "endpoint_id": "{11111111-2222-3333-4444-555555555555}",
+            "signature": "audio-input:v2|windows-endpoint|{11111111-2222-3333-4444-555555555555}",
+            "is_default_input": False,
             "default_sample_rate": 44100, "max_input_channels": 1,
         }]
         service = STTService(config=STTConfig())
@@ -67,11 +174,11 @@ class STTDeviceFailureTests(unittest.TestCase):
                 device_id="8",
                 device_name="Micrófono (Yeti GX)",
                 host_api="MME",
-                signature="micrófono (yeti gx)|mme|44100|1",
+                signature="audio-input:v2|windows-endpoint|{11111111-2222-3333-4444-555555555555}",
             )
 
         self.assertEqual(selected["device_id"], "9")
-        self.assertEqual(selected["resolution_reason"], "stable_signature")
+        self.assertEqual(selected["resolution_reason"], "stable_endpoint")
         self.assertEqual(service._input_device_generation, 1)
         port_audio.terminate.assert_called_once()
 
