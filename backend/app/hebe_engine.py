@@ -439,6 +439,10 @@ class HebeEngine:
             cancel_active=getattr(getattr(self.runtime, "tts", None), "cancel_playback", None),
             abort_active=getattr(getattr(self.runtime, "tts", None), "cancel", None),
         )
+        self._startup_greeting_lock = threading.Lock()
+        self._startup_greeting_state = "not_requested"
+        self._startup_greeting_text = ""
+        self._startup_greeting_result: dict = {}
         self.owner_discourse_buffer = OwnerDiscourseBuffer(
             tracker=None,
             session_gap_seconds=float(os.getenv("HEBE_DISCOURSE_SESSION_GAP_SECONDS", "90") or 90),
@@ -2822,6 +2826,8 @@ class HebeEngine:
         Faster-whisper and replay both hand normalized transcript text to this
         seam.  It intentionally contains no replay-specific policy.
         """
+        if str(text or "").strip():
+            self._cancel_deferred_startup_greeting("owner_interaction")
         return self.ingest_normalized_stt(
             str(text or "").strip(),
             allow_wakeword_prompt=allow_wakeword_prompt,
@@ -6210,6 +6216,100 @@ class HebeEngine:
         except Exception:
             return False
 
+    def _set_startup_greeting_pending(self, text: str) -> None:
+        clean = str(text or "").strip()
+        if not clean:
+            return
+        lock = getattr(self, "_startup_greeting_lock", None)
+        if lock is None:
+            lock = threading.Lock()
+            self._startup_greeting_lock = lock
+        with lock:
+            self._startup_greeting_text = clean
+            self._startup_greeting_state = "deferred"
+            self._startup_greeting_result = {
+                "status": "deferred",
+                "reason": "warmup_in_progress",
+                "text_length": len(clean),
+            }
+        print("[HEBE][STARTUP_GREETING] status=deferred reason=warmup_in_progress", flush=True)
+
+    def _cancel_deferred_startup_greeting(self, reason: str) -> bool:
+        lock = getattr(self, "_startup_greeting_lock", None)
+        if lock is None:
+            return False
+        with lock:
+            if getattr(self, "_startup_greeting_state", "") != "deferred":
+                return False
+            self._startup_greeting_state = "discarded"
+            self._startup_greeting_result = {
+                "status": "discarded",
+                "reason": str(reason or "stale"),
+            }
+        print(f"[HEBE][STARTUP_GREETING] status=discarded reason={reason or 'stale'}", flush=True)
+        return True
+
+    def _complete_deferred_startup_greeting(self, warmup_result: dict) -> None:
+        status = str((warmup_result or {}).get("status") or "")
+        lock = getattr(self, "_startup_greeting_lock", None)
+        if lock is None:
+            return
+        with lock:
+            if getattr(self, "_startup_greeting_state", "") != "deferred":
+                return
+            if getattr(self, "_stop_event", None) is not None and self._stop_event.is_set():
+                self._startup_greeting_state = "discarded"
+                self._startup_greeting_result = {"status": "discarded", "reason": "shutdown"}
+                outcome = "discarded"
+                reason = "shutdown"
+                text = ""
+            elif status != "ready":
+                self._startup_greeting_state = "discarded"
+                self._startup_greeting_result = {"status": "discarded", "reason": "warmup_not_ready"}
+                outcome = "discarded"
+                reason = "warmup_not_ready"
+                text = ""
+            else:
+                text = self._startup_greeting_text
+                self._startup_greeting_state = "emitting"
+                self._startup_greeting_result = {"status": "emitting", "reason": "warmup_ready"}
+                outcome = "emitting"
+                reason = "warmup_ready"
+        if outcome == "discarded":
+            print(f"[HEBE][STARTUP_GREETING] status=discarded reason={reason}", flush=True)
+            return
+        if getattr(self, "_stop_event", None) is not None and self._stop_event.is_set():
+            with lock:
+                self._startup_greeting_state = "discarded"
+                self._startup_greeting_result = {"status": "discarded", "reason": "shutdown"}
+            print("[HEBE][STARTUP_GREETING] status=discarded reason=shutdown", flush=True)
+            return
+        try:
+            self._deliver_voice_reply(text, input_type="startup_greeting")
+        except Exception as exc:
+            with lock:
+                self._startup_greeting_state = "failed"
+                self._startup_greeting_result = {
+                    "status": "failed",
+                    "reason": type(exc).__name__,
+                }
+            print(f"[HEBE][STARTUP_GREETING] status=failed reason={type(exc).__name__}", flush=True)
+            return
+        with lock:
+            self._startup_greeting_state = "delivered"
+            self._startup_greeting_result = {"status": "delivered", "reason": "warmup_ready"}
+        print("[HEBE][STARTUP_GREETING] status=delivered reason=warmup_ready", flush=True)
+
+    def _start_tts_warmup(self, warmup, *, startup_greeting: str = "") -> dict:
+        if startup_greeting:
+            self._set_startup_greeting_pending(startup_greeting)
+        callback = self._complete_deferred_startup_greeting if startup_greeting else None
+        return self._get_stream_tts_safety().warmup(
+            warmup,
+            background=True,
+            on_complete=callback,
+        )
+
     def start(self):
         if self._started:
             return
@@ -6284,14 +6384,20 @@ class HebeEngine:
                         "wake_loop_status": "starting",
                     },
                 )
+                greeting_deferred = False
                 if bool(getattr(self.runtime.state, "tts_enabled", False)):
                     tts_controller = getattr(self.runtime, "tts", None)
                     warmup = getattr(tts_controller, "warmup", None)
                     if callable(warmup):
-                        self._get_stream_tts_safety().warmup(warmup, background=True)
+                        greeting_text = "Ya estoy aquí, Leo." if self.use_wakeword else "Lista, Leo."
+                        greeting_deferred = bool(self.say_hello)
+                        self._start_tts_warmup(
+                            warmup,
+                            startup_greeting=greeting_text if greeting_deferred else "",
+                        )
 
                 target = self.wakeword_loop if self.use_wakeword else self.engine_loop
-                kwargs = {"say_hello": self.say_hello}
+                kwargs = {"say_hello": self.say_hello and not greeting_deferred}
 
                 def run_loop():
                     if self.use_wakeword:
@@ -6322,6 +6428,7 @@ class HebeEngine:
         threading.Thread(target=boot, daemon=True).start()
 
     def stop(self):
+        self._cancel_deferred_startup_greeting("shutdown")
         executor = getattr(self, "plan_executor", None)
         if executor is not None and hasattr(executor, "begin_shutdown"):
             executor.begin_shutdown(drain_seconds=float(os.getenv("HEBE_COMMAND_SHUTDOWN_DRAIN_SECONDS", "2") or 2))
@@ -6385,6 +6492,8 @@ class HebeEngine:
         self.runtime.state.mode = "stopped"
 
     def submit_text(self, text: str):
+        if str(text or "").strip():
+            self._cancel_deferred_startup_greeting("owner_interaction")
         print(f"[HEBE] submit_text: {text!r}", flush=True)
         submit_text_from_ui(text)
 
@@ -14399,6 +14508,9 @@ class HebeEngine:
         text = (command or "").strip()
         if not text:
             return "continue"
+
+        if source in {"voice", "stt_voice", "ui"}:
+            self._cancel_deferred_startup_greeting("owner_interaction")
 
         return self.cognitive_flow(text, source=source)
 

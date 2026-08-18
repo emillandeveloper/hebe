@@ -25,6 +25,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 last_status: dict | None = None
+PROCESS_STARTED_AT = time.time()
 
 app = FastAPI()
 app.add_middleware(
@@ -172,7 +173,16 @@ def health():
         except Exception as exc:
             wake_loop = {"alive": False, "last_error": str(exc), "thread_alive": False}
     ok = not wake_loop or bool(wake_loop.get("alive") or not getattr(engine, "use_wakeword", False))
-    return {"ok": ok, "ts": time.time(), "wake_loop": wake_loop}
+    now = time.time()
+    return {
+        "ok": ok,
+        "ts": now,
+        "pid": os.getpid(),
+        "parent_pid": os.getppid(),
+        "started_at": PROCESS_STARTED_AT,
+        "uptime_ms": max(0, int((now - PROCESS_STARTED_AT) * 1000)),
+        "wake_loop": wake_loop,
+    }
 
 
 @app.post("/dev/shutdown")

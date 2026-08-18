@@ -314,7 +314,13 @@ class StreamTTSSafetyManager:
         done.wait(max(0.0, float(timeout_seconds)))
         return receipt
 
-    def warmup(self, warm: Callable[[], Any], *, background: bool = False) -> dict:
+    def warmup(
+        self,
+        warm: Callable[[], Any],
+        *,
+        background: bool = False,
+        on_complete: Callable[[dict[str, Any]], None] | None = None,
+    ) -> dict:
         def run() -> None:
             started = time.perf_counter()
             try:
@@ -331,7 +337,14 @@ class StreamTTSSafetyManager:
             except Exception as exc:
                 self.warmup_latency_ms = (time.perf_counter() - started) * 1000
                 self.warmup_status = f"error:{type(exc).__name__}"
+            finally:
+                if on_complete is not None:
+                    try:
+                        on_complete({"status": self.warmup_status, "latency_ms": self.warmup_latency_ms})
+                    except Exception as exc:
+                        print(f"[HEBE][TTS_WARMUP] callback_failed={type(exc).__name__}", flush=True)
         if background:
+            self.warmup_status = "warming"
             threading.Thread(target=run, name="hebe-tts-warmup", daemon=True).start()
             return {"status": "scheduled", "latency_ms": None}
         run()

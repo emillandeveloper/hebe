@@ -234,6 +234,83 @@ class TTSQueueTests(unittest.TestCase):
         self.assertFalse(manager.worker_alive)
         self.assertEqual(manager.warmup_status, "not_run")
 
+    def startup_greeting_engine(self):
+        engine = HebeEngine.__new__(HebeEngine)
+        engine._stop_event = threading.Event()
+        engine._startup_greeting_lock = threading.Lock()
+        engine._startup_greeting_state = "not_requested"
+        engine._startup_greeting_text = ""
+        engine._startup_greeting_result = {}
+        engine.runtime = SimpleNamespace(tts=SimpleNamespace())
+        engine.stream_tts_safety = self.manager()
+        engine._deliver_voice_reply = Mock()
+        return engine
+
+    def test_cold_startup_greeting_waits_for_warmup_and_emits_once(self):
+        engine = self.startup_greeting_engine()
+        warmup_started = threading.Event()
+        release_warmup = threading.Event()
+        delivered = threading.Event()
+        engine._deliver_voice_reply.side_effect = lambda *_args, **_kwargs: delivered.set()
+
+        def warmup():
+            warmup_started.set()
+            release_warmup.wait(1)
+            return {"status": "ready"}
+
+        result = engine._start_tts_warmup(warmup, startup_greeting="Ya estoy aquí, Leo.")
+        self.assertEqual(result["status"], "scheduled")
+        self.assertTrue(warmup_started.wait(0.5))
+        self.assertEqual(engine._startup_greeting_state, "deferred")
+        self.assertEqual(engine.stream_tts_safety.current_gpu_task, "")
+        engine._deliver_voice_reply.assert_not_called()
+
+        release_warmup.set()
+        self.assertTrue(delivered.wait(0.5))
+        engine._complete_deferred_startup_greeting({"status": "ready"})
+        engine._deliver_voice_reply.assert_called_once_with(
+            "Ya estoy aquí, Leo.", input_type="startup_greeting"
+        )
+        self.assertEqual(engine._startup_greeting_result["status"], "delivered")
+
+    def test_owner_interaction_discards_deferred_startup_greeting(self):
+        engine = self.startup_greeting_engine()
+        release_warmup = threading.Event()
+        engine._start_tts_warmup(
+            lambda: (release_warmup.wait(1), {"status": "ready"})[1],
+            startup_greeting="Ya estoy aquí, Leo.",
+        )
+
+        with patch("app.hebe_engine.submit_text_from_ui") as submit:
+            engine.submit_text("Hebe, abre el chat")
+        release_warmup.set()
+        time.sleep(0.05)
+
+        submit.assert_called_once()
+        engine._deliver_voice_reply.assert_not_called()
+        self.assertEqual(engine._startup_greeting_result, {
+            "status": "discarded", "reason": "owner_interaction"
+        })
+
+    def test_shutdown_during_warmup_discards_greeting_without_late_emission(self):
+        engine = self.startup_greeting_engine()
+        release_warmup = threading.Event()
+        engine._start_tts_warmup(
+            lambda: (release_warmup.wait(1), {"status": "ready"})[1],
+            startup_greeting="Ya estoy aquí, Leo.",
+        )
+
+        self.assertTrue(engine._cancel_deferred_startup_greeting("shutdown"))
+        engine._stop_event.set()
+        release_warmup.set()
+        time.sleep(0.05)
+
+        engine._deliver_voice_reply.assert_not_called()
+        self.assertEqual(engine._startup_greeting_result, {
+            "status": "discarded", "reason": "shutdown"
+        })
+        self.assertFalse(engine.stream_tts_safety.worker_alive)
+
     def test_engine_emits_ui_and_returns_without_waiting_for_tts(self):
         release = threading.Event()
         started = threading.Event()
