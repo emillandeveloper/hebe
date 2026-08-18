@@ -240,6 +240,9 @@ class STTConfig:
         if (os.getenv("HEBE_STT_INPUT_DEVICE_CHANNELS") or "").isdigit()
         else None
     )
+    allow_default_input_fallback: bool = os.getenv(
+        "HEBE_STT_ALLOW_DEFAULT_INPUT_FALLBACK", "false"
+    ).strip().lower() in ("1", "true", "yes", "on")
 
     silence_threshold: float = 0.01
     silence_rms_threshold: float = float(os.getenv("HEBE_STT_SILENCE_RMS_THRESHOLD", "0.003") or "0.003")
@@ -455,6 +458,8 @@ class STTService:
         self.failed_input_ts = 0.0
         self._open_fail_counts: dict[str, int] = {}
         self._last_silence_warning_ts = 0.0
+        self._input_device_generation = 0
+        self._last_device_resolution_reason = "unresolved"
         self.last_audio_np: np.ndarray | None = None
         self.last_speech_detected = False
         self.last_transcription_language: str | None = None
@@ -1368,61 +1373,43 @@ class STTService:
         return self.get_selected_input_device()
     
     def _resolve_input_device(self, p: pyaudio.PyAudio) -> int:
-        """
-        Decide qué dispositivo usar:
-        1. Si hay índice en config → usarlo
-        2. Si no → usar el default del sistema
-        """
-
         devices = _list_audio_devices_with_instance(p)
         default_device = next((d for d in devices if d.get("is_default_input")), None)
         if default_device and self.cfg.verbose_device_logs:
             print(f"[HEBE][STT][DEVICE] default input={default_device.get('display_label')}", flush=True)
 
-        selected: dict | None = None
-        reason = "default_input"
-
-        if self.cfg.input_device_index is not None:
-            selected = next((d for d in devices if int(d.get("index", -1)) == int(self.cfg.input_device_index)), None)
-            if selected and self.cfg.input_device_name and str(selected.get("name") or "") != self.cfg.input_device_name:
-                selected = None
-            if selected and self.cfg.input_device_host_api and str(selected.get("host_api") or "") != self.cfg.input_device_host_api:
-                selected = None
-            if selected:
-                reason = "exact_id"
-
-        if selected is None and self.cfg.input_device_signature:
-            selected = next((d for d in devices if str(d.get("signature") or "") == self.cfg.input_device_signature), None)
-            if selected:
-                reason = "signature"
-
-        if selected is None and self.cfg.input_device_name and self.cfg.input_device_host_api:
-            selected = next(
-                (
-                    d for d in devices
-                    if str(d.get("name") or "") == self.cfg.input_device_name
-                    and str(d.get("host_api") or "") == self.cfg.input_device_host_api
-                ),
-                None,
+        selected, reason = _select_audio_input_device(
+            devices,
+            device_index=self.cfg.input_device_index,
+            device_name=self.cfg.input_device_name,
+            host_api=self.cfg.input_device_host_api,
+            signature=self.cfg.input_device_signature,
+            allow_default_fallback=self.cfg.allow_default_input_fallback,
+        )
+        if selected is None:
+            configured = (
+                f"name={self.cfg.input_device_name or '(missing)'} "
+                f"host_api={self.cfg.input_device_host_api or '(missing)'} "
+                f"signature={self.cfg.input_device_signature or '(missing)'} "
+                f"last_index={self.cfg.input_device_index}"
             )
-            if selected:
-                reason = "name_host_api"
-
-        if selected is None and self.cfg.input_device_name:
-            candidates = [d for d in devices if str(d.get("name") or "") == self.cfg.input_device_name]
-            selected = _sort_by_host_api_preference(candidates)[0] if candidates else None
-            if selected:
-                reason = "name_only"
-
-        if selected is None:
-            selected = default_device
-            reason = "default_input"
-
-        if selected is None:
-            raise RuntimeError("No input audio device available")
+            error = f"Configured STT input device is unavailable or lacks stable identity: {configured}"
+            self.status = "error"
+            self.last_input_device_error = error
+            self.failed_input_error = error
+            self.failed_input_device_id = str(self.cfg.input_device_index or "")
+            self.failed_input_signature = str(self.cfg.input_device_signature or "")
+            self._emit("status", {
+                "stt": "unavailable",
+                "last_stt_error": error,
+                "stt_input_device": self.get_selected_input_device(),
+            })
+            print(f"[HEBE][STT][ERROR] {error}", flush=True)
+            raise STTDeviceOpenFailure(error, device=self.get_selected_input_device(), attempts=0)
 
         device_index = int(selected["index"])
         self._remember_selected_device(selected)
+        self._last_device_resolution_reason = reason
         self.last_input_device_error = None
 
         if self.cfg.verbose_device_logs:
@@ -1442,6 +1429,12 @@ class STTService:
         self.selected_input_signature = str(device.get("signature") or "")
         self.selected_input_sample_rate = int(device.get("default_sample_rate") or device.get("sample_rate") or self.cfg.rate)
         self.selected_input_channels = max(1, min(int(device.get("max_input_channels") or device.get("channels") or self.cfg.channels), 2))
+        self.cfg.input_device_index = int(device.get("index"))
+        self.cfg.input_device_name = self.selected_input_device_name
+        self.cfg.input_device_host_api = self.selected_input_host_api
+        self.cfg.input_device_signature = self.selected_input_signature
+        self.cfg.input_device_sample_rate = self.selected_input_sample_rate
+        self.cfg.input_device_channels = self.selected_input_channels
 
     def set_input_device(
         self,
@@ -1473,6 +1466,12 @@ class STTService:
         self.selected_input_channels = int(channels) if channels else self.cfg.channels
         self.selected_input_signature = signature or ""
         self.clear_device_error()
+        p = pyaudio.PyAudio()
+        try:
+            self._resolve_input_device(p)
+        finally:
+            p.terminate()
+        self._input_device_generation += 1
         self.last_input_device_error = None
         print(
             f"[HEBE][STT][DEVICE] selected id={self.selected_input_device_id or '(default)'} "
@@ -1527,6 +1526,7 @@ class STTService:
             "failed_device_id": self.failed_input_device_id,
             "failed_signature": self.failed_input_signature,
             "failed_error": self.failed_input_error,
+            "resolution_reason": self._last_device_resolution_reason,
         }
 
     def _open_input_stream(self, p: pyaudio.PyAudio, device_index: int):
@@ -1640,6 +1640,7 @@ class STTService:
 
         p = pyaudio.PyAudio()
         device_index = self._resolve_input_device(p)
+        input_device_generation = self._input_device_generation
 
         try:
             stream, opened_rate, opened_channels = self._open_input_stream(p, device_index)
@@ -1656,9 +1657,19 @@ class STTService:
         silence_frames = 0
         start_time = time.time()
         tick = 0
+        silence_reresolve_attempted = False
+        health_window_started = start_time
+        health_window_max_rms = 0.0
+        health_window_max_peak = 0.0
 
         try:
             while True:
+                if input_device_generation != self._input_device_generation:
+                    print(
+                        "[HEBE][STT][DEVICE] active stream configuration changed; reopening once",
+                        flush=True,
+                    )
+                    return ""
                 data = stream.read(self.cfg.chunk, exception_on_overflow=False)
                 audio_chunk = np.frombuffer(data, dtype=np.int16).astype(np.float32) / 32768.0
                 peak = float(np.max(np.abs(audio_chunk))) if len(audio_chunk) > 0 else 0.0
@@ -1666,20 +1677,67 @@ class STTService:
                 self.last_input_peak = peak
                 self.last_input_rms = rms
                 self.last_input_level = peak
+                health_window_max_rms = max(health_window_max_rms, rms)
+                health_window_max_peak = max(health_window_max_peak, peak)
                 tick += 1
 
                 if tick % 10 == 0:
                     now = time.time()
-                    if (
-                        rms <= self.cfg.silence_rms_threshold
-                        and now - start_time >= self.cfg.silence_warning_after_seconds
-                        and now - self._last_silence_warning_ts >= self.cfg.silence_warning_rate_limit_seconds
-                    ):
-                        self._last_silence_warning_ts = now
-                        print(
-                            f"[HEBE][STT][WARN] selected input opened but signal is silent rms={rms:.4f} peak={peak:.4f}",
-                            flush=True,
+                    if now - health_window_started >= self.cfg.silence_warning_after_seconds:
+                        exact_zero_window = _input_health_window_is_silent(
+                            health_window_max_rms,
+                            health_window_max_peak,
                         )
+                        if (
+                            exact_zero_window
+                            and now - self._last_silence_warning_ts >= self.cfg.silence_warning_rate_limit_seconds
+                        ):
+                            self._last_silence_warning_ts = now
+                            print(
+                                f"[HEBE][STT][WARN] selected input opened but signal is silent "
+                                f"device={self.selected_input_device_name!r} index={device_index} "
+                                f"host_api={self.selected_input_host_api!r} "
+                                f"window_rms={health_window_max_rms:.4f} window_peak={health_window_max_peak:.4f}",
+                                flush=True,
+                            )
+                            self.last_input_device_error = (
+                                f"silent_input device={self.selected_input_device_name!r} "
+                                f"index={device_index} host_api={self.selected_input_host_api!r}"
+                            )
+                            self._emit("status", {
+                                "stt": "silent_input",
+                                "last_stt_error": self.last_input_device_error,
+                                "stt_input_device": self.get_selected_input_device(),
+                            })
+                            if not silence_reresolve_attempted:
+                                silence_reresolve_attempted = True
+                                resolved_index = self._resolve_input_device(p)
+                                print(
+                                    "[HEBE][STT][DEVICE] silent input re-resolve "
+                                    f"old_index={device_index} resolved_index={resolved_index} "
+                                    f"reason={self._last_device_resolution_reason}",
+                                    flush=True,
+                                )
+                                if resolved_index != device_index:
+                                    stream.stop_stream()
+                                    stream.close()
+                                    stream, opened_rate, opened_channels = self._open_input_stream(p, resolved_index)
+                                    device_index = resolved_index
+                                    frames.clear()
+                                    preroll_frames = max(
+                                        0,
+                                        min(
+                                            int(round(self.cfg.preroll_seconds * opened_rate / self.cfg.chunk)),
+                                            int(round(2.0 * opened_rate / self.cfg.chunk)),
+                                        ),
+                                    )
+                                    preroll = deque(maxlen=preroll_frames)
+                                    recording = False
+                                    silence_frames = 0
+                                    start_time = now
+                        health_window_started = now
+                        health_window_max_rms = 0.0
+                        health_window_max_peak = 0.0
                     self._emit("stt.partial", {
                         "text": f"rms {rms:.3f} peak {peak:.3f}",
                         "level": peak,
@@ -1872,6 +1930,10 @@ def _device_signature(name: str, host_api: str, sample_rate: int, max_input_chan
     return f"{name}|{host_api}|{sample_rate}|{max_input_channels}".lower()
 
 
+def _input_health_window_is_silent(max_rms: float, max_peak: float) -> bool:
+    return float(max_rms) <= 1e-7 and float(max_peak) <= 1e-7
+
+
 def _device_display_label(device: dict) -> str:
     return (
         f"{device.get('name') or '(sin nombre)'} — {device.get('host_api') or 'API ?'} — "
@@ -1895,6 +1957,62 @@ def _host_api_score(host_api: str) -> int:
 
 def _sort_by_host_api_preference(devices: list[dict]) -> list[dict]:
     return sorted(devices, key=lambda d: (_host_api_score(str(d.get("host_api") or "")), int(d.get("index") or 0)))
+
+
+def _select_audio_input_device(
+    devices: list[dict],
+    *,
+    device_index: int | None = None,
+    device_name: str | None = None,
+    host_api: str | None = None,
+    signature: str | None = None,
+    allow_default_fallback: bool = False,
+) -> tuple[dict | None, str]:
+    """Resolve the current PortAudio index from stable configured identity."""
+    name_key = str(device_name or "").strip().casefold()
+    host_key = str(host_api or "").strip().casefold()
+    signature_key = str(signature or "").strip().casefold()
+    has_stable_identity = bool(signature_key or name_key)
+
+    if signature_key:
+        match = next(
+            (d for d in devices if str(d.get("signature") or "").strip().casefold() == signature_key),
+            None,
+        )
+        if match is not None:
+            return match, "stable_signature"
+
+    if name_key and host_key:
+        match = next(
+            (
+                d for d in devices
+                if str(d.get("name") or "").strip().casefold() == name_key
+                and str(d.get("host_api") or "").strip().casefold() == host_key
+            ),
+            None,
+        )
+        if match is not None:
+            return match, "stable_name_host_api"
+
+    if name_key:
+        candidates = [
+            d for d in devices
+            if str(d.get("name") or "").strip().casefold() == name_key
+        ]
+        if candidates:
+            return _sort_by_host_api_preference(candidates)[0], "stable_name_rebound_host_api"
+
+    if not has_stable_identity and device_index is None:
+        default = next((d for d in devices if d.get("is_default_input")), None)
+        return default, "unconfigured_default"
+
+    if allow_default_fallback:
+        default = next((d for d in devices if d.get("is_default_input")), None)
+        return default, "authorized_default_fallback"
+
+    # A numeric index alone is deliberately not trusted: Windows/PortAudio can
+    # assign the same index to a different device after reboot or USB changes.
+    return None, "configured_identity_unavailable"
 
 
 def _list_audio_devices_with_instance(p: pyaudio.PyAudio) -> list[dict]:
@@ -1972,17 +2090,15 @@ def test_audio_input_device(
     stream = None
     try:
         devices = _list_audio_devices_with_instance(p)
-        selected: dict | None = None
-        if device_id not in (None, ""):
-            selected = next((d for d in devices if str(d.get("id")) == str(device_id)), None)
-        if selected is None and device_name and host_api:
-            selected = next((d for d in devices if d.get("name") == device_name and d.get("host_api") == host_api), None)
-        if selected is None and device_name:
-            selected = next((d for d in devices if d.get("name") == device_name), None)
+        selected, _reason = _select_audio_input_device(
+            devices,
+            device_index=int(str(device_id)) if str(device_id or "").isdigit() else None,
+            device_name=device_name,
+            host_api=host_api,
+            allow_default_fallback=False,
+        )
         if selected is None:
-            selected = next((d for d in devices if d.get("is_default_input")), None)
-        if selected is None:
-            raise RuntimeError("No input audio device available")
+            raise RuntimeError("Configured input audio device is unavailable")
 
         device_index = int(selected["index"])
         device_rate = int(selected.get("default_sample_rate") or 48000)

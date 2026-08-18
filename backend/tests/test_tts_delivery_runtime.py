@@ -5,9 +5,10 @@ import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 from app.cognitive.final_emission_gate import FinalEmissionGate, OutputRoute
+from app.core import runtime as runtime_module
 from app.hebe_engine import HebeEngine
 from app.services import speech_output
 from app.services import tts_piper, tts_service
@@ -276,6 +277,117 @@ class TTSQueueTests(unittest.TestCase):
 
 
 class TTSDeadlineTests(unittest.TestCase):
+    def test_stt_echo_guard_tracks_playback_not_synthesis(self):
+        state = SimpleNamespace(tts_enabled=True)
+        stt = Mock()
+
+        def fake_speak(**kwargs):
+            stt.set_tts_playback.assert_not_called()
+            kwargs["on_playback_state"](True)
+            kwargs["on_playback_state"](False)
+            return {"status": "tts_delivered"}
+
+        with (
+            patch.object(runtime_module, "_speak", side_effect=fake_speak),
+            patch.object(runtime_module, "log_jsonl_event"),
+        ):
+            result = runtime_module.build_speak(state, stt)("Hola.")
+
+        self.assertEqual(result["status"], "tts_delivered")
+        self.assertEqual(stt.set_tts_playback.call_args_list, [
+            call(True, "Hola."),
+            call(False, "Hola."),
+        ])
+
+    def test_cold_background_warmup_is_not_active_speech_and_returns_idle(self):
+        controller = SpeechOutputController()
+        started = threading.Event()
+        release = threading.Event()
+
+        def blocked_warmup(timeout_seconds=None):
+            started.set()
+            release.wait(1)
+            return SynthesisReceipt("fake", 1)
+
+        engine = HebeEngine.__new__(HebeEngine)
+        engine.runtime = SimpleNamespace(tts=controller)
+        engine._tts_active = True
+        engine._last_tts_activity_state = "TTS_SYNTHESIZING"
+        with patch.object(speech_output, "warmup_synthesis", side_effect=blocked_warmup):
+            thread = threading.Thread(target=controller.warmup)
+            thread.start()
+            self.assertTrue(started.wait(0.5))
+            self.assertEqual(controller.activity_state, "TTS_WARMING")
+            self.assertFalse(controller.is_speaking)
+            self.assertFalse(engine._is_tts_active())
+            release.set()
+            thread.join(1)
+
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(controller.activity_state, "TTS_IDLE")
+        self.assertFalse(engine._is_tts_active())
+
+    def test_synthesis_and_playback_publish_real_activity_then_return_idle(self):
+        controller = SpeechOutputController()
+        synthesis_started = threading.Event()
+        release_synthesis = threading.Event()
+        playback_started = threading.Event()
+        release_playback = threading.Event()
+        temp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+        temp.close()
+
+        def synthesize(*_args, **_kwargs):
+            synthesis_started.set()
+            release_synthesis.wait(1)
+            return temp.name, SynthesisReceipt("fake", 1)
+
+        music = Mock()
+        music.get_busy.side_effect = lambda: not release_playback.is_set()
+        mixer = Mock()
+        mixer.get_init.return_value = True
+        mixer.music = music
+        playback_states = []
+        result = {}
+
+        def record_playback_state(active):
+            playback_states.append(active)
+            if active:
+                playback_started.set()
+
+        with (
+            patch.object(speech_output, "tts_to_wav", side_effect=synthesize),
+            patch.object(speech_output, "pygame", SimplePygame(mixer)),
+            patch.object(controller, "_wav_duration", return_value=1.0),
+        ):
+            thread = threading.Thread(
+                target=lambda: result.update(controller.speak("Hola.", on_playback_state=record_playback_state))
+            )
+            thread.start()
+            self.assertTrue(synthesis_started.wait(0.5))
+            self.assertEqual(controller.activity_state, "TTS_SYNTHESIZING")
+            self.assertTrue(controller.is_speaking)
+            release_synthesis.set()
+            self.assertTrue(playback_started.wait(0.5))
+            self.assertEqual(controller.activity_state, "TTS_PLAYING")
+            self.assertTrue(controller.is_playing)
+            release_playback.set()
+            thread.join(1)
+
+        self.assertEqual(result["status"], "tts_delivered")
+        self.assertEqual(playback_states, [True, False])
+        self.assertEqual(controller.activity_state, "TTS_IDLE")
+        self.assertFalse(controller.is_speaking)
+
+    def test_failed_or_cancelled_synthesis_cannot_leave_tts_active(self):
+        for error in (TTSSynthesisTimeout("timeout"), TTSCancelled("cancelled"), RuntimeError("failed")):
+            with self.subTest(error=type(error).__name__):
+                controller = SpeechOutputController()
+                with patch.object(speech_output, "tts_to_wav", side_effect=error):
+                    with self.assertRaises(type(error)):
+                        controller.speak("Hola.")
+                self.assertEqual(controller.activity_state, "TTS_IDLE")
+                self.assertFalse(controller.is_speaking)
+
     def test_tts_delivery_is_independent_of_vts_hotkeys_and_connection_lifecycle(self):
         controller = SpeechOutputController()
         temp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)

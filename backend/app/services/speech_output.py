@@ -4,6 +4,7 @@ import os
 import threading
 import time
 import wave
+from enum import Enum
 from typing import Callable, Optional
 
 import pygame
@@ -29,10 +30,68 @@ class TTSCancelled(RuntimeError):
     pass
 
 
+class TTSActivityState(str, Enum):
+    WARMING = "TTS_WARMING"
+    SYNTHESIZING = "TTS_SYNTHESIZING"
+    PLAYING = "TTS_PLAYING"
+    IDLE = "TTS_IDLE"
+
+
 class SpeechOutputController:
     def __init__(self) -> None:
         self._cancelled = threading.Event()
         self._playback_lock = threading.Lock()
+        self._state_lock = threading.RLock()
+        self._warming = 0
+        self._synthesizing = 0
+        self._playing = 0
+
+    @property
+    def activity_state(self) -> str:
+        with self._state_lock:
+            if self._playing:
+                return TTSActivityState.PLAYING.value
+            if self._synthesizing:
+                return TTSActivityState.SYNTHESIZING.value
+            if self._warming:
+                return TTSActivityState.WARMING.value
+            return TTSActivityState.IDLE.value
+
+    @property
+    def is_speaking(self) -> bool:
+        return self.activity_state in {
+            TTSActivityState.SYNTHESIZING.value,
+            TTSActivityState.PLAYING.value,
+        }
+
+    @property
+    def is_playing(self) -> bool:
+        return self.activity_state == TTSActivityState.PLAYING.value
+
+    def activity_snapshot(self) -> dict:
+        state = self.activity_state
+        return {
+            "state": state,
+            "active": state in {
+                TTSActivityState.SYNTHESIZING.value,
+                TTSActivityState.PLAYING.value,
+            },
+            "playing": state == TTSActivityState.PLAYING.value,
+        }
+
+    def _change_activity(self, phase: str, delta: int) -> None:
+        with self._state_lock:
+            current = int(getattr(self, phase))
+            setattr(self, phase, max(0, current + delta))
+
+    @staticmethod
+    def _notify_playback(callback: Optional[Callable[[bool], None]], active: bool) -> None:
+        if callback is None:
+            return
+        try:
+            callback(active)
+        except Exception as exc:
+            print(f"[HEBE][TTS_STATE] playback_callback_failed={type(exc).__name__}", flush=True)
 
     @staticmethod
     def _wav_duration(path: str) -> float:
@@ -51,6 +110,7 @@ class SpeechOutputController:
         log_chat: Optional[Callable[[str, str, str], None]] = None,
         emit_chat: bool = True,
         trace_id: str = "",
+        on_playback_state: Optional[Callable[[bool], None]] = None,
     ) -> dict:
         if not text:
             return {"status": "tts_cancelled", "reason": "empty_text"}
@@ -64,7 +124,11 @@ class SpeechOutputController:
         audio_path = ""
         self._cancelled.clear()
         total_started = time.perf_counter()
+        synthesis_active = False
+        playback_active = False
         try:
+            self._change_activity("_synthesizing", 1)
+            synthesis_active = True
             if emit:
                 emit("tts.status", {"outcome": "tts_started", "stage": "synthesis", "trace_id": trace_id})
             audio_path, synthesis = tts_to_wav(
@@ -73,6 +137,8 @@ class SpeechOutputController:
                 emit=emit,
                 log_chat=log_chat,
             )
+            self._change_activity("_synthesizing", -1)
+            synthesis_active = False
             if self._cancelled.is_set():
                 raise TTSCancelled("TTS cancelled after synthesis")
             if emit:
@@ -89,6 +155,9 @@ class SpeechOutputController:
                 max(HEBE_TTS_PLAYBACK_GRACE_SECONDS, expected_duration + HEBE_TTS_PLAYBACK_GRACE_SECONDS),
             )
             playback_started = time.perf_counter()
+            self._change_activity("_playing", 1)
+            playback_active = True
+            self._notify_playback(on_playback_state, True)
             if emit:
                 emit("tts.status", {
                     "outcome": "tts_playback_started",
@@ -144,6 +213,11 @@ class SpeechOutputController:
                 raise TTSCancelled("TTS synthesis cancelled") from exc
             raise
         finally:
+            if playback_active:
+                self._notify_playback(on_playback_state, False)
+                self._change_activity("_playing", -1)
+            if synthesis_active:
+                self._change_activity("_synthesizing", -1)
             try:
                 pygame.mixer.music.unload()
             except Exception:
@@ -156,12 +230,16 @@ class SpeechOutputController:
 
     def warmup(self, *, timeout_seconds: float | None = None) -> dict:
         started = time.perf_counter()
-        receipt = warmup_synthesis(timeout_seconds=timeout_seconds)
-        return {
-            "status": "ready",
-            "backend": receipt.backend,
-            "latency_ms": (time.perf_counter() - started) * 1000,
-        }
+        self._change_activity("_warming", 1)
+        try:
+            receipt = warmup_synthesis(timeout_seconds=timeout_seconds)
+            return {
+                "status": "ready",
+                "backend": receipt.backend,
+                "latency_ms": (time.perf_counter() - started) * 1000,
+            }
+        finally:
+            self._change_activity("_warming", -1)
 
     def cancel(self) -> None:
         self.cancel_playback()
@@ -189,6 +267,7 @@ def speak(
     log_chat: Optional[Callable[[str, str, str], None]] = None,
     emit_chat: bool = True,
     trace_id: str = "",
+    on_playback_state: Optional[Callable[[bool], None]] = None,
 ) -> dict:
     """
     High-level speech output:
@@ -205,6 +284,7 @@ def speak(
         log_chat=log_chat,
         emit_chat=emit_chat,
         trace_id=trace_id,
+        on_playback_state=on_playback_state,
     )
 
 

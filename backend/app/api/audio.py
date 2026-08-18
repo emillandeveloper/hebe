@@ -11,7 +11,12 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from app.services import db_sqlite
-from app.services.stt_whisper import WhisperModel, list_audio_devices, test_audio_input_device
+from app.services.stt_whisper import (
+    WhisperModel,
+    _select_audio_input_device,
+    list_audio_devices,
+    test_audio_input_device,
+)
 
 
 router = APIRouter(prefix="/audio", tags=["audio"])
@@ -103,12 +108,26 @@ async def set_audio_input_device(selection: InputDeviceSelection, request: Reque
     channels = int(selection.channels or 0) if selection.channels else None
     signature = str(selection.signature or "").strip()
 
-    db_sqlite.set_setting(SETTING_DEVICE_ID, device_id)
-    db_sqlite.set_setting(SETTING_DEVICE_NAME, device_name)
-    db_sqlite.set_setting(SETTING_DEVICE_HOST_API, host_api)
-    db_sqlite.set_setting(SETTING_DEVICE_SAMPLE_RATE, str(sample_rate or ""))
-    db_sqlite.set_setting(SETTING_DEVICE_CHANNELS, str(channels or ""))
-    db_sqlite.set_setting(SETTING_DEVICE_SIGNATURE, signature)
+    devices = list_audio_devices()
+    resolved, reason = _select_audio_input_device(
+        devices,
+        device_index=int(device_id) if device_id.isdigit() else None,
+        device_name=device_name,
+        host_api=host_api,
+        signature=signature,
+        allow_default_fallback=False,
+    )
+    if resolved is None:
+        raise HTTPException(
+            status_code=409,
+            detail="Configured input device identity is unavailable; selection was not persisted",
+        )
+    device_id = str(resolved.get("id") or resolved.get("index") or "")
+    device_name = str(resolved.get("name") or "")
+    host_api = str(resolved.get("host_api") or "")
+    sample_rate = int(resolved.get("default_sample_rate") or resolved.get("sample_rate") or 0) or None
+    channels = int(resolved.get("max_input_channels") or resolved.get("channels") or 0) or None
+    signature = str(resolved.get("signature") or "")
 
     applied = False
     error = None
@@ -127,6 +146,14 @@ async def set_audio_input_device(selection: InputDeviceSelection, request: Reque
             error = f"{type(exc).__name__}: {exc}"
             print(f"[HEBE][STT][ERROR] apply selected input failed: {error}", flush=True)
 
+    if error is None:
+        db_sqlite.set_setting(SETTING_DEVICE_ID, device_id)
+        db_sqlite.set_setting(SETTING_DEVICE_NAME, device_name)
+        db_sqlite.set_setting(SETTING_DEVICE_HOST_API, host_api)
+        db_sqlite.set_setting(SETTING_DEVICE_SAMPLE_RATE, str(sample_rate or ""))
+        db_sqlite.set_setting(SETTING_DEVICE_CHANNELS, str(channels or ""))
+        db_sqlite.set_setting(SETTING_DEVICE_SIGNATURE, signature)
+
     print(
         f"[HEBE][STT][DEVICE] selected id={device_id or '(default)'} name={device_name or '(default)'} "
         f"host_api={host_api or '(unknown)'} applied={applied}",
@@ -142,6 +169,7 @@ async def set_audio_input_device(selection: InputDeviceSelection, request: Reque
         "sample_rate": sample_rate,
         "channels": channels,
         "signature": signature,
+        "resolution_reason": reason,
     }
 
 
@@ -166,7 +194,13 @@ def stt_health(request: Request):
     stt = getattr(getattr(engine, "runtime", None), "stt", None)
     if stt is None:
         return {"available": False, "engine_status": "unavailable"}
-    return {"available": True, **stt.health_snapshot()}
+    tts = getattr(getattr(engine, "runtime", None), "tts", None)
+    tts_activity = (
+        tts.activity_snapshot()
+        if tts is not None and hasattr(tts, "activity_snapshot")
+        else {"state": "TTS_IDLE", "active": False, "playing": False}
+    )
+    return {"available": True, **stt.health_snapshot(), "tts_activity": tts_activity}
 
 
 @router.get("/stt-benchmark/profiles")

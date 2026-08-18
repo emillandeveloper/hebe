@@ -12,7 +12,7 @@ load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), '..', '..', '.en
 from app.core.ui_bridge import emit
 from app.core.state import HebeState
 from app.core.persistent_logs import log_jsonl_event
-from app.services.db_sqlite import get_setting, log_chat
+from app.services.db_sqlite import get_setting, log_chat, set_setting
 from app.services.llm_factory import create_conversation_llm
 from app.services.speech_output import controller as speech_output_controller
 from app.services.speech_output import speak as _speak
@@ -64,9 +64,11 @@ def build_speak(state: HebeState, stt: STTService | None = None) -> Callable[...
             "text_length": len(text),
             "trace_id": trace_id,
         })
-        try:
+        def on_playback_state(active: bool) -> None:
             if stt is not None:
-                stt.set_tts_playback(True, text)
+                stt.set_tts_playback(active, text)
+
+        try:
             result = _speak(
                 text=text,
                 language=language,
@@ -74,6 +76,7 @@ def build_speak(state: HebeState, stt: STTService | None = None) -> Callable[...
                 log_chat=log_chat,
                 emit_chat=emit_chat,
                 trace_id=trace_id,
+                on_playback_state=on_playback_state,
             )
             log_jsonl_event("tts", {
                 "output_target": "local_tts",
@@ -96,10 +99,6 @@ def build_speak(state: HebeState, stt: STTService | None = None) -> Callable[...
                 "error": safe_error,
             })
             raise
-        finally:
-            if stt is not None:
-                stt.set_tts_playback(False, text)
-
     return speak
 
 
@@ -150,7 +149,7 @@ def build_runtime() -> HebeRuntime:
     speak = build_speak(state, stt)
     if persisted_device or persisted_device_name:
         try:
-            stt.set_input_device(
+            resolved_device = stt.set_input_device(
                 device_id=persisted_device or "",
                 device_name=persisted_device_name or "",
                 host_api=persisted_host_api or "",
@@ -158,6 +157,15 @@ def build_runtime() -> HebeRuntime:
                 channels=int(str(persisted_channels)) if str(persisted_channels or "").isdigit() else None,
                 signature=persisted_signature or "",
             )
+            for key, value in {
+                "stt.input_device_id": resolved_device.get("device_id"),
+                "stt.input_device_name": resolved_device.get("device_name"),
+                "stt.input_device_host_api": resolved_device.get("host_api"),
+                "stt.input_device_sample_rate": resolved_device.get("sample_rate"),
+                "stt.input_device_channels": resolved_device.get("channels"),
+                "stt.input_device_signature": resolved_device.get("signature"),
+            }.items():
+                set_setting(key, "" if value is None else str(value))
         except Exception as exc:
             print(f"[HEBE][STT][ERROR] persisted input device invalid: {exc!r}", flush=True)
 

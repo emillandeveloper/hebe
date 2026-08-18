@@ -403,7 +403,7 @@ class HebeEngine:
             scene_timeline=self.scene_timeline,
             opportunities=self.spontaneous_opportunities,
             owner_voice_active_fn=self._owner_audio_active,
-            tts_active_fn=lambda: bool(getattr(self, "_tts_active", False)),
+            tts_active_fn=self._is_tts_active,
             behavior_adaptation=self.behavior_adaptation,
         )
         self.stream_context_sync = StreamContextSyncService(
@@ -556,6 +556,7 @@ class HebeEngine:
         self._tts_started_at = 0.0
         self._tts_until = 0.0
         self._tts_active = False
+        self._last_tts_activity_state = "TTS_IDLE"
         self._recent_stt_transcripts: list[dict] = []
         self._stt_prompt_echo_rejection_ts: list[float] = []
         self._stt_visible_transcripts: set[str] = set()
@@ -5805,7 +5806,7 @@ class HebeEngine:
                 scene_timeline=getattr(self, "scene_timeline", None),
                 opportunities=getattr(self, "spontaneous_opportunities", None),
                 owner_voice_active_fn=self._owner_audio_active,
-                tts_active_fn=lambda: bool(getattr(self, "_tts_active", False)),
+                tts_active_fn=self._is_tts_active,
             )
             self.stream_companion_loop = loop
 
@@ -5915,7 +5916,7 @@ class HebeEngine:
         stream.proposed_discourse_contribution = plan.to_dict()
         detector = getattr(self, "stream_turn_detector", None) or StreamTurnDetector()
         turn = detector.detect(
-            now=now, audio_active=self._owner_audio_active(), tts_speaking=bool(getattr(self, "_tts_active", False)),
+            now=now, audio_active=self._owner_audio_active(), tts_speaking=self._is_tts_active(),
             topic_ready=plan.should_contribute,
             combat_intense=bool(getattr(stream, "combat_state", False) or getattr(stream, "current_activity", "") in {"combat", "boss"}),
         )
@@ -5973,7 +5974,7 @@ class HebeEngine:
             stream.last_discourse_blocked_reason = "render_or_grounding_failed"
             return False
         final_turn = detector.detect(now=time.time(), audio_active=self._owner_audio_active(), topic_ready=True,
-                                     tts_speaking=bool(getattr(self, "_tts_active", False)))
+                                     tts_speaking=self._is_tts_active())
         if not final_turn.turn_available:
             stream.last_discourse_blocked_reason = "owner_resumed_speaking"
             print("[HEBE][DISCOURSE_CONTRIBUTION_CANCELLED] reason=owner_resumed_speaking", flush=True)
@@ -6668,7 +6669,6 @@ class HebeEngine:
         self._last_tts_message_id = tts_message_id
         self._tts_started_at = now
         self._tts_until = until
-        self._tts_active = True
         pending = self._active_current_conversation(latest=True)
         if pending is not None and pending.topic == "promotion_target_clarification":
             capture_seconds = float(pending.domain_payload.get("capture_window_seconds") or 12.0)
@@ -6694,6 +6694,31 @@ class HebeEngine:
         })
         self._recent_tts_texts = recent[-8:]
 
+    def _tts_activity_state(self) -> str:
+        tts = getattr(getattr(self, "runtime", None), "tts", None)
+        state = str(getattr(tts, "activity_state", "") or "").strip().upper()
+        known = {"TTS_WARMING", "TTS_SYNTHESIZING", "TTS_PLAYING", "TTS_IDLE"}
+        if state not in known:
+            state = "TTS_SYNTHESIZING" if bool(getattr(tts, "is_speaking", False)) else "TTS_IDLE"
+        active = state in {"TTS_SYNTHESIZING", "TTS_PLAYING"}
+        previous = str(getattr(self, "_last_tts_activity_state", "") or "")
+        stale_reset = bool(
+            getattr(self, "_tts_active", False)
+            and not active
+            and previous == state
+        )
+        self._tts_active = active
+        self._last_tts_activity_state = state
+        if stale_reset and previous != state:
+            print(
+                f"[HEBE][TTS_STATE] invariant_reset previous={previous or 'unknown'} current={state}",
+                flush=True,
+            )
+        return state
+
+    def _is_tts_active(self) -> bool:
+        return self._tts_activity_state() in {"TTS_SYNTHESIZING", "TTS_PLAYING"}
+
     def _stt_self_tts_echo_metrics(self, text: str) -> dict:
         now = time.time()
         window = float(getattr(self, "stt_tts_echo_window_seconds", 10) or 10)
@@ -6714,11 +6739,10 @@ class HebeEngine:
                 best_text = str(item.get("text") or "")
                 best_message_id = str(item.get("message_id") or "")
         tts = getattr(getattr(self, "runtime", None), "tts", None)
-        speaking = bool(getattr(tts, "is_speaking", False))
+        speaking = self._is_tts_active()
         ignore_while_speaking = bool(getattr(self, "stt_ignore_while_tts_speaking", True))
         active_until = float(getattr(self, "_tts_until", 0.0) or 0.0)
-        active_window = bool(speaking or now <= active_until)
-        self._tts_active = active_window
+        active_window = speaking
         rejected = best >= threshold
         if ignore_while_speaking and speaking and not best_text and not normalized:
             rejected = True
@@ -6729,6 +6753,7 @@ class HebeEngine:
             "tts_speaking": speaking,
             "tts_active": active_window,
             "tts_until": active_until,
+            "tts_echo_window_active": bool(now <= active_until),
             "matched_tts_text": best_text,
             "matched_tts_message_id": best_message_id,
         }
