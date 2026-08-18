@@ -17,5 +17,16 @@
       "Alexandria": ["alexandria", "alejandria"]
     },
     "characters": {}
+  },
+  "final_fantasy_v": {
+    "game_aliases": ["final fantasy v", "final fantasy 5", "ffv", "ff5"],
+    "locations": {},
+    "characters": {},
+    "jobs": {
+      "Beastmaster": ["beastmaster", "beast master", "beatmaster"],
+      "Geomancer": ["geomancer"],
+      "Berserker": ["berserker"],
+      "Ninja": ["ninja"]
+    }
   }
 }

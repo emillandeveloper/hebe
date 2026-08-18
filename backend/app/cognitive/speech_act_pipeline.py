@@ -1375,7 +1375,9 @@ def _fallback_for_guard(
             return f"He intentado consultar {title}, pero no he obtenido datos fiables suficientes."
         return f"No tengo datos fiables de {title} ahora mismo; prefiero no describirlo ni recomendarlo a ciegas."
     if "action_claim_without_execution_success" in violations:
-        return "La respuesta parece corresponder a la tarea pendiente, pero no se ejecutó ninguna operación."
+        if bundle.cognitive_decision.intent in {"game_guidance_query", "game_guidance_clarification_answer"}:
+            return "No he podido cerrar esa consulta con una base fiable, así que prefiero no fingir una respuesta."
+        return "Eso no ha llegado a completarse; no voy a fingir que sí."
     return requested_fallback or safe_local_fallback(bundle)
 
 

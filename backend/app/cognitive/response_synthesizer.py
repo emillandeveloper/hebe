@@ -419,11 +419,15 @@ class ResponseSynthesizer:
         needs_clarification = bool(guidance.get("needs_clarification"))
         sources = list(decision.get("rag_chunks") or []) + list(decision.get("web_results") or [])
         if needs_clarification:
-            missing = "permission to discuss story spoilers" if "major_spoiler_permission_required" in ambiguity else (
-                "current character" if "character_unknown" in ambiguity else (
-                    "latest confirmed event or objective" if "story_phase_unknown" in ambiguity else "current area"
-                )
-            )
+            missing_fields = list(guidance.get("missing_required_fields") or [])
+            if "major_spoiler_permission_required" in ambiguity:
+                missing = "permission to discuss story spoilers"
+            elif {"party_jobs", "party_members", "level"} & set(missing_fields):
+                missing = "tu nivel y la party, clases o jobs que llevas"
+            elif "game" in missing_fields:
+                missing = "el juego"
+            else:
+                missing = "el último hito, objetivo o zona confirmada de la partida"
             response = self._run_universal_response(
                 route="game_guidance_clarification",
                 speech_act_type="game_guidance_clarification",
@@ -446,15 +450,23 @@ class ResponseSynthesizer:
             return clean_jarvis_reply(self._call_model(system, user, fallback=fallback)) or fallback
         if not sources:
             print("[HEBE][GAME_SOURCE] tier=all status=skipped reason=no_grounded_guidance_source", flush=True)
+            lookup_outcome = str(guidance.get("lookup_outcome") or "not_needed")
+            attempted = bool(guidance.get("lookup_attempted"))
+            honest_failure = (
+                f"He intentado comprobarlo para {game}, pero no he encontrado una base fiable suficiente."
+                if attempted else
+                f"Ahora mismo no tengo una fuente fiable disponible para concretar eso de {game}."
+            )
             response = self._run_universal_response(
                 route="game_guidance_no_source",
-                speech_act_type="game_guidance_clarification",
+                speech_act_type="game_guidance_answer",
                 context=context,
-                goal="explain that grounded game guidance needs a source or more context",
+                goal="honestly report that the gameplay lookup has no reliable evidence",
                 current_game=game,
-                required_facts=[f"game={game or 'unknown'}", "sources=none"],
+                required_facts=[f"game={game or 'unknown'}", "sources=none", f"lookup_outcome={lookup_outcome}"],
                 forbidden_content=["unsupported walkthrough facts"],
-                fallback="Necesito una fuente fiable o mas contexto de partida antes de concretar ese paso.",
+                must_not_do=["do not ask for run context that is not required", "do not invent game facts"],
+                fallback=honest_failure,
             )
             return response.text
             return "No tengo una fuente de guía fiable para concretar ese paso; necesito más contexto o consultar una fuente antes de afirmarlo."

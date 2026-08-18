@@ -240,7 +240,8 @@ class ContextMessageTypeTests(unittest.TestCase):
             )
 
         self.assertNotIn("apuntado", reply.casefold())
-        self.assertIn("no se ejecut", reply.casefold())
+        self.assertIn("no voy a fingir", reply.casefold())
+        self.assertNotIn("no se ejecut", reply.casefold())
         self.assertIn("[HEBE][FALLBACK_GUARD] blocked_action_claim=true", "\n".join(logs))
 
     def test_banter_prompt_blocks_planning_topic_shift(self):

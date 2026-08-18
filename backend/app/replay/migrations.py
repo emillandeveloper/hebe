@@ -276,7 +276,35 @@ def game_context_v2_migrations() -> tuple[Migration, ...]:
         add("game_dossiers","v2_projection_version","INTEGER NOT NULL DEFAULT 0")
         add("game_progress_states","game_run_id","TEXT")
         add("game_sessions","game_run_id","TEXT")
-    return (Migration("game_context_v2",1,"durable_runs_knowledge_and_gaps",phase3),)
+    def challenge_definitions(conn: sqlite3.Connection) -> None:
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS challenge_definitions (
+              challenge_id TEXT PRIMARY KEY, name TEXT NOT NULL, normalized_name TEXT NOT NULL,
+              game_id TEXT NOT NULL DEFAULT '', game_family TEXT NOT NULL DEFAULT '',
+              rules_json TEXT NOT NULL DEFAULT '[]', provenance TEXT NOT NULL,
+              confidence REAL NOT NULL, created_at REAL NOT NULL, updated_at REAL NOT NULL,
+              version INTEGER NOT NULL DEFAULT 1, status TEXT NOT NULL DEFAULT 'ACTIVE',
+              schema_version INTEGER NOT NULL DEFAULT 1
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_challenge_definition_identity
+              ON challenge_definitions(normalized_name,game_id,game_family);
+            CREATE TABLE IF NOT EXISTS game_run_challenges (
+              game_run_id TEXT PRIMARY KEY, challenge_definition_id TEXT NOT NULL,
+              state_json TEXT NOT NULL DEFAULT '{}', overrides_json TEXT NOT NULL DEFAULT '[]',
+              linked_at REAL NOT NULL, updated_at REAL NOT NULL, version INTEGER NOT NULL DEFAULT 1,
+              schema_version INTEGER NOT NULL DEFAULT 1,
+              FOREIGN KEY(game_run_id) REFERENCES game_runs(id),
+              FOREIGN KEY(challenge_definition_id) REFERENCES challenge_definitions(challenge_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_game_run_challenge_definition
+              ON game_run_challenges(challenge_definition_id,updated_at);
+            """
+        )
+    return (
+        Migration("game_context_v2",1,"durable_runs_knowledge_and_gaps",phase3),
+        Migration("game_context_v2",2,"persistent_challenge_definitions_and_run_overrides",challenge_definitions),
+    )
 
 
 def social_world_v2_migrations() -> tuple[Migration, ...]:

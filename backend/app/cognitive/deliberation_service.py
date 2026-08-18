@@ -283,6 +283,15 @@ class DeliberationService:
         needs_clarification = bool(context.get("needs_clarification") or getattr(guidance, "response_mode", "") == "game_guidance_clarification")
         log_jsonl_event("game_guidance", {
             "game": context.get("game"),
+            "game_question_type": context.get("game_question_type"),
+            "current_game_source": context.get("current_game_source"),
+            "run_context_required": bool(context.get("run_context_required")),
+            "run_context_available": bool(context.get("run_context_available")),
+            "challenge_id": context.get("challenge_definition_id"),
+            "challenge_name": context.get("challenge"),
+            "challenge_rules_applied": [
+                item.get("rule_id") for item in context.get("challenge_rules") or [] if isinstance(item, dict)
+            ],
             "location": context.get("location_or_area"),
             "current_character": context.get("current_character"),
             "party_members": context.get("party_members"),
@@ -291,6 +300,11 @@ class DeliberationService:
             "rag_skipped": not bool(getattr(guidance, "rag_chunks", []) or []),
             "web_used": bool(getattr(guidance, "web_results", []) or []),
             "web_skipped": not bool(getattr(guidance, "web_results", []) or []),
+            "lookup_attempted": bool(context.get("lookup_attempted")),
+            "lookup_outcome": context.get("lookup_outcome"),
+            "missing_required_fields": list(context.get("missing_required_fields") or []),
+            "clarification_reason": getattr(guidance, "reason", "") if needs_clarification else "",
+            "answer_grounding": context.get("answer_grounding"),
             "needs_clarification": bool(needs_clarification),
             "clarification_pending_created": bool(getattr(guidance, "response_mode", "") == "game_guidance_clarification"),
             "reason": getattr(guidance, "reason", ""),

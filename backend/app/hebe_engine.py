@@ -188,6 +188,7 @@ from app.continuity import (
 from app.replay.migrations import MigrationRunner, architecture_consolidation_migrations, conversation_continuity_migrations, game_context_v2_migrations, social_world_v2_migrations, learning_v2_migrations
 from app.epistemics.models import EvidenceRef, EvidenceRelation
 from app.game_context_v2.context import GameContextResolver
+from app.game_context_v2.challenge import ChallengeContextService
 from app.game_context_v2.migration import (
     game_knowledge_canonicalization_migrations,
     game_run_state_canonicalization_migrations,
@@ -643,10 +644,11 @@ class HebeEngine:
             self.game_knowledge_canonicalization=runner.migrate(game_knowledge_canonicalization_migrations())
             repository=GameV2Repository(db_sqlite.get_db_connection);runs=GameRunService(repository,self.belief_lifecycle,now_fn=lambda:time.time());knowledge=GameKnowledgeV2Service(repository,self.belief_lifecycle,now_fn=lambda:time.time())
             self.game_v2_repository=repository;self.game_run_service=runs;self.game_knowledge_v2_service=knowledge
+            self.challenge_context=ChallengeContextService(repository,now_fn=lambda:time.time())
             self.game_context_resolver=GameContextResolver(repository,runs,knowledge,research_service=getattr(self,"game_intelligence",None),memory_retrieval=getattr(self,"memory_retrieval",None),now_fn=lambda:time.time())
             self.game_knowledge.run_service=runs
         except Exception as exc:
-            self.game_v2_repository=None;self.game_run_service=None;self.game_knowledge_v2_service=None;self.game_context_resolver=None;self.game_context_v2_migrations=[];self.game_run_state_canonicalization=[];self.game_knowledge_canonicalization=[]
+            self.game_v2_repository=None;self.game_run_service=None;self.game_knowledge_v2_service=None;self.game_context_resolver=None;self.challenge_context=None;self.game_context_v2_migrations=[];self.game_run_state_canonicalization=[];self.game_knowledge_canonicalization=[]
             print(f"[HEBE][GAME_CONTEXT_V2_INIT] status=failed_closed reason={type(exc).__name__}",flush=True)
 
     def _initialize_belief_v2(self) -> None:
@@ -3952,6 +3954,11 @@ class HebeEngine:
         interpretation = getattr(current_event, "interpretation", None)
         if interpretation is None:
             interpretation = self._get_input_interpreter().interpret_event(current_event)
+        if source in {"ui", "typed_ui"}:
+            self._observe_challenge_owner_utterance(
+                command,
+                source_event_id=str(getattr(current_event,"event_id","") or f"ui_challenge_{uuid.uuid4().hex}"),
+            )
         if (
             source in {"ui", "typed_ui"}
             and active_pending is not None
@@ -5691,6 +5698,12 @@ class HebeEngine:
             run=resolution.active_run
             if run is None:return
             stream.active_game_run_id=run.id
+        challenge_service=getattr(self,"challenge_context",None)
+        if challenge_service is not None:
+            challenge_service.apply_known_definition_from_metadata(
+                title=str(getattr(stream,"current_stream_title",None) or ""),
+                game=identity.canonical_name,run_id=run.id,
+            )
         self._project_canonical_game_run(stream,run.id)
 
     def _project_canonical_game_run(self, stream, run_id: str) -> None:
@@ -5705,6 +5718,37 @@ class HebeEngine:
         stream.current_run_phase=state["last_confirmed_progress"] or None
         stream.current_challenge=state["challenge"] or None
         stream.current_playthrough_type=state["playthrough_type"] or None
+
+    def _observe_challenge_owner_utterance(self, text: str, *, source_event_id: str) -> dict:
+        service=getattr(self,"challenge_context",None);stream=self._get_stream_state()
+        if service is None or stream is None:return {}
+        normalized=self._normalize_text(text)
+        capture_active=bool(getattr(service,"capture",None))
+        challenge_signal=bool(re.search(
+            r"\b(?:desafio|challenge|reto|repaso\s+(?:a\s+)?las\s+reglas|explico\s+las\s+(?:reglas|normas))\b",
+            normalized,
+        ))
+        if not (capture_active or challenge_signal):return {}
+        game=str(getattr(stream,"current_game",None) or getattr(stream,"current_category",None) or "").strip()
+        run_id=str(getattr(stream,"active_game_run_id","") or "")
+        runs=getattr(self,"game_run_service",None)
+        if game and runs is not None and not run_id:
+            session_id=str(getattr(stream,"active_stream_session_id","") or f"challenge:{source_event_id}")
+            resolution=runs.resolve(
+                game=game,stream_session_id=session_id,source_event_id=source_event_id,
+                run_kind="challenge" if challenge_signal else str(getattr(stream,"current_playthrough_type",None) or "unknown"),
+            )
+            if resolution.active_run:
+                run_id=resolution.active_run.id;stream.active_game_run_id=run_id
+        result=service.observe_owner_utterance(
+            text,game=game,run_id=run_id,source_event_id=source_event_id,
+        )
+        if run_id and runs is not None:
+            self._project_canonical_game_run(stream,run_id)
+        event=getattr(self,"_current_input_event",None)
+        if event is not None and isinstance(getattr(event,"stt_metadata",None),dict):
+            event.stt_metadata["challenge_context_event"]=dict(result)
+        return result
 
     def _persist_canonical_run_state(self, stream, updates: dict[str, object], *, source: str) -> bool:
         service=getattr(self,"game_run_service",None)
@@ -7187,6 +7231,14 @@ class HebeEngine:
                 addressed_to_hebe=False,
                 explicit_command_mode=False,
                 direct_result=direct_stt,
+            )
+        if role_decision.role not in {
+            UtteranceRole.QUOTED_OR_READ_DIALOGUE,
+            UtteranceRole.GAME_AUDIO_BLEED,
+        }:
+            self._observe_challenge_owner_utterance(
+                transcript_for_cognition,
+                source_event_id=str(getattr(self._current_input_event,"event_id","") or f"stt_challenge_{uuid.uuid4().hex}"),
             )
         interpretation = self._current_input_event.interpretation
         mute_mode = self._owner_mute_command_mode(command)

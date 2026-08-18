@@ -8,7 +8,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable
 
-from app.game_context_v2.models import GameIdentity, GameKnowledgeGap, GameRun, GameRunStatus
+from app.game_context_v2.models import ChallengeDefinition, GameIdentity, GameKnowledgeGap, GameRun, GameRunStatus
 
 
 class GameV2Repository:
@@ -85,6 +85,22 @@ class GameV2Repository:
         if result is None:raise KeyError(run_id)
         return result
 
+    def update_run_contract(self, run_id: str, *, run_kind: str | None = None, rules: dict[str, Any] | None = None, at: float) -> GameRun:
+        current = self.get_run(run_id)
+        if current is None: raise KeyError(run_id)
+        next_rules = dict(current.rules)
+        if rules: next_rules.update(rules)
+        conn=self.connection_factory()
+        try:
+            conn.execute(
+                "UPDATE game_runs SET run_kind=?,rules_json=?,last_active_at=?,current_checkpoint_version=current_checkpoint_version+1 WHERE id=?",
+                (run_kind or current.run_kind,json.dumps(next_rules,ensure_ascii=False),at,run_id),
+            );conn.commit()
+        finally:conn.close()
+        result=self.get_run(run_id)
+        if result is None: raise KeyError(run_id)
+        return result
+
     def link_session(self,run_id:str,stream_session_id:str,*,at:float,evidence_event_id:str)->dict[str,Any]:
         started=time.perf_counter();link_id=f"run_session_{uuid.uuid5(uuid.NAMESPACE_URL,run_id+'|'+stream_session_id).hex}"
         conn=self.connection_factory()
@@ -150,6 +166,101 @@ class GameV2Repository:
         try:return [self._gap(row).to_dict() for row in conn.execute("SELECT * FROM game_knowledge_v2_gaps"+(" WHERE game_id=?" if game_id else "")+" ORDER BY created_at",(game_id,) if game_id else ())]
         finally:conn.close()
 
+    def save_challenge_definition(self, definition: ChallengeDefinition) -> ChallengeDefinition:
+        conn=self.connection_factory()
+        try:
+            conn.execute(
+                """INSERT INTO challenge_definitions(
+                   challenge_id,name,normalized_name,game_id,game_family,rules_json,provenance,
+                   confidence,created_at,updated_at,version,status,schema_version)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(challenge_id) DO UPDATE SET
+                     name=excluded.name,game_id=excluded.game_id,game_family=excluded.game_family,
+                     rules_json=excluded.rules_json,provenance=excluded.provenance,
+                     confidence=excluded.confidence,updated_at=excluded.updated_at,
+                     version=excluded.version,status=excluded.status""",
+                (
+                    definition.challenge_id,definition.name,self.normalize(definition.name),
+                    definition.game_id,definition.game_family,
+                    json.dumps(definition.rules,ensure_ascii=False),definition.provenance,
+                    definition.confidence,definition.created_at,definition.updated_at,
+                    definition.version,definition.status,definition.schema_version,
+                ),
+            );conn.commit();return definition
+        finally:conn.close()
+
+    def find_challenge_definition(self, name: str, *, game_id: str = "", game_family: str = "") -> ChallengeDefinition | None:
+        conn=self.connection_factory();conn.row_factory=__import__('sqlite3').Row
+        try:
+            row=conn.execute(
+                """SELECT * FROM challenge_definitions
+                   WHERE normalized_name=? AND (game_id=? OR game_id='' OR ?='')
+                     AND (game_family=? OR game_family='' OR ?='')
+                   ORDER BY CASE WHEN game_id=? THEN 0 ELSE 1 END,updated_at DESC LIMIT 1""",
+                (self.normalize(name),game_id,game_id,game_family,game_family,game_id),
+            ).fetchone()
+            return self._challenge(row) if row else None
+        finally:conn.close()
+
+    def get_challenge_definition(self, challenge_id: str) -> ChallengeDefinition | None:
+        conn=self.connection_factory();conn.row_factory=__import__('sqlite3').Row
+        try:
+            row=conn.execute("SELECT * FROM challenge_definitions WHERE challenge_id=?",(challenge_id,)).fetchone()
+            return self._challenge(row) if row else None
+        finally:conn.close()
+
+    def match_challenge_definition(self, text: str, *, game_id: str = "") -> ChallengeDefinition | None:
+        normalized_text=self.normalize(text)
+        conn=self.connection_factory();conn.row_factory=__import__('sqlite3').Row
+        try:
+            rows=conn.execute(
+                """SELECT * FROM challenge_definitions
+                   WHERE status='ACTIVE' AND (game_id=? OR game_id='' OR ?='')
+                   ORDER BY length(normalized_name) DESC,updated_at DESC""",
+                (game_id,game_id),
+            ).fetchall()
+            for row in rows:
+                key=str(row["normalized_name"] or "")
+                if key and key in normalized_text:
+                    return self._challenge(row)
+            return None
+        finally:conn.close()
+
+    def link_run_challenge(
+        self, run_id: str, challenge_id: str, *, state: dict[str, Any] | None = None,
+        overrides: list[dict[str, Any]] | None = None, at: float,
+    ) -> dict[str, Any]:
+        current=self.run_challenge(run_id) or {}
+        next_state=dict(current.get("state") or {})
+        if state: next_state.update(state)
+        next_overrides=list(current.get("overrides") or []) if overrides is None else list(overrides)
+        linked_at=float(current.get("linked_at") or at)
+        version=int(current.get("version") or 0)+1
+        conn=self.connection_factory()
+        try:
+            conn.execute(
+                """INSERT INTO game_run_challenges(
+                   game_run_id,challenge_definition_id,state_json,overrides_json,linked_at,updated_at,version,schema_version)
+                   VALUES(?,?,?,?,?,?,?,1)
+                   ON CONFLICT(game_run_id) DO UPDATE SET
+                     challenge_definition_id=excluded.challenge_definition_id,
+                     state_json=excluded.state_json,overrides_json=excluded.overrides_json,
+                     updated_at=excluded.updated_at,version=excluded.version""",
+                (run_id,challenge_id,json.dumps(next_state,ensure_ascii=False),json.dumps(next_overrides,ensure_ascii=False),linked_at,at,version),
+            );conn.commit()
+        finally:conn.close()
+        return self.run_challenge(run_id) or {}
+
+    def run_challenge(self, run_id: str) -> dict[str, Any] | None:
+        conn=self.connection_factory();conn.row_factory=__import__('sqlite3').Row
+        try:
+            row=conn.execute("SELECT * FROM game_run_challenges WHERE game_run_id=?",(run_id,)).fetchone()
+            if row is None:return None
+            value=dict(row);value["state"]=json.loads(value.pop("state_json") or "{}")
+            value["overrides"]=json.loads(value.pop("overrides_json") or "[]")
+            return value
+        finally:conn.close()
+
     def performance(self)->dict[str,Any]:
         return {**{key:self._pct(values) for key,values in self.lookup_latencies.items()},"db_write":self._pct(self.write_latencies)}
 
@@ -164,3 +275,13 @@ class GameV2Repository:
     @staticmethod
     def _gap(row)->GameKnowledgeGap:
         return GameKnowledgeGap(row["id"],row["game_id"],row["run_id"],row["subject_ref"],row["question_type"],row["query_intent"],row["spoiler_ceiling"],float(row["required_confidence"]),row["created_from_event_id"],row["normalized_gap_key"],row["status"],float(row["created_at"]),float(row["updated_at"]),tuple(json.loads(row["resolved_fact_ids_json"] or "[]")),int(row["schema_version"]))
+
+    @staticmethod
+    def _challenge(row)->ChallengeDefinition:
+        return ChallengeDefinition(
+            challenge_id=row["challenge_id"],name=row["name"],game_id=row["game_id"],
+            game_family=row["game_family"],rules=tuple(json.loads(row["rules_json"] or "[]")),
+            provenance=row["provenance"],confidence=float(row["confidence"]),
+            created_at=float(row["created_at"]),updated_at=float(row["updated_at"]),
+            version=int(row["version"]),status=row["status"],schema_version=int(row["schema_version"]),
+        )

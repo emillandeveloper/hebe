@@ -60,6 +60,27 @@ class GameRunResolution:
 
 
 @dataclass(frozen=True, slots=True)
+class ChallengeDefinition:
+    challenge_id: str
+    name: str
+    game_id: str = ""
+    game_family: str = ""
+    rules: tuple[dict[str, Any], ...] = ()
+    provenance: str = "owner_explicit"
+    confidence: float = 1.0
+    created_at: float = 0.0
+    updated_at: float = 0.0
+    version: int = 1
+    status: str = "ACTIVE"
+    schema_version: int = 1
+
+    def to_dict(self) -> dict[str, Any]:
+        value = asdict(self)
+        value["rules"] = [dict(rule) for rule in self.rules]
+        return value
+
+
+@dataclass(frozen=True, slots=True)
 class GameKnowledgeGap:
     id: str
     game_id: str

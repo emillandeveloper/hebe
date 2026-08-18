@@ -21,11 +21,12 @@ class GameRunService:
     _STATE_FIELDS = {
         "platform_version", "playthrough_type", "spoiler_policy", "current_location",
         "current_character", "party_members", "last_confirmed_progress", "current_objective",
-        "challenge", "known_constraints", "current_chapter", "encountered_characters",
+        "level", "party_jobs", "challenge", "challenge_definition_id", "challenge_rules",
+        "challenge_overrides", "known_constraints", "current_chapter", "encountered_characters",
         "encountered_bosses", "unlocked_mechanics", "progress_markers",
     }
     _GUARDED_FIELDS = {
-        "current_location", "current_character", "party_members",
+        "current_location", "current_character", "party_members", "level", "party_jobs",
         "current_objective", "last_confirmed_progress",
     }
     _OWNER_PROVENANCE = {"leo_clarification", "manual_command", "owner_explicit"}
@@ -45,6 +46,8 @@ class GameRunService:
         elif len(candidates)==1:
             run=candidates[0]
             if run.status!=GameRunStatus.ACTIVE:run=self.repository.set_run_status(run.id,GameRunStatus.ACTIVE,at=now)
+            if run_kind and run_kind!="unknown" and run.run_kind in {"", "unknown", "casual"}:
+                run=self.repository.update_run_contract(run.id,run_kind=run_kind,rules=rules,at=now)
             decision="resume";confidence=.98 if explicit_continue else .86;reason="explicit_continuation" if explicit_continue else "single_compatible_run"
         elif not candidates:
             run=self.repository.create_run(GameRun(f"game_run_{uuid.uuid4().hex}",identity.game_id,owner_id,run_kind or "unknown",dict(rules or {}),GameRunStatus.ACTIVE,now,now,0,1,source_event_id))
@@ -67,8 +70,11 @@ class GameRunService:
             "game":identity.canonical_name if identity else run.game_id,
             "platform_version":"","playthrough_type":run.run_kind or "unknown",
             "spoiler_policy":"spoiler_safe_hints","current_location":"",
-            "current_character":"","party_members":[],"last_confirmed_progress":"",
+            "current_character":"","party_members":[],"level":None,"party_jobs":[],"last_confirmed_progress":"",
             "current_objective":"","challenge":str(run.rules.get("challenge") or ""),
+            "challenge_definition_id":str(run.rules.get("challenge_definition_id") or ""),
+            "challenge_rules":list(run.rules.get("challenge_rules") or []),
+            "challenge_overrides":list(run.rules.get("challenge_overrides") or []),
             "known_constraints":list(run.rules.get("known_constraints") or []),
             "current_chapter":"","encountered_characters":[],"encountered_bosses":[],
             "unlocked_mechanics":[],"progress_markers":[],"last_updated":run.last_active_at,
@@ -86,6 +92,15 @@ class GameRunService:
                 result["last_updated"]=max(float(result["last_updated"]),fact.last_confirmed_at)
                 result["confidence"]=max(float(result["confidence"]),fact.confidence)
                 result["provenance"]=fact.authority_class
+        challenge_link=self.repository.run_challenge(run_id)
+        if challenge_link:
+            definition=self.repository.get_challenge_definition(str(challenge_link.get("challenge_definition_id") or ""))
+            if definition:
+                result["playthrough_type"]="challenge"
+                result["challenge_definition_id"]=definition.challenge_id
+                result["challenge"]=definition.name
+                result["challenge_rules"]=[dict(rule) for rule in definition.rules if str(rule.get("status") or "ACTIVE")=="ACTIVE"]
+            result["challenge_overrides"]=list(challenge_link.get("overrides") or [])
         return result
 
     def update_state(
@@ -165,6 +180,16 @@ class GameRunService:
         ):
             return False,"low_confidence_or_missing_provenance",value
         values=value if isinstance(value,list) else [value]
+        if field_name == "level":
+            try:
+                level = int(value)
+            except (TypeError, ValueError):
+                return False,"invalid_level",value
+            return (True,"accepted",level) if 1 <= level <= 999 else (False,"invalid_level",value)
+        if field_name in {"challenge_rules", "challenge_overrides"}:
+            if not isinstance(value, list) or any(not isinstance(item, dict) for item in value):
+                return False,"invalid_structured_rules",value
+            return True,"accepted",[dict(item) for item in value]
         cleaned=[]
         for item in values:
             raw=str(item or "").strip();text=" ".join(re.sub(r"[^a-z0-9 ]+"," ",raw.casefold()).split())

@@ -679,18 +679,41 @@ class ContextBuilder:
     def _build_state_snapshot(self, state: HebeState) -> dict[str, Any]:
         stream = getattr(state, "stream", None)
         game_run_state = GameRunState.from_value(getattr(state, "game_run_state", None))
+        current_game_context: dict[str, Any] = {}
+        if game_run_state.game:
+            current_game_context = {
+                "game": game_run_state.game,
+                "source": game_run_state.provenance or "game_run",
+                "confidence": max(0.65, float(game_run_state.confidence or 0.0)),
+            }
         if not game_run_state.game and stream is not None:
-            game_run_state.game = str(
-                getattr(stream, "current_game", None) or getattr(stream, "current_category", None) or ""
+            live = dict(getattr(stream, "live_session_context", None) or {})
+            title_game = str(getattr(stream, "current_stream_title", None) or "").split("|", 1)[0].strip()
+            candidates = (
+                (live.get("current_game") or live.get("game"), "stream_session", 0.92),
+                (getattr(stream, "current_game", None), "stream_session", 0.9),
+                (getattr(stream, "current_category", None), "twitch_category", 0.88),
+                (title_game, "stream_title", 0.62),
             )
+            selected = next(
+                ((str(value).strip(), source, confidence) for value, source, confidence in candidates if str(value or "").strip()),
+                ("", "", 0.0),
+            )
+            game_run_state.game = selected[0]
             game_run_state.current_location = str(getattr(stream, "current_location", None) or "")
             game_run_state.current_objective = str(getattr(stream, "current_objective", None) or "")
             game_run_state.last_confirmed_progress = str(
                 (getattr(stream, "recent_progress_markers", None) or [""])[-1] or ""
             )
             game_run_state.spoiler_policy = str(getattr(stream, "spoiler_policy", None) or "spoiler_safe_hints")
-            game_run_state.provenance = "current_live_session"
-            game_run_state.confidence = 0.7 if game_run_state.game else 0.0
+            game_run_state.provenance = selected[1] or "current_live_session"
+            game_run_state.confidence = selected[2] if game_run_state.game else 0.0
+            if game_run_state.game:
+                current_game_context = {
+                    "game": game_run_state.game,
+                    "source": game_run_state.provenance,
+                    "confidence": game_run_state.confidence,
+                }
 
         return {
             "now_iso": __import__("datetime").datetime.now().astimezone().isoformat(),
@@ -701,6 +724,7 @@ class ContextBuilder:
             "stream_enabled": getattr(stream, "enabled", False) if stream else False,
             "stream_armed": getattr(stream, "armed", False) if stream else False,
             "game_run_state": game_run_state.to_dict(),
+            "current_game_context": current_game_context,
         }
 
     def _normalize_for_compare(self, text: Optional[str]) -> str:

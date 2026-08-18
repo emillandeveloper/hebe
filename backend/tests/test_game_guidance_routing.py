@@ -69,7 +69,7 @@ class GameGuidanceRoutingTests(unittest.TestCase):
         self.router = CognitiveRouter()
         self.service = DeliberationService(intent_model=None, reasoning_model=None)
 
-    def test_ambiguous_location_routes_to_clarification_not_fallback(self):
+    def test_progression_with_explicit_location_can_research_without_party_clarification(self):
         value = routing_context(
             "Hebe, en FFIX ando en Alexandria y no sé cuál es el siguiente objetivo"
         )
@@ -80,11 +80,11 @@ class GameGuidanceRoutingTests(unittest.TestCase):
         self.assertEqual(value.cognitive_decision.intent, "game_guidance_query")
         self.assertTrue(value.cognitive_decision.allows_capability("game.guidance"))
         self.assertFalse(value.cognitive_decision.allows_capability("hebe.chat_reply"))
-        self.assertEqual(plan.steps[0].data["mode"], "game_guidance_clarification")
+        self.assertEqual(plan.steps[0].data["mode"], "game_guidance")
         self.assertEqual(guidance["game"], "Final Fantasy IX")
         self.assertEqual(guidance["location_or_area"], "Alexandria")
-        self.assertTrue(guidance["needs_clarification"])
-        self.assertFalse(guidance["should_search_web"])
+        self.assertFalse(guidance["needs_clarification"])
+        self.assertTrue(guidance["should_search_web"])
 
     def test_concrete_item_question_selects_rag_then_web_when_local_empty(self):
         value = routing_context("Hebe, en FFIX dónde consigo este objeto raro?")
@@ -188,7 +188,10 @@ class GameGuidanceRoutingTests(unittest.TestCase):
     def test_game_guidance_clarification_creates_real_pending(self):
         from tests.test_voice_command_pipeline import make_engine
 
-        value = routing_context("Hebe, en FFVII he llegado a Midgar y no ubico el siguiente paso")
+        value = routing_context(
+            "Hebe, ¿puedo vencer a este jefe con mi party actual?",
+            run_state=GameRunState(game="Final Fantasy VII", confidence=.9).to_dict(),
+        )
         value.cognitive_decision = self.router.route(value)
         plan = self.service.deliberate(value).plan
         engine = make_engine(live=False)
@@ -201,7 +204,8 @@ class GameGuidanceRoutingTests(unittest.TestCase):
         pending = engine._active_current_conversation(latest=True)
         self.assertEqual(pending.topic, "game_guidance_clarification")
         self.assertEqual(pending.expected_reply.type, ExpectedReplyType.GAME_PARTY_OR_CHARACTER)
-        self.assertIn("current_character", pending.domain_payload["missing_fields"])
+        self.assertIn("party_members", pending.domain_payload["missing_fields"])
+        self.assertIn("level", pending.domain_payload["missing_fields"])
 
     def test_clarification_answer_routes_and_updates_run_state_plan(self):
         value = routing_context("Voy con Cloud", pending=game_pending())
